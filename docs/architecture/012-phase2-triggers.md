@@ -1,8 +1,10 @@
 # ADR 012: Phase 2 Trigger investigation — schedules and webhooks
 
-**Status:** Investigation for issue #76. NOT accepted. Implements no code;
-constrains later implementation lanes. Defers to ADR 001 (Execution identity,
-idempotency) and ADR 010 (OrgCtx, declared requirements) where silent.
+**Status:** Schedule half Accepted per issue #137 (TRG-01, 2026-09-11);
+webhook half remains investigation for issue #76. Implements the schedule
+design below (migrations 0016/0010, `src/schedules.ts`, the `/api/schedules`
+routes, the Cron tick). Defers to ADR 001 (Execution identity, idempotency)
+and ADR 010 (OrgCtx, declared requirements) where silent.
 
 ## Context
 
@@ -41,29 +43,56 @@ does not survive multi-tenant webhooks), the key-derivation rule from vendor
 event IDs (must satisfy the 16–128 `Idempotency-Key` alphabet), and the
 payload-to-input shaping bound (4096-byte input CHECK already applies).
 
-### Schedule Triggers: Cron plus a durable Scheduled state
+### Schedule Triggers: Cron plus a durable Scheduled state (Accepted, #137)
 
 A schedule Trigger pairs a Cloudflare Cron Trigger (the tick) with a durable
 `Scheduled` Execution row (the intent): the tick promotes due rows through
-the normal dispatch protocol. `Scheduled` stays what ADR 001 says it is — a
-durable pre-publish row distinct from `Pending`, promotable when due — and
-is still deferred: this investigation does not introduce it. Blockers,
-in order:
+the normal dispatch protocol. `Scheduled` is what ADR 001 says it is — a
+durable pre-publish row distinct from `Pending`, promotable when due —
+and this lane introduces it (migration 0016b).
 
-1. **Keyless identity.** The deterministic Execution ID hashes
-   `(orgId, userId, key)`; a schedule has no client-supplied key. Server-side
-   key derivation (schedule ID plus window) or the rejected UUIDv7 plus
-   `UNIQUE(idempotency_key)` path from ADR 001 must be settled first —
-   whichever it is, it is an identity decision with an ADR, not a Cron
-   annotation on a Saga.
-2. **Due-time indexing and promotion.** A due index, a promotion claim that
-   cannot double-dispatch (same fencing discipline as the submit path:
-   single winner, retained-ID dedup), and the `Scheduled`-cancel semantics
-   ADR 001 defers.
-3. **Policy placement.** Cadence, enabled/disabled, and timezone live as
-   persisted per-installation policy (upstream finding 3), never as Saga
-   source properties — `buildCatalog` rejects schedule-shaped keys today
-   and must keep rejecting them.
+1. **Keyless identity: decided.** The tick derives the submit key
+   server-side as `sched:{scheduleId}:{once|recur}:{window}` (the window is
+   the one-off runAt instant or the minute-aligned UTC cron instant), which
+   satisfies the 16–128 `Idempotency-Key` alphabet. The deterministic
+   Execution ID hashes `(orgId, userId, key)` exactly like the submit path,
+   so promotion reuses the idempotency record: same-window ticks converge
+   (PRIMARY KEY single winner plus retained-ID dedup), a settled window
+   replays its receipt, and a cancelled window stays `409
+   EXECUTION_CANCELLED` — ticks never resurrect. The rejected UUIDv7 plus
+   `UNIQUE(idempotency_key)` path stays rejected: no demonstrated need.
+2. **Due-time indexing and promotion: decided.** The `schedules` table
+   (migration 0016) carries kind (`once`/`recurring`), status
+   (`active`/`disabled`/`deleted`), `cron_expr`, `timezone`, `run_at`,
+   `next_due_at`, `overlap` (`allow`/`skip`), and promotion receipts, under
+   a `(status, next_due_at)` due index. The Cron tick scans at most 50 due
+   schedules and admits at most 25 promotions per tick (bounded Free-tier
+   cost). Promotion claims the durable intent row with a conditional
+   `Scheduled -> Pending` write: the winner dispatches through `submit()`,
+   losers converge on the winner's Execution — exactly once under racing
+   ticks, proven by the gated-claim race test. `Scheduled`-cancel semantics:
+   the schedule cancel route cancels `Scheduled` rows only; promoted rows
+   (`Pending`+) belong to the owner cancel route; owner-cancel-wins holds
+   (a tick never resurrects a cancelled window).
+3. **Policy placement: decided.** Cadence, enabled/disabled, timezone,
+   input, overlap, and run-as (the schedule's stored org/user) live as
+   persisted per-installation rows, never as Saga source properties —
+   `buildCatalog` keeps rejecting schedule-shaped keys. The tick re-checks
+   membership per window: revoked/suspended members, disabled users/orgs,
+   and unknown orgs skip loudly (no promotion, `last_skipped_window`
+   stamped). Timezone is an IANA label (default UTC) carried for honest
+   preview text; the tick and window math run in UTC (see DST/missed-tick
+   notes below).
+4. **Cron validation: decided.** Only 5-field Cloudflare shapes are
+   admitted (numeric fields, `*`, `*/n`, lists, numeric ranges, JAN–DEC /
+   SUN–SAT names). Seconds, years, `L`/`W`/`#`, free text, and out-of-range
+   fields are refused with `INVALID_CRON` — a "valid elsewhere" expression
+   the platform cannot tick would be a silent schedule.
+
+The remaining schedule-adjacent blockers from the investigation are
+discharged: `Scheduled` is introduced with its cancel semantics, the due
+index plus promotion claim exist, and policy placement is enforced by the
+route and catalog gates.
 
 ### Topic events: deferred
 
@@ -74,9 +103,25 @@ is insufficient before any Queue or Durable Object is earned — per
 AGENTS.md constraint 7, the primitive needs the requirement, not the
 other way around.
 
-### Same-window deduplication is not cross-window overlap policy
+### Same-window deduplication is not cross-window overlap policy (decided, #137)
 
-**Audit correction (2026-09-11, [#132](https://github.com/MTG-Thomas/Wrangnarok/issues/132)):** the rules below suppress duplicate delivery of the same window only. Current upstream `api/src/jobs/schedulers/cron_scheduler.py:166-203` skips a new window while an earlier delivery for the same source remains active. A deterministic key for W does not prevent W+1 from overlapping W. The schedule implementation must test both cases and decide cross-window policy explicitly; this investigation still implements neither. Upstream enum alternatives do not establish working queue/parallel overlap modes.
+**Audit correction (2026-09-11, [#132](https://github.com/MTG-Thomas/Wrangnarok/issues/132)):** the rules below suppress duplicate delivery of the same window only. Current upstream `api/src/jobs/schedulers/cron_scheduler.py:166-203` skips a new window while an earlier delivery for the same source remains active. A deterministic key for W does not prevent W+1 from overlapping W. The schedule implementation tests both cases and decides cross-window policy explicitly per schedule — this investigation's open question is now closed:
+
+- **Same window (dedup):** the tick derives the submit key deterministically
+  from (schedule ID, window), so the existing idempotency protocol does the
+  overlap work with no new mechanism (tick details in the Accepted section
+  above).
+- **Cross window (overlap policy):** the operator chooses per schedule at
+  creation. `overlap: "allow"` dispatches every due window — concurrent
+  windows run side by side (proven: W+1 dispatches while W is still live).
+  `overlap: "skip"` holds a new window while an earlier window's Execution
+  is non-terminal (`Scheduled`, `Pending`, `Running`, `Cancelling`): the
+  tick records the skip on the schedule row (`last_skipped_window`) and
+  keeps the next window (proven: skip-then-promote after the earlier window
+  settles). Default is `allow`: skipping is the exception the operator asks
+  for, not the silent rule. Upstream enum alternatives do not establish
+  working queue/parallel overlap modes — hence the explicit two-mode choice
+  instead of an upstream-shaped enum.
 
 Schedule promotion derives the submit key deterministically from
 (schedule ID, window), so the existing idempotency protocol does the
@@ -125,15 +170,43 @@ the digest echo-503 test is the template).
 
 ## Consequences of this investigation
 
-- No new primitive, migration, binding, or route in this slice.
+- The schedule half adds one primitive (the Cron Trigger `* * * * *`),
+  two migrations (0009 schedules, 0010 `Scheduled` plus provenance), one
+  module (`src/schedules.ts`), seven routes (`POST/GET /api/schedules`,
+  `GET /api/schedules/:id`, `GET /api/schedules/:id/preview`,
+  `POST /api/schedules/:id/disable|enable`, `DELETE /api/schedules/:id`,
+  `POST /api/schedules/executions/:id/cancel`), and the `scheduled()`
+  tick handler. No other broker: Queues, Durable Objects, and new bindings
+  stay unjustified until a concrete requirement demonstrates them.
 - The next webhook lane implements one vendor webhook on the submit protocol
   with its own tests (auth, redelivery convergence, 424 posture) and no ADR
   unless it changes shared contracts.
-- The next schedule lane writes the `Scheduled` design (identity first) and
-  only then touches Cron.
 - Saga source stays free of trigger-shaped metadata; the
   `OPERATIONAL_POLICY_KEYS` rejection list already covers schedule/cron
   keys and needs no change.
+
+### DST and missed-tick behavior (operator notes, #137)
+
+- **Ticks fire in UTC; windows are UTC instants.** The `timezone` column is
+  a label for honest preview text, never a shift of the tick. A schedule
+  created with `America/New_York` and cron `0 9 * * *` fires at 09:00 UTC
+  daily — not 09:00 Eastern. Operators who want wall-clock cadence convert
+  the cron to UTC before creating the schedule; the preview route shows the
+  resulting UTC windows so the conversion is verifiable before enabling.
+- **DST transitions change nothing locally:** because neither the tick nor
+  the window math consults the label, a spring-forward/fall-back moves no
+  window and duplicates no window. The cost is the one above (UTC, not
+  wall-clock); the benefit is no 23/25-hour-day edge to test or explain.
+- **Missed ticks promote late (catch-up), never invent success.** If the
+  platform skips a tick (deploy, outage, backlog), the next tick's bounded
+  scan still finds the overdue row (`next_due_at <= now`) and promotes it
+  through the normal submit protocol — the Execution runs late with its
+  original window label, and the recurring due index advances from the tick
+  time. A tick that finds more than 25 due rows promotes the 25 earliest
+  and leaves the rest for the next minute: backlog drains one tick at a
+  time instead of stampeding dispatch. Queue backup is never mistaken for
+  failure: an undispatched `Pending` row stays `Pending` with
+  `dispatchConfirmed: false` on detail, exactly like the submit path.
 
 ## Open questions (options, not decisions)
 

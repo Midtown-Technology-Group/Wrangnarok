@@ -44,12 +44,15 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await reset();
 });
-it("declares no Cron trigger that could sweep executions", () => {
-  // Tripwire: introducing a Cron trigger (the natural home of a timeout
-  // sweeper) must come with an ADR per AGENTS.md constraint 7. If this
-  // fails, the sweeper investigation below needs re-running, not deleting.
-  expect(wranglerConfig).not.toMatch(/"crons"/);
-  expect(wranglerConfig).not.toMatch(/"schedules"/);
+it("declares exactly the TRG-01 Cron trigger that promotes due schedules", () => {
+  // Tripwire (updated by TRG-01, issue #137, ADR 012 accepted): one Cron
+  // trigger owns the schedule tick. The sweeper investigation below still
+  // holds — the tick promotes due schedule rows only, and no background job
+  // ever writes TimedOut. If a second trigger appears, it needs an ADR per
+  // AGENTS.md constraint 7; do not delete this, re-run the investigation.
+  // wrangler.jsonc carries // comments, so match the triggers block textually
+  // instead of JSON-parsing it.
+  expect(wranglerConfig).toMatch(/"triggers":\s*\{\s*"crons":\s*\["\* \* \* \* \*"\]/);
 });
 it("leaves a stuck Running execution alone until its owner cancels it", async () => {
   const id = await executionId(principal, key);

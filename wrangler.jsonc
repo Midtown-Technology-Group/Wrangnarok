@@ -16,6 +16,10 @@
   "workers_dev": false,
   "preview_urls": false,
   "routes": [],
+  // TRG-01 (issue #137, ADR 012 accepted): one Cron Trigger owns the tick.
+  // The scheduled() handler scans due schedule rows (bounded) and promotes
+  // them through the submit protocol. No other broker is introduced here.
+  "triggers": { "crons": ["* * * * *"] },
   "assets": {
     "directory": "./client/dist/",
     "binding": "ASSETS",

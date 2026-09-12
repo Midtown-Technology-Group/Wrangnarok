@@ -65,7 +65,21 @@ import {
   type MemberUpdate,
   type OrgRole,
 } from "./orgs";
-import { SAGA_CATALOG } from "./sagas";
+import { SAGA_CATALOG, SAGA_DEFINITIONS } from "./sagas";
+import {
+  cancelScheduledExecution,
+  createSchedule,
+  deleteSchedule,
+  listSchedules,
+  loadSchedule,
+  parseScheduleBody,
+  previewWindows,
+  runTick,
+  scheduleExecutionId,
+  setScheduleStatus,
+  toScheduleSummary,
+  type ScheduleRow,
+} from "./schedules";
 import { describeContract, SDK_DOC_PATH } from "./sdk";
 import { cancelExecution, listHistory, submit, summary, visibleExecution, workflowForSaga } from "./executions";
 import { scrubValueWithDeploymentSecrets } from "./secrets";
@@ -105,6 +119,23 @@ export default {
       durationMs: Date.now() - started,
     });
     return response;
+  },
+  async scheduled(controller: ScheduledController, env: Bindings, ctx: ExecutionContext): Promise<void> {
+    // TRG-01 Cron tick (issue #137): promote due schedule windows through
+    // the normal submit protocol (bounded scan/admission inside runTick).
+    // Tick-time promotion passes each due row's stored Saga/input through
+    // submit() with the server-derived window key: same-window races
+    // converge on the deterministic Execution ID; overdue windows promote
+    // late (documented catch-up, never invented success); disabled/deleted
+    // schedules never reach promote (the due scan only selects active rows);
+    // revoked callers fail the submit-time membership gate and skip loudly.
+    const tick: Promise<void> = runTick(
+      env.DB,
+      async ({ schedule, window, key }) => promoteWindow(env, schedule, window, key),
+      new Date(controller.scheduledTime),
+    ).then(() => undefined);
+    ctx.waitUntil(tick);
+    await tick;
   },
 } satisfies ExportedHandler<Bindings>;
 
@@ -149,10 +180,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const isOrgPath =
       url.pathname === "/api/orgs" || url.pathname.startsWith("/api/orgs/") || url.pathname.startsWith("/api/users/");
     const isOrgHistory = /^\/api\/orgs\/[0-9a-fA-F-]{36}\/executions$/.test(url.pathname) && request.method === "GET";
-    // Query strings are deny-by-default: only the history list routes take
-    // them, and only their allowlisted keys (anything else is UNSUPPORTED_QUERY).
+    const isSchedulePreview =
+      /^\/api\/schedules\/[0-9a-fA-F-]{36}\/preview$/.test(url.pathname) && request.method === "GET";
+    // Query strings are deny-by-default: only the history list routes and
+    // the schedule preview route take them, and only their allowlisted keys
+    // (anything else is UNSUPPORTED_QUERY).
     const historyList = url.pathname === "/api/executions" || isOrgHistory;
-    if (url.search && !(historyList && request.method === "GET"))
+    if (url.search && !((historyList || isSchedulePreview) && request.method === "GET"))
       throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
     if (isOrgPath) {
       const orgRoute = await routeOrgs(request, env, ctx, url);
@@ -389,6 +423,65 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         ),
       );
     }
+    // Schedule Triggers (TRG-01, issue #137; ADR 012 accepted). Persisted
+    // per-installation policy only: create/list/detail/preview plus
+    // enable/disable/delete. Cadence, timezone, enablement, input, and run-as
+    // live on the schedules table — never as Saga source keys. One explicit
+    // matcher per route, mirroring the executions style above.
+    if (url.pathname === "/api/schedules" && request.method === "GET") {
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json({ schedules: await listSchedules(env.DB, caller.orgId) });
+    }
+    if (url.pathname === "/api/schedules" && request.method === "POST") {
+      requireJson(request);
+      const { saga, input, create } = parseScheduleBody(await boundedJson(request.body), SAGA_DEFINITIONS);
+      return json({ schedule: await createSchedule(env.DB, caller, saga, input, create) }, 201);
+    }
+    const schedulePreview = /^\/api\/schedules\/([0-9a-fA-F-]{36})\/preview$/.exec(url.pathname);
+    if (schedulePreview?.[1] && request.method === "GET") {
+      const row = await loadSchedule(env.DB, caller.orgId, schedulePreview[1]);
+      if (!row || row.status === "deleted") throw new Fault(404, "SCHEDULE_NOT_FOUND", "Schedule not found.");
+      if (row.kind !== "recurring" || !row.cron_expr) {
+        return json({ scheduleId: row.id, kind: row.kind, windows: row.kind === "once" ? [row.run_at] : [] });
+      }
+      for (const key of url.searchParams.keys()) {
+        if (key !== "count") {
+          throw new Fault(400, "UNSUPPORTED_QUERY", "Only count is supported here.");
+        }
+      }
+      const countRaw = url.searchParams.get("count");
+      const count = countRaw === null ? 5 : Number(countRaw);
+      if (!Number.isInteger(count) || count < 1 || count > 20) {
+        throw new Fault(400, "INVALID_PREVIEW", "Preview count must be an integer from 1 to 20.");
+      }
+      return json({
+        scheduleId: row.id,
+        kind: row.kind,
+        cron: row.cron_expr,
+        timezone: row.timezone,
+        windows: previewWindows(row.cron_expr, new Date(), count),
+      });
+    }
+    const scheduleToggle = /^\/api\/schedules\/([0-9a-fA-F-]{36})\/(disable|enable)$/.exec(url.pathname);
+    if (scheduleToggle?.[1] && scheduleToggle[2] && request.method === "POST") {
+      return json({
+        schedule: await setScheduleStatus(env.DB, caller.orgId, scheduleToggle[1], scheduleToggle[2] === "disable"),
+      });
+    }
+    const scheduleCancel = /^\/api\/schedules\/executions\/([a-f0-9]{64})\/cancel$/.exec(url.pathname);
+    if (scheduleCancel?.[1] && request.method === "POST") {
+      return json(await cancelScheduledExecution(env.DB, caller, scheduleCancel[1]));
+    }
+    const scheduleOne = /^\/api\/schedules\/([0-9a-fA-F-]{36})$/.exec(url.pathname);
+    if (scheduleOne?.[1] && request.method === "GET") {
+      const row = await loadSchedule(env.DB, caller.orgId, scheduleOne[1]);
+      if (!row || row.status === "deleted") throw new Fault(404, "SCHEDULE_NOT_FOUND", "Schedule not found.");
+      return json({ schedule: toScheduleSummary(row) });
+    }
+    if (scheduleOne?.[1] && request.method === "DELETE") {
+      await deleteSchedule(env.DB, caller.orgId, scheduleOne[1]);
+      return json({ deleted: true });
+    }
     // Authored Applications (APP-01, ADR 017): independent-app lifecycle
     // (create/edit/validate/build/inspect/swap/delete) plus authorized
     // active-deployment asset serving. Solution-owned rows reject live
@@ -477,6 +570,95 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         : { code: fault.code, message: fault.message, details: fault.details };
     return json(scrubValueWithDeploymentSecrets({ error: faultBody }, env), fault.status, headers);
   }
+}
+
+/** Promote one due schedule window through the submit protocol. The
+ * schedule row owns the Saga/input (validated at creation); the run-as
+ * principal is the schedule's stored (org, user). Membership is re-checked
+ * per window (revoked/disabled callers skip loudly); overlap "skip" holds a
+ * new window while an earlier window is non-terminal; the idempotency
+ * protocol does the same-window dedup (replayed:true converges). */
+export async function promoteWindow(
+  env: Bindings,
+  schedule: ScheduleRow,
+  window: string,
+  key: string,
+): Promise<{ executionId: string; replayed: boolean; skipped: boolean; skipReason?: string }> {
+  const caller: Principal = { orgId: schedule.org_id, userId: schedule.user_id };
+  try {
+    await resolveCaller(env.DB, env, caller);
+  } catch (error) {
+    const code = error instanceof Fault ? error.code : "UNKNOWN";
+    return { executionId: "", replayed: false, skipped: true, skipReason: `caller:${code}` };
+  }
+  if (schedule.overlap === "skip") {
+    const live = await env.DB.prepare(
+      "SELECT id FROM executions WHERE schedule_id=? AND status IN ('Scheduled','Pending','Running','Cancelling') AND due_at<? LIMIT 1",
+    )
+      .bind(schedule.id, window)
+      .first<{ id: string }>();
+    if (live) {
+      return { executionId: live.id, replayed: true, skipped: true, skipReason: "overlap" };
+    }
+  }
+  const saga = SAGA_DEFINITIONS.find((entry) => entry.id === schedule.saga_id);
+  if (!saga) return { executionId: "", replayed: false, skipped: true, skipReason: "unknown-saga" };
+  let input: unknown;
+  try {
+    input = saga.parse(JSON.parse(schedule.input_json));
+  } catch {
+    return { executionId: "", replayed: false, skipped: true, skipReason: "invalid-input" };
+  }
+  const id = await scheduleExecutionId(caller, key);
+  // Exactly-once claim under racing ticks: the tick promotes by claiming
+  // the durable Scheduled intent row (conditional write on status). The
+  // winner's claim flips Scheduled -> Pending; losers match no row and
+  // converge on the winner's Execution through the idempotency record.
+  // A cancelled window matches no row here either: the receipt below stays
+  // the answer and the tick never resurrects it. The pre-claim read decides
+  // the loser's answer: a missing intent is a defect (skip loud), a
+  // cancelled receipt stays cancelled, and any other non-Scheduled row
+  // means a racing tick already claimed it (converge, never fork).
+  const before = await env.DB.prepare("SELECT id,saga_id,input_json,status FROM executions WHERE id=?")
+    .bind(id)
+    .first<{ id: string; saga_id: string; input_json: string; status: string }>();
+  if (!before) {
+    return { executionId: "", replayed: false, skipped: true, skipReason: "missing-intent" };
+  }
+  if (before.status === "Cancelling" || before.status === "Cancelled") {
+    return { executionId: before.id, replayed: true, skipped: true, skipReason: "cancelled-window" };
+  }
+  if (before.status !== "Scheduled") {
+    return { executionId: before.id, replayed: true, skipped: false };
+  }
+  await env.DB.prepare("UPDATE executions SET status='Pending',created_at=? WHERE id=? AND status='Scheduled'")
+    .bind(new Date().toISOString(), id)
+    .run();
+  const existing = await env.DB.prepare("SELECT id,saga_id,input_json,status FROM executions WHERE id=?")
+    .bind(id)
+    .first<{ id: string; saga_id: string; input_json: string; status: string }>();
+  if (!existing || existing.status === "Cancelling" || existing.status === "Cancelled") {
+    return { executionId: id, replayed: true, skipped: true, skipReason: "cancelled-window" };
+  }
+  if (existing.status !== "Pending") {
+    // A racing tick claimed and finished this window between our claim and
+    // re-read: converge on the winner's Execution instead of dispatching.
+    return { executionId: existing.id, replayed: true, skipped: false };
+  }
+  const accepted = await submit(
+    env,
+    caller,
+    key,
+    { id: saga.id, name: saga.name, revision: saga.revision, description: saga.description, parse: saga.parse },
+    input,
+  );
+  await env.DB.prepare("UPDATE executions SET schedule_id=?,due_at=? WHERE id=?")
+    .bind(schedule.id, window, accepted.executionId)
+    .run();
+  await env.DB.prepare("UPDATE schedules SET last_execution_id=?,updated_at=? WHERE id=?")
+    .bind(accepted.executionId, new Date().toISOString(), schedule.id)
+    .run();
+  return { executionId: accepted.executionId, replayed: accepted.replayed, skipped: false };
 }
 
 function parseOrgBody(value: unknown): { name: string } {

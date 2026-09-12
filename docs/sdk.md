@@ -22,8 +22,9 @@ compatibility with upstream Bifrost is not promised; see
 
 Authenticated like every other `/api/*` route: `Authorization: Bearer
 <token>` (local fixture token or Access service identity). Only
-`GET /api/executions` accepts a query string, and only its allowlisted
-keys.
+`GET /api/executions`, `GET /api/orgs/:id/executions`, and
+`GET /api/schedules/:id/preview` accept query strings, and only their
+allowlisted keys.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -36,6 +37,14 @@ keys.
 | `POST` | `/api/executions/:id/cancel` | Owner-only cancel (exact 64-hex ID) |
 | `GET` | `/api/forms/:name` | Form declaration for this Organization (FORM-01) |
 | `POST` | `/api/forms/:name/submit` | Validate (422 `FORM_VALIDATION_FAILED`) then submit the bound Saga |
+| `POST` | `/api/schedules` | Create a one-off (`runAt`) or recurring (`cron`) schedule (TRG-01; 201) |
+| `GET` | `/api/schedules` | Schedule summaries for this Organization |
+| `GET` | `/api/schedules/:id` | Schedule detail (policy, windows, receipts) |
+| `GET` | `/api/schedules/:id/preview` | Next UTC windows (`count` 1-20, default 5) |
+| `POST` | `/api/schedules/:id/disable` | Disable (ticks skip; receipts retained) |
+| `POST` | `/api/schedules/:id/enable` | Re-enable (due index recomputed) |
+| `DELETE` | `/api/schedules/:id` | Soft-delete (ticks ignore; history retained) |
+| `POST` | `/api/schedules/executions/:id/cancel` | Cancel a `Scheduled` intent row only |
 
 Errors share one envelope: `{ error: { code, message } }`. Switch on
 `code`; the message is never the contract. The full list is

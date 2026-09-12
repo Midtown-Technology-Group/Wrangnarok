@@ -11,6 +11,7 @@ const KNOWN_STATUSES: ReadonlySet<string> = new Set<string>([
   "Cancelling",
   "Cancelled",
   "TimedOut",
+  "Scheduled",
   // Authored-app lifecycle (APP-01, ADR 017): lowercase lifecycle + job states.
   "created",
   "ready",
@@ -30,6 +31,7 @@ const GLYPHS: Readonly<Record<string, string>> = {
   Cancelling: "◌",
   Cancelled: "■",
   TimedOut: "◷",
+  Scheduled: "◔",
   created: "○",
   ready: "○",
   building: "●",

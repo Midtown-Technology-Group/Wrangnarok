@@ -23,7 +23,14 @@ import { join } from "node:path";
 // fixture bootstrap; no new dependencies) measures ~144 KiB combined after a
 // shrink pass on the bootstrap DDL. Same deliberate feature headroom as the
 // 120 KiB raise, not dependency bloat: package.json is unchanged versus main.
-const BUDGET_BYTES = 145 * 1024;
+// 2026-09-11 (TRG-01, issue #137): 175 KiB. The schedule surface
+// (src/schedules.ts: cron validation, IANA timezone labels, UTC window math,
+// server-derived window keys, preview, bounded scan/admission; 7 schedule
+// routes plus the scheduled() Cron tick; Scheduled status plus schedule
+// error codes; no new dependencies) measures ~166 KiB combined. Same
+// deliberate feature headroom as the 145 KiB raise, not dependency bloat:
+// package.json is unchanged versus main.
+const BUDGET_BYTES = 175 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");
