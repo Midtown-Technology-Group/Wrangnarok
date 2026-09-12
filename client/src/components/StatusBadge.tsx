@@ -13,6 +13,7 @@ const KNOWN_STATUSES: ReadonlySet<string> = new Set<string>([
   "TimedOut",
   "Scheduled",
   // Authored-app lifecycle (APP-01, ADR 017): lowercase lifecycle + job states.
+  // Operational notifications (OPS-01, ADR 020): lowercase job progress.
   "created",
   "ready",
   "building",
@@ -21,6 +22,10 @@ const KNOWN_STATUSES: ReadonlySet<string> = new Set<string>([
   "queued",
   "running",
   "succeeded",
+  "pending",
+  "awaiting_action",
+  "completed",
+  "cancelled",
 ]);
 
 const GLYPHS: Readonly<Record<string, string>> = {
@@ -40,6 +45,10 @@ const GLYPHS: Readonly<Record<string, string>> = {
   queued: "○",
   running: "●",
   succeeded: "✓",
+  pending: "○",
+  awaiting_action: "◌",
+  completed: "✓",
+  cancelled: "■",
 };
 
 export function StatusBadge({ status }: { status: ExecutionStatus | string }): React.JSX.Element {

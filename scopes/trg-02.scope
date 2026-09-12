@@ -1,0 +1,16 @@
+# TRG-02 lane scope (issue #138): authenticated webhook and custom HTTP endpoints.
+# Merged as #210, steward-renumbered to 0021 in the supervision PR
+# (0009 collision with tables resolved; see docs/migration-ledger.md).
+src/endpoints.ts
+src/bindings.ts
+src/domain.ts
+src/index.ts
+src/sdk.ts
+migrations/0021_endpoints.sql
+test/endpoints.test.ts
+test/endpoint-branches.test.ts
+docs/architecture/018-endpoint-triggers.md
+docs/upstream-parity.md
+scripts/check-bundle-budget.mjs
+scopes/trg-02.scope
+package.json

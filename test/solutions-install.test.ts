@@ -21,6 +21,7 @@ import migration1 from "../migrations/0001_initial.sql?raw";
 import migration2 from "../migrations/0002_cancelling.sql?raw";
 import migration3 from "../migrations/0003_usage_blocks.sql?raw";
 import migration4 from "../migrations/0004_solutions_install.sql?raw";
+import migration5 from "../migrations/0010_solutions_activation.sql?raw";
 import exampleManifest from "../bundles/echo-starter/solution.manifest.json";
 
 const bindings = env as unknown as Bindings;
@@ -74,6 +75,7 @@ beforeEach(async () => {
   await bindings.DB.exec(migration2);
   await bindings.DB.exec(migration3);
   await bindings.DB.exec(migration4);
+  await bindings.DB.exec(migration5);
 });
 
 afterEach(async () => {
@@ -82,7 +84,7 @@ afterEach(async () => {
 
 it("installs a fresh org from the manifest and records the install", async () => {
   const result = await installBundle(bindings.DB, manifest());
-  expect(result.drift).toEqual({ created: 1, updated: 0, skipped: 0 });
+  expect(result.drift).toEqual({ created: 3, updated: 0, skipped: 0, deleted: 0 });
   expect(result.dryRun).toBe(false);
   expect(result.bundleId).toBe(BUNDLE_ID);
   const row = await connectionRow("default", ECHO_INTEGRATION_ID);
@@ -98,7 +100,7 @@ it("installs a fresh org from the manifest and records the install", async () =>
 it("re-running a converged install is a no-op that still appends the ledger", async () => {
   await installBundle(bindings.DB, manifest());
   const second = await installBundle(bindings.DB, manifest());
-  expect(second.drift).toEqual({ created: 0, updated: 0, skipped: 1 });
+  expect(second.drift).toEqual({ created: 0, updated: 0, skipped: 3, deleted: 0 });
   const rows = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM bundle_installs WHERE bundle_id = ?")
     .bind(BUNDLE_ID)
     .first<{ n: number }>();
@@ -114,7 +116,7 @@ it("reconciles drifted managed rows back to the manifest", async () => {
     .bind("http://127.0.0.1:9999/drifted", org?.id, ECHO_INTEGRATION_ID)
     .run();
   const result = await installBundle(bindings.DB, manifest());
-  expect(result.drift).toEqual({ created: 0, updated: 1, skipped: 0 });
+  expect(result.drift).toEqual({ created: 0, updated: 1, skipped: 2, deleted: 0 });
   const row = await connectionRow("default", ECHO_INTEGRATION_ID);
   expect(row?.endpoint).toBe(ENDPOINT_V1);
 });
@@ -145,13 +147,13 @@ it("rejects live mutation of managed rows but allows loose rows", async () => {
 it("rolls back by reinstalling the older manifest with force", async () => {
   await installBundle(bindings.DB, manifest("1.0.0"));
   const upgraded = await installBundle(bindings.DB, manifest("2.0.0", ENDPOINT_V2));
-  expect(upgraded.drift).toEqual({ created: 0, updated: 1, skipped: 0 });
+  expect(upgraded.drift).toEqual({ created: 0, updated: 3, skipped: 0, deleted: 0 });
   await expect(installBundle(bindings.DB, manifest("1.0.0"))).rejects.toMatchObject({
     status: 409,
     code: "DOWNGRADE_REFUSED",
   });
   const rolledBack = await installBundle(bindings.DB, manifest("1.0.0"), { force: true });
-  expect(rolledBack.drift).toEqual({ created: 0, updated: 1, skipped: 0 });
+  expect(rolledBack.drift).toEqual({ created: 0, updated: 3, skipped: 0, deleted: 0 });
   const row = await connectionRow("default", ECHO_INTEGRATION_ID);
   expect(row?.endpoint).toBe(ENDPOINT_V1);
   expect(row?.managed_by).toBe(`${BUNDLE_ID}@1.0.0`);
@@ -182,7 +184,7 @@ it("refuses half-credentialed installs without persisting anything", async () =>
   });
   expect(await orgCount()).toBe(0);
   const ok = await installBundle(bindings.DB, ninjaManifest, { secrets: { clientSecret: "sentinel" } });
-  expect(ok.drift).toEqual({ created: 1, updated: 0, skipped: 0 });
+  expect(ok.drift).toEqual({ created: 2, updated: 0, skipped: 0, deleted: 0 });
 });
 
 it("rejects credentials embedded in the manifest", async () => {
@@ -265,7 +267,7 @@ it("accepts the checked-in example bundle and dry-runs it without writes", async
   expect(parsed.bundle.name).toBe("echo-starter");
   const planned = await installBundle(bindings.DB, exampleManifest, { dryRun: true, orgName: "default" });
   expect(planned.dryRun).toBe(true);
-  expect(planned.drift).toEqual({ created: 1, updated: 0, skipped: 0 });
+  expect(planned.drift).toEqual({ created: 3, updated: 0, skipped: 0, deleted: 0 });
   expect(await orgCount()).toBe(0);
   expect(await connectionRow("default", ECHO_INTEGRATION_ID)).toBeNull();
 });

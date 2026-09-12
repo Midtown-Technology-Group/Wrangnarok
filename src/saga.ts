@@ -8,7 +8,7 @@
 //
 // Determinism rules (enforced by test/saga-contract.test.ts, not by types):
 // - ALL I/O and nondeterminism MUST live inside step.do() callbacks.
-// - ctx.integrations / ctx.db / ctx.secrets MUST ONLY be touched inside step.do().
+// - ctx.integrations / ctx.db / ctx.secrets / ctx.config MUST ONLY be touched inside step.do().
 // - run bodies MUST NOT call fetch, Date.now/new Date, Math.random,
 //   randomUUID, AbortSignal, or crypto at the top level.
 // - input/output MUST be JSON-serializable (assertJsonSerializable).
@@ -104,6 +104,18 @@ export function withOperation(org: OrgCtx, operationId: string): OrgCtx {
   return Object.freeze({ ...org, operationId });
 }
 
+/** Organization-scoped config reads for the current Execution. Resolves
+ * typed rows for this Execution's Organization only (ADR 020) and is usable
+ * ONLY inside step.do() callbacks, like ctx.integrations/ctx.db/ctx.secrets. */
+export interface SagaConfig {
+  /** Read one key: declared-but-missing without a default fails loud with
+   * CONFIG_REQUIREMENT_UNSATISFIED; undeclared access resolves to the
+   * default (null when none is given) and never throws. */
+  get(key: string, defaultValue?: unknown): Promise<unknown>;
+  /** Read one declared key, failing loud when it is missing or unprovisioned. */
+  require(key: string): Promise<unknown>;
+}
+
 /** Validated event context for one Saga execution. executionId is the
  * deterministic D1/Workflow identity, checked against the native instance ID
  * by the adapter. Organization context is NOT carried here: each Saga builds
@@ -115,6 +127,7 @@ export interface SagaEventContext {
   readonly integrations: SagaIntegrations;
   readonly db: D1Database;
   readonly secrets: SagaSecrets;
+  readonly config: SagaConfig;
 }
 
 /** Minimal object-schema descriptor, hand-derived from the TypeScript
@@ -517,6 +530,7 @@ const FORBIDDEN_OUTSIDE_STEPS: ReadonlyArray<{ pattern: RegExp; hint: string }> 
   { pattern: /ctx\s*\.\s*integrations/, hint: "ctx.integrations" },
   { pattern: /ctx\s*\.\s*db\b/, hint: "ctx.db" },
   { pattern: /ctx\s*\.\s*secrets/, hint: "ctx.secrets" },
+  { pattern: /ctx\s*\.\s*config/, hint: "ctx.config" },
   { pattern: /this\s*\.\s*env/, hint: "this.env" },
   { pattern: /crypto\s*\./, hint: "crypto." },
   { pattern: /process\s*\.\s*env/, hint: "process.env" },

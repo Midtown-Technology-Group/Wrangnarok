@@ -1,0 +1,24 @@
+# OPS-01 lane scope (issue #172): administrative audit trails and user-visible operational notifications.
+src/ops.ts
+src/index.ts
+src/sdk.ts
+migrations/0018_ops.sql
+test/ops.test.ts
+test/ops-branches.test.ts
+test/ops-ui.test.tsx
+test/sdk.test.ts
+client/src/pages/Audit.tsx
+client/src/pages/Notifications.tsx
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+client/src/App.tsx
+client/src/components/Nav.tsx
+client/src/components/StatusBadge.tsx
+docs/architecture/020-ops-audit-notifications.md
+docs/sdk.md
+docs/sdk-capability-map.md
+docs/upstream-parity.md
+scripts/check-bundle-budget.mjs
+scripts/wrangnarok.mjs
+scopes/ops-01.scope
+test/org-lifecycle.test.ts

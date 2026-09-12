@@ -20,9 +20,10 @@
 //
 // Deviations from workerd (documented, not hidden):
 // - D1 goes through `wrangler d1 execute --local`, whose --json meta omits
-//   `changes`. The fenced-update lost-race check (INSTALL_CONFLICT on
-//   changes === 0) therefore never fires here; it is proven in workerd
-//   tests instead. Reads/writes are otherwise the same statements.
+//   `changes`. The fenced-update lost-race checks (INSTALL_CONFLICT on
+//   changes === 0: reconcile writes, absentee deletes, activation moves)
+//   therefore never fire here; they are proven in workerd tests instead.
+//   Reads/writes are otherwise the same statements.
 // - src/solutions.ts is bundled with the repo's own esbuild so the runner
 //   stays dependency-free and exercises the exact source tests cover.
 import { execFile } from "node:child_process";

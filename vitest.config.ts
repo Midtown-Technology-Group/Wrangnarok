@@ -5,6 +5,7 @@ export default defineConfig({
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
+        r2Buckets: ["ARTIFACTS"],
         bindings: {
           LAB_ENABLED: "true",
           LAB_TOKEN: "a".repeat(64),

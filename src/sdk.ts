@@ -53,11 +53,18 @@ export const SDK_ERROR_CODES = [
   "DISPATCH_UNCONFIRMED",
   "EXECUTION_NOT_FOUND",
   "EXECUTION_NOT_CANCELLABLE",
+  "CANCELLATION_UNCONFIRMED",
   "UNSUPPORTED_QUERY",
   "INVALID_STATUS",
   "INVALID_SAGA_ID",
   "INVALID_LIMIT",
   "INVALID_CURSOR",
+  "INVALID_ACTION_PREFIX",
+  "INVALID_OUTCOME",
+  "INVALID_SEARCH",
+  "INVALID_NOTIFICATION",
+  "INVALID_NOTIFICATION_ID",
+  "NOTIFICATION_NOT_FOUND",
   "INTEGRATION_REQUIREMENT_UNSATISFIED",
   "FORM_VALIDATION_FAILED",
   "ECHO_VENDOR_TIMEOUT",
@@ -82,6 +89,25 @@ export const SDK_ERROR_CODES = [
   "SCHEDULE_LIMIT",
   "SCHEDULE_UNMATCHABLE",
   "EXECUTION_FAILED",
+  "INVALID_ARTIFACT",
+  "INVALID_ARTIFACT_ID",
+  "ARTIFACT_NOT_FOUND",
+  "ARTIFACT_FORBIDDEN",
+  "ARTIFACT_GONE",
+  "ARTIFACT_TOO_LARGE",
+  "EMPTY_ARTIFACT",
+  "BYTES_REQUIRED",
+  "ARTIFACT_WRITE_FAILED",
+  "ARTIFACT_BYTES_MISSING",
+  "ARTIFACT_STORE_NOT_CONFIGURED",
+  "INVALID_VERSION",
+  "VERSION_LIMIT",
+  "VERSION_RACE",
+  "INVALID_BINDING",
+  "BINDING_EXISTS",
+  "BINDING_NOT_FOUND",
+  "INVALID_RETENTION",
+  "RETENTION_FORBIDDEN",
   "INVALID_APP",
   "INVALID_SLUG",
   "INVALID_APP_ID",
@@ -94,16 +120,108 @@ export const SDK_ERROR_CODES = [
   "BUILD_FAILED",
   "SLUG_CONFLICT",
   "MANAGED_RESOURCE",
+  "UNKNOWN_INTEGRATION",
+  "CONNECTION_NOT_FOUND",
+  "CONNECTION_EXISTS",
+  "CONNECTION_DISABLED",
+  "CONNECTION_SCHEMA_INVALID",
+  "INVALID_CONNECTION",
+  "SECRET_NOT_CONFIGURED",
+  "CONNECTION_TEST_FAILED",
   "INVALID_SWAP",
+  "INVALID_TABLE",
+  "TABLE_CONFLICT",
+  "TABLE_NOT_FOUND",
+  "TABLE_FORBIDDEN",
+  "TABLE_BATCH_DENIED",
+  "INVALID_DOCUMENT",
+  "INVALID_DOCUMENT_ID",
+  "DOCUMENT_CONFLICT",
+  "DOCUMENT_NOT_FOUND",
+  "DOCUMENT_TOO_LARGE",
+  "DOCUMENT_WRITE_FAILED",
+  "INVALID_BATCH",
+  "INVALID_FILTER",
+  "TOO_MANY_FILTERS",
+  "INVALID_PREFIX",
+  "INVALID_ORDER",
+  "INVALID_SKIP_COUNT",
+  "INVALID_ACTION",
+  "INVALID_GRANT",
+  "INVALID_GRANTEE",
+  "INVALID_CONFIG",
+  "INVALID_CONFIG_KEY",
+  "INVALID_CONFIG_TYPE",
+  "INVALID_CONFIG_VALUE",
+  "INVALID_CONFIG_ID",
+  "INVALID_CONFIG_UPDATE",
+  "INVALID_CONFIG_DESCRIPTION",
+  "CONFIG_NOT_FOUND",
+  "CONFIG_CONFLICT",
+  "CONFIG_REQUIREMENT_UNSATISFIED",
+  "CREDENTIAL_IN_VALUE",
+  "SECRET_NOT_CONFIGURED",
+  "SECRET_SCHEMA_MISMATCH",
   "INVALID_JOB_ID",
   "JOB_NOT_FOUND",
   "APP_NOT_LIVE",
   "INVALID_ASSET",
   "ASSET_NOT_FOUND",
+  "INVALID_APP_GRANT",
+  "APP_GRANT_CONFLICT",
+  "APP_GRANT_NOT_FOUND",
+  "APP_SAGA_FORBIDDEN",
+  "APP_TABLE_FORBIDDEN",
+  "APP_FILE_FORBIDDEN",
+  "INVALID_APP_TABLE",
+  "INVALID_TABLE_QUERY",
+  "APP_TABLE_QUERY_UNSUPPORTED",
+  "APP_TABLE_NOT_FOUND",
+  "INVALID_TABLE_ROW",
+  "APP_ROW_NOT_FOUND",
+  "APP_TABLE_FULL",
+  "INVALID_APP_FILE",
+  "APP_FILE_NOT_FOUND",
+  "APP_FILE_TOKEN_INVALID",
+  "APP_FILE_TOKEN_EXPIRED",
+  "APP_FILE_METADATA_MISMATCH",
+  "APP_FILE_TOO_LARGE",
+  "APP_FILE_NOT_READY",
+  "APP_FILE_VERSION_CONFLICT",
+  "APP_SDK_MISMATCH",
+  "INVALID_LOCATION",
+  "LOCATION_CONFLICT",
+  "LOCATION_NOT_EMPTY",
+  "INVALID_PATH",
+  "INVALID_POLICY",
+  "INVALID_POLICY_ACTION",
+  "INVALID_POLICY_TEST",
+  "INVALID_BATCH",
+  "INVALID_EXPIRY",
+  "INVALID_FINALIZE",
+  "INVALID_DELETE",
+  "INVALID_LIMIT",
+  "INVALID_CURSOR",
+  "EMPTY_UPLOAD",
+  "FILE_TOO_LARGE",
+  "CONTENT_TYPE_REJECTED",
+  "FILE_MISSING",
+  "VERSION_CONFLICT",
+  "COMPLETION_MISMATCH",
   "STABLE_IDENTITY_REMAP_REQUIRED",
   "SYNC_CONFLICT",
   "INVALID_GIT_TARGET",
   "DEPLOY_BLOCKED",
+  "INVALID_ENDPOINT",
+  "ENDPOINT_EXISTS",
+  "ENDPOINT_UNAUTHORIZED",
+  "ENDPOINT_KEY_EXPIRED",
+  "ENDPOINT_DISABLED",
+  "ENDPOINT_EVENT_ID_REQUIRED",
+  "ENDPOINT_IDENTITY_FORBIDDEN",
+  "ENDPOINT_RATE_LIMITED",
+  "ENDPOINT_MISCONFIGURED",
+  "INVALID_CHALLENGE",
   "LOCAL_AUTH_NOT_CONFIGURED",
   "ACCESS_NOT_CONFIGURED",
   "SDK_CLIENT_MISMATCH",
@@ -223,6 +341,124 @@ export interface SdkCancelReceipt {
   readonly executionId: string;
   readonly status: string;
   readonly cancelled: boolean;
+}
+
+// --- Administrative audit trail and operational notifications (OPS-01) -----
+// Wire mirrors of the served shapes in src/ops.ts. Deliberately duplicated
+// from client/src/lib/client-types.ts: the Worker bundle must not depend on
+// the browser app, and the drift test asserts both agree with live responses.
+
+export interface SdkAuditEvent {
+  readonly id: string;
+  readonly orgId: string;
+  readonly actorUserId: string;
+  readonly action: string;
+  readonly targetType: string | null;
+  readonly targetId: string | null;
+  readonly outcome: string;
+  readonly detail: unknown;
+  readonly createdAt: string;
+}
+
+export interface SdkAuditPage {
+  readonly events: readonly SdkAuditEvent[];
+  readonly hasMore: boolean;
+  readonly nextCursor: string | null;
+}
+
+export interface SdkAuditQuery {
+  readonly action?: string;
+  readonly outcome?: string;
+  readonly search?: string;
+  readonly from?: string;
+  readonly to?: string;
+  readonly limit?: number;
+  readonly cursor?: string;
+}
+
+export interface SdkNotification {
+  readonly id: string;
+  readonly orgId: string;
+  readonly userId: string;
+  readonly scope: string;
+  readonly category: string;
+  readonly title: string;
+  readonly body: string | null;
+  readonly status: string;
+  readonly progressPercent: number | null;
+  readonly detail: unknown;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly dismissedAt: string | null;
+}
+
+function isAuditEvent(value: unknown): value is SdkAuditEvent {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    typeof value.orgId === "string" &&
+    typeof value.actorUserId === "string" &&
+    typeof value.action === "string" &&
+    (value.targetType === null || typeof value.targetType === "string") &&
+    (value.targetId === null || typeof value.targetId === "string") &&
+    typeof value.outcome === "string" &&
+    "detail" in value &&
+    typeof value.createdAt === "string"
+  );
+}
+
+/** Guard a GET /api/audit payload. Throws SDK_CLIENT_MISMATCH on drift. */
+export function parseAuditPage(value: unknown): SdkAuditPage {
+  if (!isRecord(value) || !Array.isArray(value.events) || typeof value.hasMore !== "boolean") {
+    throw new SdkError("SDK_CLIENT_MISMATCH", "The audit trail has an unexpected shape.");
+  }
+  for (const entry of value.events) {
+    if (!isAuditEvent(entry)) throw new SdkError("SDK_CLIENT_MISMATCH", "The audit trail has an unexpected shape.");
+  }
+  const nextCursor = value.nextCursor;
+  if (nextCursor !== undefined && nextCursor !== null && typeof nextCursor !== "string") {
+    throw new SdkError("SDK_CLIENT_MISMATCH", "The audit trail has an unexpected shape.");
+  }
+  return {
+    events: value.events as unknown as readonly SdkAuditEvent[],
+    hasMore: value.hasMore,
+    nextCursor: (nextCursor ?? null) as string | null,
+  };
+}
+
+function isNotification(value: unknown): value is SdkNotification {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    typeof value.orgId === "string" &&
+    typeof value.userId === "string" &&
+    typeof value.scope === "string" &&
+    typeof value.category === "string" &&
+    typeof value.title === "string" &&
+    (value.body === null || typeof value.body === "string") &&
+    typeof value.status === "string" &&
+    (value.progressPercent === null || typeof value.progressPercent === "number") &&
+    "detail" in value &&
+    typeof value.createdAt === "string" &&
+    typeof value.updatedAt === "string" &&
+    (value.dismissedAt === null || typeof value.dismissedAt === "string")
+  );
+}
+
+/** Guard a GET /api/notifications payload. Throws SDK_CLIENT_MISMATCH. */
+export function parseNotifications(value: unknown): readonly SdkNotification[] {
+  if (!isRecord(value) || !Array.isArray(value.notifications) || !value.notifications.every(isNotification)) {
+    throw new SdkError("SDK_CLIENT_MISMATCH", "The notifications inbox has an unexpected shape.");
+  }
+  return value.notifications;
+}
+
+/** Guard a GET /api/notifications/:id payload. Throws SDK_CLIENT_MISMATCH. */
+export function parseNotification(value: unknown): SdkNotification {
+  if (!isRecord(value) || !isNotification(value.notification)) {
+    throw new SdkError("SDK_CLIENT_MISMATCH", "The notification has an unexpected shape.");
+  }
+  return value.notification;
 }
 
 function isStringArray(value: unknown): value is readonly string[] {
@@ -365,6 +601,70 @@ export function parsePreview(value: unknown): SdkPreview {
     throw new SdkError("SDK_CLIENT_MISMATCH", "The Saga preview has an unexpected shape.");
   }
   return preview as unknown as SdkPreview;
+}
+
+// --- Scoped config (CON-02, ADR 020) -----------------------------------------
+// Typed key/value rows for the caller's own Organization. Secret rows answer
+// "[SECRET]" on every read surface; secret values never cross the wire.
+
+/** Upstream list-masking parity: secret values never serialize. */
+export const SDK_SECRET_MASK = "[SECRET]";
+
+export interface SdkConfigEntry {
+  readonly id: string;
+  readonly key: string;
+  readonly type: string;
+  readonly value: unknown;
+  readonly description: string | null;
+  readonly managedBy: string | null;
+  readonly updatedAt: string;
+  readonly updatedBy: string;
+}
+
+function isConfigEntry(value: unknown): value is SdkConfigEntry {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    typeof value.key === "string" &&
+    typeof value.type === "string" &&
+    "value" in value &&
+    (value.description === null || typeof value.description === "string") &&
+    (value.managedBy === null || typeof value.managedBy === "string") &&
+    typeof value.updatedAt === "string" &&
+    typeof value.updatedBy === "string"
+  );
+}
+
+/** Guard a GET /api/config payload. Throws SDK_CLIENT_MISMATCH on drift. */
+export function parseConfigList(value: unknown): readonly SdkConfigEntry[] {
+  if (!isRecord(value) || !Array.isArray(value.configs) || !value.configs.every(isConfigEntry)) {
+    throw new SdkError("SDK_CLIENT_MISMATCH", "The config list has an unexpected shape.");
+  }
+  return value.configs;
+}
+
+/** Guard a POST /api/config or PUT /api/config/:id payload. Throws
+ * SDK_CLIENT_MISMATCH on drift. */
+export function parseConfigEntry(value: unknown): SdkConfigEntry {
+  if (!isRecord(value) || !isConfigEntry(value.config)) {
+    throw new SdkError("SDK_CLIENT_MISMATCH", "The config entry has an unexpected shape.");
+  }
+  return value.config;
+}
+
+export interface SdkSetConfigOptions {
+  readonly key: string;
+  readonly type: string;
+  readonly value?: unknown;
+  readonly description?: string;
+}
+
+export interface SdkUpdateConfigOptions {
+  readonly id: string;
+  readonly key?: string;
+  readonly type?: string;
+  readonly value?: unknown;
+  readonly description?: string;
 }
 
 // --- Offline authoring helpers ----------------------------------------------
@@ -608,10 +908,17 @@ export interface SdkHistoryQuery {
 
 const EXECUTION_ID_RE = /^[a-f0-9]{64}$/;
 const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._:-]{16,128}$/;
+const NOTIFICATION_ID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
 function checkExecutionId(id: string): void {
   if (!EXECUTION_ID_RE.test(id)) {
     throw new SdkError("SDK_INVALID_REF", "Execution lookups need the exact 64-hex Execution ID.");
+  }
+}
+
+function checkNotificationId(id: string): void {
+  if (!NOTIFICATION_ID_RE.test(id)) {
+    throw new SdkError("SDK_INVALID_REF", "Notification lookups need the exact notification UUID.");
   }
 }
 
@@ -662,6 +969,25 @@ export interface SdkClient {
   cancelExecution(id: string): Promise<SdkCancelReceipt>;
   listHistory(query?: SdkHistoryQuery): Promise<SdkHistoryPage>;
   diagnoseExecution(id: string): Promise<SdkDiagnosis>;
+  /** OPS-01 audit trail (GET /api/audit): Organization-scoped events. */
+  listAuditEvents(query?: SdkAuditQuery): Promise<SdkAuditPage>;
+  /** OPS-01 notifications inbox (GET /api/notifications). */
+  listNotifications(limit?: number): Promise<readonly SdkNotification[]>;
+  /** OPS-01 notification detail (GET /api/notifications/:id). */
+  getNotification(id: string): Promise<SdkNotification>;
+  /** OPS-01 dismissal (DELETE /api/notifications/:id). */
+  dismissNotification(id: string): Promise<void>;
+  /** CON-02 scoped config (GET /api/config): typed rows for this
+   * Organization; secret rows answer "[SECRET]", never values. */
+  listConfigs(): Promise<readonly SdkConfigEntry[]>;
+  /** CON-02 scoped config (POST /api/config): set a non-secret value or
+   * provision a secret reference (upsert by key; managed rows refuse). */
+  setConfig(options: SdkSetConfigOptions): Promise<SdkConfigEntry>;
+  /** CON-02 scoped config (PUT /api/config/:id): omitted secret values
+   * preserve the reference. */
+  updateConfig(options: SdkUpdateConfigOptions): Promise<SdkConfigEntry>;
+  /** CON-02 scoped config (DELETE /api/config/:id). */
+  deleteConfig(id: string): Promise<void>;
   getContract(): Promise<SdkContractDescriptor>;
 }
 
@@ -845,6 +1171,90 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
         hint: hintFor(detail.error),
       };
     },
+    async listAuditEvents(query: SdkAuditQuery = {}): Promise<SdkAuditPage> {
+      const params = new URLSearchParams();
+      if (query.action !== undefined) params.set("action", query.action);
+      if (query.outcome !== undefined) params.set("outcome", query.outcome);
+      if (query.search !== undefined) params.set("search", query.search);
+      if (query.from !== undefined) params.set("startDate", query.from);
+      if (query.to !== undefined) params.set("endDate", query.to);
+      if (query.limit !== undefined) params.set("limit", String(query.limit));
+      if (query.cursor !== undefined) params.set("cursor", query.cursor);
+      const suffix = params.size > 0 ? `?${params.toString()}` : "";
+      const response = await guard(() => fetchImpl(`${base}/api/audit${suffix}`, { headers }), "audit trail");
+      return parseAuditPage(await readJson(response, "audit trail"));
+    },
+    async listNotifications(limit?: number): Promise<readonly SdkNotification[]> {
+      const params = new URLSearchParams();
+      if (limit !== undefined) params.set("limit", String(limit));
+      const suffix = params.size > 0 ? `?${params.toString()}` : "";
+      const response = await guard(() => fetchImpl(`${base}/api/notifications${suffix}`, { headers }), "notifications");
+      return parseNotifications(await readJson(response, "notifications"));
+    },
+    async getNotification(id: string): Promise<SdkNotification> {
+      checkNotificationId(id);
+      const response = await guard(() => fetchImpl(`${base}/api/notifications/${id}`, { headers }), "notification");
+      return parseNotification(await readJson(response, "notification"));
+    },
+    async dismissNotification(id: string): Promise<void> {
+      checkNotificationId(id);
+      const response = await guard(
+        () => fetchImpl(`${base}/api/notifications/${id}`, { method: "DELETE", headers }),
+        "notification dismissal",
+      );
+      await readJson(response, "notification dismissal");
+    },
+    async listConfigs(): Promise<readonly SdkConfigEntry[]> {
+      const response = await guard(() => fetchImpl(`${base}/api/config`, { headers }), "config list");
+      return parseConfigList(await readJson(response, "config list"));
+    },
+    async setConfig(options: SdkSetConfigOptions): Promise<SdkConfigEntry> {
+      const response = await guard(
+        () =>
+          fetchImpl(`${base}/api/config`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              key: options.key,
+              type: options.type,
+              ...(options.value === undefined ? {} : { value: options.value }),
+              ...(options.description === undefined ? {} : { description: options.description }),
+            }),
+          }),
+        "config set",
+      );
+      return parseConfigEntry(await readJson(response, "config set"));
+    },
+    async updateConfig(options: SdkUpdateConfigOptions): Promise<SdkConfigEntry> {
+      if (!STABLE_UUID.test(options.id)) {
+        throw new SdkError("SDK_INVALID_REF", "Config updates need the exact config UUID.");
+      }
+      const response = await guard(
+        () =>
+          fetchImpl(`${base}/api/config/${options.id}`, {
+            method: "PUT",
+            headers,
+            body: JSON.stringify({
+              ...(options.key === undefined ? {} : { key: options.key }),
+              ...(options.type === undefined ? {} : { type: options.type }),
+              ...(options.value === undefined ? {} : { value: options.value }),
+              ...(options.description === undefined ? {} : { description: options.description }),
+            }),
+          }),
+        "config update",
+      );
+      return parseConfigEntry(await readJson(response, "config update"));
+    },
+    async deleteConfig(id: string): Promise<void> {
+      if (!STABLE_UUID.test(id)) {
+        throw new SdkError("SDK_INVALID_REF", "Config deletes need the exact config UUID.");
+      }
+      const response = await guard(
+        () => fetchImpl(`${base}/api/config/${id}`, { method: "DELETE", headers }),
+        "config delete",
+      );
+      await readJson(response, "config delete");
+    },
     async getContract(): Promise<SdkContractDescriptor> {
       const response = await guard(() => fetchImpl(`${base}${SDK_DOC_PATH}`, { headers }), "sdk contract");
       const data: unknown = await readJson(response, "sdk contract");
@@ -971,6 +1381,352 @@ export function describeContract(): SdkContractDescriptor {
         path: "/api/apps/:id/assets/*",
         description: "Serve one active-deployment file.",
       },
+      { method: "GET", path: "/api/artifacts", description: "Artifact summaries for this Organization (FILE-02)." },
+      {
+        method: "PUT",
+        path: "/api/artifacts",
+        description: "Upload bytes (?name=, ?mime=, octet-stream body); same-filename re-upload versions the same row.",
+      },
+      {
+        method: "GET",
+        path: "/api/artifacts/:id",
+        description: "Artifact detail with versions and attachment bindings (creator-or-admin).",
+      },
+      { method: "DELETE", path: "/api/artifacts/:id", description: "Soft-delete: metadata survives, bytes removed." },
+      { method: "GET", path: "/api/artifacts/:id/preview", description: "Current-version bytes inline." },
+      {
+        method: "GET",
+        path: "/api/artifacts/:id/download",
+        description: "Current-version bytes as an attachment download.",
+      },
+      {
+        method: "GET",
+        path: "/api/artifacts/:id/versions/:n",
+        description: "One addressed older-version byte snapshot.",
+      },
+      {
+        method: "PUT",
+        path: "/api/artifacts/:id/bytes",
+        description: "Upload a new version to one Artifact row (octet-stream body).",
+      },
+      { method: "POST", path: "/api/artifacts/:id/rename", description: "Rename the canonical record." },
+      {
+        method: "POST",
+        path: "/api/artifacts/:id/bindings",
+        description: "Bind the Artifact to an execution/workspace/conversation reference.",
+      },
+      {
+        method: "DELETE",
+        path: "/api/artifacts/:id/bindings",
+        description: "Remove one attachment binding (bytes untouched).",
+      },
+      {
+        method: "GET",
+        path: "/api/artifacts/bindings",
+        description: "List attachment triples for one (?scope=, ?refId=) reference (no bytes).",
+      },
+      {
+        method: "GET",
+        path: "/api/artifacts/:id/export",
+        description: "Portable metadata-only manifest (never runtime bytes).",
+      },
+      { method: "GET", path: "/api/artifacts/formats", description: "Generated-output format subcapabilities." },
+      { method: "GET", path: "/api/artifacts/retention", description: "Read the retention policy (default 90 days)." },
+      {
+        method: "PUT",
+        path: "/api/artifacts/retention",
+        description: "Set the retention window, 1-3650 days (admin only).",
+      },
+      {
+        method: "GET",
+        path: "/api/artifacts/cleanup/preview",
+        description: "List what retention cleanup would delete (no writes).",
+      },
+      {
+        method: "POST",
+        path: "/api/artifacts/cleanup/run",
+        description: "Delete one bounded expired batch with per-row outcomes (admin only).",
+      },
+      { method: "GET", path: "/api/apps/:id/grants", description: "List app grants." },
+      { method: "POST", path: "/api/apps/:id/grants", description: "Create an app grant." },
+      {
+        method: "POST",
+        path: "/api/apps/:id/grants/:grantId/revoke",
+        description: "Revoke an app grant.",
+      },
+      {
+        method: "GET",
+        path: "/api/apps/:id/tables",
+        description: "List declared Tables (includes hidden).",
+      },
+      { method: "POST", path: "/api/apps/:id/tables", description: "Declare an app Table." },
+      { method: "GET", path: "/api/apps/:id/sdk", description: "App SDK handshake (version tripwire)." },
+      {
+        method: "GET",
+        path: "/api/apps/:id/runtime/tables",
+        description: "List granted visible Tables.",
+      },
+      {
+        method: "GET",
+        path: "/api/apps/:id/runtime/tables/:name/rows",
+        description: "Filtered Table page read (filter/limit/cursor/sinceRevision).",
+      },
+      {
+        method: "POST",
+        path: "/api/apps/:id/runtime/tables/:name/rows",
+        description: "Insert one Table row.",
+      },
+      {
+        method: "PATCH",
+        path: "/api/apps/:id/runtime/tables/:name/rows/:rowId",
+        description: "Replace one Table row.",
+      },
+      {
+        method: "DELETE",
+        path: "/api/apps/:id/runtime/tables/:name/rows/:rowId",
+        description: "Delete one Table row.",
+      },
+      {
+        method: "POST",
+        path: "/api/apps/:id/runtime/invoke",
+        description: "Invoke a granted Saga (Idempotency-Key required).",
+      },
+      {
+        method: "GET",
+        path: "/api/apps/:id/runtime/executions",
+        description: "Scoped invocation tail (result via Execution detail).",
+      },
+      { method: "GET", path: "/api/apps/:id/runtime/files", description: "List read-granted files." },
+      {
+        method: "POST",
+        path: "/api/apps/:id/runtime/files",
+        description: "Declare a file location.",
+      },
+      {
+        method: "POST",
+        path: "/api/apps/:id/runtime/files/tokens",
+        description: "Issue a single-use file token.",
+      },
+      {
+        method: "POST",
+        path: "/api/apps/:id/runtime/files/upload",
+        description: "Redeem an upload token (verified).",
+      },
+      {
+        method: "POST",
+        path: "/api/apps/:id/runtime/files/download",
+        description: "Redeem a download token.",
+      },
+      {
+        method: "DELETE",
+        path: "/api/apps/:id/runtime/files/*",
+        description: "Version-aware file delete.",
+      },
+      {
+        method: "GET",
+        path: "/api/audit",
+        description:
+          "Administrative audit trail (action/outcome/search/startDate/endDate/limit/cursor; Organization-scoped).",
+      },
+      {
+        method: "GET",
+        path: "/api/notifications",
+        description: "Operational inbox: own personal rows plus same-org org-scoped rows.",
+      },
+      {
+        method: "GET",
+        path: "/api/notifications/:id",
+        description: "One notification (owner-only for personal rows).",
+      },
+      {
+        method: "DELETE",
+        path: "/api/notifications/:id",
+        description: "Dismiss a notification (owner-only for personal rows).",
+      },
+      {
+        method: "GET",
+        path: "/api/file-locations",
+        description: "Declared file locations for this Organization.",
+      },
+      {
+        method: "POST",
+        path: "/api/file-locations",
+        description: "Declare a write location (mints read/write/delete policies).",
+      },
+      {
+        method: "GET",
+        path: "/api/file-locations/:name",
+        description: "Location detail with policies.",
+      },
+      {
+        method: "DELETE",
+        path: "/api/file-locations/:name",
+        description: "Delete an empty location (policies and tokens revoked).",
+      },
+      {
+        method: "POST",
+        path: "/api/files/uploads",
+        description: "Bounded batch upload-slot issuance (per-path allow/deny).",
+      },
+      {
+        method: "POST",
+        path: "/api/files/downloads",
+        description: "Bounded batch download-token issuance (per-path allow/deny).",
+      },
+      {
+        method: "PUT",
+        path: "/api/files/content?token=",
+        description: "Stage upload bytes under a single-use slot token.",
+      },
+      {
+        method: "GET",
+        path: "/api/files/content",
+        description: "Download ready bytes (capability token or Bearer read).",
+      },
+      {
+        method: "POST",
+        path: "/api/files/finalize",
+        description: "Finalize-after-upload: server verifies size/digest/type/version.",
+      },
+      {
+        method: "GET",
+        path: "/api/files",
+        description: "Organization-scoped structural listing (never shared rows).",
+      },
+      {
+        method: "DELETE",
+        path: "/api/files",
+        description: "Version-fenced delete (FILE_MISSING / VERSION_CONFLICT).",
+      },
+      {
+        method: "POST",
+        path: "/api/file-policies",
+        description: "Grant one policy row.",
+      },
+      {
+        method: "DELETE",
+        path: "/api/file-policies",
+        description: "Revoke one policy row (outstanding tokens invalidated).",
+      },
+      {
+        method: "POST",
+        path: "/api/file-policies/test",
+        description: "Evaluate a hypothetical access triple, issuing nothing.",
+      },
+      {
+        method: "GET",
+        path: "/api/integrations",
+        description: "Portable Integration definitions with schema, defaults, and health (CON-01; no org state).",
+      },
+      { method: "GET", path: "/api/connections", description: "This Organization's Connection mappings (CON-01)." },
+      { method: "POST", path: "/api/connections", description: "Create a loose Connection mapping (CON-01)." },
+      {
+        method: "GET",
+        path: "/api/connections/:integrationId",
+        description: "Read one Connection mapping for this Organization (CON-01).",
+      },
+      {
+        method: "PUT",
+        path: "/api/connections/:integrationId",
+        description: "Update a loose Connection mapping; managed rows reject MANAGED_RESOURCE (CON-01).",
+      },
+      {
+        method: "DELETE",
+        path: "/api/connections/:integrationId",
+        description: "Delete a loose Connection mapping (CON-01).",
+      },
+      {
+        method: "POST",
+        path: "/api/connections/:integrationId/test",
+        description: "Read-only connectivity test: no writes, no dispatch (CON-01).",
+      },
+      { method: "GET", path: "/api/tables", description: "Tables visible to this caller in this Organization." },
+      { method: "POST", path: "/api/tables", description: "Create a Table declaration (owner: the creator)." },
+      { method: "GET", path: "/api/tables/:name", description: "Table declaration." },
+      {
+        method: "DELETE",
+        path: "/api/tables/:name",
+        description: "Delete a Table and its rows and grants (owner-only).",
+      },
+      {
+        method: "GET",
+        path: "/api/tables/:name/rows",
+        description: "Policy-safe bounded query: nested-JSON filters, prefix, order, cursor pagination.",
+      },
+      {
+        method: "GET",
+        path: "/api/tables/:name/count",
+        description: "Scoped filtered count; skip_count answers total=-1 without scanning.",
+      },
+      { method: "PUT", path: "/api/tables/:name/rows/:id", description: "Insert one document." },
+      { method: "GET", path: "/api/tables/:name/rows/:id", description: "Read one document." },
+      { method: "PATCH", path: "/api/tables/:name/rows/:id", description: "Replace one document wholesale." },
+      { method: "DELETE", path: "/api/tables/:name/rows/:id", description: "Delete one document." },
+      {
+        method: "POST",
+        path: "/api/tables/:name/rows/batch",
+        description: "Batch insert: all-or-denied policy preflight, per-item operational results.",
+      },
+      {
+        method: "PUT",
+        path: "/api/tables/:name/rows/batch-update",
+        description: "Batch update: all-or-denied policy preflight, per-item operational results.",
+      },
+      {
+        method: "POST",
+        path: "/api/tables/:name/rows/batch-delete",
+        description: "Batch delete: all-or-denied policy preflight, per-item operational results.",
+      },
+      {
+        method: "POST",
+        path: "/api/tables/:name/grants",
+        description: "Grant one action to a user (owner-only; revocation converges on next call).",
+      },
+      {
+        method: "DELETE",
+        path: "/api/tables/:name/grants",
+        description: "Revoke one action grant (owner-only).",
+      },
+      { method: "GET", path: "/api/config", description: "Typed config rows for this Organization (secrets masked)." },
+      {
+        method: "POST",
+        path: "/api/config",
+        description: "Set a non-secret value or provision a secret reference (upsert by key).",
+      },
+      {
+        method: "PUT",
+        path: "/api/config/:id",
+        description: "Update one config row by ID; omitted secret values preserve the reference.",
+      },
+      {
+        method: "DELETE",
+        path: "/api/config/:id",
+        description: "Delete one config row by ID (managed rows refuse).",
+      },
+      { method: "GET", path: "/api/endpoints", description: "Operator endpoint inventory (this Organization)." },
+      {
+        method: "POST",
+        path: "/api/endpoints",
+        description: "Create a scoped endpoint bound to a deployed Saga (raw credential returned once).",
+      },
+      { method: "GET", path: "/api/endpoints/:name", description: "Read one scoped endpoint summary." },
+      {
+        method: "PATCH",
+        path: "/api/endpoints/:name",
+        description: "Update endpoint policy (enabled, rateLimitPerMinute, keyExpiresAt).",
+      },
+      { method: "POST", path: "/api/endpoints/:name/rotate", description: "Rotate the endpoint credential." },
+      { method: "GET", path: "/api/endpoints/:name/events", description: "Delivery history for replay visibility." },
+      {
+        method: "POST",
+        path: "/api/endpoints/:name",
+        description: "Public credential-authenticated api-key delivery (X-Endpoint-Key or Bearer).",
+      },
+      {
+        method: "POST",
+        path: "/hooks/:name",
+        description: "Public HMAC-signed webhook delivery (X-Webhook-Signature; echo-param challenge supported).",
+      },
     ],
     errorCodes: [...SDK_ERROR_CODES],
     capabilities: [
@@ -998,9 +1754,27 @@ export function describeContract(): SdkContractDescriptor {
           "One-off and recurring schedules (TRG-01): create, preview UTC windows, disable/enable/delete, cancel Scheduled intents; Cron tick promotes due windows through submit with per-window idempotency.",
       },
       {
+        name: "generated-artifacts",
+        status: "supported",
+        detail:
+          "Generated/uploaded Artifacts on Worker + D1 + R2 (FILE-02, ADR 019): upload with same-filename versioning, list/preview/download/rename/delete, execution/workspace/conversation attachment bindings with the canonical-versus-binding access split, configurable retention with explicit preview/run cleanup. Portable exports are metadata-only; Python rendering libraries are not required.",
+      },
+      {
         name: "authored-apps",
         status: "supported",
         detail: "Independent apps: create, edit, validate, build, jobs, swap, delete, asset serving (ADR 017).",
+      },
+      {
+        name: "app-runtime",
+        status: "supported",
+        detail:
+          "Scoped browser App SDK runtime (ADR 019): grant-scoped Saga invoke, visible-Table read/write with revision polling, versioned files with single-use tokens, handshake tripwire. No WebSocket; no Forms/config hooks.",
+      },
+      {
+        name: "managed-files",
+        status: "supported",
+        detail:
+          "Managed file locations: declare, policy-checked proxy upload/download, finalize-after-upload verification, versioned mutation, access-test (ADR 018). Retention/multipart stay tracked under FILE-02.",
       },
       {
         name: "local-preview",
@@ -1009,10 +1783,40 @@ export function describeContract(): SdkContractDescriptor {
           "No-registration local preview (POST /api/dev/preview): authoritative parse, no D1 writes, no dispatch; opt-in read-only environment check. Sync/Git/lock/deploy guidance lives in docs/dev-preview.md (DEV-02).",
       },
       {
+        name: "ops-audit-notifications",
+        status: "supported",
+        detail:
+          "Administrative audit trail (GET /api/audit) plus operational notifications inbox with dismiss (ADR 020).",
+      },
+      {
+        name: "connection-management",
+        status: "supported",
+        detail:
+          "Non-secret Connection mappings: list, create, read, update, delete, and read-only test through the authorized Worker API (CON-01). Managed rows reject live mutation with MANAGED_RESOURCE.",
+      },
+      {
+        name: "author-tables",
+        status: "supported",
+        detail:
+          "Author Tables over D1 (TABLE-02 query/count/batch slice): declarations, deny-by-absence per-action grants, bounded keyset queries, scoped counts with skip_count, all-or-denied batches. Realtime subscriptions stay deferred.",
+      },
+      {
+        name: "author-config",
+        status: "supported",
+        detail:
+          "Scoped config over D1 (CON-02, ADR 020): typed string/int/bool/json rows plus secret references, org-only resolution, [SECRET] list masking, managed-row ownership. No global tier.",
+      },
+      {
+        name: "endpoint-triggers",
+        status: "supported",
+        detail:
+          "Scoped api-key and HMAC webhook endpoints bound to deployed Sagas (TRG-02, ADR 019): operator create/disable/rotate, vendor deliveries with deterministic replay, rate limits, and delivery history.",
+      },
+      {
         name: "resource-management",
         status: "tracked",
         detail:
-          "Tables, forms, files, config, and agents SDK commands belong to their owning parity issues (see docs/sdk-capability-map.md).",
+          "Author Tables/files/forms/agents SDK commands belong to their owning parity issues (see docs/sdk-capability-map.md); the scoped browser app runtime is the separate app-runtime capability.",
       },
     ],
     docs: [

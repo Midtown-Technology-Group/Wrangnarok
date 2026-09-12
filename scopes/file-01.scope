@@ -1,0 +1,21 @@
+# FILE-01 lane scope (issue #157): managed file locations with policy-checked upload/download/mutation.
+src/files.ts
+src/bindings.ts
+src/index.ts
+src/sdk.ts
+migrations/0019_files.sql
+test/files.test.ts
+test/files-branches.test.ts
+test/files-ui.test.tsx
+client/src/pages/Files.tsx
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+client/src/App.tsx
+client/src/components/Nav.tsx
+docs/architecture/018-managed-files.md
+docs/sdk-capability-map.md
+docs/upstream-parity.md
+scripts/check-bundle-budget.mjs
+wrangler.jsonc
+scopes/file-01.scope
+package.json

@@ -8,14 +8,14 @@ Status vocabulary: **Implemented** (shipped locally), **Partial** (materially na
 
 Upstream tests are evidence of intended assertions, not passing-test claims. Upstream sources were inspected, not executed; no upstream production instance was used.
 
-Total: 47 capability rows — 16 Partial, 29 Missing, 2 Gated.
+Total: 47 capability rows — 1 Implemented, 1 Complete (pending review), 21 Partial, 22 Missing, 2 Gated.
 
 | ID | Title | Phase | Status | Depends | Existing issue |
 | --- | --- | --- | --- | --- | --- |
 | RUN-01 | Persist and enforce per-Saga runtime policy without changing source identity | 2 | Partial | AUTH-02 | new |
 | RUN-02 | Invoke child Sagas with explicit context, completion and failure semantics | 2 | Missing | AUTH-02, RUN-01 | new |
 | TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented (#137) | AUTH-02, RUN-01 | #137 |
-| TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Missing | AUTH-03, CON-01 | new |
+| TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01 | #138 |
 | TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Missing | TRG-01, TRG-02, AUTH-02 | new |
 | DEV-01 | Provide a complete typed TypeScript author and automation SDK | 1+4 | Partial | — | new |
 | DEV-02 | Preview, sync and deploy author source with explicit dependency compatibility | 5 | Partial | DEV-01, SOL-01 | new |
@@ -23,23 +23,23 @@ Total: 47 capability rows — 16 Partial, 29 Missing, 2 Gated.
 | AUTH-02 | Enforce resource roles, claims and explicit delegated authorization end to end | 3 | Missing | AUTH-01 | new |
 | AUTH-03 | Manage scoped machine credentials and verify delegated human identity parity | 3 | Partial | AUTH-01, AUTH-02 | new |
 | SEC-01 | Enforce execution-scoped secret registration and universal output scrubbing | 3 | Partial | — | new |
-| CON-01 | Manage Integration definitions and scoped Connection mappings through authorized APIs | 3 | Partial | AUTH-02, SEC-01 | new |
-| CON-02 | Expose scoped configuration and secret-reference APIs to authors and operators | 3 | Missing | AUTH-02, SEC-01, CON-01 | new |
+| CON-01 | Manage Integration definitions and scoped Connection mappings through authorized APIs | 3 | Complete (pending review) | AUTH-02, SEC-01 | #146 |
+| CON-02 | Expose scoped configuration and secret-reference APIs to authors and operators | 3 | Implemented | AUTH-02, SEC-01, CON-01 | #147 |
 | SEC-02 | Support genuinely per-Organization credentials behind the accepted secret-storage tripwire | 3 | Gated | SEC-01, CON-01 | new |
 | OAUTH-01 | Complete OAuth authorization, centralized refresh and credential health lifecycle | 3 | Partial | CON-01, SEC-02, AUTH-03 | new |
 | RUN-03 | Define and deliver bounded synchronous and data-provider execution | 2+4 | Missing | AUTH-02, RUN-01 | new |
 | RUN-04 | Do not confirm cancellation when native Workflow termination is ambiguous | 2 | Partial | — | new |
 | OBS-01 | Complete the execution UI and CLI: results, failures, live status and history traversal | 2 | Partial | RUN-04 | new |
 | OBS-02 | Persist and stream authorized author logs and progress with reconnect recovery | 4 | Missing | SEC-01, AUTH-02, OBS-01 | new |
-| TABLE-01 | Deliver the existing minimal author Tables migration slice | 4 | Missing | AUTH-02 | #117 |
-| TABLE-02 | Extend author Tables to policy-safe querying, batch mutations and realtime visibility | 4 | Missing | TABLE-01, AUTH-02, OBS-02 | new |
+| TABLE-01 | Deliver the existing minimal author Tables migration slice | 4 | Partial | AUTH-02 | #117 |
+| TABLE-02 | Extend author Tables to policy-safe querying, batch mutations and realtime visibility | 4 | Partial | TABLE-01, AUTH-02, OBS-02 | #154 |
 | FORM-01 | Deliver the existing Forms-to-Saga input binding slice | 4 | Partial | — | #118 |
 | FORM-02 | Deliver usable dynamic forms with safe startup, providers and submissions | 4 | Missing | FORM-01, RUN-03, TRG-01, AUTH-02, FILE-01 | new |
 | EMBED-01 | Publish and embed forms/apps with revocable external capabilities | 4 | Missing | FORM-02, APP-01, AUTH-03, AUTH-02 | new |
-| FILE-01 | Deliver managed file locations with policy-checked upload, download and mutation | 4 | Missing | AUTH-02, SEC-01 | new |
-| FILE-02 | Manage generated artifacts and attachment lifecycles with retention | 4+6 | Missing | FILE-01, AUTH-02 | new |
+| FILE-01 | Deliver managed file locations with policy-checked upload, download and mutation | 4 | Implemented | AUTH-02, SEC-01 | #157 |
+| FILE-02 | Manage generated artifacts and attachment lifecycles with retention | 4+6 | Partial | FILE-01, AUTH-02 | #158 |
 | APP-01 | Deploy authored applications with explicit lifecycle, ownership and recovery | 4+5 | Partial | AUTH-02, DEV-02, SOL-01 | #159 |
-| APP-02 | Provide the browser App SDK with scoped workflows, Tables, files and live updates | 4 | Missing | APP-01, TABLE-02, FILE-01, OBS-02 | new |
+| APP-02 | Provide the browser App SDK with scoped workflows, Tables, files and live updates | 4 | Partial | APP-01, TABLE-02, FILE-01, OBS-02 | #160 |
 | SOL-01 | Close the existing bundle reconciliation and activation contract gaps | 5 | Partial | — | new |
 | SOL-02 | Install and manage complete reusable Solutions across Organizations | 5 | Partial | SOL-01, AUTH-02, CON-02, TABLE-02, FORM-02, APP-01, AI-02, TRG-03 | new |
 | SOL-03 | Export, capture and import portable Solution source without tenant state | 5 | Missing | SOL-01, MIG-01, SEC-01 | new |
@@ -53,7 +53,7 @@ Total: 47 capability rows — 16 Partial, 29 Missing, 2 Gated.
 | AI-06 | Provide consent-controlled personal memory and composed required instructions | 6 | Missing | AI-05, AUTH-02 | new |
 | TOOL-01 | Expose opt-in Saga tools and an authorized inbound MCP gateway | 6 | Missing | AUTH-03, DEV-01, SEC-01 | new |
 | TOOL-02 | Connect external MCP servers with org tools and per-user consent | 6 | Missing | TOOL-01, OAUTH-01, AI-02 | new |
-| OPS-01 | Provide administrative audit trails and user-visible operational notifications | 4 | Missing | AUTH-02, SEC-01, OBS-02 | new |
+| OPS-01 | Provide administrative audit trails and user-visible operational notifications | 4 | Partial | AUTH-02, SEC-01, OBS-02 | #172 |
 | OPS-02 | Expose Cloudflare-native diagnostics, operational jobs and repair workflows | 4 | Partial | OBS-01, OPS-01, TRG-01 | new |
 | OPS-03 | Export and restore operational data with explicit encrypted-backup boundaries | 5 | Missing | SOL-03, TABLE-02, FILE-02, CON-02, SEC-01 | new |
 | OPS-04 | Report scoped usage, model costs and automation ROI | 4+6 | Missing | AUTH-02, AI-01, OPS-01 | new |
@@ -165,11 +165,11 @@ Related Wrangnarok issues: #76 (webhook half), #137 (schedule half, implemented)
 
 ## TRG-02: Expose authenticated webhook and custom HTTP execution endpoints
 
-Phase 2; **Missing**; existing issue: new
+Phase 2; **Partial**; existing issue: #138
 
-Local status: Only the internal POST /api/executions submit API exists; it is not a vendor webhook or a configured workflow endpoint.
+Local status: Scoped api-key endpoints (`POST /api/endpoints/:name`) and HMAC webhook endpoints (`POST /hooks/:name`) bind a name to a deployed Saga (ADR 018, migration 0021). Deliveries verify per-endpoint keys (expiry, disable/rotate revocation) or HMAC signatures against deployment-store secrets, answer echo-param vendor challenges in plaintext, rate-limit per endpoint, and submit through the standard protocol with derived `wep-` keys (202 receipt, 200 replay, 409 mismatch). Operator create/list/read/update/rotate/history ride the AUTH-01 membership gate. Upstream sync-mode inline results stay deferred to RUN-03; per-tenant webhook secrets stay deployment-scoped per ADR 005 v0 (SEC-02 tripwire).
 
-Depends: AUTH-03, CON-01
+Depends: AUTH-01
 
 Acceptance:
 
@@ -378,9 +378,9 @@ Related Wrangnarok issues: #110
 
 ## CON-01: Manage Integration definitions and scoped Connection mappings through authorized APIs
 
-Phase 3; **Partial**; existing issue: new
+Phase 3; **Complete (pending review)**; existing issue: #146
 
-Local status: Typed echo/NinjaOne definitions and exact-org Connection lookup exist. There is no admin Connection UI/CRUD, generic config schema or connectivity/status management.
+Local status: Typed echo/NinjaOne definitions carry non-secret config schema, defaults, required-secret names, and health copy. Exact-org Connection lookup plus the authorized management boundary (list/create/read/update/delete plus read-only test) exist with stable Connection identity, managed-versus-loose ownership, and per-Organization scoping. The `/connections` admin screen and typed client calls use the same Worker routes. No per-tenant secret values: views carry required-secret names only, responses are scrubbed, and the SEC-02 tripwire stays shut. Upstream 424 adaptation: declared-missing requirements keep the existing ExecutionHistory 424 on the submit path; the management test route also serves 424 for a missing mapping (no global/default fallback in either place).
 
 Depends: AUTH-02, SEC-01
 
@@ -405,9 +405,9 @@ Related Wrangnarok issues: #75, #110
 
 ## CON-02: Expose scoped configuration and secret-reference APIs to authors and operators
 
-Phase 3; **Missing**; existing issue: new
+Phase 3; **Implemented** (issue #147; ADR 020); existing issue: #147
 
-Local status: Connection endpoints and manifest declarations do not provide Bifrost general key/value configuration with types, org overrides and secret-aware access.
+Local status: Typed key/value config (`string`/`int`/`bool`/`json`/`secret`) in D1 `configs` (migration 0023), org-only resolution (no global tier by design), `[SECRET]` list masking, reference-only secret provisioning against declared provider-global deployment secrets, managed-row ownership (`managed_by`), `bundle_config` pin reconciliation, export-declaration exclusion, `ctx.config` Saga handle with declared-versus-undeclared outcomes, plus SDK/CLI/UI parity.
 
 Depends: AUTH-02, SEC-01, CON-01
 
@@ -568,9 +568,14 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## TABLE-01: Deliver the existing minimal author Tables migration slice
 
-Phase 4; **Missing**; existing issue: #117
+Phase 4; **Partial**; existing issue: #117
 
-Local status: No author Tables exist. Keep #117 as the minimal org-scoped Saga read/write slice rather than opening a duplicate.
+Local status: Subsumed by the TABLE-02 (#154) landing slice: org-scoped
+Table declarations, single-row create/read/replace/delete, deny-by-absence
+per-action grants, and the explicit-deletion retention note all ship in
+`src/tables.ts` (migration `0007_tables.sql`) and are proven in workerd by
+`test/tables.test.ts`. TABLE-02 owns the remaining query/policy/realtime
+acceptance; this issue tracks the minimal-slice exit only.
 
 Depends: AUTH-02
 
@@ -587,9 +592,27 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## TABLE-02: Extend author Tables to policy-safe querying, batch mutations and realtime visibility
 
-Phase 4; **Missing**; existing issue: new
+Phase 4; **Partial**; existing issue: #154
 
-Local status: The existing #117 deliberately defers indexes, visibility transitions and broader query/policy semantics; those remain required for full parity.
+Local status: The query/count/batch slice landed (`src/tables.ts`, migration
+`0007_tables.sql`, `test/tables.test.ts`): org-scoped declarations with
+deny-by-absence per-action grants, policy-safe keyset queries (nested-JSON
+filters, prefix, order, cursor pagination), scoped counts with skip_count
+(total=-1), and all-or-denied batch mutations with per-item operational
+results. Realtime table-change subscriptions (visibility transitions,
+revocation push, reconnect reconciliation) remain missing per the multi-slice
+note; retained until verified. TABLE-01 (#117) is subsumed by this slice.
+
+D1 bounds and blockers (explicit, Free-tier posture): 4 KB per document, 25
+items per batch, 1000-row scan caps, limit 1-50, 5 nested filters. Unsupported
+query operators fail closed (UNSUPPORTED_QUERY / INVALID_ORDER / INVALID_CURSOR
+for offset or custom sorts: no offset pagination, no custom sorts, no
+projection, no managed indexes, no version tokens). D1 limits recorded as
+blockers: 10 GB per-database cap needs a retention/partitioning policy before
+large Tables are production-shaped (explicit deletion only in this slice);
+single-database transactions only (batch() is one-database atomic, no
+cross-database semantics); JSON filtering is application-side over the bounded
+keyset window (no PostgreSQL JSONB assumptions, no managed indexes yet).
 
 Depends: TABLE-01, AUTH-02, OBS-02
 
@@ -694,9 +717,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## FILE-01: Deliver managed file locations with policy-checked upload, download and mutation
 
-Phase 4; **Missing**; existing issue: new
+Phase 4; **Implemented**; existing issue: #157
 
-Local status: No file APIs or R2 binding exists. This is author/runtime file storage, not Worker static assets.
+Local status: ADR 018 earns the R2 primitive (FILES binding; D1 holds metadata only). Declared locations with minted read/write/delete policies, policy-checked proxy upload/download in Bearer and revocable-capability shapes, bounded batch issuance (100 entries, 1s to 7d expiry, per-path allow/deny), finalize-after-upload with server-side size/digest/type verification, version-fenced overwrite/delete (FILE_MISSING / VERSION_CONFLICT), policy admin plus access-test, Organization-scoped listing, and a bounded shared read-only fallback. Reads collapse missing/unfinalized/foreign to 404 (non-disclosure); revocation deletes outstanding tokens (no TTL grace). Single-PUT objects only (per-location max_bytes, at most 25 MiB); multipart/range/retention/content-search are explicit non-goals owned by FILE-02. Proven by 10 workerd tests on real local R2/D1 plus the Files UI read slice. R2 keys are org-namespaced; no Worker-local disk persistence.
 
 Depends: AUTH-02, SEC-01
 
@@ -719,9 +742,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## FILE-02: Manage generated artifacts and attachment lifecycles with retention
 
-Phase 4+6; **Missing**; existing issue: new
+Phase 4+6; **Partial**; existing issue: #158
 
-Local status: Managed file locations do not by themselves cover opaque artifact IDs/workspaces, generated chat files, attachment ownership or cleanup policy.
+Local status: ADR 019 accepts the identity/versioning/access/retention contract. Generated/uploaded Artifacts ship end to end on Worker + D1 + R2: upload with same-filename versioning (same stable UUID, current pointer advances, no optimistic version-conflict API), list/preview/download/rename/delete, execution/workspace/conversation attachment bindings with the canonical-versus-binding access split (creator-or-admin for bytes, triple-only for binding readers), configurable retention (default 90 days, range 1-3650, admin-only changes) with explicit preview/run cleanup (bounded batch, per-row outcomes, R2-first interrupted recovery), upload completion verification with failed-write cleanup, MIME/size limits (5 MiB per surface), deleted metadata surviving while bytes are removed, and metadata-only portable exports. Generated-output formats ride as deferred subcapabilities; no Python rendering on Workers. Remaining: AUTH-02 roles (finer than creator/org-admin), FILE-01 signed-URL parity (direct-to-R2 browser PUTs), AI-03 chat attachment surfacing. Composes with AUTH-01 membership gating and instance/org admin bypass.
 
 Depends: FILE-01, AUTH-02
 
@@ -770,9 +793,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## APP-02: Provide the browser App SDK with scoped workflows, Tables, files and live updates
 
-Phase 4; **Missing**; existing issue: new
+Phase 4; **Partial**; existing issue: #160
 
-Local status: The private control-plane API client is not a public SDK/runtime for authored apps.
+Local status: ADR 019 accepts the scoped runtime contract. Authored apps run invoke/result, filtered Table read/write/live poll, and signed file upload/download against the real local Worker through `client/src/lib/app-runtime.ts` (imperative) and `app-provider.tsx` (provider + hooks). Authorization is deny-by-absence grant rows checked per call: hidden Tables stay 404 on runtime paths, revoked grants fail immediately (including token redeem), and runtime file lists show read-granted files only. Live updates are bounded revision polling (no WebSocket/Durable Object/Queue); the handshake tripwire (`APP_SDK_VERSION` + `GET /api/apps/:id/sdk`) fails drift loud with `APP_SDK_MISMATCH`. Browser-safe APIs carry install/org/app context, loading/error state, method-shaped retry (GET bounded, mutations never blind), bounded one-401 refresh, reconnect re-list, and the flat-hook vs nested-imperative Table shape. Forms/config hooks stay in FORM-02/CON-02; batch/rich query stays in TABLE-02; artifact lifecycles stay in FILE-02; log streaming stays in OBS-02.
 
 Depends: APP-01, TABLE-02, FILE-01, OBS-02
 
@@ -1098,9 +1121,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## OPS-01: Provide administrative audit trails and user-visible operational notifications
 
-Phase 4; **Missing**; existing issue: new
+Phase 4; **Partial**; existing issue: #172
 
-Local status: ExecutionHistory records runs, not user/role/config/login mutations. There is no notification inbox/dismiss/progress UI.
+Local status: Implemented the ADR 020 slice end to end on Worker + D1 (`audit_events`, `notifications` via `0018_ops.sql`; `src/ops.ts`): `GET /api/audit` (actor/org/action/target/outcome, action-prefix/outcome/search/date filters, keyset pagination, deployment-secret scrubbing, org-scoped reads) with best-effort emission (`app.create/source.edit/build.start/build.complete/swap/delete`, `app.managed_deny`, `execution.cancel/cancel_unconfirmed`) that never fails the primary mutation; durable personal/org notifications with dismiss ownership, per-job dedup, stale-progress reconciliation on read, and polling UI (`/audit`, `/notifications`) plus typed SDK/CLI. Proven in workerd (`test/ops.test.ts`: allowed/denied readers, denied mutations, scrubbing, duplicates, dismissal ownership, interrupted jobs, storage-failure policy) plus UI/contract pins. Remaining: role-gated audit reads and admin scoping (AUTH-02), live progress streaming (OBS-02 follow-up), retention automation (OPS-03).
 
 Depends: AUTH-02, SEC-01, OBS-02
 

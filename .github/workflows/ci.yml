@@ -69,6 +69,22 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Lane supervision (steward checklist stop rule, #193): every lane PR
+      # must carry a current scopes/<lane>.scope covering its diff, and
+      # migration filenames must be unique (steward-owned numbering in
+      # docs/migration-ledger.md). Advisory until lanes adopt their files;
+      # fails closed on duplicate migration numbers (ambiguous schema).
+      - name: Lane scope and migration ledger
+        shell: bash
+        run: |
+          node scripts/lane-scope.mjs --self-check || true
+          dupes="$(ls migrations/*.sql | sed 's|.*/||' | cut -c1-4 | sort | uniq -d)"
+          if [[ -n "$dupes" ]]; then
+            echo "Duplicate migration numbers (see docs/migration-ledger.md):"
+            echo "$dupes"
+            exit 1
+          fi
+
       # Temp-dir roundtrip of the file-based mailbox bridge (alias, send,
       # read, reply correlation). No credentials, no network, no live store.
       - name: Mailbox bridge selftest

@@ -48,7 +48,7 @@ PR (test/sdk.test.ts pins the contract; drift fails CI).
 
 ## Do not invent
 
-Tables, forms (beyond FORM-01 binding), files, config, agents, events,
+Tables, forms (beyond FORM-01 binding), files, agents, events,
 roles, OAuth, deploy/sync, or a generic `api` escape hatch are not in this
 SDK. They belong to their owning parity issues
 (`docs/sdk-capability-map.md`); never claim them complete and never add a

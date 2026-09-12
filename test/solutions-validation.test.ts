@@ -12,6 +12,7 @@ import migration1 from "../migrations/0001_initial.sql?raw";
 import migration2 from "../migrations/0002_cancelling.sql?raw";
 import migration3 from "../migrations/0003_usage_blocks.sql?raw";
 import migration4 from "../migrations/0004_solutions_install.sql?raw";
+import migration5 from "../migrations/0010_solutions_activation.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const BUNDLE_ID = "b10a7c2e-3f4d-4a5b-8c6d-7e8f9a0b1c2d";
@@ -54,6 +55,7 @@ beforeEach(async () => {
   await bindings.DB.exec(migration2);
   await bindings.DB.exec(migration3);
   await bindings.DB.exec(migration4);
+  await bindings.DB.exec(migration5);
 });
 
 afterEach(async () => {
@@ -163,7 +165,7 @@ it("scopes installs to one org and refuses undeclared orgs", async () => {
     secretsRequired: [],
   });
   const filtered = await installBundle(bindings.DB, two, { orgName: "second" });
-  expect(filtered.drift).toEqual({ created: 1, updated: 0, skipped: 0 });
+  expect(filtered.drift).toEqual({ created: 3, updated: 0, skipped: 0, deleted: 0 });
   expect(filtered.orgIds).toHaveLength(1);
   const missing = await bindings.DB.prepare("SELECT id FROM organizations WHERE name = ?")
     .bind("default")
@@ -178,7 +180,7 @@ it("scopes installs to one org and refuses undeclared orgs", async () => {
 it("creates connections for pre-existing org rows", async () => {
   await bindings.DB.prepare("INSERT INTO organizations(id, name) VALUES (?, ?)").bind("org-row-id", "default").run();
   const result = await installBundle(bindings.DB, manifest());
-  expect(result.drift).toEqual({ created: 1, updated: 0, skipped: 0 });
+  expect(result.drift).toEqual({ created: 3, updated: 0, skipped: 0, deleted: 0 });
   expect(result.orgIds).toEqual(["org-row-id"]);
 });
 
@@ -188,7 +190,7 @@ it("installs configs whose keys order canonically descending", async () => {
   const m = manifest();
   m.integrations[0]!.connections[0]!.config = { zebra: "stripes", endpoint: ENDPOINT_V1 };
   const result = await installBundle(bindings.DB, m);
-  expect(result.drift).toEqual({ created: 1, updated: 0, skipped: 0 });
+  expect(result.drift).toEqual({ created: 3, updated: 0, skipped: 0, deleted: 0 });
 });
 
 it("refuses silent overwrites when the marker changes under install", async () => {
@@ -206,7 +208,7 @@ it("refuses silent overwrites when the marker changes under install", async () =
       if (prop === "prepare") {
         return (sql: string, ...rest: unknown[]) => {
           const stmt = (target.prepare as (...args: unknown[]) => D1PreparedStatement)(sql, ...rest);
-          if (typeof sql === "string" && sql.includes("SET endpoint = ?, managed_by = ?")) {
+          if (typeof sql === "string" && sql.includes("SET endpoint = ?")) {
             return {
               bind: (...values: unknown[]) => {
                 const bound = stmt.bind(...values);

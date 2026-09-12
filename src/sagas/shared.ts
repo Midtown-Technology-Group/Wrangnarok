@@ -9,9 +9,18 @@ import { EXECUTION_ID } from "../domain";
 import type { ExecutionParams } from "../domain";
 import { assertJsonSerializable, bindSagaStep } from "../saga";
 import type { SagaDefinition, SagaEventContext } from "../saga";
+import { bindSagaConfig } from "../config";
 import { clearExecutionSecrets, registerExecutionSecrets, scrubExecutionText, scrubExecutionValue } from "../secrets";
 import { echo } from "../integrations/echo";
 import { listOrganizations } from "../integrations/ninjaone";
+
+/** Read the Execution's own Organization from the immutable D1 row. Never
+ * Workflow params, never caller input: the row is the authority. */
+async function executionOrgId(db: D1Database, id: string): Promise<string> {
+  const row = await db.prepare("SELECT org_id FROM executions WHERE id = ?").bind(id).first<{ org_id: string }>();
+  if (!row) throw new NonRetryableError("Unknown Execution.");
+  return row.org_id;
+}
 
 export async function executeSaga<TOutput>(
   env: Bindings,
@@ -29,11 +38,39 @@ export async function executeSaga<TOutput>(
   // carries one Execution's secrets into the next.
   registerExecutionSecrets(id, [env.NINJA_CLIENT_ID, env.NINJA_CLIENT_SECRET]);
   try {
+    // ctx.config resolves against the Execution's own Organization only: the
+    // org comes from the immutable D1 Execution row (never Workflow params,
+    // never caller input), read lazily inside step.do() so the handle itself
+    // performs no I/O at construction. Deployment secrets resolve secret
+    // references transiently; resolved values register with the
+    // execution-scoped registry for write-time scrubbing.
+    const deploymentSecrets: Record<string, string | undefined> = {
+      clientSecret: env.NINJA_CLIENT_SECRET,
+      NINJA_CLIENT_SECRET: env.NINJA_CLIENT_SECRET,
+    };
+    // One handle per Execution: the org is looked up lazily (inside step.do)
+    // so construction performs no I/O, then delegates to the pure binder.
+    // Faults (424 CONFIG_REQUIREMENT_UNSATISFIED) propagate to Saga code,
+    // which maps them like any other structured downstream error.
+    const lazyConfig = {
+      async get(key: string, defaultValue?: unknown): Promise<unknown> {
+        const orgId = await executionOrgId(env.DB, id);
+        return bindSagaConfig({ db: env.DB, orgId, executionId: id, secrets: deploymentSecrets }).get(
+          key,
+          defaultValue,
+        );
+      },
+      async require(key: string): Promise<unknown> {
+        const orgId = await executionOrgId(env.DB, id);
+        return bindSagaConfig({ db: env.DB, orgId, executionId: id, secrets: deploymentSecrets }).require(key);
+      },
+    };
     const ctx: SagaEventContext = {
       executionId: id,
       integrations: { echo: { echo }, ninjaone: { listOrganizations } },
       db: env.DB,
       secrets: { clientId: env.NINJA_CLIENT_ID, clientSecret: env.NINJA_CLIENT_SECRET },
+      config: lazyConfig,
     };
     const output = await def.run(ctx, bindSagaStep(step));
     assertJsonSerializable(output, `${def.name} output`);

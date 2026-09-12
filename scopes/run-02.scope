@@ -1,0 +1,36 @@
+# RUN-02 lane scope (issue #136): child Saga invocation with lineage.
+# Child invocation path, lineage persistence, parent/child fixtures,
+# ExecutionDetail child surfaces. Adjust at PR time: scope must cover the
+# branch diff vs origin/main exactly.
+src/children.ts
+src/sagas/definitions.ts
+src/sagas/hello-parent.ts
+src/sagas/index.ts
+src/sagas/shared.ts
+src/bindings.ts
+src/domain.ts
+src/executions.ts
+src/index.ts
+src/saga.ts
+src/sdk.ts
+src/solutions.ts
+migrations/0007_child_lineage.sql
+sagas.manifest.json
+test/child-invocation.test.ts
+test/cancel-confirmation.test.ts
+test/dev-preview.test.ts
+test/domain.test.ts
+test/execution-detail.test.tsx
+test/resilience.test.ts
+test/saga-contract.test.ts
+test/sdk.test.ts
+test/solutions-install.test.ts
+test/timeout-sweeper.test.ts
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+client/src/pages/ExecutionDetail.tsx
+docs/architecture/018-child-invocation.md
+scripts/wrangnarok.mjs
+wrangler.jsonc
+scopes/run-02.scope
+package.json

@@ -7,6 +7,7 @@ import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { NAV_ENTRIES, Nav } from "../client/src/components/Nav";
 import { fetchExecutionHistory } from "../client/src/lib/api-client";
+import { DashboardView, summarizeDashboardStatuses } from "../client/src/pages/Dashboard";
 import { ExecutionHistoryList } from "../client/src/pages/ExecutionHistory";
 import type { ExecutionHistoryResponse } from "../client/src/lib/client-types";
 
@@ -74,6 +75,51 @@ it("marks unported nav entries disabled and links each tracking issue", () => {
   expect(html).toContain("/issues/15");
   expect(html).toContain("/issues/16");
   expect(html).toContain("/issues/18");
+});
+
+it("enables the Dashboard nav entry at /dashboard", () => {
+  const dashboard = NAV_ENTRIES.find((entry) => entry.label === "Dashboard");
+  expect(dashboard?.enabled).toBe(true);
+  expect(dashboard?.to).toBe("/dashboard");
+  const html = renderToStaticMarkup(
+    <MemoryRouter>
+      <Nav />
+    </MemoryRouter>,
+  );
+  expect(html).toContain("/dashboard");
+});
+
+it("renders the Dashboard summary with honestly-scoped sample counts", () => {
+  const html = renderToStaticMarkup(
+    <MemoryRouter>
+      <DashboardView
+        initial={{
+          sagas: 3,
+          recentExecutions: 2,
+          recentHasMore: true,
+          connections: 1,
+          integrations: 2,
+          artifacts: 0,
+          artifactsHasMore: false,
+          fileLocations: 1,
+        }}
+      />
+    </MemoryRouter>,
+  );
+  expect(html).toContain("dashboard-summary");
+  expect(html).toContain("3 Sagas");
+  expect(html).toContain("2 recent Executions loaded");
+  expect(html).toContain("more available server-side");
+  expect(html).toContain("dashboard-row");
+  expect(html).toContain("/sagas");
+  expect(html).toContain("/history");
+  expect(html).toContain("/connections");
+  expect(html).toContain("/artifacts");
+  expect(html).toContain("/files");
+  expect(html).toContain("never platform totals");
+  expect(summarizeDashboardStatuses(["Succeeded", "Failed", "Failed"]).Failed).toBe(2);
+  expect(summarizeDashboardStatuses(["Succeeded", "Failed", "Failed"]).Succeeded).toBe(1);
+  expect(summarizeDashboardStatuses(["Succeeded", "Failed", "Failed"]).Pending).toBe(0);
 });
 
 it("enforces gray-out server-side: unmapped /api/* is UNIMPLEMENTED, not NOT_FOUND", async () => {

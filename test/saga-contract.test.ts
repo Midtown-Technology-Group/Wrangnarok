@@ -65,6 +65,10 @@ describe("Saga authoring contract (issue #57)", () => {
       const tables = await ctx.db.prepare("SELECT name FROM sqlite_master").all();
       return step.do("probe-v1", async () => ({ tables: tables.results.length }));
     }
+    async function topLevelConfig(ctx: SagaEventContext, step: SagaStep): Promise<unknown> {
+      const timeout = await ctx.config.get("timeout");
+      return step.do("probe-v1", async () => ({ timeout }));
+    }
     async function noDurableSteps(): Promise<unknown> {
       return { ok: true };
     }
@@ -75,6 +79,7 @@ describe("Saga authoring contract (issue #57)", () => {
       /ctx\.integrations.*outside step\.do/,
     );
     expect(() => assertDeterministicRun("bad-db", topLevelDb)).toThrow(/ctx\.db.*outside step\.do/);
+    expect(() => assertDeterministicRun("bad-config", topLevelConfig)).toThrow(/ctx\.config.*outside step\.do/);
     expect(() => assertDeterministicRun("bad-nosteps", noDurableSteps)).toThrow(/never calls step\.do/);
   });
 

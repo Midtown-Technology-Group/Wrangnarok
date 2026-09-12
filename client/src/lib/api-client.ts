@@ -11,12 +11,31 @@ import type {
   AppDetail,
   AppFile,
   AppJob,
+  AppNotification,
   AppRevision,
   AppsResponse,
   AppSummary,
+  AuditEvent,
+  AuditResponse,
+  ArtifactDetail,
+  ArtifactFormat,
+  ArtifactsResponse,
+  ArtifactSummary,
+  ConfigEntry,
+  ConfigListResponse,
+  ConnectionsResponse,
+  ConnectionSummary,
+  ConnectionTestResponse,
   ExecutionDetail,
   ExecutionHistoryResponse,
   ExecutionStatus,
+  NotificationsResponse,
+  FileLocation,
+  FileLocationsResponse,
+  FileMeta,
+  FilesResponse,
+  IntegrationsResponse,
+  IntegrationSummary,
   SagasResponse,
   SagaSummary,
 } from "./client-types";
@@ -297,4 +316,426 @@ export async function deleteApp(id: string): Promise<void> {
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const response = await fetch(`/api/apps/${id}`, { method: "DELETE", headers });
   if (!response.ok) throw await parseApiError(response);
+}
+
+/** Server-side audit filters (allowlisted query keys; anything else is UNSUPPORTED_QUERY). */
+export interface AuditListQuery {
+  /** Dotted action prefix, e.g. "app." or "execution.cancel". */
+  action?: string;
+  outcome?: "success" | "failure";
+  /** Bounded free-text match over action/target/detail. */
+  search?: string;
+  /** Inclusive ISO lower bound on created_at (YYYY-MM-DD accepted). */
+  startDate?: string;
+  /** Inclusive-day / exact-datetime upper bound on created_at. */
+  endDate?: string;
+  limit?: number;
+  /** Opaque page marker from a previous response. */
+  cursor?: string;
+}
+
+function isAuditEvent(value: unknown): value is AuditEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["orgId"] === "string" &&
+    typeof v["actorUserId"] === "string" &&
+    typeof v["action"] === "string" &&
+    (v["targetType"] === null || typeof v["targetType"] === "string") &&
+    (v["targetId"] === null || typeof v["targetId"] === "string") &&
+    (v["outcome"] === "success" || v["outcome"] === "failure") &&
+    "detail" in v &&
+    typeof v["createdAt"] === "string"
+  );
+}
+
+function isArtifactSummary(value: unknown): value is ArtifactSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["name"] === "string" &&
+    typeof v["mime"] === "string" &&
+    typeof v["sizeBytes"] === "number" &&
+    typeof v["version"] === "number" &&
+    (v["status"] === "active" || v["status"] === "deleted")
+  );
+}
+
+function isConfigEntry(value: unknown): value is ConfigEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["key"] === "string" &&
+    typeof v["type"] === "string" &&
+    "value" in v &&
+    (v["description"] === null || typeof v["description"] === "string") &&
+    (v["managedBy"] === null || typeof v["managedBy"] === "string") &&
+    typeof v["updatedAt"] === "string" &&
+    typeof v["updatedBy"] === "string"
+  );
+}
+
+/** GET /api/config — typed config rows for this Organization (CON-02, ADR
+ * 019). Secret rows answer "[SECRET]", never values. */
+export async function listConfigs(): Promise<ConfigListResponse> {
+  const data = await get("/api/config");
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { configs?: unknown }).configs)) {
+    throw new Error("Unexpected configs response shape.");
+  }
+  const configs = (data as { configs: unknown[] }).configs;
+  if (!configs.every(isConfigEntry)) throw new Error("Unexpected configs response shape.");
+  return { configs };
+}
+
+/** POST /api/config — set a non-secret value or provision a secret
+ * reference (upsert by key; managed rows refuse). */
+export async function setConfigEntry(body: {
+  key: string;
+  type: string;
+  value?: unknown;
+  description?: string;
+}): Promise<ConfigEntry> {
+  const data = await postJson("/api/config", body);
+  const config = (data as { config?: unknown }).config;
+  if (!isConfigEntry(config)) throw new Error("Unexpected config response shape.");
+  return config;
+}
+
+/** PUT /api/config/:id — update one row; omitted secret values preserve the
+ * reference. */
+export async function updateConfigEntry(
+  id: string,
+  body: { key?: string; type?: string; value?: unknown; description?: string },
+): Promise<ConfigEntry> {
+  if (!APP_ID.test(id)) throw new Error("Unexpected Config ID shape.");
+  const data = await putJson(`/api/config/${id}`, body);
+  const config = (data as { config?: unknown }).config;
+  if (!isConfigEntry(config)) throw new Error("Unexpected config response shape.");
+  return config;
+}
+
+async function deleteJson(path: string): Promise<unknown> {
+  const token = getToken();
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(path, { method: "DELETE", headers });
+  if (!response.ok) throw await parseApiError(response);
+  return (await response.json()) as unknown;
+}
+
+/** DELETE /api/config/:id — delete one row (managed rows refuse). */
+export async function deleteConfigEntry(id: string): Promise<void> {
+  if (!APP_ID.test(id)) throw new Error("Unexpected Config ID shape.");
+  await deleteJson(`/api/config/${id}`);
+}
+
+const LOCATION_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+function isFileLocation(value: unknown): value is FileLocation {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["name"] === "string" &&
+    typeof v["maxBytes"] === "number" &&
+    Array.isArray(v["contentTypes"]) &&
+    typeof v["sharedRead"] === "boolean"
+  );
+}
+
+function isFileMeta(value: unknown): value is FileMeta {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["location"] === "string" &&
+    typeof v["path"] === "string" &&
+    typeof v["version"] === "number" &&
+    (v["status"] === "pending" || v["status"] === "ready")
+  );
+}
+
+/** GET /api/file-locations — declared locations for this Organization (FILE-01). */
+export async function listFileLocations(): Promise<FileLocationsResponse> {
+  const data = await get("/api/file-locations");
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { locations?: unknown }).locations)) {
+    throw new Error("Unexpected file locations response shape.");
+  }
+  const locations = (data as { locations: unknown[] }).locations;
+  if (!locations.every(isFileLocation)) throw new Error("Unexpected file locations response shape.");
+  return { locations };
+}
+
+/** POST /api/file-locations — declare a write location. */
+export async function createFileLocation(
+  name: string,
+  options: { maxBytes?: number; contentTypes?: string[]; sharedRead?: boolean } = {},
+): Promise<FileLocation> {
+  if (!LOCATION_NAME.test(name)) throw new Error("Unexpected location name shape.");
+  const data = await postJson("/api/file-locations", { name, ...options });
+  const location = (data as { location?: unknown }).location;
+  if (!isFileLocation(location)) throw new Error("Unexpected file location response shape.");
+  return location;
+}
+
+/** GET /api/files — Organization-scoped structural listing for one location. */
+export async function listFiles(location: string, prefix?: string): Promise<FilesResponse> {
+  if (!LOCATION_NAME.test(location)) throw new Error("Unexpected location name shape.");
+  const params = new URLSearchParams({ location });
+  if (prefix) params.set("prefix", prefix);
+  const data = await get(`/api/files?${params.toString()}`);
+  const body = data as { files?: unknown; nextCursor?: unknown };
+  if (!Array.isArray(body.files) || !body.files.every(isFileMeta)) {
+    throw new Error("Unexpected files response shape.");
+  }
+  if (body.nextCursor !== null && typeof body.nextCursor !== "string") {
+    throw new Error("Unexpected files response shape.");
+  }
+  return { files: body.files, nextCursor: body.nextCursor ?? null };
+}
+
+/** Download one ready file through the authorized Bearer-shape route. */
+export async function downloadFile(location: string, path: string): Promise<Blob> {
+  const params = new URLSearchParams({ location, path });
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(`/api/files/content?${params.toString()}`, { headers });
+  if (!response.ok) throw await parseApiError(response);
+  return await response.blob();
+}
+
+const INTEGRATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isIntegrationSummary(value: unknown): value is IntegrationSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["name"] === "string" &&
+    typeof v["description"] === "string" &&
+    Array.isArray(v["secretFields"]) &&
+    Array.isArray(v["configSchema"]) &&
+    Array.isArray(v["requiredSecrets"])
+  );
+}
+
+function isAuditResponse(value: unknown): value is AuditResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (!Array.isArray(v["events"]) || typeof v["hasMore"] !== "boolean") return false;
+  if (!(v["events"] as unknown[]).every(isAuditEvent)) return false;
+  return !("nextCursor" in v) || typeof v["nextCursor"] === "string" || v["nextCursor"] === null;
+}
+
+/**
+ * GET /api/audit — administrative audit trail (Organization-scoped events +
+ * hasMore + nextCursor). Action-prefix/outcome/search/date filters run
+ * server-side.
+ */
+export async function fetchAuditEvents(query: AuditListQuery = {}): Promise<AuditResponse> {
+  const params = new URLSearchParams();
+  if (query.action) params.set("action", query.action);
+  if (query.outcome) params.set("outcome", query.outcome);
+  if (query.search) params.set("search", query.search);
+  if (query.startDate) params.set("startDate", query.startDate);
+  if (query.endDate) params.set("endDate", query.endDate);
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.cursor) params.set("cursor", query.cursor);
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+  const data = await get(`/api/audit${suffix}`);
+  if (!isAuditResponse(data)) throw new Error("Unexpected audit response shape.");
+  return data;
+}
+
+function isArtifactDetail(value: unknown): value is ArtifactDetail {
+  if (!isArtifactSummary(value)) return false;
+  const v = value as unknown as Record<string, unknown>;
+  return Array.isArray(v["versions"]) && Array.isArray(v["bindings"]);
+}
+
+/** GET /api/artifacts — Artifact summaries for this Organization (FILE-02). */
+export async function listArtifacts(limit?: number): Promise<ArtifactsResponse> {
+  const suffix = limit === undefined ? "" : `?limit=${encodeURIComponent(String(limit))}`;
+  const data = await get(`/api/artifacts${suffix}`);
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { artifacts?: unknown }).artifacts)) {
+    throw new Error("Unexpected artifacts response shape.");
+  }
+  const artifacts = (data as { artifacts: unknown[] }).artifacts;
+  if (!artifacts.every(isArtifactSummary)) throw new Error("Unexpected artifacts response shape.");
+  return { artifacts, hasMore: (data as { hasMore?: unknown }).hasMore === true };
+}
+
+/** GET /api/artifacts/:id — Artifact detail with versions and bindings. */
+export async function fetchArtifactDetail(id: string): Promise<ArtifactDetail> {
+  if (!APP_ID.test(id)) throw new Error("Unexpected Artifact ID shape.");
+  const data = await get(`/api/artifacts/${id}`);
+  const artifact = (data as { artifact?: unknown }).artifact;
+  if (!isArtifactDetail(artifact)) throw new Error("Unexpected artifact response shape.");
+  return artifact;
+}
+
+/** DELETE /api/artifacts/:id — soft-delete (metadata survives, bytes removed). */
+export async function deleteArtifact(id: string): Promise<void> {
+  if (!APP_ID.test(id)) throw new Error("Unexpected Artifact ID shape.");
+  const token = getToken();
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(`/api/artifacts/${id}`, { method: "DELETE", headers });
+  if (!response.ok) throw await parseApiError(response);
+}
+
+/** GET /api/artifacts/formats — generated-output format subcapabilities. */
+export async function listArtifactFormats(): Promise<ArtifactFormat[]> {
+  const data = await get("/api/artifacts/formats");
+  const formats = (data as { formats?: unknown }).formats;
+  if (!Array.isArray(formats)) throw new Error("Unexpected formats response shape.");
+  return formats as ArtifactFormat[];
+}
+
+function isConnectionSummary(value: unknown): value is ConnectionSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["integrationId"] === "string" &&
+    typeof v["integrationName"] === "string" &&
+    typeof v["orgId"] === "string" &&
+    (v["displayName"] === null || typeof v["displayName"] === "string") &&
+    typeof v["endpoint"] === "string" &&
+    typeof v["enabled"] === "boolean" &&
+    (v["managedBy"] === null || typeof v["managedBy"] === "string") &&
+    (v["ownerKind"] === "managed" || v["ownerKind"] === "loose") &&
+    Array.isArray(v["secretsRequired"])
+  );
+}
+
+function isNotification(value: unknown): value is AppNotification {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["orgId"] === "string" &&
+    typeof v["userId"] === "string" &&
+    (v["scope"] === "personal" || v["scope"] === "org") &&
+    typeof v["category"] === "string" &&
+    typeof v["title"] === "string" &&
+    (v["body"] === null || typeof v["body"] === "string") &&
+    typeof v["status"] === "string" &&
+    (v["progressPercent"] === null || typeof v["progressPercent"] === "number") &&
+    "detail" in v &&
+    typeof v["createdAt"] === "string" &&
+    typeof v["updatedAt"] === "string" &&
+    (v["dismissedAt"] === null || typeof v["dismissedAt"] === "string")
+  );
+}
+
+function isNotificationsResponse(value: unknown): value is NotificationsResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return Array.isArray(v["notifications"]) && (v["notifications"] as unknown[]).every(isNotification);
+}
+
+/** GET /api/notifications — operational inbox (own personal + same-org rows). */
+export async function listNotifications(limit?: number): Promise<NotificationsResponse> {
+  const suffix = limit === undefined ? "" : `?limit=${encodeURIComponent(String(limit))}`;
+  const data = await get(`/api/notifications${suffix}`);
+  if (!isNotificationsResponse(data)) throw new Error("Unexpected notifications response shape.");
+  return data;
+}
+
+/** GET /api/notifications/:id — one notification (owner-only for personal rows). */
+export async function fetchNotification(id: string): Promise<AppNotification> {
+  if (!APP_ID.test(id)) throw new Error("Unexpected Notification ID shape.");
+  const data = await get(`/api/notifications/${id}`);
+  const notification = (data as { notification?: unknown }).notification;
+  if (!isNotification(notification)) throw new Error("Unexpected notification response shape.");
+  return notification;
+}
+
+/** DELETE /api/notifications/:id — dismiss (owner-only for personal rows). */
+export async function dismissNotification(id: string): Promise<void> {
+  if (!APP_ID.test(id)) throw new Error("Unexpected Notification ID shape.");
+  const token = getToken();
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(`/api/notifications/${id}`, { method: "DELETE", headers });
+  if (!response.ok) throw await parseApiError(response);
+}
+
+/** GET /api/integrations — portable definitions (no org state, no secrets). */
+export async function listIntegrations(): Promise<IntegrationsResponse> {
+  const data = await get("/api/integrations");
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { integrations?: unknown }).integrations)) {
+    throw new Error("Unexpected integrations response shape.");
+  }
+  const integrations = (data as { integrations: unknown[] }).integrations;
+  if (!integrations.every(isIntegrationSummary)) throw new Error("Unexpected integrations response shape.");
+  return { integrations };
+}
+
+/** GET /api/connections — this Organization's mappings (no secret values). */
+export async function listConnections(): Promise<ConnectionsResponse> {
+  const data = await get("/api/connections");
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { connections?: unknown }).connections)) {
+    throw new Error("Unexpected connections response shape.");
+  }
+  const connections = (data as { connections: unknown[] }).connections;
+  if (!connections.every(isConnectionSummary)) throw new Error("Unexpected connections response shape.");
+  return { connections };
+}
+
+export interface ConnectionWrite {
+  integrationId: string;
+  config: Record<string, string>;
+  displayName?: string | null;
+  enabled?: boolean;
+}
+
+/** POST /api/connections — create a loose mapping (non-secret config only). */
+export async function createConnection(write: ConnectionWrite): Promise<ConnectionSummary> {
+  if (!INTEGRATION_ID.test(write.integrationId)) throw new Error("Unexpected Integration ID shape.");
+  const data = await postJson("/api/connections", {
+    integrationId: write.integrationId,
+    config: write.config,
+    ...(write.displayName === undefined ? {} : { displayName: write.displayName }),
+    ...(write.enabled === undefined ? {} : { enabled: write.enabled }),
+  });
+  const connection = (data as { connection?: unknown }).connection;
+  if (!isConnectionSummary(connection)) throw new Error("Unexpected connection response shape.");
+  return connection;
+}
+
+/** PUT /api/connections/:id — update a loose mapping (managed rows refuse). */
+export async function updateConnection(
+  integrationId: string,
+  patch: { config?: Record<string, string>; displayName?: string | null; enabled?: boolean },
+): Promise<ConnectionSummary> {
+  if (!INTEGRATION_ID.test(integrationId)) throw new Error("Unexpected Integration ID shape.");
+  const data = await putJson(`/api/connections/${integrationId}`, patch);
+  const connection = (data as { connection?: unknown }).connection;
+  if (!isConnectionSummary(connection)) throw new Error("Unexpected connection response shape.");
+  return connection;
+}
+
+/** DELETE /api/connections/:id — delete a loose mapping. */
+export async function deleteConnection(integrationId: string): Promise<void> {
+  if (!INTEGRATION_ID.test(integrationId)) throw new Error("Unexpected Integration ID shape.");
+  const token = getToken();
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(`/api/connections/${integrationId}`, { method: "DELETE", headers });
+  if (!response.ok) throw await parseApiError(response);
+}
+
+/** POST /api/connections/:id/test — read-only connectivity test. */
+export async function testConnection(integrationId: string): Promise<ConnectionTestResponse> {
+  if (!INTEGRATION_ID.test(integrationId)) throw new Error("Unexpected Integration ID shape.");
+  const data = await postJson(`/api/connections/${integrationId}/test`, {});
+  const test = (data as { test?: unknown }).test;
+  if (typeof test !== "object" || test === null || typeof (test as { ok?: unknown }).ok !== "boolean") {
+    throw new Error("Unexpected connection test response shape.");
+  }
+  return { test: test as ConnectionTestResponse["test"] };
 }

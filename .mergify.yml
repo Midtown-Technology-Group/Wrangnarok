@@ -6,12 +6,13 @@
 # No CI rewrite needed: Mergify validates against temp branches using the
 # existing push/pull_request triggers.
 #
-# Strict branch protection ("require branches to be up to date") rules out
-# batched speculative checks, so this queue is serial (batch_size 1,
-# max_parallel_checks 1) with identical queue/merge conditions. Do not raise
-# batching without also relaxing protection, or Mergify will refuse to queue.
+# Strict branch protection ("require branches to be up to date") is OFF (see
+# ADR 004): protection still requires the Validate check, but PRs no longer
+# need to be current with main. Mergify therefore tests each queued PR against
+# predicted main (main + PRs ahead of it) in parallel, so a merge never
+# invalidates the PR behind it. What merges is exactly what was tested.
 merge_queue:
-  max_parallel_checks: 1
+  max_parallel_checks: 3
 merge_protections_settings:
   # Vendor-blessed auto-queue: label-gated, evaluated on protection state.
   # Replaces the old pull_request_rules queue action, which missed 4 of 4
@@ -24,22 +25,15 @@ queue_rules:
       - check-success=Validate
     merge_conditions:
       - check-success=Validate
-    batch_size: 1
+    batch_size: 3
     merge_method: merge
     # NOTE: head-branch cleanup is NOT a queue key (validator rejects it
     # here). It lives in repo Settings → General → Automatically delete head
     # branches, flipped separately. Do not re-add it to this file.
-pull_request_rules:
-  # NOTE: `@mergifyio queue` comments are native Mergify commands, not a
-  # condition key — no rule needed for the manual trigger.
-  - name: Auto-update behind automerge PRs
-    conditions:
-      - label=automerge
-      - -conflict
-      - base=main
-      - "#changes-requested-reviews-by=0"
-    actions:
-      update:
-  # NOTE: the old "Auto-queue labeled green PRs" pull_request_rules queue
-  # action is intentionally gone (missed 4 of 4 greens on event races).
-  # auto_merge_conditions above is the vendor-blessed replacement.
+# NOTE: there is intentionally NO pull_request_rules section and NO
+# auto-update rule. Under strict=false + speculative checks, an "out of date"
+# PR still queues and merges fine — Mergify tests it against predicted main
+# on a temp branch via the merge_group trigger. Branch updates only burn a
+# full fresh CI cycle per main move, so lanes rebase ONLY on reported
+# conflict, never for currency. (`@mergifyio queue` comments are native
+# Mergify commands, not a condition key — no rule needed for that either.)
