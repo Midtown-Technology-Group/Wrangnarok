@@ -290,18 +290,36 @@ export function parseSubmission(value: unknown): { saga: SagaDef; input: unknown
   if (!saga) throw new Fault(400, "UNKNOWN_SAGA", "Provide a built-in Saga ID and its input only.");
   return { saga, input: saga.parse(value.input) };
 }
-export function parseKey(key: string | null): string {
+/** Internal key shape: 16-128 safe characters. Used by executionId and by
+ * endpoint-derived keys. Callers go through parseCallerKey instead, which
+ * additionally reserves the `wep-` endpoint namespace. */
+export function parseKeyShape(key: string | null): string {
   if (key === null || !/^[a-zA-Z0-9._:-]{16,128}$/.test(key)) {
     throw new Fault(400, "INVALID_IDEMPOTENCY_KEY", "An Idempotency-Key of 16 to 128 safe characters is required.");
   }
   return key;
+}
+export function parseKey(key: string | null): string {
+  return parseKeyShape(key);
+}
+/** Caller-supplied keys (the Idempotency-Key header on submit routes).
+ * TRG-02 (issue #138, ADR 018): keys starting with `wep-` are reserved for
+ * endpoint-derived delivery keys (endpointIdempotencyKey). A caller that
+ * squats the namespace could replay against or collide with an endpoint
+ * Execution, so caller keys fail closed here. */
+export function parseCallerKey(key: string | null): string {
+  const parsed = parseKeyShape(key);
+  if (parsed.startsWith("wep-")) {
+    throw new Fault(400, "INVALID_IDEMPOTENCY_KEY", "Keys starting with wep- are reserved for endpoint deliveries.");
+  }
+  return parsed;
 }
 export async function hash(value: string): Promise<string> {
   const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 export function executionId(principal: Principal, key: string): Promise<string> {
-  return hash(JSON.stringify(["wrangnarok.execution.v1", principal.orgId, principal.userId, parseKey(key)]));
+  return hash(JSON.stringify(["wrangnarok.execution.v1", principal.orgId, principal.userId, parseKeyShape(key)]));
 }
 
 /** Shared byte bound, also used before parsing an external Integration response.

@@ -105,14 +105,60 @@ export async function submit(env: Bindings, caller: Principal, key: string, saga
 /** Connection resolution outcome (ADR 010 section 3, Phase 1b; entity split
  * per ADR 003). Lookup is always exactly one row for this Organization —
  * never a global cascade, never cross-org. A hit returns the typed
- * Connection (IDs plus non-secret config); declared-but-missing fails loud
- * with 424 so a miswired install can never silently skip work; undeclared
- * (optional) access resolves to None and the Saga decides its own
- * fallback/skip. */
+ * Connection (IDs plus non-secret config); declared-but-missing — including
+ * a disabled mapping — fails loud with 424 so a miswired install can never
+ * silently skip work; undeclared (optional) access resolves to None and the
+ * Saga decides its own fallback/skip. */
 export type ConnectionResolution =
   | { readonly found: true; readonly connection: Connection }
   | { readonly found: false; readonly declared: true; readonly error: SafeError }
   | { readonly found: false; readonly declared: false };
+
+interface ResolutionRow {
+  readonly id: string;
+  readonly org_id: string;
+  readonly integration_id: string;
+  readonly endpoint: string;
+  readonly display_name: string | null;
+  readonly enabled: number | null;
+  readonly managed_by: string | null;
+}
+
+/** Read the Execution-path Connection row, tolerating older databases:
+ * full CON-01 columns first, then the 0004 managed_by schema, then the
+ * original 0001 narrow schema (suites that apply only 0001-0002 exercise
+ * each rung). Missing columns read as defaults — disabled never inferred,
+ * loose never inferred managed — the same posture as the migration
+ * backfill. */
+async function resolutionRow(db: D1Database, orgId: string, integrationId: string): Promise<ResolutionRow | null> {
+  try {
+    return await db
+      .prepare(
+        "SELECT id,org_id,integration_id,endpoint,display_name,enabled,managed_by FROM connections WHERE org_id=? AND integration_id=?",
+      )
+      .bind(orgId, integrationId)
+      .first<ResolutionRow>();
+  } catch {
+    // Fall through to the older schema rungs below.
+  }
+  try {
+    const row = await db
+      .prepare(
+        "SELECT id,org_id,integration_id,endpoint,managed_by FROM connections WHERE org_id=? AND integration_id=?",
+      )
+      .bind(orgId, integrationId)
+      .first<{ id: string; org_id: string; integration_id: string; endpoint: string; managed_by: string | null }>();
+    if (!row) return null;
+    return { ...row, display_name: null, enabled: 1 };
+  } catch {
+    const row = await db
+      .prepare("SELECT id,org_id,integration_id,endpoint FROM connections WHERE org_id=? AND integration_id=?")
+      .bind(orgId, integrationId)
+      .first<{ id: string; org_id: string; integration_id: string; endpoint: string }>();
+    if (!row) return null;
+    return { ...row, display_name: null, enabled: 1, managed_by: null };
+  }
+}
 
 export async function resolveConnection(
   db: D1Database,
@@ -120,16 +166,19 @@ export async function resolveConnection(
   integrationId: string,
   required: readonly string[],
 ): Promise<ConnectionResolution> {
-  const row = await db
-    .prepare("SELECT id,org_id,integration_id,endpoint FROM connections WHERE org_id=? AND integration_id=?")
-    .bind(org.orgId, integrationId)
-    .first<{ id: string; org_id: string; integration_id: string; endpoint: string }>();
-  if (row) {
+  const row = await resolutionRow(db, org.orgId, integrationId);
+  // A disabled mapping is unusable, not a silent skip: declared work fails
+  // loud (424), optional access resolves to None. Pre-0007 rows read NULL
+  // enabled and behave as enabled (migration backfill).
+  if (row && (row.enabled ?? 1) === 1) {
     const connection: Connection = {
       id: row.id,
       integrationId: row.integration_id,
       orgId: row.org_id,
       endpoint: row.endpoint,
+      displayName: row.display_name,
+      enabled: true,
+      managedBy: row.managed_by,
     };
     return { found: true, connection };
   }

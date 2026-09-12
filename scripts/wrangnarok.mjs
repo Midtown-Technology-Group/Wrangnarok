@@ -12,7 +12,7 @@
 // Organization always comes from the auth context plus X-Organization-Id
 // scope selection (ADR 015); passing --org fails loudly (legacy guard).
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const TERMINAL = ["Succeeded", "Failed", "TimedOut", "Cancelled"];
 const EXECUTION_ID = /^[a-f0-9]{64}$/;
@@ -125,6 +125,15 @@ async function resolveSagaId(ctx, ref) {
   return matches[0].id;
 }
 
+const NOTIFICATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function checkNotificationId(id) {
+  if (!NOTIFICATION_ID.test(id ?? "")) {
+    fail("USAGE", "notification and dismiss-notification need the exact notification UUID.");
+  }
+  return id;
+}
+
 function checkExecutionId(id) {
   if (!EXECUTION_ID.test(id ?? "")) {
     fail("USAGE", "cancel and detail need the exact 64-hex Execution ID (no prefixes, no search).");
@@ -139,6 +148,29 @@ function checkOrgId(id) {
     fail("USAGE", "org commands need the exact Organization UUID (no prefixes, no search).");
   }
   return id;
+}
+
+function checkConfigId(id) {
+  if (!STABLE_UUID.test(id ?? "")) {
+    fail("USAGE", "config-update and config-delete need the exact config UUID (no prefixes, no search).");
+  }
+  return id;
+}
+
+/** Config --value parsing: secret types take { ref } JSON (or @FILE);
+ * non-secret types take raw text (or @FILE text). Never logs or stores. */
+function readConfigValue(ctx) {
+  const raw = ctx.configValue;
+  if (typeof raw !== "string") fail("USAGE", "config --value must be text (or @path to a file).");
+  const text = raw.startsWith("@") ? readFileSync(raw.slice(1), "utf-8") : raw;
+  if (ctx.configType === "secret") {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return fail("USAGE", 'secret configs need --value \'{"ref":"<declared name>"}\' (or @path to that JSON).');
+    }
+  }
+  return text;
 }
 
 function readInput() {
@@ -234,6 +266,37 @@ function printHistory(executions, hasMore, { pages }) {
   else console.log(`# ${executions.length} loaded (complete under these filters).`);
 }
 
+function printAudit(events, hasMore, { pages }) {
+  if (emit({ events, hasMore })) return;
+  for (const row of events) {
+    console.log(
+      `${String(row.id).slice(0, 12)}\t${row.action}\t${row.outcome}\t${row.targetId ?? "-"}\t${row.createdAt ?? "-"}`,
+    );
+  }
+  // Loaded-slice counts are never presented as totals: hasMore means the
+  // server holds rows this output does not show.
+  if (hasMore) console.log(`# ${events.length} loaded across ${pages} page(s); more available server-side.`);
+  else console.log(`# ${events.length} loaded (complete under these filters).`);
+}
+
+function printNotifications(notifications) {
+  if (emit({ notifications })) return;
+  for (const row of notifications) {
+    console.log(`${String(row.id).slice(0, 12)}\t${row.scope}\t${row.status}\t${row.title}`);
+  }
+  if (notifications.length === 0) console.log("# no notifications.");
+}
+
+function printNotification(notification) {
+  if (emit({ notification })) return;
+  console.log(`${notification.id} ${notification.status}`);
+  console.log(`${notification.scope} · ${notification.category}: ${notification.title}`);
+  if (notification.body) console.log(notification.body);
+  const detail = notification.detail;
+  if (detail !== null && detail !== undefined) console.log(`detail: ${JSON.stringify(detail)}`);
+  console.log(`created: ${notification.createdAt ?? "-"} updated: ${notification.updatedAt ?? "-"}`);
+}
+
 function printDetail(detail) {
   if (emit(detail)) return;
   console.log(`${detail.executionId} ${detail.status}`);
@@ -263,6 +326,56 @@ function printCancel(outcome) {
   if (outcome.cancelled)
     console.log(`${outcome.executionId} Cancelled (confirmed; it will not run again under this key)`);
   else console.log(`${outcome.executionId} ${outcome.status} (already in progress; another request won the race)`);
+}
+
+function printArtifacts(artifacts, hasMore) {
+  if (emit({ artifacts, hasMore })) return;
+  for (const entry of artifacts ?? []) {
+    console.log(`${String(entry.id).slice(0, 8)}\t${entry.name}\tv${entry.version}\t${entry.status}`);
+  }
+  if (hasMore) console.log(`# ${artifacts?.length ?? 0} loaded; more available server-side.`);
+  else console.log(`# ${artifacts?.length ?? 0} loaded (complete under these filters).`);
+}
+
+function printArtifact(artifact) {
+  if (emit({ artifact })) return;
+  console.log(`${artifact.id} ${artifact.name} v${artifact.version} ${artifact.status}`);
+  for (const entry of artifact.versions ?? [])
+    console.log(`  v${entry.version} ${entry.mime} ${entry.sizeBytes} bytes`);
+  for (const entry of artifact.bindings ?? []) console.log(`  bound ${entry.scope}:${entry.refId}`);
+}
+
+function printDownload(result) {
+  if (emit(result)) return;
+  console.log(result.out ? `downloaded ${result.bytes} bytes to ${result.out}` : `downloaded ${result.bytes} bytes`);
+}
+
+function printBinding(binding) {
+  if (emit({ binding })) return;
+  console.log(`bound ${binding.artifactId} ${binding.scope}:${binding.refId}`);
+}
+
+function printUnbound() {
+  if (emit({ deleted: true })) return;
+  console.log("unbound");
+}
+
+function printBindings(bindings) {
+  if (emit({ bindings })) return;
+  for (const entry of bindings ?? []) console.log(`${entry.artifactId} ${entry.scope}:${entry.refId}`);
+  if ((bindings ?? []).length === 0) console.log("(no bindings)");
+}
+
+function printRetention(retention) {
+  if (emit({ retention })) return;
+  console.log(`retention: ${retention.maxAgeDays} days`);
+}
+
+function printCleanup(cleanup) {
+  if (emit({ cleanup })) return;
+  for (const id of cleanup.deleted ?? []) console.log(`deleted ${id}`);
+  for (const entry of cleanup.failed ?? []) console.log(`failed ${entry.id} ${entry.code}`);
+  console.log(`remaining: ${cleanup.remaining ?? 0}`);
 }
 
 const HELP = `wrangnarok: thin CLI over the Worker HTTP API (no Saga logic here).
@@ -295,6 +408,25 @@ Commands:
                                           Query Execution summaries (server filters,
                                           cursor traversal; loaded counts are not totals)
   cancel --id HEX                         Cancel one Execution (exact ID only)
+  audit [--action PREFIX] [--outcome success|failure] [--search TEXT]
+        [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--limit N] [--all]
+                                          Query audit events (server filters,
+                                          cursor traversal; loaded counts are not totals)
+  notifications [--limit N]               List the notifications inbox
+  notification --id UUID                  Fetch one notification
+  dismiss-notification --id UUID          Dismiss one notification (exact ID only)
+  artifacts [--limit N]                   List Artifact summaries (no bytes)
+  artifact --id UUID                      Fetch one Artifact (versions + bindings)
+  upload --name NAME [--mime TYPE] [--file PATH]
+                                          Upload bytes (same name versions the row)
+  download --id UUID [--out PATH]         Fetch current-version bytes
+  rename --id UUID --name NAME            Rename the canonical record
+  bind --id UUID --scope S --ref REF      Bind to an execution/workspace/conversation
+  unbind --id UUID --scope S --ref REF    Remove one attachment binding
+  bindings --scope S --ref REF            List attachment triples (no bytes)
+  retention [--days N]                    Read (or, with --days, set*) the policy
+  cleanup [--run]                         Preview (or, with --run, execute*) cleanup
+                                          * admin only (instance/org admin membership)
   orgs                                    List visible Organizations
   org-create --name NAME                  Create an Organization (instance admin)
   org-disable/--enable --id UUID          Disable/enable an Organization (instance admin)
@@ -308,6 +440,14 @@ Commands:
   user-disable/--enable --user ID         Disable/enable a user globally (instance admin)
   org-executions --id UUID [--status S] [--limit N]
                                           Org-scoped ExecutionHistory (org admin, incl. in-flight)
+  configs                                 List typed config rows (secrets masked)
+  config-set --key NAME --type T [--value V|@FILE] [--description TEXT]
+                                          Set a non-secret value or provision a
+                                          secret reference (upsert by key)
+  config-update --id UUID [--key NAME] [--type T] [--value V|@FILE]
+                [--description TEXT]      Update one config row (omitted secret
+                                          values preserve the reference)
+  config-delete --id UUID                 Delete one config row (exact ID only)
   contract                                Show the versioned SDK contract (GET /api/sdk)
   selftest                                Offline selftest (stub fetch, no network)
 
@@ -568,6 +708,178 @@ export async function runCommand(ctx, deps = {}) {
         "execution cancel",
       );
     }
+    case "audit": {
+      // Cursor traversal: --all follows nextCursor while preserving the
+      // active filters; otherwise one page. Loaded counts are not totals.
+      if (ctx.auditOutcome !== undefined && !["success", "failure"].includes(ctx.auditOutcome)) {
+        fail("USAGE", "--outcome must be success|failure.");
+      }
+      const collected = [];
+      let cursor;
+      let pages = 0;
+      let hasMore;
+      for (;;) {
+        const params = new URLSearchParams();
+        if (ctx.auditAction) params.set("action", ctx.auditAction);
+        if (ctx.auditOutcome) params.set("outcome", ctx.auditOutcome);
+        if (ctx.auditSearch) params.set("search", ctx.auditSearch);
+        if (ctx.from) params.set("startDate", ctx.from);
+        if (ctx.to) params.set("endDate", ctx.to);
+        if (ctx.limit) params.set("limit", String(ctx.limit));
+        if (cursor) params.set("cursor", cursor);
+        const suffix = params.size > 0 ? `?${params.toString()}` : "";
+        const data = await readJson(
+          await fetchImpl(`${ctx.base}/api/audit${suffix}`, { headers: full.headers }),
+          "audit trail",
+        );
+        if (!Array.isArray(data.events)) fail("SERVER_MISMATCH", "audit trail has no events array.");
+        collected.push(...data.events);
+        pages += 1;
+        hasMore = data.hasMore === true;
+        cursor = typeof data.nextCursor === "string" ? data.nextCursor : undefined;
+        if (!ctx.all || !hasMore || !cursor) break;
+      }
+      return { events: collected, hasMore, pages };
+    }
+    case "notifications": {
+      const params = new URLSearchParams();
+      if (ctx.limit) params.set("limit", String(ctx.limit));
+      const suffix = params.size > 0 ? `?${params.toString()}` : "";
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/notifications${suffix}`, { headers: full.headers }),
+        "notifications",
+      );
+    }
+    case "notification": {
+      checkNotificationId(ctx.id);
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/notifications/${ctx.id}`, { headers: full.headers }),
+        "notification",
+      );
+    }
+    case "dismiss-notification": {
+      checkNotificationId(ctx.id);
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/notifications/${ctx.id}`, { method: "DELETE", headers: full.headers }),
+        "notification dismissal",
+      );
+    }
+    case "artifacts": {
+      const params = new URLSearchParams();
+      if (ctx.limit !== undefined) params.set("limit", String(ctx.limit));
+      const suffix = params.size > 0 ? `?${params.toString()}` : "";
+      return readJson(await fetchImpl(`${ctx.base}/api/artifacts${suffix}`, { headers: full.headers }), "artifacts");
+    }
+    case "artifact": {
+      if (!ctx.artifactId || !STABLE_UUID.test(ctx.artifactId)) fail("USAGE", "artifact needs --id UUID.");
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/artifacts/${ctx.artifactId}`, { headers: full.headers }),
+        "artifact",
+      );
+    }
+    case "upload": {
+      // Bytes ride the raw body; name/mime ride the allowlisted query keys.
+      if (!ctx.artifactName) fail("USAGE", "upload needs --name NAME.");
+      const params = new URLSearchParams({
+        name: ctx.artifactName,
+        mime: ctx.artifactMime ?? "application/octet-stream",
+      });
+      const bytes = ctx.artifactFile ? readFileSync(ctx.artifactFile) : Buffer.from(ctx.artifactText ?? "", "utf-8");
+      if (bytes.length === 0) fail("USAGE", "upload needs non-empty bytes (--file PATH or --text TEXT).");
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/artifacts?${params.toString()}`, {
+          method: "PUT",
+          headers: { ...full.headers, "Content-Type": "application/octet-stream" },
+          body: bytes,
+        }),
+        "artifact upload",
+      );
+    }
+    case "download": {
+      if (!ctx.artifactId || !STABLE_UUID.test(ctx.artifactId)) fail("USAGE", "download needs --id UUID.");
+      const response = await fetchImpl(`${ctx.base}/api/artifacts/${ctx.artifactId}/download`, {
+        headers: full.headers,
+      });
+      if (!response.ok) {
+        const code = (await response.json().catch(() => ({})))?.error?.code ?? "UNKNOWN";
+        fail("SERVER_REJECTED", `artifact download failed: HTTP ${response.status} ${code}.`);
+      }
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (ctx.artifactOut) writeFileSync(ctx.artifactOut, buffer);
+      return { bytes: buffer.length, out: ctx.artifactOut ?? null };
+    }
+    case "rename": {
+      if (!ctx.artifactId || !STABLE_UUID.test(ctx.artifactId)) fail("USAGE", "rename needs --id UUID.");
+      if (!ctx.artifactName) fail("USAGE", "rename needs --name NAME.");
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/artifacts/${ctx.artifactId}/rename`, {
+          method: "POST",
+          headers: full.headers,
+          body: JSON.stringify({ name: ctx.artifactName }),
+        }),
+        "artifact rename",
+      );
+    }
+    case "bind":
+    case "unbind": {
+      if (!ctx.artifactId || !STABLE_UUID.test(ctx.artifactId)) fail("USAGE", `${ctx.command} needs --id UUID.`);
+      if (!ctx.bindingScope || !ctx.bindingRef) fail("USAGE", `${ctx.command} needs --scope S and --ref REF.`);
+      const body = JSON.stringify({ scope: ctx.bindingScope, refId: ctx.bindingRef });
+      if (ctx.command === "bind") {
+        return readJson(
+          await fetchImpl(`${ctx.base}/api/artifacts/${ctx.artifactId}/bindings`, {
+            method: "POST",
+            headers: full.headers,
+            body,
+          }),
+          "artifact bind",
+        );
+      }
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/artifacts/${ctx.artifactId}/bindings`, {
+          method: "DELETE",
+          headers: full.headers,
+          body,
+        }),
+        "artifact unbind",
+      );
+    }
+    case "bindings": {
+      if (!ctx.bindingScope || !ctx.bindingRef) fail("USAGE", "bindings needs --scope S and --ref REF.");
+      const params = new URLSearchParams({ scope: ctx.bindingScope, refId: ctx.bindingRef });
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/artifacts/bindings?${params.toString()}`, { headers: full.headers }),
+        "artifact bindings",
+      );
+    }
+    case "retention": {
+      if (ctx.retentionDays === undefined) {
+        return readJson(await fetchImpl(`${ctx.base}/api/artifacts/retention`, { headers: full.headers }), "retention");
+      }
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/artifacts/retention`, {
+          method: "PUT",
+          headers: { ...full.headers },
+          body: JSON.stringify({ maxAgeDays: ctx.retentionDays }),
+        }),
+        "retention set",
+      );
+    }
+    case "cleanup": {
+      if (!ctx.cleanupRun) {
+        return readJson(
+          await fetchImpl(`${ctx.base}/api/artifacts/cleanup/preview`, { headers: full.headers }),
+          "cleanup preview",
+        );
+      }
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/artifacts/cleanup/run`, {
+          method: "POST",
+          headers: { ...full.headers },
+        }),
+        "cleanup run",
+      );
+    }
     case "orgs": {
       return readJson(await fetchImpl(`${ctx.base}/api/orgs`, { headers: full.headers }), "org list");
     }
@@ -661,6 +973,52 @@ export async function runCommand(ctx, deps = {}) {
         "org executions",
       );
     }
+    case "configs": {
+      const data = await readJson(await fetchImpl(`${ctx.base}/api/config`, { headers: full.headers }), "config list");
+      if (!Array.isArray(data.configs)) fail("SERVER_MISMATCH", "config list has no configs array.");
+      return data;
+    }
+    case "config-set": {
+      if (!ctx.configKey) fail("USAGE", "config-set needs --key NAME.");
+      if (!ctx.configType) fail("USAGE", "config-set needs --type string|int|bool|json|secret.");
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/config`, {
+          method: "POST",
+          headers: full.headers,
+          body: JSON.stringify({
+            key: ctx.configKey,
+            type: ctx.configType,
+            ...(ctx.configValue === undefined ? {} : { value: readConfigValue(ctx) }),
+            ...(ctx.configDescription === undefined ? {} : { description: ctx.configDescription }),
+          }),
+        }),
+        "config set",
+      );
+    }
+    case "config-update": {
+      const id = checkConfigId(ctx.id);
+      const update = {};
+      if (ctx.configKey !== undefined) update.key = ctx.configKey;
+      if (ctx.configType !== undefined) update.type = ctx.configType;
+      if (ctx.configValue !== undefined) update.value = readConfigValue(ctx);
+      if (ctx.configDescription !== undefined) update.description = ctx.configDescription;
+      if (Object.keys(update).length === 0) fail("USAGE", "config-update needs --key/--type/--value/--description.");
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/config/${id}`, {
+          method: "PUT",
+          headers: full.headers,
+          body: JSON.stringify(update),
+        }),
+        "config update",
+      );
+    }
+    case "config-delete": {
+      const id = checkConfigId(ctx.id);
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/config/${id}`, { method: "DELETE", headers: full.headers }),
+        "config delete",
+      );
+    }
     default:
       fail("USAGE", `unknown command ${JSON.stringify(ctx.command ?? "")}. See --help.`);
       return undefined;
@@ -682,8 +1040,9 @@ async function main() {
   const parsed = parseContext();
   if (!/^https?:\/\//.test(parsed.base)) fail("USAGE", "--base must be an http(s) URL.");
   const limit = arg("limit");
-  if (limit !== undefined && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 50)) {
-    fail("USAGE", "--limit must be an integer from 1 to 50.");
+  const limitMax = parsed.command === "notifications" ? 100 : 50;
+  if (limit !== undefined && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > limitMax)) {
+    fail("USAGE", `--limit must be an integer from 1 to ${limitMax}.`);
   }
   const command = parsed.command;
   const orgCommands = new Set([
@@ -713,17 +1072,42 @@ async function main() {
     scaffoldRevision: command === "scaffold" ? arg("revision") : undefined,
     sagaFilter: command === "history" || command === "org-executions" ? arg("saga") : undefined,
     id:
-      command === "detail" || command === "cancel" || command === "diagnose" || orgCommands.has(command)
+      command === "detail" ||
+      command === "cancel" ||
+      command === "diagnose" ||
+      command === "notification" ||
+      command === "dismiss-notification" ||
+      orgCommands.has(command)
         ? arg("id")
         : undefined,
     key: command === "submit" ? arg("key") : undefined,
     input: command === "submit" || command === "preview" ? readInput() : undefined,
     statusFilter: command === "history" || command === "org-executions" ? arg("status") : undefined,
+    auditAction: command === "audit" ? arg("action") : undefined,
+    auditOutcome: command === "audit" ? arg("outcome") : undefined,
+    auditSearch: command === "audit" ? arg("search") : undefined,
     limit: limit === undefined ? undefined : Number(limit),
-    from: command === "history" ? arg("from") : undefined,
-    to: command === "history" ? arg("to") : undefined,
-    all: command === "history" ? flag("all") : false,
+    from: command === "history" || command === "audit" ? arg("from") : undefined,
+    to: command === "history" || command === "audit" ? arg("to") : undefined,
+    all: command === "history" || command === "audit" ? flag("all") : false,
     wait: command === "submit" ? !flag("no-wait") : flag("wait"),
+    artifactId:
+      command === "artifact" ||
+      command === "download" ||
+      command === "rename" ||
+      command === "bind" ||
+      command === "unbind"
+        ? arg("id")
+        : undefined,
+    artifactName: command === "upload" || command === "rename" ? arg("name") : undefined,
+    artifactMime: command === "upload" ? arg("mime") : undefined,
+    artifactFile: command === "upload" ? arg("file") : undefined,
+    artifactText: command === "upload" ? arg("text") : undefined,
+    artifactOut: command === "download" ? arg("out") : undefined,
+    bindingScope: command === "bind" || command === "unbind" || command === "bindings" ? arg("scope") : undefined,
+    bindingRef: command === "bind" || command === "unbind" || command === "bindings" ? arg("ref") : undefined,
+    retentionDays: command === "retention" && arg("days") !== undefined ? Number(arg("days")) : undefined,
+    cleanupRun: command === "cleanup" ? flag("run") : false,
     name: command === "org-create" ? arg("name") : undefined,
     user: command === "invite" || command === "member-update" || userCommands.has(command) ? arg("user") : undefined,
     role: command === "invite" || command === "member-update" ? arg("role") : undefined,
@@ -744,7 +1128,13 @@ async function main() {
       for (const step of result.scaffold.next) console.log(`next: ${step}`);
     }
   } else if (command === "history") printHistory(result.executions, result.hasMore, { pages: result.pages ?? 1 });
-  else if (command === "org-executions" && Array.isArray(result.executions))
+  else if (command === "audit") printAudit(result.events, result.hasMore, { pages: result.pages ?? 1 });
+  else if (command === "notifications") printNotifications(result.notifications ?? []);
+  else if (command === "notification") printNotification(result.notification);
+  else if (command === "dismiss-notification") {
+    if (parsed.json) console.log(JSON.stringify(result));
+    else console.log("dismissed");
+  } else if (command === "org-executions" && Array.isArray(result.executions))
     printHistory(result.executions, result.hasMore);
   else if (command === "orgs" && Array.isArray(result.orgs)) {
     if (asJson()) console.log(JSON.stringify(result));
@@ -754,8 +1144,35 @@ async function main() {
     if (asJson()) console.log(JSON.stringify(result));
     else for (const m of result.members) console.log(`${m.userId}\t${m.role}\t${m.status}\t${m.kind}`);
     return;
+  } else if (command === "configs" && Array.isArray(result.configs)) {
+    if (asJson()) console.log(JSON.stringify(result));
+    else
+      for (const c of result.configs)
+        console.log(`${c.key}\t${c.type}\t${JSON.stringify(c.value)}\t${c.managedBy ?? "loose"}`);
+    return;
+  } else if ((command === "config-set" || command === "config-update") && result.config) {
+    if (asJson()) console.log(JSON.stringify(result));
+    else {
+      const c = result.config;
+      console.log(`${c.key}\t${c.type}\t${JSON.stringify(c.value)}`);
+    }
+    return;
+  } else if (command === "config-delete") {
+    if (asJson()) console.log(JSON.stringify(result));
+    else console.log("deleted");
+    return;
   } else if (command === "detail") printDetail(result);
   else if (command === "cancel") printCancel(result);
+  else if (command === "artifacts") printArtifacts(result.artifacts, result.hasMore);
+  else if (command === "artifact") printArtifact(result.artifact);
+  else if (command === "upload") printArtifact(result.artifact);
+  else if (command === "download") printDownload(result);
+  else if (command === "rename") printArtifact(result.artifact);
+  else if (command === "bind") printBinding(result.binding);
+  else if (command === "unbind") printUnbound();
+  else if (command === "bindings") printBindings(result.bindings);
+  else if (command === "retention") printRetention(result.retention);
+  else if (command === "cleanup") printCleanup(result.cleanup);
   else if (parsed.json) console.log(JSON.stringify(result));
   else if (typeof result.status === "string") console.log(`${result.executionId} ${result.status}`);
   else console.log(`${result.executionId} accepted (replayed: ${result.replayed === true})`);
@@ -1026,6 +1443,46 @@ async function selftest() {
     check("contract url", stub.calls[0].url === "http://local.test/api/sdk");
   }
 
+  // artifacts list forwards the limit filter only.
+  {
+    const stub = stubFetch([jsonResponse({ artifacts: [], hasMore: false })]);
+    const result = await runCommand({ ...base, command: "artifacts", limit: 5 }, { fetchImpl: stub.fetch, ...noSleep });
+    check("artifacts query", stub.calls[0].url === "http://local.test/api/artifacts?limit=5");
+    check("artifacts empty", result.artifacts.length === 0 && result.hasMore === false);
+  }
+
+  // upload sends octet-stream bytes with name/mime query keys.
+  {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const stub = stubFetch([jsonResponse({ artifact: { id, name: "n.md", version: 1, status: "active" } }, 201)]);
+    const result = await runCommand(
+      { ...base, command: "upload", artifactName: "n.md", artifactMime: "text/markdown", artifactText: "hi" },
+      { fetchImpl: stub.fetch, ...noSleep },
+    );
+    check("upload url", stub.calls[0].url === "http://local.test/api/artifacts?name=n.md&mime=text%2Fmarkdown");
+    check("upload bytes", stub.calls[0].init.headers["Content-Type"] === "application/octet-stream");
+    check("upload result", result.artifact.id === id);
+  }
+
+  // retention reads by default and sets with --days; cleanup previews and runs.
+  {
+    const stub = stubFetch([jsonResponse({ retention: { maxAgeDays: 90 } })]);
+    const result = await runCommand({ ...base, command: "retention" }, { fetchImpl: stub.fetch, ...noSleep });
+    check("retention read", result.retention.maxAgeDays === 90);
+    const setStub = stubFetch([jsonResponse({ retention: { maxAgeDays: 7 } })]);
+    await runCommand({ ...base, command: "retention", retentionDays: 7 }, { fetchImpl: setStub.fetch, ...noSleep });
+    check("retention set url", setStub.calls[0].url === "http://local.test/api/artifacts/retention");
+    const previewStub = stubFetch([jsonResponse({ cleanup: { deleted: [], failed: [], remaining: 0 } })]);
+    await runCommand({ ...base, command: "cleanup" }, { fetchImpl: previewStub.fetch, ...noSleep });
+    check("cleanup preview url", previewStub.calls[0].url === "http://local.test/api/artifacts/cleanup/preview");
+    const runStub = stubFetch([jsonResponse({ cleanup: { deleted: [], failed: [], remaining: 0 } })]);
+    await runCommand(
+      { ...base, command: "cleanup", cleanupRun: true, admin: true },
+      { fetchImpl: runStub.fetch, ...noSleep },
+    );
+    check("cleanup run url", runStub.calls[0].url === "http://local.test/api/artifacts/cleanup/run");
+  }
+
   // preview resolves the Saga name, posts the parsed input, and returns the
   // read-only receipt untouched. --check-env opts into the read-only check.
   {
@@ -1082,6 +1539,90 @@ async function selftest() {
       console.error = err;
     }
     check("mismatch loud", /exit:1/.test(String(error)) && errlines.some((line) => line.includes("SERVER_MISMATCH")));
+  }
+
+  // audit forwards allowlisted filters and follows cursors with --all.
+  {
+    const stub = stubFetch([
+      jsonResponse({ events: [{ id: "e1" }], hasMore: true, nextCursor: "cursor-2" }),
+      jsonResponse({ events: [{ id: "e2" }], hasMore: false, nextCursor: null }),
+    ]);
+    const result = await runCommand(
+      {
+        ...base,
+        command: "audit",
+        auditAction: "app.",
+        auditOutcome: "success",
+        auditSearch: "storefront",
+        from: "2026-09-01",
+        to: "2026-09-10",
+        limit: 1,
+        all: true,
+      },
+      { fetchImpl: stub.fetch, ...noSleep },
+    );
+    check("audit traversal", result.events.length === 2 && result.pages === 2 && result.hasMore === false);
+    check(
+      "audit cursor keeps filters",
+      stub.calls[0].url.includes("action=app.") &&
+        stub.calls[1].url.includes("outcome=success") &&
+        stub.calls[1].url.includes("search=storefront") &&
+        stub.calls[1].url.includes("cursor=cursor-2"),
+    );
+  }
+
+  // audit rejects bad outcomes before any fetch.
+  {
+    const stub = stubFetch([]);
+    let error = null;
+    const exit = process.exit;
+    process.exit = (code) => {
+      throw new Error(`exit:${code}`);
+    };
+    try {
+      await runCommand({ ...base, command: "audit", auditOutcome: "Bogus" }, { fetchImpl: stub.fetch, ...noSleep });
+    } catch (e) {
+      error = e;
+    } finally {
+      process.exit = exit;
+    }
+    check("audit outcome gate", /exit:2/.test(String(error)) && stub.calls.length === 0);
+  }
+
+  // notifications list passes the limit through; fetch and dismiss use exact UUIDs.
+  {
+    const stub = stubFetch([jsonResponse({ notifications: [] })]);
+    await runCommand({ ...base, command: "notifications", limit: 5 }, { fetchImpl: stub.fetch, ...noSleep });
+    check("notifications query", stub.calls[0].url === "http://local.test/api/notifications?limit=5");
+    const one = stubFetch([jsonResponse({ notification: { id: "11111111-1111-4111-8111-111111111111" } })]);
+    await runCommand(
+      { ...base, command: "notification", id: "11111111-1111-4111-8111-111111111111" },
+      { fetchImpl: one.fetch, ...noSleep },
+    );
+    check(
+      "notification exact url",
+      one.calls[0].url === "http://local.test/api/notifications/11111111-1111-4111-8111-111111111111",
+    );
+    const gone = stubFetch([jsonResponse({ dismissed: true })]);
+    await runCommand(
+      { ...base, command: "dismiss-notification", id: "11111111-1111-4111-8111-111111111111" },
+      { fetchImpl: gone.fetch, ...noSleep },
+    );
+    check("dismiss exact url", gone.calls[0].init.method === "DELETE");
+    const bad = stubFetch([]);
+    let error = null;
+    const exit = process.exit;
+    process.exit = (code) => {
+      throw new Error(`exit:${code}`);
+    };
+    try {
+      await runCommand({ ...base, command: "dismiss-notification", id: "abc" }, { fetchImpl: bad.fetch, ...noSleep });
+    } catch (e) {
+      error = e;
+    } finally {
+      process.exit = exit;
+    }
+    check("dismiss exact id", /exit:2/.test(String(error)) && bad.calls.length === 0);
   }
 
   console.log(`wrangnarok cli selftest: ${passed} passed.`);

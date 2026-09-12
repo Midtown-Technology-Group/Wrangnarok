@@ -1,0 +1,31 @@
+# CON-02 lane scope (issue #147): scoped configuration and secret references.
+# Typed key/value config plus secret-reference provisioning, operator routes,
+# Saga ctx.config handle, SDK/CLI/UI surfaces, migration 0023.
+src/config.ts
+src/index.ts
+src/saga.ts
+src/sagas/shared.ts
+src/sdk.ts
+scripts/wrangnarok.mjs
+scripts/check-bundle-budget.mjs
+migrations/0023_config.sql
+test/config.test.ts
+test/config-unit.test.ts
+test/config-redaction.test.ts
+test/config-runtime.test.ts
+test/config-sdk-ui.test.tsx
+test/saga-contract.test.ts
+test/sdk.test.ts
+client/src/pages/Configs.tsx
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+client/src/App.tsx
+client/src/components/Nav.tsx
+docs/architecture/020-scoped-config.md
+docs/upstream-parity.md
+docs/upstream-spec.md
+docs/sdk.md
+docs/sdk-agents.md
+docs/sdk-capability-map.md
+docs/migration-ledger.md
+scopes/con-02.scope

@@ -1,0 +1,29 @@
+# TRG-01 lane scope (issue #137): one-off and recurring schedules with
+# durable due-time and cancellation semantics. Schedule files only: the
+# schedules module, schedule wiring in the Worker entry, schedule migrations,
+# schedule tests, schedule docs, and the shared contracts the slice extends
+# (Scheduled status, schedule error codes, Scheduled UI/history surfaces).
+scopes/trg-01.scope
+src/schedules.ts
+src/index.ts
+src/domain.ts
+src/orgs.ts
+src/sdk.ts
+migrations/0009_schedules.sql
+migrations/0010_scheduled_executions.sql
+test/schedules.test.ts
+test/schedule-lifecycle.test.ts
+test/schedule-tick.test.ts
+test/domain.test.ts
+test/sdk.test.ts
+test/timeout-sweeper.test.ts
+client/src/lib/client-types.ts
+client/src/lib/history-view.ts
+client/src/components/StatusBadge.tsx
+client/src/pages/ExecutionHistory.tsx
+docs/architecture/012-phase2-triggers.md
+docs/upstream-parity.md
+docs/sdk.md
+wrangler.jsonc
+scripts/check-bundle-budget.mjs
+package.json

@@ -1,0 +1,8 @@
+# APP-02 lane scope (issue #160): browser App SDK runtime slice.
+# Minimal slice only. Adjust at PR time to cover the branch diff exactly.
+src/app-runtime.ts
+src/index.ts
+src/sdk.ts
+migrations/0007_app_runtime.sql
+scopes/app-02.scope
+package.json

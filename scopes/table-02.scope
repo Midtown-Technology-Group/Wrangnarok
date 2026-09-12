@@ -1,0 +1,11 @@
+# TABLE-02 lane scope (issue #154): policy-safe Tables query/count/batch slice.
+src/tables.ts
+src/index.ts
+src/sdk.ts
+migrations/0009_tables.sql
+test/tables.test.ts
+test/tables-unit.test.ts
+docs/upstream-parity.md
+scripts/check-bundle-budget.mjs
+scopes/table-02.scope
+package.json

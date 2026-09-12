@@ -19,10 +19,22 @@ export interface NavEntry {
 export const NAV_ENTRIES: NavEntry[] = [
   { label: "History", to: "/history", enabled: true, phase: "Phase 4 (#17)" },
   {
+    label: "Audit trail",
+    to: "/audit",
+    enabled: true,
+    phase: "Phase 4 (#172)",
+  },
+  {
+    label: "Notifications",
+    to: "/notifications",
+    enabled: true,
+    phase: "Phase 4 (#172)",
+  },
+  {
     label: "Dashboard",
-    enabled: false,
-    issue: `${REPO}/issues/15`,
-    phase: "Phase 4",
+    to: "/dashboard",
+    enabled: true,
+    phase: "Phase 4 (#222)",
   },
   {
     label: "Sagas and Catalog",
@@ -43,22 +55,40 @@ export const NAV_ENTRIES: NavEntry[] = [
     phase: "Phase 4 (#159)",
   },
   {
+    label: "Files",
+    to: "/files",
+    enabled: true,
+    phase: "Phase 4 (#157)",
+  },
+  {
     label: "Integrations",
     enabled: false,
     issue: `${REPO}/issues/18`,
     phase: "Phase 2 / Phase 3",
   },
   {
+    label: "Configuration",
+    to: "/configs",
+    enabled: true,
+    phase: "Phase 3 (#147)",
+  },
+  {
     label: "Connections",
-    enabled: false,
-    issue: `${REPO}/issues/18`,
-    phase: "Phase 3",
+    to: "/connections",
+    enabled: true,
+    phase: "Phase 3 (#146)",
   },
   {
     label: "Triggers",
     enabled: false,
     issue: `${REPO}/issues/16`,
     phase: "Phase 2 / Phase 4",
+  },
+  {
+    label: "Artifacts",
+    to: "/artifacts",
+    enabled: true,
+    phase: "Phase 4 (#158)",
   },
   {
     label: "Tables and Forms",

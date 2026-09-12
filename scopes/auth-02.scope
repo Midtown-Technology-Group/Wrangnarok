@@ -1,0 +1,17 @@
+# AUTH-02 lane scope (issue #143): resource roles, claims, delegated auth.
+src/roles.ts
+src/auth.ts
+src/apps.ts
+src/index.ts
+src/sdk.ts
+migrations/0009_resource_roles.sql
+migrations/0005_forms.sql
+migrations/0006_apps.sql
+test/resource-roles.test.ts
+test/resource-roles-unit.test.ts
+test/org-lifecycle.test.ts
+test/sdk.test.ts
+docs/architecture/018-resource-roles.md
+scripts/check-bundle-budget.mjs
+scopes/auth-02.scope
+package.json

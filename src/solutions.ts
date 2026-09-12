@@ -436,7 +436,7 @@ export async function installBundle(db: D1Database, raw: unknown, opts: InstallO
   // fully reconciled install), never the newest ledger row: ledger rows are
   // immutable evidence of attempts, and an interrupted install leaves a
   // newer ledger row behind while the pointer still names the previous
-  // complete version (restart convergence, ADR 011 section 2).
+  // complete version (restart convergence, ADR 011 section 2; #161).
   const orgIds = new Map<string, string>();
   for (const name of orgNames) {
     const row = await db.prepare("SELECT id FROM organizations WHERE name = ?").bind(name).first<{ id: string }>();
@@ -484,8 +484,8 @@ export async function installBundle(db: D1Database, raw: unknown, opts: InstallO
   }
   const marker = managedBy(bundleId, version);
   // Desired Connection state compares the full non-secret config on
-  // activation-schema databases (flag read above); older databases keep the
-  // endpoint-only comparison and write path below.
+  // activation-schema databases (flag read in preflight above); older
+  // databases keep the endpoint-only comparison and write path below.
   const plan: PlannedConnection[] = [];
   for (const conn of desired) {
     const orgId = orgIds.get(conn.org) ?? null;

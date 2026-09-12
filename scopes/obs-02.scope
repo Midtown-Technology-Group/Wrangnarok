@@ -1,0 +1,17 @@
+# OBS-02 lane scope (issue #153): author logs/progress with reconnect recovery.
+src/logs.ts
+src/index.ts
+src/sdk.ts
+src/sagas/hello.ts
+migrations/0009_execution_logs.sql
+test/logs.test.ts
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+client/src/pages/ExecutionDetail.tsx
+docs/sdk.md
+docs/sdk-capability-map.md
+docs/upstream-parity.md
+scripts/check-bundle-budget.mjs
+scripts/wrangnarok.mjs
+scopes/obs-02.scope
+package.json

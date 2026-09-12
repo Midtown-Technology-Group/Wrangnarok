@@ -57,6 +57,66 @@ export interface SagasResponse {
   sagas: SagaSummary[];
 }
 
+/** Integration definition for GET /api/integrations (CON-01): portable
+ * schema, defaults, required-secret names, and health — never org state. */
+export interface IntegrationSummary {
+  id: string;
+  name: string;
+  description: string;
+  secretFields: string[];
+  configSchema: {
+    name: string;
+    type: string;
+    required: boolean;
+    default?: string;
+    maxLength?: number;
+    description: string;
+  }[];
+  requiredSecrets: string[];
+  secretEnvVars: Record<string, string>;
+  health: { testHint: string; remediation: string };
+}
+
+export interface IntegrationsResponse {
+  integrations: IntegrationSummary[];
+}
+
+/** Connection mapping for GET /api/connections (CON-01): stable IDs,
+ * non-secret config, ownership, health — secret values never appear. */
+export interface ConnectionSummary {
+  id: string;
+  integrationId: string;
+  integrationName: string;
+  orgId: string;
+  displayName: string | null;
+  endpoint: string;
+  config: Record<string, string>;
+  enabled: boolean;
+  managedBy: string | null;
+  ownerKind: "managed" | "loose";
+  secretsRequired: string[];
+  updatedAt: string | null;
+}
+
+export interface ConnectionsResponse {
+  connections: ConnectionSummary[];
+}
+
+export interface ConnectionResponse {
+  connection: ConnectionSummary;
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  checkedAt: string;
+  detail: string;
+  code?: string;
+}
+
+export interface ConnectionTestResponse {
+  test: ConnectionTestResult;
+}
+
 /** Detail shape for GET /api/executions/:id. */
 export interface ExecutionDetail extends ExecutionSummary {
   runtimeStatus: string | null;
@@ -138,4 +198,202 @@ export interface AppDetail extends AppSummary {
   revisions: AppRevision[];
   jobs: AppJob[];
   activeDeployment: AppDeployment | null;
+}
+
+/** One administrative audit event (GET /api/audit; OPS-01, ADR 020). */
+export interface AuditEvent {
+  id: string;
+  orgId: string;
+  actorUserId: string;
+  action: string;
+  targetType: string | null;
+  targetId: string | null;
+  outcome: "success" | "failure";
+  detail: unknown;
+  createdAt: string;
+}
+
+export interface AuditResponse {
+  events: AuditEvent[];
+  hasMore: boolean;
+  /** Opaque page marker for the next GET /api/audit call; null when done. */
+  nextCursor: string | null;
+}
+
+/** One operational notification (GET /api/notifications; OPS-01, ADR 020). */
+export interface AppNotification {
+  id: string;
+  orgId: string;
+  userId: string;
+  scope: "personal" | "org";
+  category: string;
+  title: string;
+  body: string | null;
+  status: "pending" | "running" | "awaiting_action" | "completed" | "failed" | "cancelled";
+  progressPercent: number | null;
+  detail: unknown;
+  createdAt: string;
+  updatedAt: string;
+  dismissedAt: string | null;
+}
+
+export interface NotificationsResponse {
+  notifications: AppNotification[];
+}
+
+/** Artifact status values served by the Wrangnarök Worker (ADR 018). */
+export type ArtifactStatus = "active" | "deleted";
+
+/** Attachment-binding scopes: which surface the Artifact backs. */
+export type ArtifactBindingScope = "execution" | "workspace" | "conversation";
+
+/** Row shape for GET /api/artifacts (summaries + hasMore, never bytes). */
+export interface ArtifactSummary {
+  id: string;
+  name: string;
+  mime: string;
+  sizeBytes: number;
+  version: number;
+  status: ArtifactStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Row shape for GET /api/config (CON-02, ADR 020): typed values for this
+ * Organization; secret rows answer "[SECRET]", never values. */
+export interface ConfigEntry {
+  id: string;
+  key: string;
+  type: string;
+  value: unknown;
+  description: string | null;
+  managedBy: string | null;
+  updatedAt: string;
+  updatedBy: string;
+}
+
+export interface ConfigListResponse {
+  configs: ConfigEntry[];
+}
+
+/** Browser App SDK runtime wire shapes (APP-02, ADR 019). Mirrors
+ * src/app-runtime.ts; guards in lib/app-runtime.ts fail loud on drift. */
+
+/** Scoped capability grant (author view; revoked rows stay listed). */
+export interface AppGrant {
+  id: string;
+  kind: "saga" | "table" | "file";
+  ref: string;
+  permission: "invoke" | "read" | "write";
+  revoked: boolean;
+  createdAt: string;
+}
+
+/** App Table declaration (author view shows hidden; runtime lists visible only). */
+export interface AppTableDef {
+  id: string;
+  name: string;
+  visibility: "visible" | "hidden";
+  columns: string[];
+  revision: number;
+  createdAt: string;
+}
+
+/** One JSON document row with its authoritative Table revision. */
+export interface AppTableRow {
+  id: string;
+  data: Record<string, unknown>;
+  tableRevision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Compatibility handshake descriptor (GET /api/apps/:id/sdk). */
+export interface AppHandshake {
+  sdk: "wrangnarok.app-runtime";
+  version: string;
+  app: { id: string; name: string; slug: string; status: string };
+}
+
+/** File metadata (never bytes; bytes ride single-use tokens). */
+export interface AppFileMeta {
+  id: string;
+  name: string;
+  contentType: string;
+  size: number;
+  sha256: string;
+  version: number;
+  status: "pending" | "ready";
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Scoped invocation linkage (activity tail; result via execution detail). */
+export interface AppExecutionLink {
+  executionId: string;
+  sagaId: string;
+  createdAt: string;
+}
+
+/** File location declaration (FILE-01, ADR 018). */
+export interface FileLocation {
+  name: string;
+  maxBytes: number;
+  contentTypes: string[];
+  sharedRead: boolean;
+  createdAt: string;
+}
+
+export interface FileLocationsResponse {
+  locations: FileLocation[];
+}
+
+/** File metadata row (only ready rows are downloadable). */
+export interface FileMeta {
+  location: string;
+  path: string;
+  version: number;
+  size: number;
+  contentType: string;
+  sha256: string;
+  status: "pending" | "ready";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ArtifactsResponse {
+  artifacts: ArtifactSummary[];
+  hasMore: boolean;
+}
+
+export interface ArtifactVersion {
+  version: number;
+  mime: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
+export interface ArtifactBinding {
+  scope: ArtifactBindingScope;
+  refId: string;
+}
+
+/** Detail shape for GET /api/artifacts/:id. */
+export interface ArtifactDetail extends ArtifactSummary {
+  orgId: string;
+  creatorUserId: string;
+  deletedAt: string | null;
+  versions: ArtifactVersion[];
+  bindings: ArtifactBinding[];
+}
+
+/** Generated-output format subcapability (all deferred: no Python rendering on Workers). */
+export interface ArtifactFormat {
+  format: string;
+  status: string;
+}
+
+export interface FilesResponse {
+  files: FileMeta[];
+  nextCursor: string | null;
 }

@@ -1,0 +1,27 @@
+# FILE-02 lane scope (issue #158): generated artifacts with R2 bytes, bindings, retention.
+# LIMITS-01: R2 is a new Cloudflare primitive for this project — needs
+# explicit classification before merge (see ADR 013 constraint discussion).
+src/artifacts.ts
+src/bindings.ts
+src/index.ts
+src/sdk.ts
+migrations/0020_artifacts.sql
+test/artifacts.test.ts
+test/artifact-branches.test.ts
+test/artifact-retention.test.ts
+test/artifacts-ui.test.tsx
+client/src/pages/Artifacts.tsx
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+client/src/App.tsx
+client/src/components/Nav.tsx
+docs/architecture/019-artifacts.md
+docs/architecture/018-artifacts.md
+docs/sdk-capability-map.md
+docs/upstream-parity.md
+scripts/check-bundle-budget.mjs
+scripts/wrangnarok.mjs
+vitest.config.ts
+wrangler.jsonc
+scopes/file-02.scope
+package.json

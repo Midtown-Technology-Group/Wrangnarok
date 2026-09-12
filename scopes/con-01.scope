@@ -1,0 +1,23 @@
+# CON-01 lane scope (issue #146): authorized Integration and Connection management.
+# Integration definitions plus Organization-scoped Connection mappings,
+# Connection admin routes, secret-field echo policy, SDK/UI surfaces.
+src/connections.ts
+src/integrations/index.ts
+src/executions.ts
+src/index.ts
+src/sdk.ts
+migrations/0009_connection_admin.sql
+test/connections.test.ts
+test/connections-ui.test.tsx
+test/integrations.test.ts
+test/echo-secretfields.test.ts
+client/src/pages/Connections.tsx
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+client/src/App.tsx
+client/src/components/Nav.tsx
+docs/architecture/003-integrations-connections.md
+docs/upstream-parity.md
+scripts/check-bundle-budget.mjs
+scopes/con-01.scope
+package.json

@@ -1,0 +1,17 @@
+# SOL-03 lane scope (issue #163): portable Solution source capture/export/import.
+# No tenant state. Must re-evaluate against the SOL-01 activation contract
+# now on main (bundle_active pointer, immutable ledger): serialize SOL-01
+# first, then this slice. Update this file if the contract forces new files.
+src/solution-export.ts
+src/solutions.ts
+src/index.ts
+src/sdk.ts
+test/solution-export.test.ts
+test/solutions-validation.test.ts
+test/saga-contract.test.ts
+scripts/export-local.mjs
+docs/architecture/016-solution-export.md
+docs/architecture/011-solutions-contract.md
+docs/upstream-parity.md
+scopes/sol-03.scope
+package.json

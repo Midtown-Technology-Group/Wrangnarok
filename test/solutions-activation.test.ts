@@ -16,7 +16,7 @@ import { activeInstallFor, installBundle, requireActiveInstall } from "../src/so
 import migration1 from "../migrations/0001_initial.sql?raw";
 import migration2 from "../migrations/0002_cancelling.sql?raw";
 import migration4 from "../migrations/0004_solutions_install.sql?raw";
-import migration5 from "../migrations/0005_solutions_activation.sql?raw";
+import migration5 from "../migrations/0010_solutions_activation.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const BUNDLE_ID = "b10a7c2e-3f4d-4a5b-8c6d-7e8f9a0b1c2d";
@@ -212,6 +212,7 @@ it("lets an interrupted upgrade fall back to the active version without force", 
   // The failed v2 attempt is the newest ledger row, but the pointer still
   // names the complete v1 install: re-running v1 reconciles back to the
   // active version without force (fencing reads the pointer, not newest-row).
+  // Regression for #161.
   expect(await pointer()).toMatchObject({ version: "1.0.0" });
   const recovered = await installBundle(bindings.DB, manifest("1.0.0", ENDPOINT_V1));
   expect(await pointer()).toMatchObject({ version: "1.0.0", manifestHash: recovered.manifestHash });

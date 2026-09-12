@@ -77,7 +77,9 @@ it("resolves an echo Connection with IDs plus endpoint only, no secret material"
   const resolved = await resolveConnection(bindings.DB, orgCtx, ECHO_INTEGRATION_ID, [ECHO_INTEGRATION_ID]);
   expect(resolved.found).toBe(true);
   if (!resolved.found) throw new Error("expected echo Connection");
-  expect(Object.keys(resolved.connection).sort()).toEqual(["endpoint", "id", "integrationId", "orgId"]);
+  expect(Object.keys(resolved.connection).sort()).toEqual(
+    ["displayName", "enabled", "endpoint", "id", "integrationId", "managedBy", "orgId"].sort(),
+  );
   expect(resolved.connection).toMatchObject({
     integrationId: ECHO_INTEGRATION_ID,
     orgId,

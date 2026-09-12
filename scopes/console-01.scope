@@ -1,0 +1,24 @@
+# CONSOLE-01 lane scope (issue #222): own the operator console shell and build
+# pages proactively by adapting upstream's React frontend to our Cloudflare
+# backend patterns. Owns client/ shell + lib; feature lanes consume it.
+# May touch src/index.ts, src/sdk.ts, src/executions.ts ONLY for UI-serving
+# route/shape fixes the console needs (no domain changes); docs + tests for
+# the console slices. Bundle budget raises are deliberate per raise.
+client/
+src/index.ts
+src/sdk.ts
+src/executions.ts
+test/execution-detail.test.tsx
+test/ui-shell.test.tsx
+test/artifacts-ui.test.tsx
+test/files-ui.test.tsx
+test/config-sdk-ui.test.tsx
+test/app-sdk-client.test.tsx
+test/ops-ui.test.tsx
+docs/upstream-spec.md
+docs/upstream-parity.md
+docs/sdk.md
+scripts/check-bundle-budget.mjs
+wrangler.jsonc
+scopes/console-01.scope
+package.json

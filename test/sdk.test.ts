@@ -14,8 +14,11 @@ import {
   describeContract,
   inspectSaga,
   localCatalog,
+  parseAuditPage,
   parseExecutionDetail,
   parseHistoryPage,
+  parseNotification,
+  parseNotifications,
   parseSagaCatalog,
   parseSdkError,
   scaffoldSaga,
@@ -51,10 +54,35 @@ describe("SDK contract version and descriptor (issue #140)", () => {
     expect(descriptor.routes.map((route) => `${route.method} ${route.path}`)).toEqual(
       expect.arrayContaining(["GET /api/sdk", "GET /api/sagas", "POST /api/executions", "POST /api/dev/preview"]),
     );
-    // DEV-02 (issue #141): local preview is a supported capability; the new
-    // error codes stay in the contract list.
+    // DEV-02 (issue #141): local preview is a supported capability; the OPS-01
+    // routes and error codes stay in the contract list.
     expect(descriptor.capabilities.find((entry) => entry.name === "local-preview")?.status).toBe("supported");
-    for (const code of ["STABLE_IDENTITY_REMAP_REQUIRED", "SYNC_CONFLICT", "INVALID_GIT_TARGET", "DEPLOY_BLOCKED"]) {
+    expect(descriptor.capabilities.find((entry) => entry.name === "ops-audit-notifications")?.status).toBe("supported");
+    expect(descriptor.routes.map((route) => `${route.method} ${route.path}`)).toEqual(
+      expect.arrayContaining(["GET /api/audit", "GET /api/notifications", "DELETE /api/notifications/:id"]),
+    );
+    for (const code of [
+      "CANCELLATION_UNCONFIRMED",
+      "STABLE_IDENTITY_REMAP_REQUIRED",
+      "SYNC_CONFLICT",
+      "INVALID_GIT_TARGET",
+      "DEPLOY_BLOCKED",
+      "INVALID_ACTION_PREFIX",
+      "INVALID_OUTCOME",
+      "INVALID_SEARCH",
+      "INVALID_NOTIFICATION",
+      "INVALID_NOTIFICATION_ID",
+      "NOTIFICATION_NOT_FOUND",
+    ]) {
+      expect(SDK_ERROR_CODES).toContain(code);
+    }
+    // CON-02 (issue #147): scoped config is a supported capability with its
+    // routes in the descriptor and its codes in the contract list.
+    expect(descriptor.capabilities.find((entry) => entry.name === "author-config")?.status).toBe("supported");
+    expect(descriptor.routes.map((route) => `${route.method} ${route.path}`)).toEqual(
+      expect.arrayContaining(["GET /api/config", "POST /api/config", "PUT /api/config/:id"]),
+    );
+    for (const code of ["CONFIG_REQUIREMENT_UNSATISFIED", "SECRET_NOT_CONFIGURED", "MANAGED_RESOURCE"]) {
       expect(SDK_ERROR_CODES).toContain(code);
     }
     for (const capability of descriptor.capabilities) {
@@ -496,6 +524,54 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     ).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
   });
 
+  it("lists audit events and the notifications inbox through the typed client", async () => {
+    const audit = { events: [], hasMore: false, nextCursor: null };
+    const { calls, fetchImpl } = stub([json(audit)]);
+    const client = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+    const seen = await client.listAuditEvents({ action: "app.", outcome: "success", limit: 5 });
+    expect(seen.events).toEqual([]);
+    const url = calls[0]?.url ?? "";
+    expect(url).toContain("/api/audit?");
+    expect(url).toContain("action=app.");
+    expect(url).toContain("outcome=success");
+    const inbox = stub([json({ notifications: [] })]);
+    const inboxClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: inbox.fetchImpl });
+    expect(await inboxClient.listNotifications(5)).toEqual([]);
+    expect(inbox.calls[0]?.url).toBe("http://local.test/api/notifications?limit=5");
+    const noteId = "11111111-1111-4111-8111-111111111111";
+    const one = stub([
+      json({
+        notification: {
+          id: noteId,
+          orgId: "org",
+          userId: "user",
+          scope: "personal",
+          category: "app_build",
+          title: "App build succeeded",
+          body: null,
+          status: "completed",
+          progressPercent: null,
+          detail: null,
+          createdAt: "2026-09-11T00:00:00.000Z",
+          updatedAt: "2026-09-11T00:00:01.000Z",
+          dismissedAt: null,
+        },
+      }),
+    ]);
+    const oneClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: one.fetchImpl });
+    expect((await oneClient.getNotification(noteId)).id).toBe(noteId);
+    const gone = stub([json({ dismissed: true })]);
+    const goneClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: gone.fetchImpl });
+    await goneClient.dismissNotification(noteId);
+    expect(gone.calls[0]?.init.method).toBe("DELETE");
+    await expect(client.getNotification("abc")).rejects.toMatchObject({ code: "SDK_INVALID_REF" });
+    await expect(client.dismissNotification("abc")).rejects.toMatchObject({ code: "SDK_INVALID_REF" });
+    const malformed = stub([json({ nope: true })]);
+    await expect(
+      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: malformed.fetchImpl }).listAuditEvents(),
+    ).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
+  });
+
   it("lists history with filters, cursors, and saga resolution", async () => {
     const page = {
       executions: [{ executionId: "d".repeat(64), sagaId: helloSaga.id, status: "Failed" }],
@@ -601,6 +677,14 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     expect(() => parseHistoryPage({ executions: [], hasMore: false, nextCursor: 7 })).toThrow(/unexpected shape/);
     expect(parseHistoryPage({ executions: [], hasMore: false }).nextCursor).toBeNull();
     expect(parseHistoryPage({ executions: [], hasMore: false, nextCursor: "c" }).nextCursor).toBe("c");
+    // OPS-01 wire guards (issue #172): audit pages and notifications.
+    expect(() => parseAuditPage({})).toThrow(/unexpected shape/);
+    expect(() => parseAuditPage({ events: [{ id: 1 }], hasMore: false })).toThrow(/unexpected shape/);
+    expect(() => parseAuditPage({ events: [], hasMore: false, nextCursor: 7 })).toThrow(/unexpected shape/);
+    expect(parseAuditPage({ events: [], hasMore: false }).nextCursor).toBeNull();
+    expect(() => parseNotifications({})).toThrow(/unexpected shape/);
+    expect(() => parseNotifications({ notifications: [{ id: 1 }] })).toThrow(/unexpected shape/);
+    expect(() => parseNotification({})).toThrow(/unexpected shape/);
   });
 
   it("validates every schema branch offline", () => {

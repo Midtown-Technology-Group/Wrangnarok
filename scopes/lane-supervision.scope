@@ -1,0 +1,19 @@
+# chore/lane-supervision scope: durable lane-supervision fix per #193 follow-up.
+# Own-your-PR standing orders, repo-wide scope files, CI scope gate,
+# steward-owned migration ledger, 0005 collision renumber to 0010.
+scopes/
+scripts/lane-scope.mjs
+.github/workflows/ci.yml
+docs/migration-ledger.md
+docs/architecture/011-solutions-contract.md
+migrations/0010_solutions_activation.sql
+migrations/0021_endpoints.sql
+src/solutions.ts
+test/endpoints.test.ts
+test/endpoint-branches.test.ts
+test/solutions-activation.test.ts
+test/solutions-install.test.ts
+test/solutions-validation.test.ts
+scopes/lane-supervision.scope
+.jcode/swarm-prompt.md
+package.json

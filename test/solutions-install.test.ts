@@ -21,7 +21,7 @@ import migration1 from "../migrations/0001_initial.sql?raw";
 import migration2 from "../migrations/0002_cancelling.sql?raw";
 import migration3 from "../migrations/0003_usage_blocks.sql?raw";
 import migration4 from "../migrations/0004_solutions_install.sql?raw";
-import migration5 from "../migrations/0005_solutions_activation.sql?raw";
+import migration5 from "../migrations/0010_solutions_activation.sql?raw";
 import exampleManifest from "../bundles/echo-starter/solution.manifest.json";
 
 const bindings = env as unknown as Bindings;

@@ -12,7 +12,7 @@ import migration1 from "../migrations/0001_initial.sql?raw";
 import migration2 from "../migrations/0002_cancelling.sql?raw";
 import migration3 from "../migrations/0003_usage_blocks.sql?raw";
 import migration4 from "../migrations/0004_solutions_install.sql?raw";
-import migration5 from "../migrations/0005_solutions_activation.sql?raw";
+import migration5 from "../migrations/0010_solutions_activation.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const BUNDLE_ID = "b10a7c2e-3f4d-4a5b-8c6d-7e8f9a0b1c2d";

@@ -1,0 +1,27 @@
+# RUN-01 lane scope (issue #135): persisted per-Saga runtime policy.
+# Saga policy rows, enforcement in the execution path, operator routes,
+# ExecutionDetail UI, SDK surface, runtime-policy ADR.
+src/saga.ts
+src/domain.ts
+src/executions.ts
+src/sagas/shared.ts
+src/sagas/echo.ts
+src/sagas/digest.ts
+src/sagas/ninjaorgs.ts
+src/integrations/echo.ts
+src/integrations/ninjaone.ts
+src/index.ts
+src/sdk.ts
+migrations/0009_saga_policies.sql
+test/runtime-policy.test.ts
+test/execution-detail.test.tsx
+test/access-auth.test.ts
+test/execution-guards.test.ts
+test/sdk.test.ts
+client/src/pages/ExecutionDetail.tsx
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+docs/architecture/018-runtime-policy.md
+scripts/check-bundle-budget.mjs
+scopes/run-01.scope
+package.json

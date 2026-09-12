@@ -37,6 +37,23 @@
       "migrations_dir": "migrations",
     },
   ],
+  // ADR 018: FILE-01 earns the R2 primitive (author/runtime file bytes; D1
+  // holds metadata only). ADR 019 (FILE-02 artifacts) reuses the same
+  // primitive with a separate binding: FILES carries (org/location/path)
+  // objects, ARTIFACTS carries (artifact/version) objects, so keys can never
+  // alias across surfaces. Buckets are provisioned per environment via
+  // `wrangler r2 bucket create <name>`; local dev/tests use the
+  // Miniflare/workerd R2 implementation, never production.
+  "r2_buckets": [
+    {
+      "binding": "FILES",
+      "bucket_name": "wrangnarok-local",
+    },
+    {
+      "binding": "ARTIFACTS",
+      "bucket_name": "wrangnarok-artifacts-local",
+    },
+  ],
   "workflows": [
     {
       "binding": "ECHO_WORKFLOW",
@@ -92,6 +109,17 @@
           "migrations_dir": "migrations",
         },
       ],
+      // Dev buckets live apart from local ones (never shared).
+      "r2_buckets": [
+        {
+          "binding": "FILES",
+          "bucket_name": "wrangnarok-dev",
+        },
+        {
+          "binding": "ARTIFACTS",
+          "bucket_name": "wrangnarok-artifacts-dev",
+        },
+      ],
       "workflows": [
         {
           "binding": "ECHO_WORKFLOW",
@@ -143,6 +171,12 @@
           "database_name": "wrangnarok-preview",
           "database_id": "00000000-0000-0000-0000-000000000000",
           "migrations_dir": "migrations",
+        },
+      ],
+      "r2_buckets": [
+        {
+          "binding": "FILES",
+          "bucket_name": "wrangnarok-preview",
         },
       ],
       "workflows": [

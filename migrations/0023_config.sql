@@ -1,0 +1,2 @@
+CREATE TABLE configs(id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), key TEXT NOT NULL CHECK(length(key) BETWEEN 1 AND 128), type TEXT NOT NULL CHECK(type IN ('string', 'int', 'bool', 'json', 'secret')), value_json TEXT NOT NULL CHECK(length(value_json) <= 4096), description TEXT CHECK(description IS NULL OR length(description) <= 280), managed_by TEXT, updated_at TEXT NOT NULL, updated_by TEXT NOT NULL, UNIQUE(org_id, key));
+CREATE INDEX configs_org ON configs(org_id);
