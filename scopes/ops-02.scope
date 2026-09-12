@@ -1,0 +1,13 @@
+# OPS-02 lane scope (issue #173): Cloudflare-native diagnostics, operational jobs, repair workflows.
+src/ops.ts
+src/index.ts
+src/sdk.ts
+test/ops.test.ts
+test/ops-branches.test.ts
+test/sdk.test.ts
+scripts/wrangnarok.mjs
+docs/upstream-parity.md
+docs/architecture/020-ops-audit-notifications.md
+scripts/check-bundle-budget.mjs
+scopes/ops-02.scope
+package.json

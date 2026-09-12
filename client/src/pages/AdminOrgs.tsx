@@ -176,7 +176,12 @@ export function AdminOrgs(): React.JSX.Element {
           <p className="muted" data-testid="delete-preview">
             {preview.orgName}: {preview.executions} Executions, {preview.operations} Operations,{" "}
             {preview.connectionsLoose} loose Connections, {preview.connectionsManaged} managed, {preview.bundleInstalls}{" "}
-            installs, {preview.memberships} memberships. Retained: {preview.retained.join(", ")}.{" "}
+            installs, {preview.memberships} memberships, {preview.forms} forms, {preview.apps} apps (
+            {preview.appsManaged} Solution-owned), {preview.tables} tables with {preview.tableRows} rows,{" "}
+            {preview.fileLocations} file locations with {preview.files} files, {preview.artifacts} artifacts,{" "}
+            {preview.endpoints} endpoints, {preview.configsLoose} loose configs ({preview.configsManaged} managed),{" "}
+            {preview.auditEvents} audit events (retained), {preview.notifications} notifications, {preview.bundleActive}{" "}
+            active bundle pointers with {preview.bundleOwnedRows} owned rows. Retained: {preview.retained.join(", ")}.{" "}
             {preview.canDelete ? "Deletable." : preview.blockedBy.join(" ")}
           </p>
           {preview.canDelete ? (

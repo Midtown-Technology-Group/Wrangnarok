@@ -19,7 +19,12 @@ import {
 import migration1 from "../migrations/0001_initial.sql?raw";
 import migration2 from "../migrations/0002_cancelling.sql?raw";
 import migration6 from "../migrations/0006_apps.sql?raw";
+import migrationOrg from "../migrations/0007_org_membership.sql?raw";
+import migration9 from "../migrations/0011_connection_admin.sql?raw";
 import migration18 from "../migrations/0018_ops.sql?raw";
+import migrationFiles from "../migrations/0019_files.sql?raw";
+import migrationEndpoints from "../migrations/0021_endpoints.sql?raw";
+import migrationAppRuntime from "../migrations/0022_app_runtime.sql?raw";
 import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
@@ -84,7 +89,12 @@ beforeEach(async () => {
   await bindings.DB.exec(migration1);
   await bindings.DB.exec(migration2);
   await bindings.DB.exec(migration6);
+  await bindings.DB.exec(migrationOrg);
+  await bindings.DB.exec(migration9);
   await bindings.DB.exec(migration18);
+  await bindings.DB.exec(migrationFiles);
+  await bindings.DB.exec(migrationEndpoints);
+  await bindings.DB.exec(migrationAppRuntime);
   await bindings.DB.exec(seed);
 });
 
@@ -384,4 +394,417 @@ it("rethrows non-Fault failures without auditing them", async () => {
     expect(response.status).toBe(500);
     expect(await response.json()).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
   }
+});
+
+// OPS-02 (issue #173): Cloudflare-native diagnostics and repair workflows,
+// proven against real local D1 in workerd. Reads are Organization-scoped;
+// repairs inspect by default and execute only behind the admin gate with an
+// explicit dryRun:false commit.
+
+it("serves version, health, metrics, scheduler, jobs, preflight, and connection health", async () => {
+  const version = await call("/api/ops/version");
+  expect(version.status).toBe(200);
+  const versionBody = (await version.json()) as {
+    version: { sdkVersion: string; sagaCatalog: { count: number; revision: string }; migrationsApplied: unknown };
+  };
+  expect(versionBody.version.sdkVersion).toBe("1");
+  expect(versionBody.version.sagaCatalog.count).toBeGreaterThan(0);
+  // No Cloudflare metering or secrets ride the version contract.
+  expect(JSON.stringify(versionBody)).not.toContain("test-client-secret-sentinel");
+
+  const health = await call("/api/ops/health");
+  expect(health.status).toBe(200);
+  expect(await health.json()).toMatchObject({ status: "ok", database: "ok", worker: "ok" });
+
+  const metrics = await call("/api/ops/metrics");
+  expect(metrics.status).toBe(200);
+  const metricsBody = (await metrics.json()) as {
+    metrics: { executions: { total: number; pendingUndispatched: number }; recentFailures: unknown[] };
+  };
+  expect(metricsBody.metrics.executions.total).toBe(0);
+  expect(metricsBody.metrics.recentFailures).toEqual([]);
+
+  const tasks = await call("/api/ops/scheduled-tasks");
+  expect(tasks.status).toBe(200);
+  // No scheduler process exists in this slice: an empty endpoint inventory
+  // answers an empty task list, honestly stating the gap.
+  expect(await tasks.json()).toEqual({ tasks: [] });
+
+  const jobs = await call("/api/ops/jobs");
+  expect(jobs.status).toBe(200);
+  const jobsBody = (await jobs.json()) as {
+    jobs: { executions: { total: number }; appBuilds: { queued: number; interrupted: unknown[] } };
+  };
+  expect(jobsBody.jobs.executions.total).toBe(0);
+  expect(jobsBody.jobs.appBuilds.interrupted).toEqual([]);
+
+  const preflight = await call("/api/ops/preflight");
+  expect(preflight.status).toBe(200);
+  const preflightBody = (await preflight.json()) as {
+    integrations: { integrationName: string; connected: boolean; ready: boolean }[];
+  };
+  const echo = preflightBody.integrations.find((entry) => entry.integrationName === "echo");
+  // The local seed owns the fixture echo mapping for the LAB org.
+  expect(echo).toMatchObject({ connected: true, ready: true });
+  expect(JSON.stringify(preflightBody)).not.toContain("test-client-secret-sentinel");
+
+  const conns = await call("/api/ops/connections");
+  expect(conns.status).toBe(200);
+  const connsBody = (await conns.json()) as {
+    connections: { integrationName: string; connected: boolean; testHint: string }[];
+  };
+  expect(connsBody.connections.find((entry) => entry.integrationName === "echo")).toMatchObject({
+    connected: true,
+  });
+});
+
+it("counts the admission backlog and surfaces recent failures without bodies", async () => {
+  const submitted = await worker.fetch(
+    new Request("http://local.test/api/executions", {
+      method: "POST",
+      headers: { ...headers(), "Idempotency-Key": "ops-metrics-backlog-001" },
+      body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "hello" } }),
+    }),
+    bindings,
+  );
+  expect(submitted.status).toBe(202);
+  const { executionId } = (await submitted.json()) as { executionId: string };
+  // Simulate an unconfirmed dispatch: the Pending receipt exists but the
+  // Workflow dispatch never confirmed.
+  await bindings.DB.prepare("UPDATE executions SET dispatched=0,status='Pending' WHERE id=?").bind(executionId).run();
+  // A terminal failure row carries its safe error code, never input/result.
+  await bindings.DB.prepare("UPDATE executions SET status='Failed',completed_at=?,error_json=? WHERE id=?")
+    .bind(new Date().toISOString(), JSON.stringify({ code: "ECHO_INTEGRATION_FAILED", message: "nope" }), executionId)
+    .run();
+  const metrics = (await (await call("/api/ops/metrics?recent=5")).json()) as {
+    metrics: {
+      executions: { total: number; failed: number };
+      recentFailures: { executionId: string; code: string; completedAt: string }[];
+    };
+  };
+  expect(metrics.metrics.executions.total).toBe(1);
+  expect(metrics.metrics.executions.failed).toBe(1);
+  expect(metrics.metrics.recentFailures).toHaveLength(1);
+  expect(metrics.metrics.recentFailures[0]).toMatchObject({
+    executionId,
+    code: "ECHO_INTEGRATION_FAILED",
+  });
+  expect(JSON.stringify(metrics)).not.toContain("hello");
+  expect(await (await call("/api/ops/metrics?recent=0")).json()).toMatchObject({ error: { code: "INVALID_LIMIT" } });
+  expect(await (await call("/api/ops/metrics?foo=1")).json()).toMatchObject({ error: { code: "UNSUPPORTED_QUERY" } });
+});
+
+it("flags interrupted builds and repairs the stuck app status", async () => {
+  const id = await createApp("stuck", "stuck");
+  await buildApp(id);
+  // Simulate interruption: the build settled but the app row never left
+  // `building` (a crash between the job write and the status flip).
+  await bindings.DB.prepare("UPDATE apps SET status='building' WHERE id=?").bind(id).run();
+  const jobs = (await (await call("/api/ops/jobs")).json()) as {
+    jobs: { appBuilds: { succeeded: number; interrupted: { appId: string }[] } };
+  };
+  expect(jobs.jobs.appBuilds.succeeded).toBe(1);
+  expect(jobs.jobs.appBuilds.interrupted.map((entry) => entry.appId)).toContain(id);
+  // Dry-run inspects without mutating: still building afterwards.
+  const inspect = await call("/api/ops/repairs", "POST", {
+    kind: "repair-stuck-build",
+    targetId: id,
+  });
+  expect(inspect.status).toBe(200);
+  expect(await inspect.json()).toMatchObject({ repair: { kind: "repair-stuck-build", dryRun: true } });
+  const still = (await bindings.DB.prepare("SELECT status FROM apps WHERE id=?").bind(id).first<{ status: string }>())
+    ?.status;
+  expect(still).toBe("building");
+  // Execute restores the prior usable status (live: a deployment exists).
+  const repaired = await call("/api/ops/repairs", "POST", {
+    kind: "repair-stuck-build",
+    targetId: id,
+    dryRun: false,
+  });
+  expect(repaired.status).toBe(200);
+  expect(await repaired.json()).toMatchObject({ repair: { kind: "repair-stuck-build", dryRun: false } });
+  const restored = (
+    await bindings.DB.prepare("SELECT status FROM apps WHERE id=?").bind(id).first<{ status: string }>()
+  )?.status;
+  expect(restored).toBe("live");
+  // The repair emits its audit event; a second run finds nothing stuck.
+  const events = await auditEvents("?action=ops.repair.repair-stuck-build");
+  expect(events.events.some((event) => event.targetId === id && event.outcome === "success")).toBe(true);
+  const again = await call("/api/ops/repairs", "POST", { kind: "repair-stuck-build", targetId: id, dryRun: false });
+  expect(await again.json()).toMatchObject({ repair: { dryRun: false } });
+});
+
+it("cleans up pending uploads and expired tokens with bounded deletes", async () => {
+  // One pending upload row plus its expired capability token.
+  const now = new Date().toISOString();
+  await bindings.DB.prepare(
+    "INSERT INTO file_locations(org_id,name,max_bytes,content_types_json,shared_read,created_at) VALUES (?,?,?,?,?,?)",
+  )
+    .bind(ORG, "ops-cleanup", 1024, "[]", 0, now)
+    .run();
+  await bindings.DB.prepare("INSERT INTO file_policies(org_id,location,action,created_at) VALUES (?,?,?,?)")
+    .bind(ORG, "ops-cleanup", "write", now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO files(org_id,location,path,version,size,content_type,sha256,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(ORG, "ops-cleanup", "stale.bin", 0, 0, "", "", "pending", now, now)
+    .run();
+  const capId = "11111111-1111-4111-8111-111111111111";
+  await bindings.DB.prepare(
+    "INSERT INTO file_capabilities(id,org_id,source_org_id,location,path,action,staging_key,token_hash,expires_at,used_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,NULL,?)",
+  )
+    .bind(
+      capId,
+      ORG,
+      ORG,
+      "ops-cleanup",
+      "stale.bin",
+      "upload",
+      "stale-key",
+      "stale-hash",
+      "2020-01-01T00:00:00.000Z",
+      now,
+    )
+    .run();
+  // Dry-runs count without deleting.
+  const pendingInspect = await call("/api/ops/repairs", "POST", { kind: "cleanup-pending-uploads" });
+  expect(await pendingInspect.json()).toMatchObject({ repair: { dryRun: true, result: { pending: 1 } } });
+  const tokensInspect = await call("/api/ops/repairs", "POST", { kind: "cleanup-expired-tokens" });
+  expect(tokensInspect.status).toBe(200);
+  // Execute deletes both; live rows are untouched by construction (only
+  // pending/expired rows match the fenced deletes).
+  const pendingRun = await call("/api/ops/repairs", "POST", { kind: "cleanup-pending-uploads", dryRun: false });
+  expect(await pendingRun.json()).toMatchObject({ repair: { dryRun: false, result: { deleted: 1 } } });
+  const tokensRun = await call("/api/ops/repairs", "POST", { kind: "cleanup-expired-tokens", dryRun: false });
+  expect(await tokensRun.json()).toMatchObject({
+    repair: { dryRun: false, result: { capabilities: 1 } },
+  });
+});
+
+it("gates repair execution behind admin membership with explicit commits", async () => {
+  // OTHER_USER is a known user with no membership: a stranger's repair
+  // inspect fails at the membership gate, never at repair policy.
+  // LAB_FIXTURE_USER_ID pins the bootstrap identity so the swapped
+  // LAB_USER_ID bootstraps nothing (the lifecycle-test posture).
+  const stamp = new Date().toISOString();
+  await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?)")
+    .bind(OTHER_USER, stamp)
+    .run();
+  const strangerBindings = {
+    ...bindings,
+    LAB_USER_ID: OTHER_USER,
+    LAB_FIXTURE_USER_ID: "00000000-0000-4000-8000-000000000002",
+  };
+  const stranger = await worker.fetch(
+    new Request("http://local.test/api/ops/repairs", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ kind: "cleanup-pending-uploads" }),
+    }),
+    strangerBindings,
+  );
+  expect(stranger.status).toBe(404);
+  // An ordinary member may inspect (dry-run) but never execute: the commit
+  // needs the admin gate, answered 403 with a machine-readable code.
+  await bindings.DB.prepare(
+    "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+  )
+    .bind(ORG, OTHER_USER, "member", "active", "ordinary", stamp, stamp)
+    .run();
+  const memberInspect = await call("/api/ops/repairs", "POST", { kind: "cleanup-pending-uploads" }, ORG, OTHER_USER);
+  expect(memberInspect.status).toBe(200);
+  const memberExecute = await call(
+    "/api/ops/repairs",
+    "POST",
+    { kind: "cleanup-pending-uploads", dryRun: false },
+    ORG,
+    OTHER_USER,
+  );
+  expect(memberExecute.status).toBe(403);
+  expect(await memberExecute.json()).toMatchObject({ error: { code: "REPAIR_FORBIDDEN" } });
+  // Malformed repairs fail closed before any mutation.
+  expect(await (await call("/api/ops/repairs", "POST", { kind: "nope" })).json()).toMatchObject({
+    error: { code: "INVALID_REPAIR_KIND" },
+  });
+  expect(await (await call("/api/ops/repairs", "POST", { kind: "repair-stuck-build" })).json()).toMatchObject({
+    error: { code: "INVALID_REPAIR_TARGET" },
+  });
+  expect(
+    await (
+      await call("/api/ops/repairs", "POST", { kind: "cleanup-pending-uploads", targetId: "x", dryRun: false })
+    ).json(),
+  ).toMatchObject({ error: { code: "INVALID_REPAIR_TARGET" } });
+  expect(await (await call("/api/ops/version?foo=1")).json()).toMatchObject({ error: { code: "UNSUPPORTED_QUERY" } });
+  // Every other diagnostics read guards its query string the same way.
+  for (const path of [
+    "/api/ops/health?foo=1",
+    "/api/ops/scheduled-tasks?foo=1",
+    "/api/ops/jobs?foo=1",
+    "/api/ops/preflight?foo=1",
+    "/api/ops/connections?foo=1",
+  ]) {
+    expect(await (await call(path)).json()).toMatchObject({ error: { code: "UNSUPPORTED_QUERY" } });
+  }
+});
+
+it("keeps ops diagnostics scoped to the Organization", async () => {
+  await createApp("scoped", "scoped");
+  const foreign = (await (await call("/api/ops/metrics", "GET", undefined, OTHER_ORG)).json()) as {
+    metrics: { executions: { total: number } };
+  };
+  expect(foreign.metrics.executions.total).toBe(0);
+  const foreignJobs = (await (await call("/api/ops/jobs", "GET", undefined, OTHER_ORG)).json()) as {
+    jobs: { executions: { total: number } };
+  };
+  expect(foreignJobs.jobs.executions.total).toBe(0);
+});
+
+it("lists durable endpoints as scheduled tasks with delivery counts", async () => {
+  // Seed one endpoint of each kind directly: the tasks surface reports
+  // name, kind, enabled state, and recorded delivery depth with an honest
+  // null cadence (no scheduler rows exist in this slice).
+  const now = new Date().toISOString();
+  for (const [id, name, kind, enabled] of [
+    ["11111111-1111-4111-8111-111111111111", "ops-hook", "webhook", 1],
+    ["22222222-2222-4222-8222-222222222222", "ops-key", "api-key", 0],
+  ] as const) {
+    await bindings.DB.prepare(
+      "INSERT INTO endpoints(id,org_id,name,saga_id,kind,enabled,challenge,created_at) VALUES (?,?,?,?,?,?,?,?)",
+    )
+      .bind(id, ORG, name, echoSaga.id, kind, enabled, "none", now)
+      .run();
+  }
+  await bindings.DB.prepare(
+    "INSERT INTO endpoint_events(endpoint_id,event_id,input_json,execution_id,created_at) VALUES (?,?,?,?,?)",
+  )
+    .bind("11111111-1111-4111-8111-111111111111", "evt-1", "{}", "a".repeat(64), now)
+    .run();
+  const tasks = (await (await call("/api/ops/scheduled-tasks")).json()) as {
+    tasks: { name: string; kind: string; enabled: boolean; cadence: string | null; detail: string }[];
+  };
+  expect(tasks.tasks).toHaveLength(2);
+  expect(tasks.tasks[0]).toMatchObject({ name: "ops-hook", kind: "endpoint", enabled: true, cadence: null });
+  expect(tasks.tasks[0]?.detail).toContain("1 recorded deliveries");
+  expect(tasks.tasks[1]).toMatchObject({ name: "ops-key", enabled: false });
+  expect(tasks.tasks[1]?.detail).toContain("0 recorded deliveries");
+});
+
+it("aggregates every deploy-job status in platform progress", async () => {
+  // Seed one job per status directly: queued/running/failed join the
+  // succeeded build from the helper path in the aggregate counts.
+  const now = new Date().toISOString();
+  const appIds = [
+    "aaaaaaaa-1111-4111-8111-111111111111",
+    "bbbbbbbb-2222-4222-8222-222222222222",
+    "cccccccc-3333-4333-8333-333333333333",
+  ];
+  for (const [index, appId] of appIds.entries()) {
+    await bindings.DB.prepare(
+      "INSERT INTO apps(id,org_id,name,slug,owner_kind,managed_by,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?, ?,?)",
+    )
+      .bind(appId, ORG, `agg-${index}`, `agg-${index}`, "independent", null, "ready", now, now)
+      .run();
+  }
+  const statuses = ["queued", "running", "failed"] as const;
+  for (const [index, status] of statuses.entries()) {
+    await bindings.DB.prepare(
+      "INSERT INTO app_jobs(id,app_id,revision,status,created_at,started_at) VALUES (?,?,?,?,?,?)",
+    )
+      .bind(`dddddddd-1111-4111-8111-11111111111${index}`, appIds[index] as string, 1, status, now, now)
+      .run();
+  }
+  const jobs = (await (await call("/api/ops/jobs")).json()) as {
+    jobs: { appBuilds: { queued: number; running: number; succeeded: number; failed: number } };
+  };
+  expect(jobs.jobs.appBuilds).toMatchObject({ queued: 1, running: 1, failed: 1 });
+});
+
+it("retries terminal executions and cancels live ones through repairs", async () => {
+  // Submit a terminal Failed execution, then retry it through the repair
+  // route: the retry replays the original input under the fresh key.
+  const submitted = await worker.fetch(
+    new Request("http://local.test/api/executions", {
+      method: "POST",
+      headers: { ...headers(), "Idempotency-Key": "ops-repair-retry-001" },
+      body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "retry me" } }),
+    }),
+    bindings,
+  );
+  expect(submitted.status).toBe(202);
+  const { executionId } = (await submitted.json()) as { executionId: string };
+  await bindings.DB.prepare("UPDATE executions SET status='Failed',completed_at=?,error_json=? WHERE id=?")
+    .bind(new Date().toISOString(), JSON.stringify({ code: "ECHO_INTEGRATION_FAILED", message: "nope" }), executionId)
+    .run();
+  const retryInspect = await call("/api/ops/repairs", "POST", {
+    kind: "retry-execution",
+    targetId: executionId,
+    idempotencyKey: "ops-repair-retry-002",
+  });
+  expect(retryInspect.status).toBe(200);
+  expect(await retryInspect.json()).toMatchObject({ repair: { dryRun: true } });
+  // Live executions refuse retry: cancel the live one first.
+  await bindings.DB.prepare("UPDATE executions SET status='Running' WHERE id=?").bind(executionId).run();
+  const refused = await call("/api/ops/repairs", "POST", {
+    kind: "retry-execution",
+    targetId: executionId,
+    idempotencyKey: "ops-repair-retry-003",
+  });
+  expect(await refused.json()).toMatchObject({ error: { code: "EXECUTION_NOT_REPAIRABLE" } });
+  // Cancel the live execution through the repair route (dryRun:false).
+  // The native binding is real workerd: terminate is best-effort, the D1
+  // marker is the durable repair record.
+  const cancelled = await call("/api/ops/repairs", "POST", {
+    kind: "cancel-execution",
+    targetId: executionId,
+    dryRun: false,
+  });
+  expect(cancelled.status).toBe(200);
+  const cancelledBody = (await cancelled.json()) as { repair: { dryRun: boolean; result: { cancelled: boolean } } };
+  expect(cancelledBody.repair.dryRun).toBe(false);
+  const row = await bindings.DB.prepare("SELECT status FROM executions WHERE id=?")
+    .bind(executionId)
+    .first<{ status: string }>();
+  expect(["Cancelling", "Cancelled"]).toContain(row?.status);
+  // Unknown saga IDs and unknown executions fail closed.
+  const ghost = await call("/api/ops/repairs", "POST", {
+    kind: "retry-execution",
+    targetId: "d".repeat(64),
+    idempotencyKey: "ops-repair-retry-004",
+  });
+  expect(await ghost.json()).toMatchObject({ error: { code: "EXECUTION_NOT_FOUND" } });
+  // A retry whose Saga is no longer deployed fails closed (UNKNOWN_SAGA).
+  const orphanId = "e".repeat(64);
+  await bindings.DB.prepare(
+    "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at,completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      orphanId,
+      "00000000-0000-4000-8000-000000009999",
+      "retired",
+      "retired-v1",
+      ORG,
+      "00000000-0000-4000-8000-000000000002",
+      "{}",
+      1,
+      "Failed",
+      new Date().toISOString(),
+      new Date().toISOString(),
+    )
+    .run();
+  const orphan = await call("/api/ops/repairs", "POST", {
+    kind: "retry-execution",
+    targetId: orphanId,
+    idempotencyKey: "ops-repair-retry-005",
+    dryRun: false,
+  });
+  expect(await orphan.json()).toMatchObject({ error: { code: "UNKNOWN_SAGA" } });
+  // Cancelling an already-terminal execution through the repair route
+  // answers the current status with cancelled:false (lost-race path).
+  const settled = await call("/api/ops/repairs", "POST", {
+    kind: "cancel-execution",
+    targetId: executionId,
+    dryRun: false,
+  });
+  expect(await settled.json()).toMatchObject({ repair: { dryRun: false } });
 });

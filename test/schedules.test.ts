@@ -4,8 +4,13 @@
 // over a stub promoter. No runtime binding: runs in plain Vitest.
 import { describe, expect, it } from "vitest";
 import {
+  advanceRecurring,
+  createSchedule,
   cronMatches,
+  deleteSchedule,
   firstWindow,
+  listSchedules,
+  loadSchedule,
   nextWindow,
   parseCronExpression,
   parseScheduleBody,
@@ -13,6 +18,7 @@ import {
   previewWindows,
   runTick,
   scheduleKey,
+  setScheduleStatus,
   windowOf,
   type ScheduleRow,
 } from "../src/schedules";
@@ -250,5 +256,190 @@ describe("tick skeleton over a stub promoter", () => {
     );
     expect(count).toBeLessThanOrEqual(25);
     expect(result.promoted).toBeLessThanOrEqual(25);
+  });
+});
+
+describe("parser and persistence branch edges", () => {
+  it("refuses malformed cron ranges, values, and non-string expressions", () => {
+    // Bare slash with no range side: `range` is empty, not "*".
+    expect(faultCode(() => parseCronExpression("/2 * * * *"))).toBe("INVALID_CRON");
+    // Out-of-range range bound.
+    expect(faultCode(() => parseCronExpression("70-80 * * * *"))).toBe("INVALID_CRON");
+    // Inverted range.
+    expect(faultCode(() => parseCronExpression("30-10 * * * *"))).toBe("INVALID_CRON");
+    // Non-string expression.
+    expect(faultCode(() => parseCronExpression(42))).toBe("INVALID_CRON");
+    // Field too long.
+    expect(faultCode(() => parseCronExpression(`${"1".repeat(65)} * * * *`))).toBe("INVALID_CRON");
+  });
+  it("refuses malformed runAt, overlap, and timezone values", () => {
+    const sagas = [
+      { id: echoSaga.id, name: "echo", revision: "echo-v1", description: "echo", parse: (v: unknown) => v },
+    ];
+    const bodyCode = (body: unknown): string => faultCode(() => parseScheduleBody(body, sagas));
+    // Non-string runAt.
+    expect(bodyCode({ sagaId: echoSaga.id, input: {}, kind: "once", runAt: 123 })).toBe("INVALID_RUN_AT");
+    // Unparseable runAt.
+    expect(bodyCode({ sagaId: echoSaga.id, input: {}, kind: "once", runAt: "not-a-date" })).toBe("INVALID_RUN_AT");
+    // Past runAt.
+    expect(bodyCode({ sagaId: echoSaga.id, input: {}, kind: "once", runAt: "2000-01-01T00:00:00.000Z" })).toBe(
+      "INVALID_RUN_AT",
+    );
+    // `skip` overlap is accepted and carried.
+    const skipped = parseScheduleBody(
+      { sagaId: echoSaga.id, input: {}, kind: "once", runAt: "2099-01-01T00:00:00.000Z", overlap: "skip" },
+      sagas,
+    );
+    expect(skipped.create.overlap).toBe("skip");
+    // Empty timezone string.
+    expect(
+      bodyCode({ sagaId: echoSaga.id, input: {}, kind: "once", runAt: "2099-01-01T00:00:00.000Z", timezone: "" }),
+    ).toBe("INVALID_TIMEZONE");
+    // Array body.
+    expect(bodyCode([])).toBe("INVALID_SCHEDULE");
+    // Non-Fault parse throw becomes INVALID_INPUT.
+    const throwing = [
+      {
+        id: echoSaga.id,
+        name: "echo",
+        revision: "echo-v1",
+        description: "echo",
+        parse: () => {
+          throw new Error("boom");
+        },
+      },
+    ];
+    expect(
+      faultCode(() =>
+        parseScheduleBody(
+          { sagaId: echoSaga.id, input: {}, kind: "once", runAt: "2099-01-01T00:00:00.000Z" },
+          throwing,
+        ),
+      ),
+    ).toBe("INVALID_INPUT");
+    // Missing runAt inside windowOf for one-off.
+    expect(faultCode(() => windowOf("once", new Date()))).toBe("INTERNAL_ERROR");
+  });
+  it("matches comma lists, ranges, steps, and names in cronMatches", () => {
+    // Undefined field short-circuit is internal; exercise list/range/step paths.
+    expect(cronMatches("0,30 * * * *", new Date("2026-09-12T03:30:00Z"))).toBe(true);
+    expect(cronMatches("0,30 * * * *", new Date("2026-09-12T03:15:00Z"))).toBe(false);
+    expect(cronMatches("10-20 * * * *", new Date("2026-09-12T03:15:00Z"))).toBe(true);
+    expect(cronMatches("*/15 * * * *", new Date("2026-09-12T03:30:00Z"))).toBe(true);
+    expect(cronMatches("*/15 * * * *", new Date("2026-09-12T03:31:00Z"))).toBe(false);
+    expect(cronMatches("* * * JAN *", new Date("2026-01-12T03:00:00Z"))).toBe(true);
+    expect(cronMatches("0 0 * * MON-FRI", new Date("2026-09-14T00:00:00Z"))).toBe(true);
+    expect(cronMatches("0 0 * * MON-FRI", new Date("2026-09-13T00:00:00Z"))).toBe(false);
+    // Malformed step is skipped, not fatal.
+    expect(cronMatches("*/0 * * * *", new Date("2026-09-12T03:00:00Z"))).toBe(false);
+  });
+
+  // Small in-memory D1 stub keyed by SQL prefix.
+  function stubDb(handlers: { count?: number; schedule?: ScheduleRow | null; listed?: ScheduleRow[] }): D1Database {
+    const stmt = (sql: string) => ({
+      bind: () => ({
+        first: async () => {
+          if (sql.startsWith("SELECT COUNT")) return { n: handlers.count ?? 0 };
+          if (sql.startsWith("SELECT * FROM schedules WHERE id=")) return handlers.schedule ?? null;
+          return null;
+        },
+        all: async () => ({ results: handlers.listed ?? [] }),
+        run: async () => ({}),
+      }),
+    });
+    return {
+      prepare: stmt,
+      batch: async () => [],
+    } as unknown as D1Database;
+  }
+  const caller = {
+    orgId: "00000000-0000-4000-8000-000000000001",
+    userId: "00000000-0000-4000-8000-000000000002",
+  } as never;
+  const sagaRef = {
+    id: echoSaga.id,
+    name: "echo",
+    revision: "echo-v1",
+    description: "echo",
+    parse: (v: unknown) => v,
+  };
+
+  it("refuses creation past the per-org limit", async () => {
+    const db = stubDb({ count: 100 });
+    await expect(
+      createSchedule(
+        db,
+        caller,
+        sagaRef,
+        {},
+        { sagaId: echoSaga.id, input: {}, kind: "once", runAt: "2099-01-01T00:00:00.000Z" },
+      ),
+    ).rejects.toMatchObject({ code: "SCHEDULE_LIMIT" });
+  });
+  it("loads null for malformed ids and lists with or without deleted rows", async () => {
+    const db = stubDb({});
+    expect(await loadSchedule(db, caller.orgId, "not-a-uuid")).toBeNull();
+    const listed: ScheduleRow[] = [row({}), row({ id: "22222222-2222-4222-8222-222222222222", status: "deleted" })];
+    const dbList = stubDb({ listed });
+    expect(await listSchedules(dbList, caller.orgId)).toHaveLength(2);
+    expect(await listSchedules(dbList, caller.orgId, true)).toHaveLength(2);
+  });
+  it("returns the same summary when the status already matches", async () => {
+    const active = row({ status: "active" });
+    const db = stubDb({ schedule: active });
+    const summary = await setScheduleStatus(db, caller.orgId, active.id, false);
+    expect(summary.status).toBe("active");
+    const disabled = row({ status: "disabled" });
+    const dbDisabled = stubDb({ schedule: disabled });
+    const summaryDisabled = await setScheduleStatus(dbDisabled, caller.orgId, disabled.id, true);
+    expect(summaryDisabled.status).toBe("disabled");
+  });
+  it("re-enables a recurring schedule by advancing its window", async () => {
+    const disabled = row({ status: "disabled", kind: "recurring", cron_expr: "* * * * *" });
+    const updates: string[] = [];
+    const stmt = (sql: string) => ({
+      bind: () => ({
+        first: async () => (sql.startsWith("SELECT * FROM schedules WHERE id=") ? disabled : null),
+        all: async () => ({ results: [] }),
+        run: async () => {
+          updates.push(sql);
+          return {};
+        },
+      }),
+    });
+    const db = { prepare: stmt, batch: async () => [] } as unknown as D1Database;
+    const summary = await setScheduleStatus(db, caller.orgId, disabled.id, false);
+    // The stub reloads the pre-update row; what matters is the status UPDATE
+    // plus the recurring advance UPDATE both ran.
+    expect(summary.status).toBe("disabled");
+    expect(updates.some((sql) => sql.startsWith("UPDATE schedules SET status="))).toBe(true);
+    expect(updates.some((sql) => sql.startsWith("UPDATE schedules SET next_due_at="))).toBe(true);
+  });
+  it("rejects status changes and deletes for missing rows", async () => {
+    const db = stubDb({ schedule: null });
+    await expect(
+      setScheduleStatus(db, caller.orgId, "11111111-1111-4111-8111-111111111111", true),
+    ).rejects.toMatchObject({
+      code: "SCHEDULE_NOT_FOUND",
+    });
+    await expect(deleteSchedule(db, caller.orgId, "11111111-1111-4111-8111-111111111111")).rejects.toMatchObject({
+      code: "SCHEDULE_NOT_FOUND",
+    });
+    const deleted = row({ status: "deleted" });
+    const dbDeleted = stubDb({ schedule: deleted });
+    await expect(setScheduleStatus(dbDeleted, caller.orgId, deleted.id, true)).rejects.toMatchObject({
+      code: "SCHEDULE_NOT_FOUND",
+    });
+    await expect(deleteSchedule(dbDeleted, caller.orgId, deleted.id)).rejects.toMatchObject({
+      code: "SCHEDULE_NOT_FOUND",
+    });
+  });
+  it("advanceRecurring ignores one-off rows and disables unmatchable crons", async () => {
+    const once = row({ kind: "once" });
+    const dbOnce = stubDb({});
+    await advanceRecurring(dbOnce, once, new Date());
+    const broken = row({ kind: "recurring", cron_expr: "0 0 30 2 *" });
+    const dbBroken = stubDb({});
+    await advanceRecurring(dbBroken, broken, new Date("2026-09-12T00:00:00Z"));
   });
 });

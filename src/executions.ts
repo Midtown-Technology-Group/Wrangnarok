@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0
 import { NonRetryableError } from "cloudflare:workflows";
 import {
+  DEFAULT_SAGA_POLICY,
   digestSaga,
   encodeHistoryCursor,
   Fault,
   executionId,
   helloSaga,
   ninjaSaga,
+  parseSagaPolicy,
+  POLICY_JSON_BOUND,
+  POLICY_VERSION,
   RECOVERY_WINDOW_MS,
   smokeSaga,
 } from "./domain";
-import type { ExecutionStatus, HistoryQuery, Principal, SafeError, SagaDef } from "./domain";
+import type { ExecutionStatus, HistoryQuery, Principal, SafeError, SagaDef, SagaRuntimePolicy } from "./domain";
 import type { Connection } from "./integrations";
 import { buildOrgCtx } from "./saga";
 import type { OrgCtx } from "./saga";
@@ -32,6 +36,84 @@ export interface ExecutionRow {
   completed_at: string | null;
   result_json: string | null;
   error_json: string | null;
+  /** Applied runtime-policy snapshot (RUN-01, ADR 018). Null on rows written
+   * before migration 0007; read paths treat null as DEFAULT_SAGA_POLICY. */
+  policy_json: string | null;
+}
+export interface SagaPolicyRecord {
+  readonly policy: SagaRuntimePolicy;
+  readonly version: number;
+  readonly updatedAt: string;
+}
+/** Parse a stored policy snapshot. Corrupt snapshots fail closed to the
+ * default policy rather than inventing per-Saga behavior. */
+export function parseStoredPolicy(value: string | null): SagaRuntimePolicy {
+  if (value === null) return DEFAULT_SAGA_POLICY;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!objectLike(parsed) || !objectLike(parsed.policy)) return DEFAULT_SAGA_POLICY;
+    return parseSagaPolicy(parsed.policy, DEFAULT_SAGA_POLICY);
+  } catch {
+    return DEFAULT_SAGA_POLICY;
+  }
+}
+function objectLike(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+/** Load the effective policy for one (org, Saga): the persisted operator row
+ * when present, else DEFAULT_SAGA_POLICY. Never throws on missing rows. */
+export async function loadSagaPolicy(db: D1Database, orgId: string, sagaId: string): Promise<SagaPolicyRecord> {
+  try {
+    const row = await db
+      .prepare("SELECT policy_json,version,updated_at FROM saga_policies WHERE org_id=? AND saga_id=?")
+      .bind(orgId, sagaId)
+      .first<{ policy_json: string; version: number; updated_at: string }>();
+    if (!row) {
+      return { policy: DEFAULT_SAGA_POLICY, version: POLICY_VERSION, updatedAt: new Date(0).toISOString() };
+    }
+    return { policy: parseStoredPolicy(row.policy_json), version: row.version, updatedAt: row.updated_at };
+  } catch {
+    // Old DB before migration 0007 (or a missing table in a unit double):
+    // policy reverts to the code default rather than failing submit.
+    return { policy: DEFAULT_SAGA_POLICY, version: POLICY_VERSION, updatedAt: new Date(0).toISOString() };
+  }
+}
+/** Persist one operator policy row. Partial bodies merge over the current row
+ * (defaults for a fresh row); unknown keys reject via parseSagaPolicy.
+ * Returns the stored record; version bumps on every write. */
+export async function storeSagaPolicy(
+  db: D1Database,
+  orgId: string,
+  sagaId: string,
+  body: unknown,
+): Promise<SagaPolicyRecord> {
+  const current = await loadSagaPolicy(db, orgId, sagaId);
+  const policy = parseSagaPolicy(body, current.policy);
+  const snapshot = JSON.stringify({ version: POLICY_VERSION, policy });
+  if (new TextEncoder().encode(snapshot).byteLength > POLICY_JSON_BOUND) {
+    throw new Fault(400, "INVALID_POLICY", "The policy snapshot exceeds its storage bound.");
+  }
+  const now = new Date().toISOString();
+  const existing = await db
+    .prepare("SELECT version FROM saga_policies WHERE org_id=? AND saga_id=?")
+    .bind(orgId, sagaId)
+    .first<{ version: number }>();
+  if (!existing) {
+    await db
+      .prepare("INSERT INTO saga_policies(org_id,saga_id,policy_json,version,updated_at) VALUES (?,?,?,?,?)")
+      .bind(orgId, sagaId, snapshot, POLICY_VERSION, now)
+      .run();
+    return { policy, version: POLICY_VERSION, updatedAt: now };
+  }
+  const next = existing.version + 1;
+  await db
+    .prepare("UPDATE saga_policies SET policy_json=?,version=?,updated_at=? WHERE org_id=? AND saga_id=?")
+    .bind(snapshot, next, now, orgId, sagaId)
+    .run();
+  return { policy, version: next, updatedAt: now };
+}
+export function policySnapshot(policy: SagaRuntimePolicy): string {
+  return JSON.stringify({ version: POLICY_VERSION, policy });
 }
 export async function visibleExecution(db: D1Database, id: string, caller: Principal): Promise<ExecutionRow> {
   const row = await db
@@ -59,17 +141,51 @@ export async function submit(env: Bindings, caller: Principal, key: string, saga
   // Canonical per ADR 001 (reconciled #15): deterministic SHA execution ID
   // scoped to (org, user, key); required Idempotency-Key; createBatch
   // retained-ID dedup + dispatched marker; 15-min same-revision retry gate;
-  // Pending never auto-swept; caller-driven retry on 503.
+  // Pending never auto-swept; caller-driven retry on 503. RUN-01 (ADR 018):
+  // the persisted per-Saga runtime policy gates admission and is snapshotted
+  // onto the Execution row so applied behavior stays inspectable.
   const id = await executionId(caller, key);
   const inputJson = JSON.stringify(input);
-  const inserted = await env.DB.prepare(
-    "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,created_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
-  )
-    .bind(id, saga.id, saga.name, saga.revision, caller.orgId, caller.userId, inputJson, new Date().toISOString())
-    .run();
+  const effective = await loadSagaPolicy(env.DB, caller.orgId, saga.id);
+  const policyJson = policySnapshot(effective.policy);
+  let inserted: D1Result;
+  try {
+    inserted = await env.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,created_at,policy_json) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+    )
+      .bind(
+        id,
+        saga.id,
+        saga.name,
+        saga.revision,
+        caller.orgId,
+        caller.userId,
+        inputJson,
+        new Date().toISOString(),
+        policyJson,
+      )
+      .run();
+  } catch {
+    // Old DB before migration 0007: fall back to the pre-policy insert shape.
+    inserted = await env.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,created_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
+    )
+      .bind(id, saga.id, saga.name, saga.revision, caller.orgId, caller.userId, inputJson, new Date().toISOString())
+      .run();
+  }
   const row = await visibleExecution(env.DB, id, caller);
   if (row.saga_id !== saga.id || row.input_json !== inputJson) {
     throw new Fault(409, "IDEMPOTENCY_CONFLICT", "This key already identifies different input.");
+  }
+  // Snapshot backfill: rows inserted before migration 0007 (or by an old
+  // insert path) carry NULL; the submit path stamps the effective policy so
+  // detail always exposes what admission applied.
+  try {
+    if (row.policy_json === null || row.policy_json === undefined) {
+      await env.DB.prepare("UPDATE executions SET policy_json=? WHERE id=?").bind(policyJson, id).run();
+    }
+  } catch {
+    // Old DB without the column: the snapshot is unavailable, never fatal.
   }
   // A cancelled Execution never dispatches (again): the row stays as the
   // durable receipt, and the caller must submit a fresh Idempotency-Key.
@@ -77,6 +193,25 @@ export async function submit(env: Bindings, caller: Principal, key: string, saga
     throw new Fault(409, "EXECUTION_CANCELLED", "This Execution was cancelled and will not dispatch.");
   }
   if (!row.dispatched) {
+    // Pause/admission policy (RUN-01): disabled Sagas fence new dispatches
+    // with 409 SAGA_PAUSED; maxConcurrent fences with 429 ADMISSION_LIMITED.
+    // In-flight Executions keep their snapshot and run to their own terminal.
+    if (!effective.policy.admission.enabled) {
+      throw new Fault(409, "SAGA_PAUSED", "This Saga is paused for this Organization; new Executions do not dispatch.");
+    }
+    if (effective.policy.admission.maxConcurrent > 0) {
+      // The row itself was just inserted as Pending: exempt it so the first
+      // Execution under a limit of 1 still dispatches, while the next active
+      // row fences with 429.
+      const active = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM executions WHERE org_id=? AND saga_id=? AND status IN ('Pending','Running','Cancelling') AND id<>?",
+      )
+        .bind(caller.orgId, saga.id, id)
+        .first<{ n: number }>();
+      if ((active?.n ?? 0) >= effective.policy.admission.maxConcurrent) {
+        throw new Fault(429, "ADMISSION_LIMITED", "This Saga reached its concurrent Execution limit.");
+      }
+    }
     // Same-revision + 15-min refusal window (ADR 001 #15): never auto-fail
     // Pending, never resurrect after the window, never invent success.
     if (row.saga_revision !== saga.revision || Date.now() - Date.parse(row.created_at) >= RECOVERY_WINDOW_MS) {

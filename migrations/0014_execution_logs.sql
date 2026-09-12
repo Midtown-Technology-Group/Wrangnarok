@@ -1,0 +1,3 @@
+CREATE TABLE execution_logs(seq INTEGER PRIMARY KEY AUTOINCREMENT, execution_id TEXT NOT NULL REFERENCES executions(id), org_id TEXT NOT NULL REFERENCES organizations(id), user_id TEXT NOT NULL, saga_id TEXT NOT NULL, saga_name TEXT NOT NULL, level TEXT NOT NULL CHECK(level IN ('DEBUG','INFO','WARN','ERROR','PROGRESS')), message TEXT NOT NULL CHECK(length(message) BETWEEN 1 AND 1024), data_json TEXT CHECK(data_json IS NULL OR length(data_json) <= 2048), created_at TEXT NOT NULL);
+CREATE INDEX execution_logs_tail ON execution_logs(execution_id, seq ASC);
+CREATE INDEX execution_logs_search ON execution_logs(org_id, user_id, created_at ASC, seq ASC);

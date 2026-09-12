@@ -25,8 +25,18 @@ import migration2 from "../migrations/0002_cancelling.sql?raw";
 import migration3 from "../migrations/0003_usage_blocks.sql?raw";
 import migration4 from "../migrations/0004_solutions_install.sql?raw";
 import migration5 from "../migrations/0005_forms.sql?raw";
+import migration6 from "../migrations/0006_apps.sql?raw";
 import migration7 from "../migrations/0007_org_membership.sql?raw";
 import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
+import migration9 from "../migrations/0009_tables.sql?raw";
+import migration10 from "../migrations/0010_solutions_activation.sql?raw";
+import migration11 from "../migrations/0011_connection_admin.sql?raw";
+import migration18 from "../migrations/0018_ops.sql?raw";
+import migration19 from "../migrations/0019_files.sql?raw";
+import migration20 from "../migrations/0020_artifacts.sql?raw";
+import migration21 from "../migrations/0021_endpoints.sql?raw";
+import migration22 from "../migrations/0022_app_runtime.sql?raw";
+import migration23 from "../migrations/0023_config.sql?raw";
 import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
@@ -105,8 +115,18 @@ beforeEach(async () => {
   await bindings.DB.exec(migration4);
   await bindings.DB.exec(seed);
   await bindings.DB.exec(migration5);
+  await bindings.DB.exec(migration6);
   await bindings.DB.exec(migration7);
   await bindings.DB.exec(migration8);
+  await bindings.DB.exec(migration9);
+  await bindings.DB.exec(migration10);
+  await bindings.DB.exec(migration11);
+  await bindings.DB.exec(migration18);
+  await bindings.DB.exec(migration19);
+  await bindings.DB.exec(migration20);
+  await bindings.DB.exec(migration21);
+  await bindings.DB.exec(migration22);
+  await bindings.DB.exec(migration23);
   // Fixture caller bootstraps to admin of org A inside authenticate; the
   // ordinary identity holds org-A membership too (member), so collection
   // routes gate cleanly. External/stranger stay strangers until invited.
@@ -323,6 +343,12 @@ it("previews cascading deletes with retained ExecutionHistory and refuses manage
     connectionsLoose: 0,
     connectionsManaged: 0,
     memberships: 1,
+    forms: 0,
+    apps: 0,
+    tables: 0,
+    files: 0,
+    artifacts: 0,
+    endpoints: 0,
     retained: ["executions", "operations"],
     canDelete: true,
   });
@@ -354,6 +380,224 @@ it("previews cascading deletes with retained ExecutionHistory and refuses manage
     status: 409,
     body: { error: { code: "DELETE_BLOCKED" } },
   });
+});
+
+it("removes owned resources and R2 bytes with the org, blocks managed rows", async () => {
+  const stamp = new Date().toISOString();
+  const created = await call("/api/orgs", "POST", USER_ADMIN, { name: "owned" });
+  expect(created.status).toBe(201);
+  const orgO = created.body.id as string;
+  await bindings.DB.prepare("INSERT INTO forms(id,org_id,name,saga_id,fields_json,created_at) VALUES (?,?,?,?,?,?)")
+    .bind("00000000-0000-4000-8000-000000000301", orgO, "intake", echoSaga.id, "[]", stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO apps(id,org_id,name,slug,owner_kind,managed_by,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      "00000000-0000-4000-8000-000000000302",
+      orgO,
+      "portal",
+      "portal",
+      "independent",
+      null,
+      "created",
+      stamp,
+      stamp,
+    )
+    .run();
+  await bindings.DB.prepare("INSERT INTO tables(id,org_id,name,owner_user_id,created_at) VALUES (?,?,?,?,?)")
+    .bind("00000000-0000-4000-8000-000000000303", orgO, "notes", USER_ADMIN, stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO table_rows(table_id,org_id,doc_id,owner_user_id,data_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+  )
+    .bind("00000000-0000-4000-8000-000000000303", orgO, "doc-1", USER_ADMIN, "{}", stamp, stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO file_locations(org_id,name,max_bytes,content_types_json,shared_read,created_at) VALUES (?,?,?,?,?,?)",
+  )
+    .bind(orgO, "uploads", 1024, "[]", 0, stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO files(org_id,location,path,version,size,content_type,sha256,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(orgO, "uploads", "note.txt", 1, 3, "text/plain", "a".repeat(64), "ready", stamp, stamp)
+    .run();
+  await bindings.FILES.put(`${orgO}/uploads/note.txt`, new TextEncoder().encode("hey"));
+  await bindings.DB.prepare(
+    "INSERT INTO artifacts(id,org_id,creator_user_id,name,mime,size_bytes,version,status,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      "00000000-0000-4000-8000-000000000304",
+      orgO,
+      USER_ADMIN,
+      "report",
+      "text/plain",
+      3,
+      1,
+      "active",
+      stamp,
+      stamp,
+      null,
+    )
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO artifact_versions(id,artifact_id,version,mime,size_bytes,created_at) VALUES (?,?,?,?,?,?)",
+  )
+    .bind("00000000-0000-4000-8000-000000000305", "00000000-0000-4000-8000-000000000304", 1, "text/plain", 3, stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO artifact_bindings(id,artifact_id,org_id,scope,ref_id,created_at) VALUES (?,?,?,?,?,?)",
+  )
+    .bind(
+      "00000000-0000-4000-8000-000000000306",
+      "00000000-0000-4000-8000-000000000304",
+      orgO,
+      "workspace",
+      "desk",
+      stamp,
+    )
+    .run();
+  await bindings.ARTIFACTS!.put("artifacts/00000000-0000-4000-8000-000000000304/v1", new TextEncoder().encode("hey"));
+  await bindings.DB.prepare(
+    "INSERT INTO endpoints(id,org_id,name,saga_id,kind,enabled,created_at) VALUES (?,?,?,?,?,?,?)",
+  )
+    .bind("00000000-0000-4000-8000-000000000307", orgO, "hook", echoSaga.id, "api-key", 1, stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO endpoint_events(endpoint_id,event_id,input_json,execution_id,created_at) VALUES (?,?,?,?,?)",
+  )
+    .bind("00000000-0000-4000-8000-000000000307", "evt-1", "{}", "e".repeat(64), stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO configs(id,org_id,key,type,value_json,managed_by,updated_at,updated_by) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("00000000-0000-4000-8000-000000000308", orgO, "greeting", "string", '"hi"', null, stamp, USER_ADMIN)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO notifications(id,org_id,user_id,scope,category,title,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+  )
+    .bind("00000000-0000-4000-8000-000000000309", orgO, USER_ADMIN, "org", "ops", "hello", "pending", stamp, stamp)
+    .run();
+  const preview = await call(`/api/orgs/${orgO}/delete-preview`, "GET", USER_ADMIN);
+  expect(preview.status).toBe(200);
+  expect(preview.body).toMatchObject({
+    canDelete: true,
+    forms: 1,
+    apps: 1,
+    tables: 1,
+    tableRows: 1,
+    fileLocations: 1,
+    files: 1,
+    artifacts: 1,
+    endpoints: 1,
+    configsLoose: 1,
+    notifications: 1,
+  });
+  const deleted = await call(`/api/orgs/${orgO}`, "DELETE", USER_ADMIN);
+  expect(deleted.status).toBe(200);
+  expect(deleted.body).toMatchObject({
+    orgId: orgO,
+    deletedForms: 1,
+    deletedApps: 1,
+    deletedTables: 1,
+    deletedTableRows: 1,
+    deletedFileLocations: 1,
+    deletedFiles: 1,
+    deletedArtifacts: 1,
+    deletedArtifactBindings: 1,
+    deletedEndpoints: 1,
+    deletedConfigs: 1,
+    deletedNotifications: 1,
+    deletedFileObjects: 1,
+    deletedArtifactObjects: 1,
+  });
+  for (const [table, column] of [
+    ["forms", "org_id"],
+    ["apps", "org_id"],
+    ["tables", "org_id"],
+    ["table_rows", "org_id"],
+    ["file_locations", "org_id"],
+    ["files", "org_id"],
+    ["file_policies", "org_id"],
+    ["file_capabilities", "org_id"],
+    ["artifacts", "org_id"],
+    ["artifact_retention", "org_id"],
+    ["endpoints", "org_id"],
+    ["configs", "org_id"],
+    ["notifications", "org_id"],
+  ] as const) {
+    const left = await bindings.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${column}=?`)
+      .bind(orgO)
+      .first<{ n: number }>();
+    expect(left?.n).toBe(0);
+  }
+  expect(await bindings.FILES.get(`${orgO}/uploads/note.txt`)).toBeNull();
+  expect(await bindings.ARTIFACTS!.get("artifacts/00000000-0000-4000-8000-000000000304/v1")).toBeNull();
+  // Solution-owned apps and managed bundle rows block deletion.
+  const created2 = await call("/api/orgs", "POST", USER_ADMIN, { name: "managed-app" });
+  const orgS = created2.body.id as string;
+  await bindings.DB.prepare(
+    "INSERT INTO apps(id,org_id,name,slug,owner_kind,managed_by,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      "00000000-0000-4000-8000-000000000311",
+      orgS,
+      "bundle-app",
+      "bundle-app",
+      "solution",
+      "bundle@1.0.0",
+      "created",
+      stamp,
+      stamp,
+    )
+    .run();
+  expect(await call(`/api/orgs/${orgS}/delete-preview`, "GET", USER_ADMIN)).toMatchObject({
+    status: 200,
+    body: { canDelete: false, appsManaged: 1 },
+  });
+  expect(await call(`/api/orgs/${orgS}`, "DELETE", USER_ADMIN)).toMatchObject({
+    status: 409,
+    body: { error: { code: "DELETE_BLOCKED" } },
+  });
+  // Managed configs block deletion with their own message.
+  const created3 = await call("/api/orgs", "POST", USER_ADMIN, { name: "managed-config" });
+  const orgC = created3.body.id as string;
+  await bindings.DB.prepare(
+    "INSERT INTO configs(id,org_id,key,type,value_json,managed_by,updated_at,updated_by) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("00000000-0000-4000-8000-000000000312", orgC, "theme", "string", '"dark"', "bundle@1.0.0", stamp, USER_ADMIN)
+    .run();
+  expect(await call(`/api/orgs/${orgC}/delete-preview`, "GET", USER_ADMIN)).toMatchObject({
+    status: 200,
+    body: { canDelete: false, configsManaged: 1 },
+  });
+  expect(await call(`/api/orgs/${orgC}`, "DELETE", USER_ADMIN)).toMatchObject({
+    status: 409,
+    body: { error: { code: "DELETE_BLOCKED" } },
+  });
+  // Orphaned bytes fail closed instead of silently abandoned.
+  const created4 = await call("/api/orgs", "POST", USER_ADMIN, { name: "no-bucket" });
+  const orgN = created4.body.id as string;
+  await bindings.DB.prepare(
+    "INSERT INTO files(org_id,location,path,version,size,content_type,sha256,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(orgN, "uploads", "ghost.txt", 1, 3, "text/plain", "b".repeat(64), "ready", stamp, stamp)
+    .run();
+  const storeless = await worker.fetch(
+    new Request(`http://local.test/api/orgs/${orgN}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    }),
+    {
+      ...bindings,
+      FILES: undefined as unknown as R2Bucket,
+      LAB_USER_ID: USER_ADMIN,
+      LAB_FIXTURE_USER_ID: USER_ADMIN,
+      ADMIN_USER_IDS: USER_ADMIN,
+    },
+  );
+  expect(storeless.status).toBe(503);
 });
 
 it("keeps in-flight jobs visible to org admins after a member is revoked", async () => {
@@ -647,10 +891,13 @@ it("pins admin validation, error, and filter branches", async () => {
     status: 409,
     body: { error: { code: "DELETE_BLOCKED" } },
   });
-  await bindings.DB.prepare("DELETE FROM bundle_installs WHERE org_id=?").bind(orgB).run();
+  await bindings.DB.exec("DROP TABLE bundle_installs;");
+  await bindings.DB.exec(
+    "CREATE TABLE bundle_installs(id INTEGER PRIMARY KEY AUTOINCREMENT, bundle_id TEXT NOT NULL, version TEXT NOT NULL, org_id TEXT NOT NULL REFERENCES organizations(id), manifest_hash TEXT NOT NULL, installed_at TEXT NOT NULL);",
+  );
   // Pre-0004 databases predate connections.managed_by and bundle_installs:
   // the preview falls back instead of failing.
-  await bindings.DB.exec("DROP TABLE connections; DROP TABLE bundle_installs;");
+  await bindings.DB.exec("DROP TABLE connections;");
   await bindings.DB.exec(
     "CREATE TABLE connections(id TEXT PRIMARY KEY, org_id TEXT NOT NULL, endpoint TEXT NOT NULL);",
   );

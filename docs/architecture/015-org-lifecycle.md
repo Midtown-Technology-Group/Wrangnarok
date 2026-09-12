@@ -83,15 +83,25 @@ lifecycle semantics onto D1 (Worker + Workflows + D1 only; no new primitive).
 ### Cascading delete
 
 - Deleting an Organization previews first (`GET /api/orgs/:id/delete-preview`): counts of Executions, Operations,
-  loose vs managed Connections, bundle install records, and memberships.
-- **ExecutionHistory is always retained** (`retained: ["executions", "operations"]`): Execution and Operation rows
-  are never deleted by the org-delete path. Once the org row is gone they are unreachable through the API (every
-  read is org-gated) but remain for audit/restore. Retention is structural, not just policy: migration
-  `0008_executions_org_fk.sql` drops the `executions.org_id` foreign key (table rebuild, same pattern as 0002) so
-  the delete is not blocked by a dangling reference. `operations.execution_id` keeps its foreign key — operations
-  are never orphaned because their execution row is never deleted.
-- Deletion refuses while managed Connections or bundle install records exist (`DELETE_BLOCKED`): the owning bundle
-  must be uninstalled first. Loose Connections, memberships, and the org row are removed in one D1 batch.
+  loose vs managed Connections, bundle install records, memberships, forms, apps (independent vs Solution-owned),
+  tables plus table rows, file locations plus files plus outstanding staging capabilities, artifacts (plus versions
+  and bindings), endpoints plus delivery events, loose vs managed configs, audit events (retained), notifications,
+  and managed bundle rows (active pointers, bundle config, bundle Sagas).
+- **ExecutionHistory and audit events are always retained** (`retained: ["executions", "operations"]`): Execution,
+  Operation, and audit-event rows are never deleted by the org-delete path. Once the org row is gone they are
+  unreachable through the API (every read is org-gated) but remain for audit/restore. Retention is structural, not
+  just policy: migration `0008_executions_org_fk.sql` drops the `executions.org_id` foreign key (table rebuild,
+  same pattern as 0002) so the delete is not blocked by a dangling reference. `operations.execution_id` keeps its
+  foreign key — operations are never orphaned because their execution row is never deleted.
+- Deletion refuses while managed Connections, bundle install records, Solution-owned apps, managed bundle rows, or
+  managed configs exist (`DELETE_BLOCKED`): the owning bundle must be uninstalled first. Loose Connections,
+  memberships, every other org-owned row, and the org row are removed in one D1 batch sequence.
+- **R2 bytes go first**: managed-file objects (plus outstanding staging objects) and every artifact version object
+  are deleted before the D1 batch. An interruption leaves D1 rows the next delete (or artifact retention cleanup)
+  picks up, never a deleted org over surviving bytes. R2 deletes are idempotent. Missing buckets fail closed
+  (`ORG_DELETE_STORE_MISSING`, 503): bytes must not be silently abandoned.
+- **Old-database tolerance**: counts and deletes for tables that postdate AUTH-01 treat a missing table as zero
+  rows, so old databases preview and delete cleanly. Real query errors still throw.
 
 ### Claim boundary (what this ADR does not do)
 

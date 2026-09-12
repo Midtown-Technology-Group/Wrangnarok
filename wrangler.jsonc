@@ -4,10 +4,15 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-09",
   "compatibility_flags": ["nodejs_compat"],
-  // Observability (Workers Logs + traces): sampling 1 while traffic is
-  // experiment-scale; revisit before any real load. Retention/quotas follow
-  // the account plan — verify vs current Cloudflare pricing before claiming
-  // Free-tier headroom for log/trace volume.
+  // Observability (Workers Logs + traces, issue #238): the top-level block
+  // is the local default — sampling 1 while traffic is experiment-scale.
+  // Deployed environments override sampling per env below (dev, preview):
+  // lower non-local defaults bound log/trace volume and cost at scale, and
+  // any temporary raise is an explicit per-env config edit, never a global
+  // flip. Retention/quotas follow the account plan — verify vs current
+  // Cloudflare pricing before claiming Free-tier headroom for log/trace
+  // volume. Per-request WRANGNAROK_REQUEST console lines are application
+  // logs and follow the same sampled pipeline.
   "observability": {
     "enabled": true,
     "logs": { "enabled": true, "head_sampling_rate": 1, "invocation_logs": true },
@@ -93,6 +98,16 @@
       // Dev-only ingress for smoke testing. Production stays without
       // workers_dev/routes until promotion is explicitly designed.
       "workers_dev": true,
+      // Issue #238: dev Override — sampled below local full capture. Dev is
+      // the smoke-test environment: 25% of logs and 10% of traces bound
+      // volume while keeping enough signal to debug post-deploy smoke. Raise
+      // temporarily with an explicit edit here (reviewed like code), then
+      // restore the default.
+      "observability": {
+        "enabled": true,
+        "logs": { "enabled": true, "head_sampling_rate": 0.25, "invocation_logs": true },
+        "traces": { "enabled": true, "head_sampling_rate": 0.1 },
+      },
       "vars": {
         "ENVIRONMENT": "dev",
         // LAB_ENABLED is a non-secret kill-switch (NOT a credential): dev
@@ -161,6 +176,15 @@
     "preview": {
       "name": "wrangnarok-preview",
       "workers_dev": true,
+      // Issue #238: preview override — the lowest default. The preview Worker
+      // is shared and disposable with tiny per-PR traffic: 10% of logs and
+      // traces is enough to confirm smoke health without paying full capture
+      // on every PR run. Same explicit-edit override contract as dev.
+      "observability": {
+        "enabled": true,
+        "logs": { "enabled": true, "head_sampling_rate": 0.1, "invocation_logs": true },
+        "traces": { "enabled": true, "head_sampling_rate": 0.1 },
+      },
       "vars": {
         "ENVIRONMENT": "preview",
         "LAB_ENABLED": "true",

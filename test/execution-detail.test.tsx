@@ -39,6 +39,15 @@ function detailFixture(overrides: Partial<ExecutionDetail> = {}): ExecutionDetai
     startedAt: "2026-09-10T08:00:01.000Z",
     completedAt: "2026-09-10T08:00:02.000Z",
     runtimeStatus: "complete",
+    policy: {
+      sagaId: echoSaga.id,
+      version: 1,
+      policy: {
+        timeout: { vendorTimeoutMs: 0, stepTimeout: "10 seconds" },
+        retry: { checkpointRetries: 2, vendorRetries: 0 },
+        admission: { enabled: true, maxConcurrent: 0 },
+      },
+    },
     input: { message: "hello" },
     result: { message: "hello" },
     error: null,
@@ -114,6 +123,30 @@ describe("execution detail rendering", () => {
     );
     expect(html).toContain("detail-runtime");
     expect(html).toContain("unavailable (native history expired or not yet dispatched)");
+  });
+
+  it("renders the applied runtime-policy snapshot", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <ExecutionDetailView
+          initial={detailFixture({
+            policy: {
+              sagaId: echoSaga.id,
+              version: 3,
+              policy: {
+                timeout: { vendorTimeoutMs: 250, stepTimeout: "10 seconds" },
+                retry: { checkpointRetries: 1, vendorRetries: 1 },
+                admission: { enabled: true, maxConcurrent: 2 },
+              },
+            },
+          })}
+        />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("detail-policy");
+    expect(html).toContain("v3");
+    expect(html).toContain("250ms");
+    expect(html).toContain("max 2 concurrent");
   });
 
   it("bounds JSON rendering at the D1 payload bound", () => {

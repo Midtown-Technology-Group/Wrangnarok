@@ -1,0 +1,11 @@
+# sec-endpoint lane scope (issue #236): validate integration endpoint values as safe URLs before persist/use.
+src/integrations/index.ts
+src/integrations/ninjaone.ts
+src/integrations/echo.ts
+src/connections.ts
+test/integrations.test.ts
+test/connections.test.ts
+test/integration-faults.test.ts
+docs/architecture/003-integrations-connections.md
+scripts/check-bundle-budget.mjs
+scopes/sec-endpoint.scope

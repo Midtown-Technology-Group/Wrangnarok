@@ -90,7 +90,9 @@ The budget is deliberately generous against the current ~62 KiB bundle. Shrink t
 
 ### Observability
 
-Workers Logs and traces are enabled in `wrangler.jsonc` (`observability.enabled`, sampling rate 1 at experiment scale). Every request additionally emits one `WRANGNAROK_REQUEST` JSON log line — method, route, status, duration only — scraped the same way as the `WRANGNAROK_USAGE` block. Access logs MUST NEVER carry headers, bodies, query strings, or secrets, mirroring the usage-block posture in the cost-logging section above.
+Workers Logs and traces are enabled in `wrangler.jsonc` (`observability.enabled`). Sampling is environment-specific (issue #238): the top-level block is the local default at full capture (logs and traces head sampling rate 1, experiment scale), while deployed environments sample below it — dev at 0.25 logs / 0.1 traces, preview at 0.1 / 0.1. Lower non-local defaults bound log/trace volume and cost at scale; a temporary raise for incident debugging is an explicit per-env config edit (reviewed like code), then restored — never a global flip of the top-level default.
+
+Every request additionally emits one `WRANGNAROK_REQUEST` JSON log line — method, route, status, duration only — scraped the same way as the `WRANGNAROK_USAGE` block. Access logs MUST NEVER carry headers, bodies, query strings, or secrets, mirroring the usage-block posture in the cost-logging section above.
 
 Retention and quotas follow the account plan, not this ADR: verify vs current Cloudflare pricing before claiming Free-tier headroom for log/trace volume, and revisit sampling before any real load.
 

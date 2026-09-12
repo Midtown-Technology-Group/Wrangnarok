@@ -13,6 +13,9 @@ export const ninjaSaga = Object.freeze({
   description: "Rung 1: list NinjaOne organizations read-only over client-credentials OAuth",
 });
 export const NINJA_INTEGRATION_ID = "0606e237-137b-4629-8346-85468e1c2df6";
+// TOOL-01 HaloPSA Code Mode provider (issue #170, ADR 022): stable identity
+// for the OpenAPI proof Integration. Never changes across source edits.
+export const HALO_INTEGRATION_ID = "a1b2c3d4-0000-4111-8111-000000000001";
 // Phase 2 multi-Integration Saga: NinjaOne census digested through the echo
 // Integration. Stable identity per ADR 002 (UUID + revision).
 export const digestSaga = Object.freeze({
@@ -66,6 +69,139 @@ export const VENDOR_TIMEOUT_MS = 1000;
 // Integration enforces its own deadline and surfaces NINJA_VENDOR_TIMEOUT
 // for both aborted and merely-late vendors. Sagas route it to timeout-mark-v1.
 export const NINJA_TIMEOUT_MS = 5000;
+// --- Persisted per-Saga runtime policy (RUN-01, ADR 018) --------------------
+// NEVER Saga source: buildCatalog rejects these keys, and ordinary callers
+// cannot change them. One row per (org, Saga) in D1 `saga_policies`; every
+// Execution snapshots the applied policy into `executions.policy_json` so the
+// applied behavior stays inspectable after later policy edits. Missing rows
+// resolve to DEFAULT_SAGA_POLICY, never to an invented per-Saga guess.
+export interface SagaRetryPolicy {
+  /** Engine-loss-only checkpoint retry ceiling (0-2, default 2). */
+  readonly checkpointRetries: number;
+  /** Integration/vendor step retry ceiling (0-2, default 0). */
+  readonly vendorRetries: number;
+}
+export interface SagaTimeoutPolicy {
+  /** Per-Operation vendor deadline in ms (0 disables, default by Integration). */
+  readonly vendorTimeoutMs: number;
+  /** Native Workflow step timeout label (fixed platform text, default below). */
+  readonly stepTimeout: string;
+}
+export interface SagaAdmissionPolicy {
+  /** Whether new Executions dispatch (default true). False fences submit. */
+  readonly enabled: boolean;
+  /** Max concurrent active (Pending/Running/Cancelling) Executions; 0 = unbounded. */
+  readonly maxConcurrent: number;
+}
+export interface SagaRuntimePolicy {
+  readonly timeout: SagaTimeoutPolicy;
+  readonly retry: SagaRetryPolicy;
+  /** Pause is admission-only (enabled=false): in-flight Executions keep their
+   * snapshot and run to their own terminal; no new dispatches under the key. */
+  readonly admission: SagaAdmissionPolicy;
+}
+export const POLICY_VERSION = 1;
+export const POLICY_JSON_BOUND = 2048;
+const POLICY_STEP_TIMEOUTS = ["10 seconds"] as const;
+export const DEFAULT_VENDOR_TIMEOUT_MS: Readonly<Record<string, number>> = Object.freeze({
+  echo: VENDOR_TIMEOUT_MS,
+  ninjaone: NINJA_TIMEOUT_MS,
+});
+export const DEFAULT_SAGA_POLICY: SagaRuntimePolicy = {
+  timeout: { vendorTimeoutMs: 0, stepTimeout: "10 seconds" },
+  retry: { checkpointRetries: STEP_RETRY_CEILING, vendorRetries: 0 },
+  admission: { enabled: true, maxConcurrent: 0 },
+};
+function policyFault(message: string): Fault {
+  return new Fault(400, "INVALID_POLICY", message);
+}
+/** Pure parser for operator-supplied policy bodies. Unknown keys reject;
+ * partial bodies merge over the current policy (defaults for a fresh row). */
+export function parseSagaPolicy(value: unknown, base: SagaRuntimePolicy = DEFAULT_SAGA_POLICY): SagaRuntimePolicy {
+  if (!object(value)) throw policyFault("Policy must be a JSON object with timeout, retry, and admission sections.");
+  for (const key of Object.keys(value)) {
+    if (!["timeout", "retry", "admission", "version"].includes(key)) {
+      throw policyFault(`Unknown policy field "${key}".`);
+    }
+  }
+  const timeoutRaw = value.timeout ?? {};
+  const retryRaw = value.retry ?? {};
+  const admissionRaw = value.admission ?? {};
+  if (!object(timeoutRaw) || !object(retryRaw) || !object(admissionRaw)) {
+    throw policyFault("Policy sections timeout, retry, and admission must be objects.");
+  }
+  for (const key of Object.keys(timeoutRaw)) {
+    if (!["vendorTimeoutMs", "stepTimeout"].includes(key)) throw policyFault(`Unknown timeout field "${key}".`);
+  }
+  for (const key of Object.keys(retryRaw)) {
+    if (!["checkpointRetries", "vendorRetries"].includes(key)) throw policyFault(`Unknown retry field "${key}".`);
+  }
+  for (const key of Object.keys(admissionRaw)) {
+    if (!["enabled", "maxConcurrent"].includes(key)) throw policyFault(`Unknown admission field "${key}".`);
+  }
+  const vendorTimeoutMs = timeoutRaw.vendorTimeoutMs ?? base.timeout.vendorTimeoutMs;
+  if (
+    typeof vendorTimeoutMs !== "number" ||
+    !Number.isInteger(vendorTimeoutMs) ||
+    vendorTimeoutMs < 0 ||
+    vendorTimeoutMs > 30000
+  ) {
+    throw policyFault("timeout.vendorTimeoutMs must be an integer 0 to 30000 (0 disables the override).");
+  }
+  const stepTimeout = timeoutRaw.stepTimeout ?? base.timeout.stepTimeout;
+  if (typeof stepTimeout !== "string" || !(POLICY_STEP_TIMEOUTS as readonly string[]).includes(stepTimeout)) {
+    throw policyFault('timeout.stepTimeout must be "10 seconds".');
+  }
+  const checkpointRetries = retryRaw.checkpointRetries ?? base.retry.checkpointRetries;
+  if (
+    typeof checkpointRetries !== "number" ||
+    !Number.isInteger(checkpointRetries) ||
+    checkpointRetries < 0 ||
+    checkpointRetries > STEP_RETRY_CEILING
+  ) {
+    throw policyFault(`retry.checkpointRetries must be an integer 0 to ${STEP_RETRY_CEILING}.`);
+  }
+  const vendorRetries = retryRaw.vendorRetries ?? base.retry.vendorRetries;
+  if (
+    typeof vendorRetries !== "number" ||
+    !Number.isInteger(vendorRetries) ||
+    vendorRetries < 0 ||
+    vendorRetries > STEP_RETRY_CEILING
+  ) {
+    throw policyFault(`retry.vendorRetries must be an integer 0 to ${STEP_RETRY_CEILING}.`);
+  }
+  const enabled = admissionRaw.enabled ?? base.admission.enabled;
+  if (typeof enabled !== "boolean") throw policyFault("admission.enabled must be a boolean.");
+  const maxConcurrent = admissionRaw.maxConcurrent ?? base.admission.maxConcurrent;
+  if (
+    typeof maxConcurrent !== "number" ||
+    !Number.isInteger(maxConcurrent) ||
+    maxConcurrent < 0 ||
+    maxConcurrent > 100
+  ) {
+    throw policyFault("admission.maxConcurrent must be an integer 0 to 100 (0 is unbounded).");
+  }
+  return {
+    timeout: { vendorTimeoutMs, stepTimeout },
+    retry: { checkpointRetries, vendorRetries },
+    admission: { enabled, maxConcurrent },
+  };
+}
+/** Resolve the effective vendor deadline: a per-Saga override wins when set;
+ * 0 means the Integration default (echo 1000ms, ninjaone 5000ms). */
+export function vendorDeadlineMs(policy: SagaRuntimePolicy, integrationDefaultMs: number): number {
+  return policy.timeout.vendorTimeoutMs > 0 ? policy.timeout.vendorTimeoutMs : integrationDefaultMs;
+}
+/** Resolve the effective vendor step retry limit: engine-loss-only with the
+ * operator ceiling. Business/expected failures still throw NonRetryableError
+ * so the engine never retries a non-idempotent mutation. */
+export function vendorRetryLimit(policy: SagaRuntimePolicy): number {
+  return Math.min(policy.retry.vendorRetries, STEP_RETRY_CEILING);
+}
+/** Resolve the effective checkpoint retry limit through the same operator ceiling. */
+export function checkpointRetryLimit(policy: SagaRuntimePolicy): number {
+  return Math.min(policy.retry.checkpointRetries, STEP_RETRY_CEILING);
+}
 export const EXECUTION_ID = /^[a-f0-9]{64}$/;
 export const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 export type ExecutionStatus =

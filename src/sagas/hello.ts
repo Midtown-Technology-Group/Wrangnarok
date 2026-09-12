@@ -9,6 +9,7 @@ import type { Bindings } from "../bindings";
 import { EXECUTION_ID, helloSaga, parseHelloInput } from "../domain";
 import type { ExecutionParams, HelloResult, SafeError } from "../domain";
 import { defineSaga } from "../saga";
+import { appendAuthorLog } from "../logs";
 import { scrubExecutionError, scrubExecutionValue } from "../secrets";
 import { beginOperation, failExecution, finishOperation, prepareExecution } from "../executions";
 import { executeSaga } from "./shared";
@@ -55,6 +56,19 @@ export const helloSagaDef = defineSaga<HelloResult>({
             greeting: `Hello, ${prepared.input.name}!`,
             name: prepared.input.name,
           };
+          // OBS-02 progress proof: the pilot emits one bounded PROGRESS row
+          // plus one INFO row from inside step.do(). Attribution comes from
+          // the immutable Execution row; SEC-01 scrubbing runs before the
+          // write, so a name carrying a secret substring can never persist.
+          await appendAuthorLog(ctx.db, id, {
+            level: "PROGRESS",
+            message: `Greeting ${prepared.input.name}`,
+          });
+          await appendAuthorLog(ctx.db, id, {
+            level: "INFO",
+            message: `Hello Saga greeted ${prepared.input.name}`,
+            data: { name: prepared.input.name },
+          });
           await finishOperation(ctx.db, id, "greet-v1", result);
           return { ok: true as const, result };
         },

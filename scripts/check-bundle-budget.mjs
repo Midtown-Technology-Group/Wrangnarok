@@ -17,6 +17,11 @@ import { join } from "node:path";
 // fixture bootstrap; no new dependencies) measures ~144 KiB combined after a
 // shrink pass on the bootstrap DDL. Same deliberate feature headroom as the
 // 120 KiB raise, not dependency bloat: package.json is unchanged versus main.
+// 2026-09-11 (OBS-02, issue #153): stacks within the 380 KiB headroom.
+// The bounded author-log surface (src/logs.ts domain: parsers, cursor
+// pagination, retention, SEC-01 write/read paths, plus two routes, SDK
+// tail/search, and hello-pilot emission) measures within the deliberate
+// feature headroom above; package.json is unchanged versus main.
 // 2026-09-11 (TRG-02, issue #138): 210 KiB. The endpoint/webhook Trigger
 // surface (src/endpoints.ts: key/HMAC verification, rate limits, challenge,
 // delivery protocol, operator management; 3 public plus 6 management routes
@@ -62,15 +67,77 @@ import { join } from "node:path";
 // same deliberate feature headroom, not dependency bloat: package.json is
 // unchanged. Remeasure after merge; shrink the raise if the combined bundle
 // lands lower.
-// 2026-09-11 (TRG-01 over OPS-01, issue #137): 395 KiB. The schedule surface
+// 2026-09-11 (TRG-01 over OPS-01, issue #137): schedule surface
 // (src/schedules.ts: cron validation, IANA timezone labels, UTC window math,
 // server-derived window keys, preview, bounded scan/admission; 7 schedule
 // routes plus the scheduled() Cron tick; Scheduled status plus schedule
-// error codes; no new dependencies) stacks on the OPS-01 surface with the
-// same deliberate feature headroom, not dependency bloat: package.json is
-// unchanged versus main. Remeasure after merge; shrink the raise if the
-// combined bundle lands lower.
-const BUDGET_BYTES = 395 * 1024;
+// error codes; no new dependencies) stacks on the contemporary main surface
+// with the same deliberate feature headroom, not dependency bloat:
+// package.json is unchanged versus main. Remeasure after merge; shrink the
+// raise if the combined bundle lands lower. Budget stays at the FORM-02
+// 555 KiB line (main HEAD); the TRG-01 surface must fit inside it.
+// 2026-09-11 (AUTH-01 follow-up): 390 KiB. Cascading-delete accounting over
+// every post-AUTH-01 org-owned table (forms, apps, tables, files, artifacts,
+// endpoints, configs, audit; R2 bytes first, managed rows block) stacks on
+// the OPS-01 surface: 385797 bytes baseline, 394934 bytes with the slice, so
+// 390 KiB keeps the same deliberate feature headroom. No new dependencies:
+// package.json is unchanged versus main.
+// 2026-09-11 (OBS-02 merge over current main, issue #153): 405 KiB. The
+// union of the OBS-02 author-log surface (src/logs.ts, two routes, SDK
+// tail/search, CLI logs/log-search) with the newer main surfaces measures
+// ~388 KiB combined. Hand-written feature code, no new dependencies
+// (package.json unchanged versus main); deliberate feature headroom only.
+// 2026-09-12 (OPS-02, issue #173): 425 KiB. The diagnostics/repair surface
+// (src/ops.ts: version/health/metrics/scheduler/jobs/preflight/connections
+// plus five inspect-then-act repairs; 8 routes in src/index.ts; SDK guards
+// plus client plus descriptor entries; CLI commands plus selftest) measures
+// ~413 KiB combined over the OBS-02 baseline (~397 KiB). Hand-written
+// feature code, no new dependencies (package.json unchanged versus main);
+// deliberate feature headroom only.
+// 2026-09-12 (RUN-01 stacked over OPS-02, issue #135): 435 KiB. Persisted
+// per-Saga runtime policy (2 routes, D1 table, per-Execution snapshot,
+// policy-gated submit plus snapshot-resolved retries/deadlines) stacks on
+// the OPS-02 surface above. Same deliberate feature headroom, not dependency
+// bloat: package.json is unchanged versus main.
+// 2026-09-12 (AUTH-01 second re-drive over RUN-01 main): 440 KiB. The union
+// of the AUTH-01 org-lifecycle surface (cascading-delete accounting over all
+// org-owned tables plus R2 bytes) with the RUN-01 policy surface measures
+// 446392 bytes: 952 bytes over the 435 KiB budget. Hand-written feature code,
+// no new dependencies (package.json unchanged versus main); deliberate
+// feature headroom only.
+// 2026-09-12 (sec-endpoint, issue #236): 445 KiB. The endpoint safe-URL policy
+// (src/integrations/index.ts: URL parse plus per-Integration transport/host
+// policy at persist time, assertSafeEndpoint guards in the echo/ninjaone
+// Actions and the management probe) measures 451460 bytes after a shrink pass
+// (short messages, no dead helpers): 900 bytes over the 440 KiB budget.
+// Hand-written security-boundary code, no new dependencies (package.json
+// unchanged versus main); deliberate feature headroom only.
+// 2026-09-12 (sec/response-hardening, issues #237 #238 #239): 450 KiB. The
+// response baseline (src/index.ts: inline security headers on the JSON
+// helper, Static Assets pass-through, and all raw file/artifact byte
+// responses; no re-wrap, no new dependencies) plus the echo
+// deployment-environment gate (src/integrations/index.ts, src/connections.ts:
+// opts.environment threading, two failure arms) measures 455735 bytes after
+// a shrink pass (direct header construction instead of Response re-wrapping):
+// 55 bytes over the 445 KiB budget. Hand-written security-boundary code,
+// package.json unchanged versus main; deliberate feature headroom only.
+// 2026-09-12 (TOOL-01 stacked over sec/response main, issue #170): 490 KiB.
+// The opt-in tool registry (4 routes + D1 tool_enrollments + SDK entries),
+// the inbound MCP gateway (JSON-RPC tools/list, tools/call, tools/search,
+// tools/describe over the membership gate), and the HaloPSA Code Mode host
+// (contract search/inspect plus host-mediated execute with policy, egress,
+// and provenance) stack on the 450 KiB surface above. Hand-written feature
+// code, no new dependencies (package.json unchanged versus main);
+// deliberate feature headroom only.
+// 2026-09-12 (FORM-02 stacked over TOOL-01 main, issue #155): 555 KiB. The
+// dynamic-forms surface (8 routes plus the forms domain: 17 field types,
+// startup handles, Table and static providers, delegated submit, scheduled
+// receipts, file-field re-validation; plus the Forms renderer and SDK
+// descriptor entries) stacks on the 490 KiB surface above with the same
+// deliberate feature headroom, not dependency bloat: package.json is
+// unchanged versus main. Combined measures 545802 bytes locally (CI number
+// governs); shrink the raise if it lands lower.
+const BUDGET_BYTES = 555 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");

@@ -1,0 +1,28 @@
+# TOOL-01 lane scope (issue #170): opt-in Saga tools, authorized inbound
+# MCP gateway, and OpenAPI Code Mode with the HaloPSA proof.
+# New modules own the feature; shared touch points are listed explicitly.
+# ADR 022 docs already landed via PR #268 — no doc duplication here.
+scopes/tool-01.scope
+src/tools.ts
+src/openapi.ts
+src/mcp.ts
+src/index.ts
+src/sdk.ts
+src/bindings.ts
+src/connections.ts
+src/secrets.ts
+src/domain.ts
+src/integrations/index.ts
+src/integrations/halo.ts
+migrations/0024_tool_enrollments.sql
+docs/migration-ledger.md
+scripts/check-bundle-budget.mjs
+test/tool-01-tools.test.ts
+test/tool-01-openapi.test.ts
+test/tool-01-mcp.test.ts
+test/tool-01-halo-proof.test.ts
+test/integrations.test.ts
+test/sdk.test.ts
+test/connections.test.ts
+test/dev-preview.test.ts
+test/ops.test.ts

@@ -1,0 +1,23 @@
+# FORM-02 lane scope (issue #155): dynamic forms with safe startup, providers, submissions.
+src/forms.ts
+src/index.ts
+src/sdk.ts
+test/forms.test.ts
+test/form-binding.test.ts
+test/form-lifecycle.test.ts
+test/form-ui.test.tsx
+test/sdk.test.ts
+test/ui-shell.test.tsx
+test/sagas-catalog.test.tsx
+client/src/pages/Forms.tsx
+client/src/App.tsx
+client/src/components/Nav.tsx
+client/src/lib/api-client.ts
+client/src/lib/api-error.ts
+client/src/lib/client-types.ts
+docs/upstream-parity.md
+docs/sdk.md
+docs/sdk-capability-map.md
+scripts/check-bundle-budget.mjs
+scopes/form-02.scope
+package.json

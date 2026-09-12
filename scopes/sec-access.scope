@@ -1,0 +1,7 @@
+# sec-access lane scope (issues #234, #235): Access cert cache eviction + cert fetch timeout.
+# AUTH-01 owns src/access.ts for org lifecycle only; this lane touches only the
+# cert-cache/fetch hardening surface and its tests. Coordinate by merge.
+src/access.ts
+test/access-auth.test.ts
+docs/architecture/014-access-auth.md
+scopes/sec-access.scope

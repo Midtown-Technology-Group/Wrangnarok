@@ -1,0 +1,13 @@
+# AUTH-03 lane scope (issue #144): scoped machine credentials and delegated human identity.
+src/auth.ts
+src/access.ts
+src/secrets.ts
+src/index.ts
+src/sdk.ts
+test/machine-credentials.test.ts
+test/sdk.test.ts
+docs/architecture/014-access-auth.md
+docs/upstream-parity.md
+scripts/check-bundle-budget.mjs
+scopes/auth-03.scope
+package.json

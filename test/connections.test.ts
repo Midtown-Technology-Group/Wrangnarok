@@ -96,7 +96,7 @@ describe("Integration discovery (CON-01)", () => {
     expect(response.status).toBe(200);
     const body = await jsonOf(response);
     const integrations = body.integrations as { id: string; name: string; requiredSecrets: string[] }[];
-    expect(integrations.map((entry) => entry.name).sort()).toEqual(["echo", "ninjaone"]);
+    expect(integrations.map((entry) => entry.name).sort()).toEqual(["echo", "halo", "ninjaone"]);
     const echo = integrations.find((entry) => entry.name === "echo");
     const text = JSON.stringify(body);
     // The echo default endpoint is a portable declaration (schema default),
@@ -393,6 +393,56 @@ describe("Connection redaction (CON-01)", () => {
 
 describe("Connection management branches (CON-01 coverage)", () => {
   const GHOST = "00000000-0000-4000-8000-000000000000";
+
+  it("rejects unsafe endpoint values on create and update, and fails the probe closed (issue #236)", async () => {
+    const created = await worker.fetch(
+      call("/api/connections", "POST", { integrationId: NINJA_INTEGRATION_ID, config: {} }),
+      bindings,
+    );
+    expect(created.status).toBe(400);
+    expect(await created.json()).toMatchObject({ error: { code: "CONNECTION_SCHEMA_INVALID" } });
+    // Internal, non-https, and foreign-host endpoints never persist.
+    for (const endpoint of [
+      "http://10.9.9.9/api",
+      "http://us2.ninjarmm.com/api",
+      "https://evil.example.com/api",
+      "not-a-url",
+    ]) {
+      const denied = await worker.fetch(
+        call("/api/connections", "POST", { integrationId: NINJA_INTEGRATION_ID, config: { endpoint } }),
+        bindings,
+      );
+      expect(denied.status).toBe(400);
+      expect(await denied.json()).toMatchObject({ error: { code: "CONNECTION_SCHEMA_INVALID" } });
+    }
+    const ok = await worker.fetch(
+      call("/api/connections", "POST", {
+        integrationId: NINJA_INTEGRATION_ID,
+        config: { endpoint: "https://us2.ninjarmm.com/api" },
+      }),
+      bindings,
+    );
+    expect(ok.status).toBe(201);
+    const badUpdate = await worker.fetch(
+      call(`/api/connections/${NINJA_INTEGRATION_ID}`, "PUT", { config: { endpoint: "http://10.9.9.9/api" } }),
+      bindings,
+    );
+    expect(badUpdate.status).toBe(400);
+    expect(await badUpdate.json()).toMatchObject({ error: { code: "CONNECTION_SCHEMA_INVALID" } });
+    // A row that predates validation (written straight to D1) fails the probe
+    // closed as invalid configuration without any outbound fetch.
+    await bindings.DB.prepare("DELETE FROM connections WHERE org_id=?").bind(ORG).run();
+    await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
+      .bind("00000000-0000-4000-8000-000000000115", ORG, NINJA_INTEGRATION_ID, "http://10.9.9.9/api")
+      .run();
+    const callsBefore = vi.mocked(fetch).mock.calls.length;
+    const probed = await worker.fetch(call(`/api/connections/${NINJA_INTEGRATION_ID}/test`, "POST", {}), bindings);
+    // The route maps test-path failures to 502 (same arm as
+    // CONNECTION_TEST_FAILED/SECRET_NOT_CONFIGURED); the code names the cause.
+    expect(probed.status).toBe(502);
+    expect(await probed.json()).toMatchObject({ test: { ok: false, code: "INVALID_CONNECTION" } });
+    expect(vi.mocked(fetch).mock.calls.length).toBe(callsBefore);
+  });
 
   it("rejects malformed and unknown Integration ids on every route", async () => {
     // Non-UUID ids match no route matcher: the gray-out answers 501

@@ -22,9 +22,10 @@ compatibility with upstream Bifrost is not promised; see
 
 Authenticated like every other `/api/*` route: `Authorization: Bearer
 <token>` (local fixture token or Access service identity). Only
-`GET /api/executions`, `GET /api/orgs/:id/executions`, and
-`GET /api/schedules/:id/preview` accept query strings, and only their
-allowlisted keys.
+`GET /api/executions`, `GET /api/orgs/:id/executions`,
+`GET /api/schedules/:id/preview`, `GET /api/executions/:id/logs`, and
+`GET /api/logs` accept a query string, and only each route's allowlisted
+keys.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -34,9 +35,11 @@ allowlisted keys.
 | `POST` | `/api/dev/preview` | No-registration local preview (authoritative parse; no D1 writes, no dispatch; opt-in `checkEnvironment` read-only Connection check) |
 | `GET` | `/api/executions` | History summaries (`status` single or comma-separated, `sagaId`, `sagaName`, `startDate`, `endDate`, `limit`, `cursor`) |
 | `GET` | `/api/executions/:id` | Detail with Operations, input/result, safe error, `runtimeStatus` |
+| `GET` | `/api/executions/:id/logs` | OBS-02 scoped log tail (`level`, `limit`, `cursor`; DEBUG hidden unless asked; polling view over durable rows) |
+| `GET` | `/api/logs` | OBS-02 operator log search (`level`, `sagaId`, `sagaName`, `startDate`, `endDate`, `limit`, `cursor`) |
 | `POST` | `/api/executions/:id/cancel` | Owner-only cancel (exact 64-hex ID) |
-| `GET` | `/api/forms/:name` | Form declaration for this Organization (FORM-01) |
-| `POST` | `/api/forms/:name/submit` | Validate (422 `FORM_VALIDATION_FAILED`) then submit the bound Saga |
+| `GET` | `/api/forms/:name` | Form declaration for this Organization (FORM-01; FORM-02 designer surface on main) |
+| `POST` | `/api/forms/:name/submit` | Validate then submit the bound Saga (FORM-02: consume a startup handle, 422 `STALE_FORM_HANDLE`) |
 | `POST` | `/api/schedules` | Create a one-off (`runAt`) or recurring (`cron`) schedule (TRG-01; 201) |
 | `GET` | `/api/schedules` | Schedule summaries for this Organization |
 | `GET` | `/api/schedules/:id` | Schedule detail (policy, windows, receipts) |
@@ -45,6 +48,12 @@ allowlisted keys.
 | `POST` | `/api/schedules/:id/enable` | Re-enable (due index recomputed) |
 | `DELETE` | `/api/schedules/:id` | Soft-delete (ticks ignore; history retained) |
 | `POST` | `/api/schedules/executions/:id/cancel` | Cancel a `Scheduled` intent row only |
+| `GET` | `/api/forms` | Org-scoped form summaries (FORM-02 designer list) |
+| `POST` | `/api/forms` | Create a form declaration (400 `INVALID_FORM` on bad fields) |
+| `PUT` | `/api/forms/:name` | Replace a form declaration wholesale (FORM-02 designer edit) |
+| `DELETE` | `/api/forms/:name` | Delete a form declaration |
+| `POST` | `/api/forms/:name/startup` | Mint a session-bound 30-minute handle with snapshot + provider options |
+| `GET` | `/api/forms/:name/providers` | Resolved select/multiselect options through the caller Table gate |
 | `GET` | `/api/config` | Typed config rows for this Organization (secrets answer `[SECRET]`) |
 | `POST` | `/api/config` | Set a non-secret value or provision a secret reference (upsert by key) |
 | `PUT` | `/api/config/:id` | Update one row; omitted secret values preserve the reference |
@@ -77,11 +86,26 @@ await client.listHistory({ status: "Failed,TimedOut", limit: 20 });
 await client.cancelExecution(done.executionId);
 await client.diagnoseExecution(done.executionId); // detail + hint for known codes
 
+// Author logs (OBS-02): scoped tail plus operator search. Polling views over
+// durable D1 rows; reconnect by refetching from nextCursor (replays dedupe
+// by seq). DEBUG rows stay hidden unless level asks for them.
+await client.tailLogs(done.executionId, { level: "INFO", limit: 50 });
+await client.searchLogs({ saga: "hello", level: "ERROR", limit: 20 });
+
 // Scoped config (CON-02, ADR 020): typed rows for this Organization.
 // Secret rows answer "[SECRET]"; secret values never cross the wire.
 await client.listConfigs();
 await client.setConfig({ key: "timeout", type: "int", value: "30" });
 await client.setConfig({ key: "apiKey", type: "secret", value: { ref: "clientSecret" } });
+
+// Dynamic forms (FORM-02, issue #155): designer CRUD, startup handles,
+// providers, submit or schedule. The handle is peeked for validation and
+// consumed only after validation passes; unknown/stale handles answer STALE_FORM_HANDLE.
+await client.listForms();
+await client.getForm("contact");
+await client.startForm("contact", { name: "Ada" }); // opt-in prefill only
+await client.getFormProviders("contact");
+await client.submitForm({ form: "contact", handle, values: { name: "Ada" } });
 
 // Contract drift check.
 await client.getContract(); // throws SDK_CLIENT_MISMATCH on version skew
@@ -90,7 +114,9 @@ await client.getContract(); // throws SDK_CLIENT_MISMATCH on version skew
 Offline helpers (no network): `scaffoldSaga` (emit a `defineSaga` module),
 `inspectSaga` (resolve one entry from a catalog), `validateAgainstSchema`,
 `localCatalog`, `describeContract`. Wire guards (`parseSagaCatalog`,
-`parseExecutionDetail`, `parseHistoryPage`) fail loud with
+`parseExecutionDetail`, `parseHistoryPage`, `parseFormList`,
+`parseFormDetail`, `parseFormStartup`, `parseFormProviders`,
+`parseFormSubmit`) fail loud with
 `SDK_CLIENT_MISMATCH` instead of trusting the wire.
 
 ## CLI (`scripts/wrangnarok.mjs`: thin fetch calls, no Saga logic)
@@ -103,6 +129,8 @@ node scripts/wrangnarok.mjs submit --saga hello --input '{"name":"Ada"}'
 node scripts/wrangnarok.mjs detail --id <64-hex> --wait
 node scripts/wrangnarok.mjs diagnose --id <64-hex>
 node scripts/wrangnarok.mjs history --status Failed,TimedOut --limit 20 --all
+node scripts/wrangnarok.mjs logs --id <64-hex> [--level INFO] [--limit 50] [--follow]
+node scripts/wrangnarok.mjs log-search [--level ERROR] [--saga hello] [--from 2026-09-01] [--to 2026-09-10] [--all]
 node scripts/wrangnarok.mjs cancel --id <64-hex>
 node scripts/wrangnarok.mjs audit --action app. --outcome success --all
 node scripts/wrangnarok.mjs notifications
@@ -143,8 +171,9 @@ register endpoint by design):
 
 ## What this SDK does not cover
 
-Tables, forms (beyond the FORM-01 binding slice), files, agents,
+Tables beyond the shipped query/count/batch slice, agents,
 events, roles, and deploy/sync commands belong to their owning parity
 issues (`docs/sdk-capability-map.md` section 1, `docs/upstream-parity.md`).
-The contract descriptor lists them as `tracked`, never as supported.
-escriptor lists them as `tracked`, never as supported.
+Dynamic forms ship as the supported `dynamic-forms` capability (FORM-02,
+issue #155); embed/publication stays tracked under EMBED-01. The contract
+descriptor lists deferred items as `tracked`, never as supported.

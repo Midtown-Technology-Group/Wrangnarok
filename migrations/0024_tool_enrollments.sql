@@ -1,0 +1,2 @@
+CREATE TABLE IF NOT EXISTS tool_enrollments(id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), tool_name TEXT NOT NULL, saga_id TEXT NOT NULL, saga_revision TEXT NOT NULL, description TEXT, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(org_id, tool_name));
+CREATE INDEX IF NOT EXISTS tool_enrollments_org ON tool_enrollments(org_id, tool_name);

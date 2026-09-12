@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0
-import { authenticate } from "./auth";
+import { authenticate, describeCaller } from "./auth";
 import type { Bindings } from "./bindings";
 import {
   appDetail,
@@ -70,11 +70,32 @@ import {
 } from "./app-runtime";
 import { previewEnvironment, previewLocal } from "./dev";
 import {
+  HALO_INTEGRATION_ID,
+  executeHaloOperation,
+  haloLabSpec,
+  inspectHaloOperation,
+  searchHaloOperations,
+  HALO_CLASSIFICATIONS,
+  HALO_DEFAULT_POLICY,
+} from "./integrations/halo";
+import {
+  mcpResult,
+  parseMcpCallParams,
+  parseMcpDescribeParams,
+  parseMcpRequest,
+  parseMcpSearchParams,
+  searchTools,
+} from "./mcp";
+import { indexOperations, inspectOperation, searchOperations } from "./openapi";
+import type { CodeModeProvenance } from "./openapi";
+import { toolRegistry } from "./tools";
+import {
   boundedJson,
   canTransition,
   classifyTerminateError,
   digestSaga,
   echoSaga,
+  executionId,
   Fault,
   helloSaga,
   ninjaSaga,
@@ -89,6 +110,7 @@ import {
   parseSmokeInput,
   parseSubmission,
   smokeSaga,
+  UUID,
 } from "./domain";
 import type { Principal, TerminateOutcome } from "./domain";
 import {
@@ -113,17 +135,41 @@ import {
   vendorChallenge,
 } from "./endpoints";
 import type { EndpointRow } from "./endpoints";
-import { bindFormInput, FORM_NAME, loadForm } from "./forms";
+import {
+  consumeStartupHandle,
+  deleteForm,
+  FORM_NAME,
+  type FormDefinition,
+  listForms,
+  loadForm,
+  parseFileRef,
+  parseScheduleAt,
+  parseStartupHandle,
+  peekStartupHandle,
+  resolveProviderOptions,
+  saveForm,
+  startFormSession,
+  validateAndMerge,
+} from "./forms";
 import { deleteConfig, listConfigs, parseUpdateConfigInput, setConfig, updateConfig } from "./config";
 import {
   createNotification,
   dismissNotification,
+  inspectRepair,
   listAudit,
   listNotifications,
+  opsConnectionHealth,
+  opsJobs,
+  opsMetrics,
+  opsPreflight,
+  opsScheduledTasks,
+  opsVersion,
   parseAuditQuery,
   parseNotificationId,
   parseNotificationLimit,
+  parseRepairBody,
   recordAudit,
+  runRepair,
   visibleNotification,
 } from "./ops";
 import {
@@ -213,6 +259,7 @@ import {
   insertRow,
   listTables,
   loadTable,
+  lookupPath,
   parseBatchBody,
   parseBatchDeleteBody,
   parseTableName,
@@ -224,16 +271,67 @@ import {
   updateRow,
 } from "./tables";
 import { SAGA_CATALOG, SAGA_DEFINITIONS } from "./sagas";
-import { describeContract, SDK_DOC_PATH } from "./sdk";
-import { cancelExecution, listHistory, submit, summary, visibleExecution, workflowForSaga } from "./executions";
+import { describeContract, SDK_DOC_PATH, SDK_VERSION } from "./sdk";
+import {
+  cancelExecution,
+  listHistory,
+  loadSagaPolicy,
+  parseStoredPolicy,
+  policySnapshot,
+  storeSagaPolicy,
+  submit,
+  summary,
+  visibleExecution,
+  workflowForSaga,
+} from "./executions";
+import { listExecutionLogs, parseLogSearchQuery, parseLogTailQuery, searchExecutionLogs } from "./logs";
 import { deploymentSecretsFromEnv, scrubValueWithDeploymentSecrets } from "./secrets";
 import { logRequest } from "./usage";
 export { EchoWorkflow, HelloWorkflow, NinjaEchoDigestWorkflow, NinjaOrgsWorkflow, SmokeWorkflow } from "./sagas";
 
+/** Baseline defense headers for every user-facing response (issue #237).
+ * JSON API responses already carried no-store + nosniff; this extends the same
+ * posture to Static Assets pass-through and raw file/byte responses so the
+ * public UI and the API share one baseline: no MIME sniffing, no framing, a
+ * locked-down referrer, no powerful browser features, and HSTS on HTTPS.
+ * Content-Type/Cache-Control stay caller-owned (JSON defaults, file types).
+ * apiBytes/json build the baseline inline (one Response, no re-wrap); only
+ * the ASSETS pass-through copies headers, since fetched responses may be
+ * immutable. */
+/** Content-Security-Policy per surface: the JSON/file API carries no active
+ * content, so default-src 'none'; the Static Assets UI shell needs its own
+ * scripts, styles, and images, so self-only. */
+const API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
+const ASSET_CSP = "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'";
+const SECURITY_HEADERS: Record<string, string> = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "no-referrer",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+  "Content-Security-Policy": API_CSP,
+};
+function withAssetSecurity(response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const name of Object.keys(SECURITY_HEADERS)) {
+    if (name === "Content-Security-Policy") continue;
+    const value = SECURITY_HEADERS[name];
+    if (value !== undefined && !headers.has(name)) headers.set(name, value);
+  }
+  if (!headers.has("Content-Security-Policy")) headers.set("Content-Security-Policy", ASSET_CSP);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+function apiBytes(body: BodyInit | null, status: number, headers: Record<string, string>): Response {
+  return new Response(body, { status, headers: { ...SECURITY_HEADERS, ...headers } });
+}
 function json(body: unknown, status = 200, extra: Record<string, string> = {}) {
   return Response.json(body, {
     status,
-    headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...extra },
+    headers: { ...SECURITY_HEADERS, "Cache-Control": "no-store", ...extra },
   });
 }
 /** Log route for the access log: raw /api/* pathname or "static". Query
@@ -266,6 +364,39 @@ function bearerToken(request: Request): string | null {
   const match = /^Bearer (.+)$/.exec(header);
   return match?.[1] ?? null;
 }
+/** TOOL-01 shared Code Mode execution (issue #170): one host-mediated call
+ * used by POST /api/openapi/execute and the MCP halo_api_execute path.
+ * Takes operation selection + params only (never credentials, never a URL);
+ * resolves the caller-org Connection, validates against the pinned
+ * contract, applies policy, enforces egress, injects auth outside
+ * model-visible state, and audits success with sanitized provenance. */
+async function runCodeModeExecute(
+  env: Bindings,
+  caller: Principal,
+  call: { operationId: string; path?: Record<string, string>; query?: Record<string, string>; body?: unknown },
+): Promise<{ result: unknown; provenance: CodeModeProvenance }> {
+  const executed = await executeHaloOperation(
+    env.DB,
+    caller,
+    { clientId: env.HALO_CLIENT_ID, clientSecret: env.HALO_CLIENT_SECRET },
+    {
+      operationId: call.operationId,
+      ...(call.path === undefined ? {} : { path: call.path }),
+      ...(call.query === undefined ? {} : { query: call.query }),
+      ...(call.body === undefined ? {} : { body: call.body }),
+    },
+  );
+  await recordAudit(
+    env.DB,
+    caller,
+    "codemode.execute",
+    { type: "integration", id: HALO_INTEGRATION_ID },
+    "success",
+    executed.provenance,
+    deploymentSecretsFromEnv(env),
+  );
+  return executed;
+}
 /** Public TRG-02 deliveries (issue #138, ADR 019): vendor-facing webhook and
  * endpoint receivers. Authenticated by credential (per-endpoint key or HMAC
  * secret), never by the operator session — so they run BEFORE the
@@ -289,9 +420,9 @@ async function handlePublicDelivery(request: Request, env: Bindings): Promise<Re
   const challengeRow = findChallengeEndpoint(rows.filter((row) => row.kind === "webhook"));
   const challenge = challengeRow ? vendorChallenge(challengeRow, url) : null;
   if (challenge !== null) {
-    return new Response(challenge, {
-      status: 200,
-      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+    return apiBytes(challenge, 200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
     });
   }
   if (url.search) {
@@ -373,6 +504,164 @@ export default {
   },
 } satisfies ExportedHandler<Bindings>;
 
+/** Serialize a form definition for the designer/read surface (FORM-02):
+ * full declaration metadata; the server stays authoritative. */
+function serializeForm(def: FormDefinition): unknown {
+  return {
+    id: def.id,
+    name: def.name,
+    sagaId: def.sagaId,
+    ...(def.title === undefined ? {} : { title: def.title }),
+    ...(def.description === undefined ? {} : { description: def.description }),
+    allowPrefill: def.allowPrefill,
+    fields: def.fields.map((field) => ({
+      name: field.name,
+      type: field.type,
+      ...(field.label === undefined ? {} : { label: field.label }),
+      required: field.required,
+      maxLength: field.maxLength,
+      ...(field.default === undefined ? {} : { default: field.default }),
+      ...(field.options === undefined ? {} : { options: field.options }),
+      ...(field.provider === undefined ? {} : { provider: field.provider }),
+      ...(field.visibleWhen === undefined ? {} : { visibleWhen: field.visibleWhen }),
+      ...(field.file === undefined ? {} : { file: field.file }),
+      ...(field.min === undefined ? {} : { min: field.min }),
+      ...(field.max === undefined ? {} : { max: field.max }),
+      ...(field.pattern === undefined ? {} : { pattern: field.pattern }),
+      ...(field.content === undefined ? {} : { content: field.content }),
+    })),
+  };
+}
+
+/** Provider table reader for FORM-02 select/multiselect options: one Table,
+ * caller-scoped read policy, distinct non-empty string values from the
+ * valueField path, bounded scan (at most 50), sorted alphabetically so the
+ * option list is deterministic regardless of row insertion or doc_id order.
+ * Denied or missing tables throw (the resolver converts to per-field errors,
+ * never a leak). */
+async function readProviderTable(
+  db: D1Database,
+  caller: Principal,
+  table: string,
+  valueField: string,
+): Promise<readonly string[]> {
+  const def = await loadTable(db, caller.orgId, table);
+  if (!def) throw new Fault(404, "TABLE_NOT_FOUND", "Table not found.");
+  const page = await queryRows(db, caller, def, {
+    filters: [],
+    order: "asc",
+    skipCount: true,
+    limit: 50,
+  });
+  const values: string[] = [];
+  const seen = new Set<string>();
+  for (const row of page.rows) {
+    const at = lookupPath(row.data, valueField);
+    if (typeof at !== "string" || at.length === 0 || at.length > 128) continue;
+    if (seen.has(at)) continue;
+    seen.add(at);
+    values.push(at);
+    if (values.length >= 50) break;
+  }
+  values.sort();
+  return values;
+}
+
+/** Re-validate file-field references against the live FILE-01 rows: the
+ * reference must name the declared location, resolve to a ready file in
+ * this Organization, and satisfy the per-field size/type bounds. Stale,
+ * foreign, pending, or over-bounds pointers fail closed with 422. */
+async function checkFormFiles(
+  db: D1Database,
+  caller: Principal,
+  def: FormDefinition,
+  input: Record<string, unknown>,
+): Promise<void> {
+  for (const field of def.fields) {
+    if (field.type !== "file" || !field.file) continue;
+    const ref = input[field.name];
+    if (ref === undefined) continue;
+    const { location, path } = parseFileRef(field, ref);
+    const row = await db
+      .prepare("SELECT status,size,content_type FROM files WHERE org_id=? AND location=? AND path=?")
+      .bind(caller.orgId, location, path)
+      .first<{ status: string; size: number; content_type: string }>()
+      .catch(() => null);
+    if (!row || row.status !== "ready") {
+      throw new Fault(422, "FORM_VALIDATION_FAILED", "The form submission did not pass validation.", [
+        { field: field.name, code: "FILE_NOT_READY", message: "The referenced file is not ready." },
+      ]);
+    }
+    const maxBytes = (field.file.maxMb ?? 25) * 1024 * 1024;
+    if (row.size > maxBytes) {
+      throw new Fault(422, "FORM_VALIDATION_FAILED", "The form submission did not pass validation.", [
+        { field: field.name, code: "FILE_TOO_LARGE", message: "The referenced file exceeds the field bound." },
+      ]);
+    }
+    if (field.file.contentTypes && !field.file.contentTypes.includes(row.content_type)) {
+      throw new Fault(422, "FORM_VALIDATION_FAILED", "The form submission did not pass validation.", [
+        { field: field.name, code: "FILE_TYPE_REJECTED", message: "The referenced file type is not accepted." },
+      ]);
+    }
+  }
+}
+
+/** Deferred form submission: persist an undispatched Pending Execution row
+ * with the due instant recorded in the input (`__scheduleAt`) and no
+ * Workflow dispatch (TRG-01 owns promotion; this lane only records the
+ * inspectable linkage through the standard Execution detail + history).
+ * Same-key same-input replays answer 200. No new DDL: Pending +
+ * undispatched is the canonical not-yet-dispatched shape. */
+async function scheduleFormExecution(
+  db: D1Database,
+  caller: Principal,
+  key: string,
+  formName: string,
+  saga: { id: string; name: string; revision: string; parse: (value: unknown) => unknown },
+  input: unknown,
+  scheduleAt: string,
+): Promise<{ executionId: string; replayed: boolean; statusUrl: string; scheduled: true; scheduleAt: string }> {
+  const id = await executionId(caller, key);
+  const inputJson = JSON.stringify({
+    ...(input as Record<string, unknown>),
+    __form: formName,
+    __scheduleAt: scheduleAt,
+  });
+  const now = new Date().toISOString();
+  const inserted = await db
+    .prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,created_at) VALUES (?,?,?,?,?,?,?,0,?) ON CONFLICT(id) DO NOTHING",
+    )
+    .bind(id, saga.id, saga.name, saga.revision, caller.orgId, caller.userId, inputJson, now)
+    .run();
+  if (inserted.meta.changes === 0) {
+    // Same-key replay: the existing row must carry the same Saga input,
+    // mirroring the immediate submit path's IDEMPOTENCY_CONFLICT fence —
+    // a recycled key over different input answers 409, never a replay.
+    const existing = await db
+      .prepare("SELECT saga_id,input_json FROM executions WHERE id=?")
+      .bind(id)
+      .first<{ saga_id: string; input_json: string }>();
+    if (!existing || existing.saga_id !== saga.id || existing.input_json !== inputJson) {
+      throw new Fault(409, "IDEMPOTENCY_CONFLICT", "This key already identifies different input.");
+    }
+    return {
+      executionId: id,
+      replayed: true,
+      statusUrl: `/api/executions/${id}`,
+      scheduled: true,
+      scheduleAt,
+    };
+  }
+  return {
+    executionId: id,
+    replayed: false,
+    statusUrl: `/api/executions/${id}`,
+    scheduled: true,
+    scheduleAt,
+  };
+}
+
 async function handleFetch(request: Request, env: Bindings): Promise<Response> {
   const url = new URL(request.url);
   // Single-Worker full-stack app (ADR 008): the browser UI ships as Static
@@ -390,7 +679,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         return json({ error: { code: fault.code, message: fault.message } }, fault.status);
       }
     }
-    if (env.ASSETS) return env.ASSETS.fetch(request);
+    if (env.ASSETS) return withAssetSecurity(await env.ASSETS.fetch(request));
     return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
   }
   try {
@@ -439,16 +728,31 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const isSchedulePreview =
       /^\/api\/schedules\/[0-9a-fA-F-]{36}\/preview$/.test(url.pathname) && request.method === "GET";
     // Query strings are deny-by-default: only the history list routes, the
-    // schedule preview route, the table query/count routes, and the file
-    // structural list and byte routes take them, each through its own
+    // schedule preview route, the table query/count routes, the file
+    // structural list and byte routes, the OBS-02 log tail and log search,
+    // plus the OPS-01/FILE-02/APP-02 routes take them, each through its own
     // allowlisted parser (anything else is UNSUPPORTED_QUERY).
     const historyList = url.pathname === "/api/executions" || isOrgHistory;
+    // OBS-02 (issue #153): scoped log tail plus operator search.
+    const logQueryList =
+      (url.pathname === "/api/logs" && request.method === "GET") ||
+      (/^\/api\/executions\/[a-f0-9]{64}\/logs$/.test(url.pathname) && request.method === "GET");
     const tableQueryList =
       request.method === "GET" && /^\/api\/tables\/[a-z0-9][a-z0-9-]{0,63}\/(rows|count)$/.test(url.pathname);
     // OPS-01 (ADR 020): the audit list and notifications list take query
-    // strings too, each through its own allowlisted parser.
+    // strings too, each through its own allowlisted parser. OPS-02 (issue
+    // #173): the ops metrics/jobs reads take the same allowlisted keys as
+    // the Execution history list (status filters, cursor paging); each
+    // route validates its keys below.
     const opsQueryList =
       (url.pathname === "/api/audit" || url.pathname === "/api/notifications") && request.method === "GET";
+    const opsDiagQueryList =
+      request.method === "GET" &&
+      (url.pathname === "/api/ops/metrics" ||
+        url.pathname === "/api/ops/jobs" ||
+        url.pathname === "/api/ops/scheduled-tasks" ||
+        url.pathname === "/api/ops/preflight" ||
+        url.pathname === "/api/ops/connections");
     // FILE-02 artifact routes take their own allowlisted keys (upload
     // ?name=/?mime=, list ?limit=, binding ?scope=/?refId=); each route
     // validates its keys below.
@@ -462,26 +766,87 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       request.method === "DELETE" && /^\/api\/apps\/[0-9a-f-]{36}\/runtime\/files\/.+$/.test(url.pathname);
     const fileList = url.pathname === "/api/files" && request.method === "GET";
     const fileBytes = url.pathname === "/api/files/content" && (request.method === "GET" || request.method === "PUT");
+    // TOOL-01 Code Mode search (issue #170): ?integration= + ?q= through the
+    // route's own allowlisted parser below.
+    const openapiSearch = request.method === "GET" && url.pathname === "/api/openapi/search";
     if (
       url.search &&
       !((historyList || isSchedulePreview) && request.method === "GET") &&
+      !logQueryList &&
       !tableQueryList &&
       !opsQueryList &&
+      !opsDiagQueryList &&
       !artifactQuery &&
       !appTableRowsRead &&
       !appRuntimeFileDelete &&
       !fileList &&
-      !fileBytes
+      !fileBytes &&
+      !openapiSearch
     )
       throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
     if (isOrgPath) {
       const orgRoute = await routeOrgs(request, env, ctx, url);
       if (orgRoute) return orgRoute;
     }
+    if (url.pathname === "/api/auth/me" && request.method === "GET") {
+      // AUTH-03 caller identity (issue #144): read-only proof of which
+      // credential class verified this caller (human, service, fixture, or
+      // endpoint). The membership gate above already proved authorization, so
+      // strangers and revoked callers never reach this view. Query strings
+      // stay deny-by-default like every other single-resource route.
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json({ caller: describeCaller(identity, request), role: ctx.role, kind: ctx.kind });
+    }
     if (url.pathname === "/api/sagas" && request.method === "GET")
       // Static Git-owned Catalog (ADR 002): discovery metadata only.
       // D1 Execution rows mirror saga_id/name/revision but never drive behavior.
       return json({ sagas: SAGA_CATALOG });
+    const policyRoute = /^\/api\/sagas\/([0-9a-f-]{36})\/policy$/.exec(url.pathname);
+    if (policyRoute?.[1]) {
+      // RUN-01 persisted runtime policy (ADR 018): operator-managed,
+      // Organization-scoped environment state, never Saga source. GET inspects
+      // the effective policy (persisted row or code default); PUT merges a
+      // partial body over the current row. Caller scoping is the same
+      // org/requester boundary as reads: unknown Sagas 404, never a leak.
+      const sagaId = policyRoute[1].toLowerCase();
+      if (!UUID.test(sagaId)) throw new Fault(400, "INVALID_SAGA_ID", "sagaId must be a stable Saga UUID.");
+      const entry = SAGA_CATALOG.find((saga) => saga.id.toLowerCase() === sagaId);
+      if (!entry) throw new Fault(404, "NOT_FOUND", "Not found.");
+      if (request.method === "GET") {
+        const record = await loadSagaPolicy(env.DB, caller.orgId, entry.id);
+        return json({
+          policy: {
+            sagaId: entry.id,
+            sagaName: entry.name,
+            version: record.version,
+            updatedAt: record.updatedAt,
+            ...record.policy,
+          },
+        });
+      }
+      if (request.method === "PUT") {
+        requireJson(request);
+        // Operator gate (Phase 0, explicit): policy writes carry an
+        // `X-Operator: allow-policy-write` header minted by the local
+        // operator harness (scripts + tests). Ordinary callers never send
+        // it, so they read policy but cannot change it (403). Phase 3
+        // replaces this header with the membership/role table (AUTH-02);
+        // the routes and policy shapes do not change.
+        if (request.headers.get("X-Operator") !== "allow-policy-write") {
+          throw new Fault(403, "FORBIDDEN", "Only an operator identity may change Saga runtime policy.");
+        }
+        const record = await storeSagaPolicy(env.DB, caller.orgId, entry.id, await boundedJson(request.body));
+        return json({
+          policy: {
+            sagaId: entry.id,
+            sagaName: entry.name,
+            version: record.version,
+            updatedAt: record.updatedAt,
+            ...record.policy,
+          },
+        });
+      }
+    }
     if (url.pathname === SDK_DOC_PATH && request.method === "GET")
       // DEV-01 versioned SDK contract (issue #140): machine-readable
       // descriptor of the public author/automation surface. Authenticated
@@ -499,47 +864,181 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
       return json(accepted, accepted.replayed ? 200 : 202, { Location: accepted.statusUrl });
     }
+    const formList = url.pathname === "/api/forms";
+    if (formList && request.method === "GET") {
+      // FORM-02 designer list: org-scoped summaries (id, name, sagaId).
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json({ forms: await listForms(env.DB, caller) });
+    }
+    if (formList && request.method === "POST") {
+      // FORM-02 designer create: persisted declaration (server
+      // authoritative). Validation failures are 400 INVALID_FORM; unknown
+      // Saga IDs fail closed (forms bind to catalog Sagas by name).
+      requireJson(request);
+      const created: unknown = await boundedJson(request.body);
+      if (created === null || typeof created !== "object" || Array.isArray(created)) {
+        throw new Fault(400, "INVALID_FORM", "Form declarations must be a JSON object.");
+      }
+      const createdRecord = created as Record<string, unknown>;
+      if (
+        typeof createdRecord.sagaId !== "string" ||
+        !SAGA_CATALOG.some((entry) => entry.id === (createdRecord.sagaId as string).toLowerCase())
+      ) {
+        throw new Fault(400, "INVALID_FORM", "Form sagaId must be a known Saga UUID.");
+      }
+      const saved = await saveForm(env.DB, caller, created);
+      return json({ form: serializeForm(saved) }, 201);
+    }
     const formDetail = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname);
     if (formDetail?.[1] && request.method === "GET") {
-      // Form declaration read (FORM-01): persisted fields for this
-      // Organization only. Unknown or foreign names answer 404, never a leak.
+      // Form declaration read (server-authoritative binding plus FORM-02
+      // metadata): persisted fields for this Organization only. Unknown or
+      // foreign names answer 404 FORM_NOT_FOUND, never a leak.
       const name = formDetail[1];
-      if (!FORM_NAME.test(name)) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
       const def = await loadForm(env.DB, caller.orgId, name);
-      if (!def) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
-      return json({
-        form: {
-          id: def.id,
-          name: def.name,
-          sagaId: def.sagaId,
-          fields: def.fields.map((field) => ({
-            name: field.name,
-            type: field.type,
-            required: field.required,
-            maxLength: field.maxLength,
-          })),
+      if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      return json({ form: serializeForm(def) });
+    }
+    if (formDetail?.[1] && request.method === "PUT") {
+      // FORM-02 designer edit: replace the declaration wholesale (server
+      // re-validates; unknown or foreign names answer 404 FORM_NOT_FOUND).
+      const name = formDetail[1];
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      requireJson(request);
+      const body: unknown = await boundedJson(request.body);
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(400, "INVALID_FORM", "Form declarations must be a JSON object.");
+      }
+      const existing = await loadForm(env.DB, caller.orgId, name);
+      if (!existing) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      const patch = body as Record<string, unknown>;
+      if (
+        typeof patch.sagaId !== "string" ||
+        !SAGA_CATALOG.some((entry) => entry.id === (patch.sagaId as string).toLowerCase())
+      ) {
+        throw new Fault(400, "INVALID_FORM", "Form sagaId must be a known Saga UUID.");
+      }
+      const saved = await saveForm(env.DB, caller, { ...patch, name });
+      return json({ form: serializeForm(saved) });
+    }
+    if (formDetail?.[1] && request.method === "DELETE") {
+      // FORM-02 designer delete: unknown or foreign names answer 404 FORM_NOT_FOUND.
+      const name = formDetail[1];
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      await deleteForm(env.DB, caller, name);
+      return json({ deleted: name });
+    }
+    const formStartup = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/startup$/.exec(url.pathname);
+    if (formStartup?.[1] && request.method === "POST") {
+      // FORM-02 startup: mint a session-bound 30-minute handle plus the
+      // resolved snapshot (defaults, opt-in prefill merge, provider
+      // options through the caller-scoped Table gate). Query strings and
+      // display-only/unknown prefill fail closed.
+      const name = formStartup[1];
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      requireJson(request);
+      const def = await loadForm(env.DB, caller.orgId, name);
+      if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      const started = await startFormSession(env.DB, caller, def, await boundedJson(request.body), readProviderTable);
+      return json(
+        {
+          form: name,
+          handle: started.handle,
+          expiresAt: started.expiresAt,
+          snapshot: started.snapshot,
+          options: started.options,
         },
-      });
+        201,
+      );
+    }
+    const formProviders = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/providers$/.exec(url.pathname);
+    if (formProviders?.[1] && request.method === "GET") {
+      // FORM-02 provider fetch: resolved select/multiselect options for
+      // this Organization through the caller-scoped Table gate. Denied or
+      // foreign tables yield empty lists with per-field errors, never a
+      // leak. Query strings are unsupported (options ride the declaration).
+      const name = formProviders[1];
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      const def = await loadForm(env.DB, caller.orgId, name);
+      if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      const resolved = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
+      return json({ form: name, options: resolved.options, errors: resolved.errors });
     }
     const formSubmit = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/submit$/.exec(url.pathname);
     if (formSubmit?.[1] && request.method === "POST") {
-      // Form-to-Saga binding (FORM-01): server validates the submission
-      // against the persisted declaration (422 + per-field details on
-      // failure), then submits the bound Saga input down the standard
-      // Execution path. The submit gate is authoritative; no renderer,
-      // provider, or publication behavior lives here.
+      // Form-to-Saga submission (FORM-01 binding, FORM-02 lifecycle):
+      // the caller presents a live startup handle bound to (org, user,
+      // form); the server peeks it, re-resolves provider options,
+      // validates against the persisted declaration (422 + per-field
+      // details), re-validates file references against the live FILE-01
+      // rows, merges validated values over declared defaults, and submits
+      // down the standard Execution path, consuming the handle only after
+      // validation passes so failed validation leaves it live for retry. `{
+      // scheduleAt }` defers dispatch (deferred receipt, undispatched
+      // Pending row with `__scheduleAt` linkage for TRG-01 promotion).
+      // Unknown, expired, foreign, or replayed handles answer 422
+      // STALE_FORM_HANDLE and dispatch nothing. The consumed handle is
+      // the form-to-Saga grant: no separate direct-Saga grant required.
       const name = formSubmit[1];
-      if (!FORM_NAME.test(name)) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
       const key = parseCallerKey(request.headers.get("Idempotency-Key"));
-      if (
-        request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() !== "application/json" ||
-        request.headers.has("Content-Encoding")
-      )
-        throw new Fault(415, "JSON_REQUIRED", "Unencoded JSON is required.");
+      requireJson(request);
       const def = await loadForm(env.DB, caller.orgId, name);
-      if (!def) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
-      const { saga, input } = bindFormInput(def, await boundedJson(request.body));
-      const accepted = await submit(env, caller, key, saga, input);
+      if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      const body: unknown = await boundedJson(request.body);
+      if (body === null || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(422, "FORM_VALIDATION_FAILED", "The form submission must be a JSON object.", [
+          { field: "", code: "NOT_OBJECT", message: "The form submission must be a JSON object." },
+        ]);
+      }
+      const record = body as Record<string, unknown>;
+      if (Object.keys(record).some((entry) => !["handle", "values", "scheduleAt"].includes(entry))) {
+        throw new Fault(422, "FORM_VALIDATION_FAILED", "Submissions carry handle, values, and scheduleAt only.", [
+          { field: "", code: "UNKNOWN_FIELD", message: "Submissions carry handle, values, and scheduleAt only." },
+        ]);
+      }
+      const handle = parseStartupHandle(record.handle);
+      const scheduleAt = parseScheduleAt(record.scheduleAt);
+      // Peek the session without consuming: validation, provider refresh,
+      // and the file check all run first so a submission that fails them
+      // leaves the handle live for a corrected retry. Only validated
+      // submissions reach the consume-then-dispatch fence below.
+      const session = await peekStartupHandle(env.DB, caller, name, handle);
+      const fresh = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
+      const values = record.values === undefined ? {} : record.values;
+      // Order matters: form-gate validation + defaults merge first, then
+      // the live FILE-01 file check, then the Saga parse gate last — so a
+      // stale file pointer answers 422 even when the declaration drifts
+      // from its Saga schema (which answers the Saga 400 instead).
+      const merged = validateAndMerge(def, values, { allowedOptions: fresh.options, values: session.snapshot });
+      await checkFormFiles(env.DB, caller, def, merged);
+      const { saga, input } = parseSubmission({ sagaId: def.sagaId, input: merged });
+      // Consume only after every validation gate passes (form gate, file
+      // check, Saga parse), immediately before dispatch: failed validation
+      // leaves the handle live for retry, while the single-use fence wins
+      // the row for exactly one submit so a concurrent duplicate racing
+      // past validation answers stale instead of dispatching twice.
+      await consumeStartupHandle(env.DB, caller, name, handle);
+      if (scheduleAt !== null) {
+        const scheduled = await scheduleFormExecution(env.DB, caller, key, name, saga, input, scheduleAt);
+        return json({ form: name, ...scheduled }, scheduled.replayed ? 200 : 202, {
+          Location: scheduled.statusUrl,
+        });
+      }
+      // Defensive strip before the immediate Saga parse gate: a form
+      // field can never declare __-prefixed names (FIELD_NAME), so any
+      // such key would be internal linkage, never caller input.
+      const { __form: _internalForm, __scheduleAt: _internalAt, ...sagaInput } = input as Record<string, unknown>;
+      void _internalForm;
+      void _internalAt;
+      const accepted = await submit(env, caller, key, saga, sagaInput);
       // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
       return json({ form: name, ...accepted }, accepted.replayed ? 200 : 202, { Location: accepted.statusUrl });
     }
@@ -688,6 +1187,29 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         "Cancellation could not be confirmed. Retry the same cancel request.",
       );
     }
+    if (url.pathname === "/api/logs" && request.method === "GET") {
+      // Operator log search (OBS-02): the caller's own rows only, filterable
+      // by date/level/Saga, cursor-paginated in seq order. D1 is the source
+      // of truth; this is a polling view, never a live stream.
+      return json(
+        scrubValueWithDeploymentSecrets(
+          await searchExecutionLogs(env.DB, caller, parseLogSearchQuery(url.searchParams)),
+          env,
+        ),
+      );
+    }
+    const logTail = /^\/api\/executions\/([a-f0-9]{64})\/logs$/.exec(url.pathname);
+    if (logTail?.[1] && request.method === "GET") {
+      // Scoped read/tail for one Execution (OBS-02): owner-only, DEBUG hidden
+      // unless explicitly requested, cursor-paginated in seq order. Reconnect
+      // backfills by refetching from the last seen cursor (see mergeLogPages).
+      return json(
+        scrubValueWithDeploymentSecrets(
+          await listExecutionLogs(env.DB, caller, logTail[1], parseLogTailQuery(url.searchParams)),
+          env,
+        ),
+      );
+    }
     const match = /^\/api\/executions\/([a-f0-9]{64})$/.exec(url.pathname);
     if (match?.[1] && request.method === "GET") {
       const row = await visibleExecution(env.DB, match[1], caller);
@@ -715,6 +1237,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           {
             ...summary(row),
             runtimeStatus,
+            // RUN-01 (ADR 018): the applied policy snapshot rides detail so
+            // operators can inspect what this Execution ran under, even after
+            // later policy edits. Old rows (NULL) report the code default.
+            policy: { sagaId: row.saga_id, ...JSON.parse(policySnapshot(parseStoredPolicy(row.policy_json ?? null))) },
             input: JSON.parse(row.input_json),
             result: row.result_json ? JSON.parse(row.result_json) : null,
             error: row.error_json ? JSON.parse(row.error_json) : null,
@@ -901,16 +1427,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (!row) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
       const stored = await env.FILES.get(objectKey(resolved.sourceOrgId, resolved.location, resolved.path));
       if (!stored) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
-      return new Response(stored.body, {
-        status: 200,
-        headers: {
-          "Content-Type": row.content_type,
-          "Content-Length": String(row.size),
-          ETag: `"${row.sha256}"`,
-          "X-File-Version": String(row.version),
-          "Cache-Control": "no-store",
-          "X-Content-Type-Options": "nosniff",
-        },
+      return apiBytes(stored.body, 200, {
+        "Content-Type": row.content_type,
+        "Content-Length": String(row.size),
+        ETag: `"${row.sha256}"`,
+        "X-File-Version": String(row.version),
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
       });
     }
     if (url.pathname === "/api/files/finalize" && request.method === "POST") {
@@ -1138,14 +1661,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const appAsset = /^\/api\/apps\/([0-9a-f-]{36})\/assets\/(.+)$/.exec(url.pathname);
     if (appAsset?.[1] && appAsset[2] && request.method === "GET") {
       const served = await serveAsset(env.DB, caller, parseAppId(appAsset[1]), appAsset[2]);
-      return new Response(served.content, {
-        status: 200,
-        headers: {
-          "Content-Type": "text/plain; charset=utf-8",
-          "Cache-Control": "no-store",
-          ETag: `"${served.contentHash}"`,
-          "X-Content-Type-Options": "nosniff",
-        },
+      return apiBytes(served.content, 200, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",
+        ETag: `"${served.contentHash}"`,
+        "X-Content-Type-Options": "nosniff",
       });
     }
     const appOne = /^\/api\/apps\/([0-9a-f-]{36})$/.exec(url.pathname);
@@ -1219,6 +1739,132 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const dismissed = await dismissNotification(env.DB, caller, parseNotificationId(notifOne[1]));
       if (!dismissed) return json({ error: { code: "NOTIFICATION_NOT_FOUND", message: "Not found." } }, 404);
       return json({ dismissed: true });
+    }
+    // Cloudflare-native diagnostics (OPS-02, issue #173): product health,
+    // version, metrics, scheduled-task status, platform job progress, and
+    // Connection health. Every read is Organization-scoped; missing
+    // provider metrics answer unavailable, never fabricated. Query strings
+    // stay deny-by-default: only the allowlisted keys below pass the gate.
+    if (url.pathname === "/api/ops/version" && request.method === "GET") {
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json({
+        version: await opsVersion(env.DB, { sdkVersion: SDK_VERSION, catalog: SAGA_CATALOG }),
+      });
+    }
+    if (url.pathname === "/api/ops/health" && request.method === "GET") {
+      // Liveness over durable state: the membership gate already read D1
+      // before reaching this route, so a SELECT 1 here proves the Worker
+      // can serve traffic. No vendor, no metering, no secrets. A genuine
+      // storage failure surfaces as 500 via the shared handler, never a
+      // fabricated degraded payload.
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
+      return json({ status: "ok", database: "ok", worker: "ok", checkedAt: new Date().toISOString() });
+    }
+    if (url.pathname === "/api/ops/metrics" && request.method === "GET") {
+      // Upstream metrics.py maps to per-status Execution counts plus the
+      // undispatched-Pending admission backlog and recent failure codes.
+      // ?recent=N bounds the failure tail (1-50, default 10).
+      const recentRaw = url.searchParams.get("recent");
+      for (const key of url.searchParams.keys()) {
+        if (key !== "recent") {
+          throw new Fault(400, "UNSUPPORTED_QUERY", "Only recent is supported here.");
+        }
+      }
+      let recent = 10;
+      if (recentRaw !== null) {
+        if (!/^\d+$/.test(recentRaw) || Number(recentRaw) < 1 || Number(recentRaw) > 50) {
+          throw new Fault(400, "INVALID_LIMIT", "Recent must be an integer from 1 to 50.");
+        }
+        recent = Number(recentRaw);
+      }
+      return json(scrubValueWithDeploymentSecrets({ metrics: await opsMetrics(env.DB, caller, recent) }, env));
+    }
+    if (url.pathname === "/api/ops/scheduled-tasks" && request.method === "GET") {
+      // Upstream scheduler_diagnostics.py maps to the durable endpoint
+      // inventory (the trigger surface that actually exists); cadence stays
+      // honestly null until TRG-01 recurring schedules land.
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json(await opsScheduledTasks(env.DB, caller));
+    }
+    if (url.pathname === "/api/ops/jobs" && request.method === "GET") {
+      // Upstream jobs.py + platform_jobs.py map to Execution backlog
+      // counters plus per-app deploy-job aggregates with interrupted flags.
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json(scrubValueWithDeploymentSecrets({ jobs: await opsJobs(env.DB, caller) }, env));
+    }
+    if (url.pathname === "/api/ops/preflight" && request.method === "GET") {
+      // Upstream maintenance.py preflight maps to static per-Integration
+      // mapping/credential presence: no vendor HTTP, no secret values.
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json(await opsPreflight(env.DB, caller, env as unknown as Record<string, string | undefined>));
+    }
+    if (url.pathname === "/api/ops/connections" && request.method === "GET") {
+      // Upstream platform/workers.py maps to per-Integration Connection
+      // health with registry test hints; live probes stay on the explicit
+      // per-Connection test route.
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json(await opsConnectionHealth(env.DB, caller));
+    }
+    // Operational repairs (OPS-02, issue #173): inspect-then-act behind the
+    // double-commit contract. POST with dryRun omitted or true only
+    // inspects (no writes, no dispatch, no deletes); dryRun:false executes
+    // behind the admin gate and emits a best-effort audit event. Production
+    // stays manual per ADR 004; nothing here runs on a schedule.
+    if (url.pathname === "/api/ops/repairs" && request.method === "POST") {
+      requireJson(request);
+      const repair = parseRepairBody(await boundedJson(request.body));
+      const admin = isAdminCaller(ctx);
+      if (repair.dryRun) {
+        return json({ repair: await inspectRepair(env.DB, caller, repair) });
+      }
+      if (!admin) {
+        throw new Fault(403, "REPAIR_FORBIDDEN", "Only an admin may run operational repairs.");
+      }
+      const outcome = await runRepair(env.DB, caller, repair, {
+        admin,
+        secrets: deploymentSecretsFromEnv(env),
+        retry: async (key: string, sagaId: string, retryInput: unknown) => {
+          const target = SAGA_DEFINITIONS.find((entry) => entry.id === sagaId);
+          if (!target) throw new Fault(404, "UNKNOWN_SAGA", "The Saga for this Execution is no longer deployed.");
+          const accepted = await submit(env, caller, parseCallerKey(key), target, target.parse(retryInput));
+          return { executionId: accepted.executionId, replayed: accepted.replayed };
+        },
+        cancel: async (executionId: string) => {
+          // UPDATE-first like the interactive cancel route: the fenced
+          // write decides, then the row is re-read. A lost race (or an
+          // already-terminal row) answers the current status with
+          // cancelled:false instead of rewriting history.
+          const marked = await env.DB.prepare(
+            "UPDATE executions SET status='Cancelling' WHERE id=? AND status IN ('Pending','Running')",
+          )
+            .bind(executionId)
+            .run();
+          const current = await visibleExecution(env.DB, executionId, caller);
+          if (marked.meta.changes === 0) {
+            return { status: current.status, cancelled: false };
+          }
+          try {
+            await (await workflowForSaga(env, current.saga_id).get(executionId)).terminate();
+          } catch {
+            // Best-effort native stop: the D1 marker below is the durable
+            // repair record either way (the interactive cancel route keeps
+            // the stricter classify-and-confirm contract).
+          }
+          await cancelExecution(env.DB, executionId);
+          return { status: "Cancelled", cancelled: true };
+        },
+      });
+      await recordAudit(
+        env.DB,
+        caller,
+        `ops.repair.${repair.kind}`,
+        repair.targetId ? { type: "ops-repair", id: repair.targetId } : { type: "ops-repair" },
+        "success",
+        { kind: repair.kind, targetId: repair.targetId ?? null },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubValueWithDeploymentSecrets({ repair: outcome }, env));
     }
     // Generated Artifacts (FILE-02, ADR 019): Organization-scoped records
     // with R2 bytes, attachment bindings, and explicit retention cleanup.
@@ -1310,13 +1956,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         artifactAdmin,
         parseArtifactVersion(Number(artifactVersion[2])),
       );
-      return new Response(served.bytes.slice().buffer as ArrayBuffer, {
-        status: 200,
-        headers: {
-          "Content-Type": served.mime,
-          "Cache-Control": "no-store",
-          "X-Content-Type-Options": "nosniff",
-        },
+      return apiBytes(served.bytes.slice().buffer as ArrayBuffer, 200, {
+        "Content-Type": served.mime,
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
       });
     }
     const artifactBytes = /^\/api\/artifacts\/([0-9a-f-]{36})\/bytes$/.exec(url.pathname);
@@ -1343,13 +1986,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     if (artifactPreview?.[1] && request.method === "GET") {
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
       const served = await previewArtifact(artifactStore, caller, parseArtifactId(artifactPreview[1]), artifactAdmin);
-      return new Response(served.bytes.slice().buffer as ArrayBuffer, {
-        status: 200,
-        headers: {
-          "Content-Type": served.mime,
-          "Cache-Control": "no-store",
-          "X-Content-Type-Options": "nosniff",
-        },
+      return apiBytes(served.bytes.slice().buffer as ArrayBuffer, 200, {
+        "Content-Type": served.mime,
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
       });
     }
     const artifactDownload = /^\/api\/artifacts\/([0-9a-f-]{36})\/download$/.exec(url.pathname);
@@ -1357,14 +1997,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
       const served = await downloadArtifact(artifactStore, caller, parseArtifactId(artifactDownload[1]), artifactAdmin);
       const filename = served.name.replace(/["\r\n]/g, "_");
-      return new Response(served.bytes.slice().buffer as ArrayBuffer, {
-        status: 200,
-        headers: {
-          "Content-Type": served.mime,
-          "Content-Disposition": `attachment; filename="${filename}"`,
-          "Cache-Control": "no-store",
-          "X-Content-Type-Options": "nosniff",
-        },
+      return apiBytes(served.bytes.slice().buffer as ArrayBuffer, 200, {
+        "Content-Type": served.mime,
+        "Content-Disposition": `attachment; filename="${filename}"`,
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
       });
     }
     const artifactRename = /^\/api\/artifacts\/([0-9a-f-]{36})\/rename$/.exec(url.pathname);
@@ -1590,11 +2227,19 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (typeof body.integrationId !== "string") {
         throw new Fault(400, "UNKNOWN_INTEGRATION", "A Connection write needs an integrationId.");
       }
-      const created = await createConnection(env.DB, caller, body.integrationId, {
-        config: body.config,
-        ...(body.displayName === undefined ? {} : { displayName: body.displayName }),
-        ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
-      });
+      const created = await createConnection(
+        env.DB,
+        caller,
+        body.integrationId,
+        {
+          config: body.config,
+          ...(body.displayName === undefined ? {} : { displayName: body.displayName }),
+          ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
+        },
+        // Issue #239: echo endpoints gate on deployment environment — the
+        // loopback default serves local only; non-local needs explicit HTTPS.
+        { environment: (env as unknown as Record<string, string | undefined>).ENVIRONMENT },
+      );
       return json(scrubConnectionPayload({ connection: created }, env), 201);
     }
     const connTest = /^\/api\/connections\/([0-9a-f-]{36})\/test$/.exec(url.pathname);
@@ -1621,16 +2266,299 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     if (connOne?.[1] && request.method === "PUT") {
       requireJson(request);
       const body = (await boundedJson(request.body)) as Record<string, unknown>;
-      const updated = await updateConnection(env.DB, caller, connOne[1], {
-        ...(body.config === undefined ? {} : { config: body.config }),
-        ...(body.displayName === undefined ? {} : { displayName: body.displayName }),
-        ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
-      });
+      const updated = await updateConnection(
+        env.DB,
+        caller,
+        connOne[1],
+        {
+          ...(body.config === undefined ? {} : { config: body.config }),
+          ...(body.displayName === undefined ? {} : { displayName: body.displayName }),
+          ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
+        },
+        // Issue #239: same environment gate as create above.
+        { environment: (env as unknown as Record<string, string | undefined>).ENVIRONMENT },
+      );
       return json(scrubConnectionPayload({ connection: updated }, env));
     }
     if (connOne?.[1] && request.method === "DELETE") {
       await deleteConnection(env.DB, caller, connOne[1]);
       return json({ deleted: true });
+    }
+    // TOOL-01 opt-in Saga tools (issue #170, ADR 022): explicit enrollment
+    // with stable identity, collision-safe names, and distinctive
+    // descriptions. Discovery (GET) and execution (resolve below + the MCP
+    // tools/call path) share the registry gate: disabled and stale rows
+    // vanish from both identically. Query strings stay deny-by-default.
+    if (url.pathname === "/api/tools" && request.method === "GET") {
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json(scrubConnectionPayload({ tools: await toolRegistry.list(env.DB, caller, SAGA_CATALOG) }, env));
+    }
+    if (url.pathname === "/api/tools" && request.method === "POST") {
+      requireJson(request);
+      const body = (await boundedJson(request.body)) as { sagaId?: unknown } & Record<string, unknown>;
+      if (typeof body.sagaId !== "string") {
+        throw new Fault(400, "UNKNOWN_SAGA", "A tool enrollment needs a sagaId.");
+      }
+      const saga = SAGA_CATALOG.find((entry) => entry.id === body.sagaId);
+      if (!saga) throw new Fault(404, "UNKNOWN_SAGA", "Unknown Saga id.");
+      const enrolled = await toolRegistry.enroll(env.DB, caller, saga, {
+        ...(body.name === undefined ? {} : { name: body.name }),
+        ...(body.description === undefined ? {} : { description: body.description }),
+      });
+      await recordAudit(
+        env.DB,
+        caller,
+        "tool.enroll",
+        { type: "tool", id: enrolled.name },
+        "success",
+        { sagaId: enrolled.sagaId },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ tool: enrolled }, env), 201);
+    }
+    const toolDisable = /^\/api\/tools\/([a-z][a-z0-9_]{2,63})\/disable$/.exec(url.pathname);
+    if (toolDisable?.[1] && request.method === "POST") {
+      const disabled = await toolRegistry.disable(env.DB, caller, toolDisable[1]);
+      await recordAudit(
+        env.DB,
+        caller,
+        "tool.disable",
+        { type: "tool", id: disabled.name },
+        "success",
+        { sagaId: disabled.sagaId },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ tool: disabled }, env));
+    }
+    const toolExecute = /^\/api\/tools\/([a-z][a-z0-9_]{2,63})\/execute$/.exec(url.pathname);
+    if (toolExecute?.[1] && request.method === "POST") {
+      // Tool execution rides the standard Execution path: resolve the tool
+      // through the registry gate, then submit its Saga with the standard
+      // Idempotency-Key contract. The submit gate stays authoritative.
+      requireJson(request);
+      const tool = await toolRegistry.resolve(env.DB, caller, toolExecute[1], SAGA_CATALOG);
+      const key = parseCallerKey(request.headers.get("Idempotency-Key"));
+      const { saga, input } = parseSubmission({
+        ...((await boundedJson(request.body)) as Record<string, unknown>),
+        sagaId: tool.sagaId,
+      });
+      const accepted = await submit(env, caller, key, saga, input);
+      await recordAudit(
+        env.DB,
+        caller,
+        "tool.execute",
+        { type: "tool", id: tool.name },
+        "success",
+        { sagaId: tool.sagaId, executionId: accepted.executionId },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ tool: tool.name, ...accepted }, env), accepted.replayed ? 200 : 202, {
+        Location: accepted.statusUrl,
+      });
+    }
+    // TOOL-01 Code Mode discovery (issue #170, ADR 022): progressive
+    // search/inspect over the pinned Halo contract. Query strings are
+    // allowlisted per route (?integration= + ?q= here); unknown integrations
+    // 404, never a leak. Execution lives on POST /api/openapi/execute below.
+    if (url.pathname === "/api/openapi/search" && request.method === "GET") {
+      const keys = [...url.searchParams.keys()];
+      if (keys.some((key) => key !== "integration" && key !== "q")) {
+        throw new Fault(400, "UNSUPPORTED_QUERY", "Only ?integration= and ?q= are supported here.");
+      }
+      const integration = url.searchParams.get("integration");
+      if (integration !== "halo") throw new Fault(404, "UNKNOWN_INTEGRATION", "Unknown Integration id.");
+      const operations = searchHaloOperations(url.searchParams.get("q") ?? "");
+      return json(scrubConnectionPayload({ integration: "halo", operations }, env));
+    }
+    const openapiInspect = /^\/api\/openapi\/operations\/([A-Za-z][A-Za-z0-9_.-]{0,127})$/.exec(url.pathname);
+    if (openapiInspect?.[1] && request.method === "GET") {
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json(scrubConnectionPayload({ operation: inspectHaloOperation(openapiInspect[1]) }, env));
+    }
+    if (url.pathname === "/api/openapi/execute" && request.method === "POST") {
+      // Host-mediated Code Mode execution (ADR 022): the route resolves the
+      // caller + Organization Connection, validates against the pinned
+      // contract, applies policy, enforces egress, and injects credentials
+      // outside model-visible state. The body carries operation selection +
+      // params only — never credentials, never a URL.
+      requireJson(request);
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      if (body.integration !== "halo") throw new Fault(404, "UNKNOWN_INTEGRATION", "Unknown Integration id.");
+      if (typeof body.operationId !== "string") {
+        throw new Fault(400, "OPENAPI_UNKNOWN_OPERATION", "Provide an operationId from the pinned contract.");
+      }
+      const params = (body.params ?? {}) as Record<string, unknown>;
+      const { result, provenance } = await runCodeModeExecute(env, caller, {
+        operationId: body.operationId,
+        ...(params.path === undefined ? {} : { path: params.path as Record<string, string> }),
+        ...(params.query === undefined ? {} : { query: params.query as Record<string, string> }),
+        ...(body.input === undefined ? {} : { body: body.input }),
+      });
+      return json(scrubConnectionPayload({ result, provenance }, env));
+    }
+    // TOOL-01 inbound MCP gateway (issue #170, ADR 022): JSON-RPC 2.0 over
+    // POST behind the same membership gate as every /api/* route. tools/list
+    // serves enrolled live tools plus the Code Mode search/execute pair;
+    // tools/call executes enrolled tools through the standard submit path;
+    // tools/search narrows live tools by text; tools/describe inspects one
+    // tool or one pinned Halo operation. Envelope faults (auth/parse/
+    // unknown-method) throw; call-level denials serialize as error results.
+    if (url.pathname === "/api/mcp" && request.method === "POST") {
+      requireJson(request);
+      const envelope = parseMcpRequest(await boundedJson(request.body));
+      if (envelope.method === "tools/list") {
+        const tools = await toolRegistry.list(env.DB, caller, SAGA_CATALOG);
+        return json(
+          scrubConnectionPayload(
+            mcpResult(envelope.id, {
+              tools: [
+                ...tools.map((tool) => ({
+                  name: tool.name,
+                  description: tool.description,
+                  inputSchema: tool.inputSchema,
+                })),
+                {
+                  name: "halo_api_search",
+                  description: "[halo_api_search] Search the pinned HaloPSA contract by free text.",
+                  inputSchema: { type: "object" },
+                },
+                {
+                  name: "halo_api_execute",
+                  description: "[halo_api_execute] Execute one pinned HaloPSA operation through the org Connection.",
+                  inputSchema: { type: "object" },
+                },
+              ],
+            }),
+            env,
+          ),
+        );
+      }
+      if (envelope.method === "tools/search") {
+        const { query } = parseMcpSearchParams(envelope.params);
+        const tools = await toolRegistry.list(env.DB, caller, SAGA_CATALOG);
+        const views = tools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+        }));
+        return json(scrubConnectionPayload(mcpResult(envelope.id, { tools: searchTools(views, query) }), env));
+      }
+      if (envelope.method === "tools/describe") {
+        const { name } = parseMcpDescribeParams(envelope.params);
+        const tools = await toolRegistry.list(env.DB, caller, SAGA_CATALOG);
+        const tool = tools.find((entry) => entry.name === name);
+        if (tool) {
+          return json(
+            scrubConnectionPayload(
+              mcpResult(envelope.id, {
+                tool: { name: tool.name, description: tool.description, inputSchema: tool.inputSchema },
+              }),
+              env,
+            ),
+          );
+        }
+        const operations = indexOperations(haloLabSpec(), HALO_CLASSIFICATIONS);
+        const operation = operations.find((entry) => entry.operationId === name);
+        if (operation) {
+          return json(
+            scrubConnectionPayload(
+              mcpResult(envelope.id, {
+                operation: inspectOperation(operations, operation.operationId),
+                policy: HALO_DEFAULT_POLICY,
+              }),
+              env,
+            ),
+          );
+        }
+        return json(
+          scrubConnectionPayload(
+            mcpResult(envelope.id, {
+              error: { code: "MCP_TOOL_DENIED", message: `Unknown tool ${JSON.stringify(name)}.` },
+            }),
+            env,
+          ),
+        );
+      }
+      // tools/call: enrolled Saga tools execute through the standard submit
+      // path; halo_api_search describes Code Mode discovery; halo_api_execute
+      // runs the host-mediated execution. Unknown names deny as error
+      // results (call-level), never envelope faults.
+      const { tool, input } = parseMcpCallParams(envelope.params);
+      if (tool === "halo_api_search") {
+        const query = (input as Record<string, unknown>).query;
+        const found = searchOperations(
+          indexOperations(haloLabSpec(), HALO_CLASSIFICATIONS),
+          typeof query === "string" ? query : "",
+        );
+        return json(scrubConnectionPayload(mcpResult(envelope.id, { tools: found }), env));
+      }
+      if (tool === "halo_api_execute") {
+        const args = input as Record<string, unknown>;
+        if (typeof args.operationId !== "string") {
+          return json(
+            scrubConnectionPayload(
+              mcpResult(envelope.id, { error: { code: "MCP_INVALID_PARAMS", message: "Provide an operationId." } }),
+              env,
+            ),
+          );
+        }
+        try {
+          const params = (args.params ?? {}) as Record<string, unknown>;
+          const { result, provenance } = await runCodeModeExecute(env, caller, {
+            operationId: args.operationId,
+            ...(params.path === undefined ? {} : { path: params.path as Record<string, string> }),
+            ...(params.query === undefined ? {} : { query: params.query as Record<string, string> }),
+            ...(args.input === undefined ? {} : { body: args.input }),
+          });
+          return json(scrubConnectionPayload(mcpResult(envelope.id, { result, provenance }), env));
+        } catch (error) {
+          const code = error instanceof Fault ? error.code : "MCP_EXECUTION_FAILED";
+          const message = error instanceof Fault ? error.message : "The Code Mode execution failed.";
+          await recordAudit(
+            env.DB,
+            caller,
+            "codemode.execute_denied",
+            { type: "integration", id: HALO_INTEGRATION_ID },
+            "failure",
+            { operationId: args.operationId, code },
+            deploymentSecretsFromEnv(env),
+          );
+          return json(scrubConnectionPayload(mcpResult(envelope.id, { error: { code, message } }), env));
+        }
+      }
+      let resolved: { name: string; sagaId: string } | null = null;
+      let resolveFault: Fault | null = null;
+      try {
+        resolved = await toolRegistry.resolve(env.DB, caller, tool, SAGA_CATALOG);
+      } catch (error) {
+        resolveFault =
+          error instanceof Fault ? error : new Fault(500, "MCP_EXECUTION_FAILED", "The tool lookup failed.");
+      }
+      if (!resolved) {
+        const code = resolveFault?.code ?? "MCP_TOOL_DENIED";
+        const message = resolveFault?.message ?? `Unknown tool ${JSON.stringify(tool)}.`;
+        return json(scrubConnectionPayload(mcpResult(envelope.id, { error: { code, message } }), env));
+      }
+      try {
+        const args = input as Record<string, unknown>;
+        const key = parseCallerKey(typeof args.idempotencyKey === "string" ? (args.idempotencyKey as string) : null);
+        const { saga, input: parsed } = parseSubmission({ input: args.input ?? {}, sagaId: resolved.sagaId });
+        const accepted = await submit(env, caller, key, saga, parsed);
+        await recordAudit(
+          env.DB,
+          caller,
+          "tool.execute",
+          { type: "tool", id: resolved.name },
+          "success",
+          { sagaId: resolved.sagaId, executionId: accepted.executionId },
+          deploymentSecretsFromEnv(env),
+        );
+        return json(scrubConnectionPayload(mcpResult(envelope.id, { tool: resolved.name, ...accepted }), env));
+      } catch (error) {
+        const code = error instanceof Fault ? error.code : "MCP_EXECUTION_FAILED";
+        const message = error instanceof Fault ? error.message : "The tool execution failed.";
+        return json(scrubConnectionPayload(mcpResult(envelope.id, { error: { code, message } }), env));
+      }
     }
     // TRG-02 endpoint management (issue #138, ADR 018): operator-owned
     // inventory over this Organization's scoped endpoints. Create returns
@@ -2114,7 +3042,7 @@ async function routeOrgs(request: Request, env: Bindings, ctx: CallerCtx, url: U
   const del = /^\/api\/orgs\/([0-9a-fA-F-]{36})$/.exec(pathname);
   if (del?.[1] && request.method === "DELETE") {
     requireInstanceAdmin(ctx);
-    return json(await deleteOrg(env.DB, parseOrgId(del[1])));
+    return json(await deleteOrg(env.DB, parseOrgId(del[1]), { files: env.FILES, artifacts: env.ARTIFACTS }));
   }
   const preview = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/delete-preview$/.exec(pathname);
   if (preview?.[1] && request.method === "GET") {

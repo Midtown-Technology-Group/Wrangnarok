@@ -3,7 +3,7 @@ src/logs.ts
 src/index.ts
 src/sdk.ts
 src/sagas/hello.ts
-migrations/0009_execution_logs.sql
+migrations/0014_execution_logs.sql
 test/logs.test.ts
 client/src/lib/api-client.ts
 client/src/lib/client-types.ts
@@ -11,6 +11,7 @@ client/src/pages/ExecutionDetail.tsx
 docs/sdk.md
 docs/sdk-capability-map.md
 docs/upstream-parity.md
+docs/migration-ledger.md
 scripts/check-bundle-budget.mjs
 scripts/wrangnarok.mjs
 scopes/obs-02.scope
