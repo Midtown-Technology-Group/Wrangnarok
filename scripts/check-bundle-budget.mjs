@@ -146,14 +146,14 @@ import { join } from "node:path";
 // deliberate feature headroom, not dependency bloat: package.json is
 // unchanged versus main. Combined measures 545802 bytes locally (CI number
 // governs); shrink the raise if it lands lower.
-// 2026-09-12 (AUTH-02 rebase over FORM-02 main, issue #143): 570 KiB.
+// 2026-09-12 (AUTH-02 rebase over TRG-01 main, issue #143): 590 KiB.
 // The union of the AUTH-02 resource-role control plane (grant gates on
 // form read/submit plus the FORM-02 startup-handle delegation test) with
-// the FORM-02 dynamic-forms surface stacked on TOOL-01 plus the sec
-// endpoint safe-URL policy and response baseline measures 580884 bytes.
-// Hand-written feature code, no new dependencies (package.json unchanged
-// versus main); deliberate feature headroom only.
-const BUDGET_BYTES = 570 * 1024;
+// the TRG-01 schedules surface stacked on FORM-02 plus the sec endpoint
+// safe-URL policy and response baseline measures locally below; the CI
+// number governs. Hand-written feature code, no new dependencies
+// (package.json unchanged versus main); deliberate feature headroom only.
+const BUDGET_BYTES = 590 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");

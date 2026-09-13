@@ -592,11 +592,11 @@ export interface OpsMetrics {
 }
 
 /** One scheduled-task row: upstream `scheduler_diagnostics.py` inspects
- * APScheduler jobs; Wrangnarok has no scheduler process in this slice
- * (TRG-01 owns recurring schedules), so the answer is the durable trigger
- * surface that actually exists — Cron-capable endpoints are reported from
- * D1, and the cadence field stays honestly null until TRG-01 schedules
- * land. A missing scheduler is stated, never emulated with a fake ticker. */
+ * APScheduler jobs; Wrangnarok reports the durable trigger surface that
+ * actually exists — endpoints (`kind: "endpoint"`, cadence honestly null)
+ * plus TRG-01 schedules (`kind: "scheduler"`, cadence is the cron plus
+ * timezone or the one-off due instant). A missing schedule table degrades
+ * to the endpoint-only view, never a fake ticker. */
 export interface OpsScheduledTask {
   readonly id: string;
   readonly name: string;
@@ -873,12 +873,13 @@ export async function opsMetrics(db: D1Database, caller: Principal, recentLimit 
   return { generatedAt: new Date().toISOString(), executions, recentFailures };
 }
 
-/** Scheduled-task status for this Organization. No scheduler process exists
- * in this slice (TRG-01 owns recurring schedules), so tasks are the durable
- * endpoint inventory that can actually trigger work: each endpoint reports
- * name, kind, enabled state, and its delivery backlog depth. The cadence is
- * honestly null — there is no Cron Trigger row to read yet, and a fake
- * cadence would be worse than none. */
+/** Scheduled-task status for this Organization. TRG-01 (issue #137, ADR
+ * 012): the durable endpoint inventory plus the recurring/one-off schedule
+ * inventory that can actually trigger work. Endpoints report name, kind,
+ * enabled state, and delivery backlog depth; schedules report cadence
+ * (cron plus timezone, or the one-off due instant), enablement, next due
+ * instant, and recorded delivery depth. Missing tables degrade to the
+ * endpoint-only view, never a throw: diagnostics must degrade, not fail. */
 export async function opsScheduledTasks(db: D1Database, caller: Principal): Promise<{ tasks: OpsScheduledTask[] }> {
   let endpoints: { id: string; name: string; kind: string; enabled: number }[];
   try {
@@ -910,9 +911,55 @@ export async function opsScheduledTasks(db: D1Database, caller: Principal): Prom
       cadence: null,
       detail:
         endpoint.kind === "webhook"
-          ? `webhook endpoint with ${pendingDeliveries} recorded deliveries; recurring schedules arrive with TRG-01.`
-          : `api-key endpoint with ${pendingDeliveries} recorded deliveries; recurring schedules arrive with TRG-01.`,
+          ? `webhook endpoint with ${pendingDeliveries} recorded deliveries.`
+          : `api-key endpoint with ${pendingDeliveries} recorded deliveries.`,
     });
+  }
+  try {
+    const schedules = await db
+      .prepare(
+        "SELECT id,name,kind,cron,timezone,enabled,run_at,next_due_at FROM schedules WHERE org_id=? ORDER BY name",
+      )
+      .bind(caller.orgId)
+      .all<{
+        id: string;
+        name: string;
+        kind: string;
+        cron: string;
+        timezone: string;
+        enabled: number;
+        run_at: string | null;
+        next_due_at: string | null;
+      }>();
+    for (const schedule of schedules.results) {
+      let deliveries = 0;
+      try {
+        deliveries = await countRows(
+          db,
+          "SELECT COUNT(*) AS n FROM schedule_deliveries WHERE schedule_id=?",
+          schedule.id,
+        );
+      } catch {
+        deliveries = 0;
+      }
+      // run_at is always set for one-off rows (parseRunAt requires it), so
+      // the cadence is the due instant itself; spent rows keep it as history.
+      const cadence =
+        schedule.kind === "one-off" ? (schedule.run_at as string) : `${schedule.cron} (${schedule.timezone})`;
+      tasks.push({
+        id: schedule.id,
+        name: schedule.name,
+        kind: "scheduler",
+        enabled: schedule.enabled === 1,
+        cadence,
+        detail:
+          schedule.kind === "one-off"
+            ? `one-off schedule due ${schedule.next_due_at ?? "spent"} with ${deliveries} recorded deliveries.`
+            : `recurring schedule next due ${schedule.next_due_at as string} with ${deliveries} recorded deliveries.`,
+      });
+    }
+  } catch {
+    // Pre-TRG-01 database without the schedules table: endpoint-only view.
   }
   return { tasks };
 }

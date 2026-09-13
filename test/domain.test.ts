@@ -14,6 +14,7 @@ import {
   parseDigestInput,
   parseHistoryQuery,
   parseInput,
+  parseCallerKey,
   parseSubmission,
   shapeDigest,
   STEP_RETRY_CEILING,
@@ -50,6 +51,10 @@ describe("MVP slice contracts", () => {
     expect(await executionId(principal, "mvp-slice-key-001")).toBe(id);
     expect(await executionId({ ...principal, userId: "other" }, "mvp-slice-key-001")).not.toBe(id);
     expect(await executionId({ ...principal, orgId: "other" }, "mvp-slice-key-001")).not.toBe(id);
+    // TRG-01 (issue #137): schedule-window keys own the sch- namespace the
+    // way endpoint deliveries own wep-; caller keys squatting it fail closed.
+    expect(() => parseCallerKey("sch-abc1234567890123")).toThrow(/reserved/);
+    expect(parseCallerKey("caller-key-00000001")).toBe("caller-key-00000001");
   });
   it("counts actual streamed bytes before parsing JSON", async () => {
     const body = new Response(" ".repeat(4097)).body;

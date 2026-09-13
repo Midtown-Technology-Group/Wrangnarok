@@ -34,7 +34,7 @@ type SagaRuntimePolicy = {
 
 Every Execution snapshots the effective policy into `executions.policy_json` at submit. The Workflow resolves step retry limits and vendor deadlines through that snapshot, never the live operator row: in-flight runs keep the behavior they started with when an operator edits policy mid-flight. Detail exposes the snapshot under `policy`; missing snapshots (pre-migration rows) report the code default, never an invented per-Saga guess.
 
-Authorization is explicit and minimal for Phase 0: any authenticated caller in the Organization may inspect policy (`GET /api/sagas/:id/policy`); only operator-harness writes carrying the `X-Operator: allow-policy-write` header may change it (`PUT`). Ordinary callers read policy, never write it (`403 FORBIDDEN`). Unknown Saga IDs answer 404, never an existence leak across tenants. Phase 3 replaces the header gate with the membership and role table (AUTH-02); the routes and shapes do not change.
+Authorization follows the authoritative Organization membership boundary: any authenticated caller in the Organization may inspect policy (`GET /api/sagas/:id/policy`), while `PUT` requires an active Organization-admin membership or instance-admin identity through `requireManageOrg`. Ordinary members may read policy but cannot change it (`403 ADMIN_ONLY`), even if they supply forged operator headers. Unknown Saga IDs answer 404, never an existence leak across tenants.
 
 ## Behavioral matrix (proven by `test/runtime-policy.test.ts` plus existing suites)
 
@@ -56,5 +56,5 @@ Authorization is explicit and minimal for Phase 0: any authenticated caller in t
 - Operators gain a real runtime surface without forking Saga identity: policy rows are Organization-scoped environment state, portable bundles stay credential-free.
 - Executions become self-describing: detail carries the applied policy, so post-incident review does not guess what the defaults were.
 - Free-tier cost stays flat: one extra indexed D1 lookup per submit plus one snapshot column; no Cron, no Queue, no Durable Object, no background job.
-- The service-identity write gate is deliberately narrow and documented as the Phase 3 replacement point. `stepTimeout` stays fixed platform text for the same reason: per-Saga native bounds need their own cost and venue decision.
+- Policy writes reuse the single Organization-admin authorization path rather than introducing a header- or service-identity exception. `stepTimeout` stays fixed platform text because per-Saga native bounds need their own cost and venue decision.
 - `CompletedWithErrors` and `Stuck` remain explicit non-adoptions with the semantics above. If a concrete Saga use case demonstrates behavior distinct from `Succeeded` with warnings, `Failed`, or `Running`-until-cancel, that case earns its own ADR and migration.
