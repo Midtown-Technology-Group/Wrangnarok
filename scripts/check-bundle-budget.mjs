@@ -160,12 +160,26 @@ import { join } from "node:path";
 // deliberate feature headroom, not dependency bloat: package.json is
 // unchanged versus main. Combined measures 545802 bytes locally (CI number
 // governs); shrink the raise if it lands lower.
+// 2026-09-12 (TRG-01 stacked over FORM-02 main, issue #137): 575 KiB. The
+// schedules surface (6 routes plus the schedules domain: cron/timezone
+// parsers, next-due math, deterministic window keys, bounded tick
+// promotion, delivery visibility; plus the minute Cron trigger, SDK
+// schedule types/guards/client, and ops scheduler inventory) stacks on the
+// 555 KiB surface above and measures ~567 KiB combined. Same deliberate
+// feature headroom as the earlier raises, not dependency bloat:
+// package.json is unchanged versus main.
 // 2026-09-12 (RUN-02 re-merge over FORM-02 main, issue #136): 560 KiB. The
 // union of the RUN-02 child-lineage surface with the FORM-02 dynamic-forms
 // main measures 561822 bytes (~548.7 KiB) locally (CI number governs).
 // Hand-written feature code, no new dependencies (package.json
 // unchanged versus main); deliberate feature headroom only.
-const BUDGET_BYTES = 560 * 1024;
+// 2026-09-13 (RUN-02 re-merge over TRG-01 main, issue #136): 585 KiB
+// provisional. The union of the RUN-02 child-lineage surface with the
+// TRG-01 schedules main remeasures below (CI number governs); shrink this
+// raise if the combined bundle lands lower. Hand-written feature code, no
+// new dependencies (package.json unchanged versus main); deliberate
+// feature headroom only.
+const BUDGET_BYTES = 585 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");

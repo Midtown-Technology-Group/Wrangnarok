@@ -1,7 +1,7 @@
 # RUN-02 lane scope (issue #136): child Saga invocation with lineage.
 # Child invocation path, lineage persistence, parent/child fixtures,
 # ExecutionDetail child surfaces. Scope covers the branch diff vs
-# origin/main exactly (2026-09-12 re-merge over OPS-02 main).
+# origin/main exactly (2026-09-13 re-merge over TRG-01 main).
 client/src/lib/api-client.ts
 client/src/lib/client-types.ts
 client/src/pages/ExecutionDetail.tsx

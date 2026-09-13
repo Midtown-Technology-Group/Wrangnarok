@@ -139,6 +139,17 @@ import {
 } from "./endpoints";
 import type { EndpointRow } from "./endpoints";
 import {
+  createSchedule,
+  deleteSchedule,
+  deliveryForWindow,
+  listSchedules,
+  loadSchedule,
+  parseScheduleBody,
+  parseScheduleName,
+  promoteDueSchedules,
+  setScheduleEnabled,
+} from "./schedules";
+import {
   consumeStartupHandle,
   deleteForm,
   FORM_NAME,
@@ -481,6 +492,15 @@ export default {
     });
     return response;
   },
+  async scheduled(controller: ScheduledController, env: Bindings): Promise<void> {
+    // TRG-01 Cron tick (issue #137, ADR 012): promote due schedule rows
+    // through the submit protocol. Bounded scan, single-winner discipline,
+    // overdue promotion, disabled/deleted rows never promoted. The tick
+    // never writes timeouts, never sweeps Pending, and never resurrects a
+    // cancelled window — promotion is the only write path here.
+    void controller;
+    await promoteDueSchedules(env.DB, env, SAGA_DEFINITIONS, submit).catch(() => undefined);
+  },
 } satisfies ExportedHandler<Bindings>;
 
 /** Serialize a form definition for the designer/read surface (FORM-02):
@@ -746,6 +766,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // TOOL-01 Code Mode search (issue #170): ?integration= + ?q= through the
     // route's own allowlisted parser below.
     const openapiSearch = request.method === "GET" && url.pathname === "/api/openapi/search";
+    // TRG-01 delivery visibility (issue #137): ?window= through the route's
+    // own allowlisted parser below.
+    const scheduleDeliveriesRead =
+      request.method === "GET" && /^\/api\/schedules\/[a-z0-9][a-z0-9-]{0,63}\/deliveries$/.test(url.pathname);
     if (
       url.search &&
       !(historyList && request.method === "GET") &&
@@ -758,7 +782,8 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       !appRuntimeFileDelete &&
       !fileList &&
       !fileBytes &&
-      !openapiSearch
+      !openapiSearch &&
+      !scheduleDeliveriesRead
     )
       throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
     if (isOrgPath) {
@@ -802,16 +827,12 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         });
       }
       if (request.method === "PUT") {
+        // Runtime policy changes affect every caller in this Organization.
+        // Authorize through the trusted membership context resolved above;
+        // request headers are attacker-controlled and are never an operator
+        // identity boundary. Instance admins retain the recovery path.
+        await requireManageOrg(env.DB, ctx, caller.orgId);
         requireJson(request);
-        // Operator gate (Phase 0, explicit): policy writes carry an
-        // `X-Operator: allow-policy-write` header minted by the local
-        // operator harness (scripts + tests). Ordinary callers never send
-        // it, so they read policy but cannot change it (403). Phase 3
-        // replaces this header with the membership/role table (AUTH-02);
-        // the routes and policy shapes do not change.
-        if (request.headers.get("X-Operator") !== "allow-policy-write") {
-          throw new Fault(403, "FORBIDDEN", "Only an operator identity may change Saga runtime policy.");
-        }
         const record = await storeSagaPolicy(env.DB, caller.orgId, entry.id, await boundedJson(request.body));
         return json({
           policy: {
@@ -829,6 +850,77 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // descriptor of the public author/automation surface. Authenticated
       // like every other /api/* route; drift is pinned by test/sdk.test.ts.
       return json(describeContract());
+    if (url.pathname === "/api/schedules" && request.method === "GET") {
+      // TRG-01 schedule inventory (issue #137, ADR 012): org-scoped
+      // summaries. Cadence, timezone, enablement, input, and run-as stay
+      // persisted environment state, never Saga source metadata.
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json({ schedules: await listSchedules(env.DB, caller, SAGA_DEFINITIONS) });
+    }
+    if (url.pathname === "/api/schedules" && request.method === "POST") {
+      // TRG-01 schedule create: any active member may author; run-as always
+      // resolves to the creating caller (the schedule owner), never a
+      // caller-supplied identity. Same-org duplicate names answer 409.
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
+      const parsed = parseScheduleBody(await boundedJson(request.body), SAGA_DEFINITIONS);
+      return json({ schedule: await createSchedule(env.DB, caller, parsed, SAGA_DEFINITIONS) }, 201);
+    }
+    const scheduleDetail = /^\/api\/schedules\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname);
+    if (scheduleDetail?.[1] && (request.method === "GET" || request.method === "DELETE")) {
+      const name = parseScheduleName(scheduleDetail[1]);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      if (request.method === "GET") {
+        const row = await loadSchedule(env.DB, caller.orgId, name);
+        if (!row) throw new Fault(404, "NOT_FOUND", "Not found.");
+        const [listed] = await listSchedules(env.DB, caller, SAGA_DEFINITIONS).then((all) =>
+          all.filter((entry) => entry.name === name),
+        );
+        return json({ schedule: listed ?? null });
+      }
+      // Deleting removes the row; already-promoted Executions keep their
+      // identity and history. Gone-or-foreign answers 404, never a leak.
+      if (request.method === "DELETE") await requireManageOrg(env.DB, ctx, caller.orgId);
+      await deleteSchedule(env.DB, caller, name);
+      return json({ deleted: true });
+    }
+    const scheduleEnable = /^\/api\/schedules\/([a-z0-9][a-z0-9-]{0,63})\/(enable|disable)$/.exec(url.pathname);
+    if (scheduleEnable?.[1] && scheduleEnable?.[2] && request.method === "POST") {
+      // Enablement is operator-managed environment state: disabling fences
+      // future promotion while in-flight Executions run to terminal.
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      const name = parseScheduleName(scheduleEnable[1]);
+      return json({
+        schedule: await setScheduleEnabled(env.DB, caller, name, scheduleEnable[2] === "enable", SAGA_DEFINITIONS),
+      });
+    }
+    const scheduleDeliveries = /^\/api\/schedules\/([a-z0-9][a-z0-9-]{0,63})\/deliveries$/.exec(url.pathname);
+    // Unknown name shapes (uppercase, dots, slashes beyond one segment)
+    // answer 404 like parseScheduleName does — never UNIMPLEMENTED theater.
+    if (
+      /^\/api\/schedules\/[^/]+(\/[^/]+)?$/.exec(url.pathname) &&
+      !scheduleDeliveries &&
+      !/^\/api\/schedules\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname) &&
+      !/^\/api\/schedules\/([a-z0-9][a-z0-9-]{0,63})\/(enable|disable)$/.exec(url.pathname)
+    ) {
+      return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+    }
+    if (scheduleDeliveries?.[1] && request.method === "GET") {
+      // Delivery visibility: which window promoted to which Execution.
+      // Window selection travels in the allowlisted ?window= key only.
+      const name = parseScheduleName(scheduleDeliveries[1]);
+      const keys = [...url.searchParams.keys()];
+      if (keys.length !== 1 || keys[0] !== "window") {
+        throw new Fault(400, "UNSUPPORTED_QUERY", "Only window is supported here.");
+      }
+      const window = url.searchParams.get("window") ?? "";
+      const row = await loadSchedule(env.DB, caller.orgId, name);
+      if (!row) throw new Fault(404, "NOT_FOUND", "Not found.");
+      const delivery = await deliveryForWindow(env.DB, row.id, window);
+      if (!delivery) throw new Fault(404, "NOT_FOUND", "Not found.");
+      return json({ delivery: { schedule: name, window, executionId: delivery.execution_id } });
+    }
     if (url.pathname === "/api/executions" && request.method === "POST") {
       const key = parseCallerKey(request.headers.get("Idempotency-Key"));
       if (
@@ -1733,8 +1825,9 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     if (url.pathname === "/api/ops/scheduled-tasks" && request.method === "GET") {
       // Upstream scheduler_diagnostics.py maps to the durable endpoint
-      // inventory (the trigger surface that actually exists); cadence stays
-      // honestly null until TRG-01 recurring schedules land.
+      // inventory plus the TRG-01 schedule inventory (the trigger surfaces
+      // that actually exist); schedule rows report their cron/timezone or
+      // one-off cadence.
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
       return json(await opsScheduledTasks(env.DB, caller));
     }
