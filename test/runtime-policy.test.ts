@@ -38,13 +38,6 @@ const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
 const TOKEN = "a".repeat(64);
 const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
-// Operator identity for policy writes: the Phase 0 operator header. Ordinary
-// callers never send it, so they read policy but cannot change it.
-const operatorAuth = {
-  Authorization: `Bearer ${TOKEN}`,
-  "Content-Type": "application/json",
-  "X-Operator": "allow-policy-write",
-};
 function submitRequest(key: string, sagaId: string = echoSaga.id, input: unknown = { message: "hello" }) {
   return new Request("http://local.test/api/executions", {
     method: "POST",
@@ -58,7 +51,7 @@ function detailRequest(id: string) {
 function policyGet(sagaId: string) {
   return new Request(`http://local.test/api/sagas/${sagaId}/policy`, { method: "GET", headers: { ...auth } });
 }
-function policyPut(sagaId: string, body: unknown, headers: Record<string, string> = operatorAuth) {
+function policyPut(sagaId: string, body: unknown, headers: Record<string, string> = auth) {
   return new Request(`http://local.test/api/sagas/${sagaId}/policy`, {
     method: "PUT",
     headers,
@@ -188,23 +181,37 @@ describe("RUN-01 operator inspect/change (workerd)", () => {
   it("rejects malformed policy route identifiers", async () => {
     expect((await worker.fetch(policyGet("0".repeat(36)), bindings)).status).toBe(400);
   });
-  it("serves the default policy to any caller and gates writes to operators", async () => {
+  it("serves the default policy to any caller and gates writes to Organization admins", async () => {
     const got = await worker.fetch(policyGet(echoSaga.id), bindings);
     expect(got.status).toBe(200);
     expect(await got.json()).toMatchObject({
       policy: { sagaId: echoSaga.id, sagaName: "echo", version: 1, admission: { enabled: true } },
     });
-    // Ordinary callers cannot change policy.
-    const denied = await worker.fetch(policyPut(echoSaga.id, { admission: { enabled: false } }, { ...auth }), bindings);
+    // A member cannot forge operator authority through a request header.
+    const memberId = "00000000-0000-4000-8000-000000000099";
+    const stamp = new Date().toISOString();
+    await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?)")
+      .bind(memberId, stamp)
+      .run();
+    await bindings.DB.prepare(
+      "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,'member','active','ordinary',?,?)",
+    )
+      .bind(principal.orgId, memberId, stamp, stamp)
+      .run();
+    const memberBindings = { ...bindings, LAB_USER_ID: memberId, LAB_FIXTURE_USER_ID: principal.userId };
+    const denied = await worker.fetch(
+      policyPut(echoSaga.id, { admission: { enabled: false } }, { ...auth, "X-Operator": "allow-policy-write" }),
+      memberBindings,
+    );
     expect(denied.status).toBe(403);
-    expect(await denied.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
+    expect(await denied.json()).toMatchObject({ error: { code: "ADMIN_ONLY" } });
     // Unknown Sagas 404, never a leak.
     expect((await worker.fetch(policyGet("395e15f0-3627-41f6-8922-008ce37e3b00"), bindings)).status).toBe(404);
     // Bad bodies reject without writing.
     const bad = await worker.fetch(policyPut(echoSaga.id, { retry: { vendorRetries: 9 } }), bindings);
     expect(bad.status).toBe(400);
     expect(await bad.json()).toMatchObject({ error: { code: "INVALID_POLICY" } });
-    // Operator merge: partial bodies merge, version bumps per write.
+    // Organization-admin merge: partial bodies merge, version bumps per write.
     const first = await worker.fetch(policyPut(echoSaga.id, { timeout: { vendorTimeoutMs: 250 } }), bindings);
     expect(first.status).toBe(200);
     expect(await first.json()).toMatchObject({

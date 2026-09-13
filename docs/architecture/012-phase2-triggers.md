@@ -1,8 +1,6 @@
 # ADR 012: Phase 2 Trigger investigation — schedules and webhooks
 
-**Status:** Investigation for issue #76. NOT accepted. Implements no code;
-constrains later implementation lanes. Defers to ADR 001 (Execution identity,
-idempotency) and ADR 010 (OrgCtx, declared requirements) where silent.
+**Status:** Schedule direction accepted and implemented (TRG-01, issue #137, 2026-09-12). Webhook direction ships separately (TRG-02, ADR 018). Implements the schedule slice; constrains later topic lanes. Defers to ADR 001 (Execution identity, idempotency) and ADR 010 (OrgCtx, declared requirements) where silent.
 
 ## Context
 
@@ -134,6 +132,33 @@ the digest echo-503 test is the template).
 - Saga source stays free of trigger-shaped metadata; the
   `OPERATIONAL_POLICY_KEYS` rejection list already covers schedule/cron
   keys and needs no change.
+
+## TRG-01 implementation (2026-09-12, issue #137)
+
+The schedule direction above ships as:
+
+- Migration `0016_schedules.sql` (reserved per `docs/migration-ledger.md`):
+  `schedules` rows (org-scoped name, Saga UUID, recurring/one-off kind,
+  cron, timezone, enablement, input, run-as owner, due instants) plus
+  `schedule_deliveries` window-to-Execution receipts.
+- `src/schedules.ts`: cron/timezone/input/run-at parsers, deterministic
+  `sch-` window keys, next-due math with named-timezone wall clocks,
+  bounded tick promotion with overdue handling and owner-cancel-wins.
+- Worker routes: `GET/POST /api/schedules`, `GET/DELETE
+  /api/schedules/:name`, `POST .../enable|.../disable`, `GET
+  .../deliveries?window=`; writes admin-gated, reads member-open.
+- The minute Cron tick (`triggers.crons`, the only Cron trigger —
+  `test/timeout-sweeper.test.ts` pins it) calls `promoteDueSchedules`.
+  Earned per AGENTS.md constraint 7 by the durable due-time requirement;
+  no Queue, no Durable Object, no sweeper, no reconciler.
+- `Scheduled` stays a non-status by design: promotion writes Pending rows
+  through the submit protocol, never a new Execution state.
+- DST/missed-tick posture: matching is wall-clock in the schedule
+  timezone; a missed tick promotes the window overdue on the next tick,
+  never skips it silently and never fans out catch-up windows.
+- SDK: `scheduled-triggers` capability, schedule types/guards/client, and
+  contract routes; `SCHEDULE_CONFLICT`, `SCHEDULE_IDENTITY_FORBIDDEN`,
+  `SCHEDULE_MISCONFIGURED` join the error registry.
 
 ## Open questions (options, not decisions)
 

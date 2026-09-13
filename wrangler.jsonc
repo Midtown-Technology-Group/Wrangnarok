@@ -21,6 +21,14 @@
   "workers_dev": false,
   "preview_urls": false,
   "routes": [],
+  // TRG-01 (issue #137, ADR 012): the minute Cron tick promotes due schedule
+  // rows through the submit protocol. The tick is the only writer here —
+  // no sweeper, no reconciler, no timeout inference. Earned per AGENTS.md
+  // constraint 7 by the durable due-time requirement; no other primitive
+  // (Queue, Durable Object) is adopted.
+  "triggers": {
+    "crons": ["* * * * *"],
+  },
   "assets": {
     "directory": "./client/dist/",
     "binding": "ASSETS",

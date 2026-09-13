@@ -24,6 +24,7 @@ import migration9 from "../migrations/0011_connection_admin.sql?raw";
 import migration18 from "../migrations/0018_ops.sql?raw";
 import migrationFiles from "../migrations/0019_files.sql?raw";
 import migrationEndpoints from "../migrations/0021_endpoints.sql?raw";
+import migrationSchedules from "../migrations/0016_schedules.sql?raw";
 import migrationAppRuntime from "../migrations/0022_app_runtime.sql?raw";
 import seed from "../scripts/seed-local.sql?raw";
 
@@ -94,6 +95,7 @@ beforeEach(async () => {
   await bindings.DB.exec(migration18);
   await bindings.DB.exec(migrationFiles);
   await bindings.DB.exec(migrationEndpoints);
+  await bindings.DB.exec(migrationSchedules);
   await bindings.DB.exec(migrationAppRuntime);
   await bindings.DB.exec(seed);
 });
@@ -688,6 +690,74 @@ it("lists durable endpoints as scheduled tasks with delivery counts", async () =
   expect(tasks.tasks[0]?.detail).toContain("1 recorded deliveries");
   expect(tasks.tasks[1]).toMatchObject({ name: "ops-key", enabled: false });
   expect(tasks.tasks[1]?.detail).toContain("0 recorded deliveries");
+});
+
+it("lists durable schedules as scheduled tasks with cadence and delivery counts", async () => {
+  // TRG-01 (issue #137): the tasks surface reports schedule cadence
+  // (cron plus timezone, or the one-off due instant), enablement, next due
+  // instant, and recorded delivery depth alongside the endpoint inventory.
+  const now = new Date().toISOString();
+  await bindings.DB.prepare(
+    "INSERT INTO schedules(id,org_id,name,saga_id,kind,cron,timezone,enabled,input_json,run_as_user_id,next_due_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      "33333333-3333-4333-8333-333333333333",
+      ORG,
+      "ops-recur",
+      echoSaga.id,
+      "recurring",
+      "* * * * *",
+      "UTC",
+      1,
+      JSON.stringify({ message: "hi" }),
+      "00000000-0000-4000-8000-000000000002",
+      now,
+      now,
+      now,
+    )
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO schedule_deliveries(schedule_id,window,input_json,execution_id,created_at) VALUES (?,?,?,?,?)",
+  )
+    .bind("33333333-3333-4333-8333-333333333333", "2026-09-12T10:01", "{}", "a".repeat(64), now)
+    .run();
+  const tasks = (await (await call("/api/ops/scheduled-tasks")).json()) as {
+    tasks: { name: string; kind: string; enabled: boolean; cadence: string | null; detail: string }[];
+  };
+  expect(tasks.tasks).toHaveLength(1);
+  expect(tasks.tasks[0]).toMatchObject({
+    name: "ops-recur",
+    kind: "scheduler",
+    enabled: true,
+    cadence: "* * * * * (UTC)",
+  });
+  expect(tasks.tasks[0]?.detail).toContain("1 recorded deliveries");
+  // A spent one-off keeps its run-at cadence and reads as spent.
+  await bindings.DB.prepare(
+    "INSERT INTO schedules(id,org_id,name,saga_id,kind,timezone,enabled,input_json,run_as_user_id,run_at,next_due_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      "44444444-4444-4444-8444-444444444444",
+      ORG,
+      "ops-spent",
+      echoSaga.id,
+      "one-off",
+      "UTC",
+      0,
+      "{}",
+      "00000000-0000-4000-8000-000000000002",
+      now,
+      null,
+      now,
+      now,
+    )
+    .run();
+  const rescan = (await (await call("/api/ops/scheduled-tasks")).json()) as {
+    tasks: { name: string; cadence: string | null; detail: string }[];
+  };
+  const spent = rescan.tasks.find((entry) => entry.name === "ops-spent");
+  expect(spent?.cadence).toBe(now);
+  expect(spent?.detail).toContain("spent");
 });
 
 it("aggregates every deploy-job status in platform progress", async () => {

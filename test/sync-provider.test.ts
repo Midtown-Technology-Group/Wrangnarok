@@ -717,6 +717,35 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     });
   });
 
+  it("denies query strings and non-JSON bodies on the provider route", async () => {
+    mockEcho();
+    // Query strings stay denied by the global gate: routing identity lives
+    // in the path only.
+    const queried = await worker.fetch(
+      new Request("http://local.test/api/executions/provider?window=2026-09-12T09:00", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", "Idempotency-Key": "run-03-provider-query-001" },
+        body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "sync-proof" } }),
+      }),
+      bindings,
+    );
+    expect(queried.status).toBe(400);
+    expect(await queried.json()).toMatchObject({ error: { code: "UNSUPPORTED_QUERY" } });
+    // Unencoded bodies stay denied before any admission write.
+    const encoded = await worker.fetch(
+      new Request("http://local.test/api/executions/provider", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain", "Idempotency-Key": "run-03-provider-415-001" },
+        body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "sync-proof" } }),
+      }),
+      bindings,
+    );
+    expect(encoded.status).toBe(415);
+    expect(await encoded.json()).toMatchObject({ error: { code: "JSON_REQUIRED" } });
+    const rows = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM executions").first<{ n: number }>();
+    expect(rows?.n ?? 0).toBe(0);
+  });
+
   it("cancels an inline terminal receipt through the standard cancel route", async () => {
     mockNinjaCensus([{ id: 1, name: "Acme" }]);
     const key = "run-03-provider-cancel-001";

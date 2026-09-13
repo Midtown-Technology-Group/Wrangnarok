@@ -1,0 +1,7 @@
+# LIMITS-01 lane scope (issue #177): prove the Cloudflare feasibility envelope
+# and keep parity exceptions explicit. Docs-only lane: the dated
+# capability-versus-limit matrix plus the parity-tracker status update.
+# No runtime code, no migrations, no new primitives.
+scopes/limits-01.scope
+docs/feasibility-envelope.md
+docs/upstream-parity.md
