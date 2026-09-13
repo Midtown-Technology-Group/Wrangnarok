@@ -8,20 +8,20 @@ Status vocabulary: **Implemented** (shipped locally), **Partial** (materially na
 
 Upstream tests are evidence of intended assertions, not passing-test claims. Upstream sources were inspected, not executed; no upstream production instance was used.
 
-Total: 47 capability rows — 1 Implemented, 1 Complete (pending review), 21 Partial, 22 Missing, 2 Gated.
+Total: 47 capability rows — 3 Implemented, 1 Complete (pending review), 26 Partial, 16 Missing, 1 Gated.
 
 | ID | Title | Phase | Status | Depends | Existing issue |
 | --- | --- | --- | --- | --- | --- |
 | RUN-01 | Persist and enforce per-Saga runtime policy without changing source identity | 2 | Partial | AUTH-02 | new |
 | RUN-02 | Invoke child Sagas with explicit context, completion and failure semantics | 2 | Missing | AUTH-02, RUN-01 | new |
-| TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Missing | AUTH-02, RUN-01 | new |
+| TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented | AUTH-02, RUN-01 | #137 |
 | TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01 | #138 |
 | TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Missing | TRG-01, TRG-02, AUTH-02 | new |
 | DEV-01 | Provide a complete typed TypeScript author and automation SDK | 1+4 | Partial | — | new |
 | DEV-02 | Preview, sync and deploy author source with explicit dependency compatibility | 5 | Partial | DEV-01, SOL-01 | new |
 | AUTH-01 | Replace the single-org allowlist with Organization and user lifecycle management | 3 | Partial | — | new |
 | AUTH-02 | Enforce resource roles, claims and explicit delegated authorization end to end | 3 | Missing | AUTH-01 | new |
-| AUTH-03 | Manage scoped machine credentials and verify delegated human identity parity | 3 | Partial | AUTH-01, AUTH-02 | new |
+| AUTH-03 | Manage scoped machine credentials and verify delegated human identity parity | 3 | Partial | AUTH-01, AUTH-02 | #144 |
 | SEC-01 | Enforce execution-scoped secret registration and universal output scrubbing | 3 | Partial | — | new |
 | CON-01 | Manage Integration definitions and scoped Connection mappings through authorized APIs | 3 | Complete (pending review) | AUTH-02, SEC-01 | #146 |
 | CON-02 | Expose scoped configuration and secret-reference APIs to authors and operators | 3 | Implemented | AUTH-02, SEC-01, CON-01 | #147 |
@@ -30,11 +30,11 @@ Total: 47 capability rows — 1 Implemented, 1 Complete (pending review), 21 Par
 | RUN-03 | Define and deliver bounded synchronous and data-provider execution | 2+4 | Missing | AUTH-02, RUN-01 | new |
 | RUN-04 | Do not confirm cancellation when native Workflow termination is ambiguous | 2 | Partial | — | new |
 | OBS-01 | Complete the execution UI and CLI: results, failures, live status and history traversal | 2 | Partial | RUN-04 | new |
-| OBS-02 | Persist and stream authorized author logs and progress with reconnect recovery | 4 | Missing | SEC-01, AUTH-02, OBS-01 | new |
+| OBS-02 | Persist and stream authorized author logs and progress with reconnect recovery | 4 | Partial | SEC-01, AUTH-02, OBS-01 | #153 |
 | TABLE-01 | Deliver the existing minimal author Tables migration slice | 4 | Partial | AUTH-02 | #117 |
 | TABLE-02 | Extend author Tables to policy-safe querying, batch mutations and realtime visibility | 4 | Partial | TABLE-01, AUTH-02, OBS-02 | #154 |
 | FORM-01 | Deliver the existing Forms-to-Saga input binding slice | 4 | Partial | — | #118 |
-| FORM-02 | Deliver usable dynamic forms with safe startup, providers and submissions | 4 | Missing | FORM-01, RUN-03, TRG-01, AUTH-02, FILE-01 | new |
+| FORM-02 | Deliver usable dynamic forms with safe startup, providers and submissions | 4 | Partial | FORM-01, RUN-03, TRG-01, AUTH-02, FILE-01 | #155 |
 | EMBED-01 | Publish and embed forms/apps with revocable external capabilities | 4 | Missing | FORM-02, APP-01, AUTH-03, AUTH-02 | new |
 | FILE-01 | Deliver managed file locations with policy-checked upload, download and mutation | 4 | Implemented | AUTH-02, SEC-01 | #157 |
 | FILE-02 | Manage generated artifacts and attachment lifecycles with retention | 4+6 | Partial | FILE-01, AUTH-02 | #158 |
@@ -42,7 +42,7 @@ Total: 47 capability rows — 1 Implemented, 1 Complete (pending review), 21 Par
 | APP-02 | Provide the browser App SDK with scoped workflows, Tables, files and live updates | 4 | Partial | APP-01, TABLE-02, FILE-01, OBS-02 | #160 |
 | SOL-01 | Close the existing bundle reconciliation and activation contract gaps | 5 | Partial | — | new |
 | SOL-02 | Install and manage complete reusable Solutions across Organizations | 5 | Partial | SOL-01, AUTH-02, CON-02, TABLE-02, FORM-02, APP-01, AI-02, TRG-03 | new |
-| SOL-03 | Export, capture and import portable Solution source without tenant state | 5 | Missing | SOL-01, MIG-01, SEC-01 | new |
+| SOL-03 | Export, capture and import portable Solution source without tenant state | 5 | Partial | SOL-01, MIG-01, SEC-01 | #163 |
 | MIG-01 | Deliver the existing workspace-to-bundle bridge without false compatibility claims | 5 | Missing | — | #116 |
 | MIG-02 | Verify and close out the existing TypeScript migration pilot | 1 | Partial | — | #119 |
 | AI-01 | Configure AI provider Connections, model profiles and capability assignments | 6 | Missing | SEC-01, CON-01, AUTH-02 | new |
@@ -58,7 +58,7 @@ Total: 47 capability rows — 1 Implemented, 1 Complete (pending review), 21 Par
 | OPS-03 | Export and restore operational data with explicit encrypted-backup boundaries | 5 | Missing | SOL-03, TABLE-02, FILE-02, CON-02, SEC-01 | new |
 | OPS-04 | Report scoped usage, model costs and automation ROI | 4+6 | Missing | AUTH-02, AI-01, OPS-01 | new |
 | UX-01 | Provide configurable branding, user profiles and discoverable platform administration | 4 | Partial | AUTH-01, FILE-01 | new |
-| LIMITS-01 | Prove the Cloudflare feasibility envelope and keep parity exceptions explicit | Continuous | Gated | — | new |
+| LIMITS-01 | Prove the Cloudflare feasibility envelope and keep parity exceptions explicit | Continuous | Partial | — | #177 |
 
 ## RUN-01: Persist and enforce per-Saga runtime policy without changing source identity
 
@@ -109,9 +109,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## TRG-01: Run one-off and recurring schedules with durable due-time and cancellation semantics
 
-Phase 2; **Missing**; existing issue: new
+Phase 2; **Implemented**; existing issue: #137
 
-Local status: ADR 012 is an investigation only. Worker has no scheduled handler or durable Scheduled execution state.
+Local status: Schedules ship as persisted environment state (migration 0016, `src/schedules.ts`, ADR 012 accepted): one org-scoped row binds a name to a stable Saga UUID plus cadence, timezone, enablement, input, and run-as policy. A minute Cloudflare Cron Trigger (the only Cron trigger; `test/timeout-sweeper.test.ts` tripwire pins it) promotes due rows through the standard submit protocol with deterministic `sch-` schedule-window keys. Operator create/preview/disable/delete ride the AUTH-01 membership gate (writes admin-only); run-as always resolves to the creating caller, never caller-supplied identity. Delivery visibility maps windows to Executions. `Scheduled` stays a non-status by design: promotion writes Pending rows, never a new Execution state.
 
 Depends: AUTH-02, RUN-01
 
@@ -300,9 +300,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## AUTH-03: Manage scoped machine credentials and verify delegated human identity parity
 
-Phase 3; **Partial**; existing issue: new
+Phase 3; **Partial**; existing issue: #144
 
-Local status: Access service allowlists and LAB fixtures exist; user API keys/workflow keys/device login/session lifecycle are not a product surface.
+Local status: Adapted parity slice (ADR 014 Adaptation Mapping, `test/machine-credentials.test.ts`): delegated human/service identity via Access verification (email + service `common_name` allowlists, per-request membership gate with invited-activation), scoped endpoint credentials as the workflow-key analogue (per-endpoint digest, expiry, disable/rotate, derived `wep-` delivery keys, no raw-secret readback), and `GET /api/auth/me` plus SDK `whoAmI()` reporting the verified credential class. LAB fixture auth is flagged non-production. Remaining gaps: no user-minted/self-service keys, no per-key scopes beyond the bound Saga, service tokens still allowlist-gated, no in-app MFA/passkey enrollment (IdP-owned).
 
 Depends: AUTH-01, AUTH-02
 
@@ -519,9 +519,9 @@ Related Wrangnarok issues: #17, #77
 
 ## OBS-02: Persist and stream authorized author logs and progress with reconnect recovery
 
-Phase 4; **Missing**; existing issue: new
+Phase 4; **Partial**; existing issue: #153
 
-Local status: Request/usage console logs and Operation rows exist, but no author logging/progress SDK, durable log API, cross-execution log search or live subscription surface.
+Local status: Bounded structured author logs/progress ship end to end on Worker + D1: Saga-emitted rows via `appendAuthorLog` inside `step.do()` (the hello pilot emits one PROGRESS plus one INFO row), execution/org/caller attribution from the immutable Execution row, deterministic seq order, SEC-01 scrubbing before persistence and again before streaming, DEBUG rows persisted but hidden unless explicitly requested, 200-row-per-Execution retention, scoped tail (`GET /api/executions/:id/logs`) plus operator search (`GET /api/logs`, date/level/Saga filters, cursor pagination), SDK `tailLogs`/`searchLogs`, browser tail on the Execution detail view (same 2s tick, cursor resume, seq-dedupe merge), and CLI `logs`/`log-search` with `--follow`. Polling only: D1 is the source of truth and reconnects backfill from the cursor; no WebSocket/DO/Queue surface exists (an earned ADR is required before any live-push design). Remaining: live-push subscriptions, cross-organization operator views (AUTH-02), and richer progress schemas.
 
 Depends: SEC-01, AUTH-02, OBS-01
 
@@ -542,12 +542,20 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase 4; **Partial**; existing issue: #117
 
-Local status: Subsumed by the TABLE-02 (#154) landing slice: org-scoped
-Table declarations, single-row create/read/replace/delete, deny-by-absence
-per-action grants, and the explicit-deletion retention note all ship in
-`src/tables.ts` (migration `0007_tables.sql`) and are proven in workerd by
-`test/tables.test.ts`. TABLE-02 owns the remaining query/policy/realtime
-acceptance; this issue tracks the minimal-slice exit only.
+Local status: The minimal slice ships in `src/tables.ts` (migration
+`0009_tables.sql`, renumbered from the `0007` collision per the ledger):
+org-scoped Table declarations, single-row create/read/replace/delete,
+deny-by-absence per-action grants, and explicit-deletion retention, proven in
+workerd by `test/tables.test.ts`. The #117 exit proof lands here too: a
+code-first Saga fixture (`table-ledger-fixture`, stable UUID identity, every
+durable effect inside `step.do`) writes then reads an author row against real
+local D1, replaces it on a second pass, and keeps deny-by-absence for
+grantless strangers. Retention/partitioning note: retention is org-owned
+explicit deletion only (`deleteTable` drops rows and grants; no TTL, no
+partitioning); the D1 10 GB per-database cap needs a retention/partitioning
+policy before large Tables are production-shaped. TABLE-02 owns the remaining
+query/policy/realtime acceptance; this issue tracks the minimal-slice exit
+only.
 
 Depends: AUTH-02
 
@@ -567,7 +575,7 @@ Upstream evidence (paths relative to upstream repo root):
 Phase 4; **Partial**; existing issue: #154
 
 Local status: The query/count/batch slice landed (`src/tables.ts`, migration
-`0007_tables.sql`, `test/tables.test.ts`): org-scoped declarations with
+`0009_tables.sql`, `test/tables.test.ts`): org-scoped declarations with
 deny-by-absence per-action grants, policy-safe keyset queries (nested-JSON
 filters, prefix, order, cursor pagination), scoped counts with skip_count
 (total=-1), and all-or-denied batch mutations with per-item operational
@@ -634,9 +642,46 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## FORM-02: Deliver usable dynamic forms with safe startup, providers and submissions
 
-Phase 4; **Missing**; existing issue: new
+Phase 4; **Partial**; existing issue: #155
 
-Local status: Input parsing is not a form renderer/designer, startup session, dynamic provider or submission lifecycle.
+Local status: Usable dynamic forms over the same D1 `forms` table (no new
+DDL): designer CRUD (`GET/POST /api/forms`, `GET/PUT/DELETE
+/api/forms/:name`), 17 field types (text, number, boolean, email, date,
+time, datetime, select, multiselect, textarea, url, tel, file, hidden plus
+display-only heading/paragraph/divider), declared defaults with
+submission-wins merge, `visibleWhen` conditionals (hidden values dropped,
+smuggled values fail closed), static + Table option providers resolved
+through the caller Table gate (denied tables yield empty lists, never
+leaks; membership re-checked at submit), session-bound 30-minute startup
+handles (`POST /api/forms/:name/startup`, peeked for validation and
+consumed only after validation passes, org/user/form bound, `STALE_FORM_HANDLE` on
+unknown/expired/foreign/replayed),
+delegated form-to-Saga submit (the consumed handle is the grant; no
+separate direct-Saga grant required), immediate dispatch down the standard
+Execution path or `{ scheduleAt }` deferred receipt (undispatched Pending
+row with `__scheduleAt` linkage, TRG-01 owns promotion), FILE-01
+file-field re-validation (ready/size/type against live rows), opt-in URL
+prefill (`allowPrefill`; unknown/display-only names fail closed), and a
+Forms renderer (`/forms`, `/forms/:name`) with per-field errors plus
+execution linkage. The renderer evaluates conditional visibility over the
+startup snapshot under operator edits (edits win), matching the server
+gate — a prefilled trigger reveals its dependent immediately, and clearing
+the trigger hides it again. Submit sends snapshot-backed values for
+visible fields (cleared fields send explicit null, which the server reads
+as a gap for defaults to fill).
+Unknown or stale handles dispatch nothing. Proven in
+workerd (`test/form-lifecycle.test.ts`: designer, startup, providers,
+submit, scheduled, file, drift) plus unit pins
+(`test/form-binding.test.ts`), SDK client + guards (`test/sdk.test.ts`),
+and renderer tests (`test/form-ui.test.tsx`). `GET
+/api/forms/:name/providers` exposes resolved options; the SDK
+`dynamic-forms` capability is supported.
+
+Explicitly deferred (retain until verified): public/embed publication
+with capability fingerprints and origin fencing (EMBED-01); scheduled
+promotion/due-time dispatch (TRG-01); realtime provider refresh (polling
+only); rich-text/signature/cascading-provider field kinds beyond the 17
+shipped.
 
 Depends: FORM-01, RUN-03, TRG-01, AUTH-02, FILE-01
 
@@ -840,9 +885,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## SOL-03: Export, capture and import portable Solution source without tenant state
 
-Phase 5; **Missing**; existing issue: new
+Phase 5; **Partial**; existing issue: #163
 
-Local status: The local JSON manifest is not a complete source-closure/package/export/capture product. Existing #116 is only the workspace-to-manifest bridge.
+Local status: Implemented the portable source-closure/package/export/capture product in `src/solution-export.ts` (ADR 016): read-only capture/preview with fail-closed gaps, versioned JSON shareable packages with dependency-closure checks, export/import round-trip, and staged export jobs with guaranteed cleanup. App source hosting and forms/tables/agents ownership in packages stay explicitly deferred to SOL-02; encrypted operational backup stays under OPS-03.
 
 Depends: SOL-01, MIG-01, SEC-01
 
@@ -1117,9 +1162,28 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## OPS-02: Expose Cloudflare-native diagnostics, operational jobs and repair workflows
 
-Phase 4; **Partial**; existing issue: new
+Phase 4; **Partial**; existing issue: #173
 
-Local status: Native Workers observability and application usage blocks exist, but no product health/version/metrics/job/scheduler/repair dashboard.
+Local status: Cloudflare-native diagnostics ship on Worker + D1 only (issue
+#173): GET /api/ops/version (SDK/catalog/migration contract), /health
+(Worker/D1 liveness), /metrics (per-status counts, undispatched-Pending
+backlog, recent failure codes), /scheduled-tasks (durable endpoint
+inventory, cadence honestly null until TRG-01), /jobs (Execution backlog
+plus app deploy aggregates with interrupted flags), /preflight (static
+mapping/credential presence), /connections (per-Integration health with
+registry hints), and POST /api/ops/repairs (inspect-then-act:
+retry-execution with original-input replay, cancel-execution, stuck-build
+restore, pending-upload and expired-token sweeps; dryRun inspects, explicit
+dryRun:false executes behind the admin gate with audit emission). Typed SDK
+client, CLI (ops-version/health/metrics/tasks/jobs/preflight/connections/
+repair with --execute), and contract descriptor entries ship too.
+Native Workers observability and application usage blocks predate this.
+
+Explicit gaps: no recurring-schedule rows (TRG-01 owns them), no live
+vendor probes in preflight (the per-Connection test route owns probes), no
+documentation/index repair (no search index exists), no distributed upload
+locks (single-Writer D1 needs none), no provider metering (unavailable,
+never fabricated), and no scheduled production jobs (manual per ADR 004).
 
 Depends: OBS-01, OPS-01, TRG-01
 
@@ -1215,9 +1279,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## LIMITS-01: Prove the Cloudflare feasibility envelope and keep parity exceptions explicit
 
-Phase Continuous; **Gated**; existing issue: new
+Phase Continuous; **Partial**; existing issue: #177
 
-Local status: The first useful MVP is Free-tier-constrained. No evidence proves all upstream features, arbitrary Python workloads or full tenant scale can fit Cloudflare Free.
+Local status: The dated capability-versus-limit matrix ships as `docs/feasibility-envelope.md` (2026-09-12): Worker CPU/memory/bundle/egress, Workflows instances/steps/history, D1 reads/writes/storage/transaction limits, R2 size/signing, Access users, and model/vector/build costs each carry a free / paid-adaptation / redesign / unresolved classification with the binding limit named. Measured local usage (smoke budgets, usage blocks, bundle size) stays explicitly separated from provider meters; what still requires an authorized dev measurement is listed, not assumed. Remaining: deployed D1-meta/Workers-analytics metering and multi-org load fixtures before any production accuracy claim.
 
 Depends: none
 

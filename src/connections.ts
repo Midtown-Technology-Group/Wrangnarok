@@ -17,10 +17,10 @@
 //   per-tenant secret storage.
 import { Fault, UUID } from "./domain";
 import type { Principal } from "./domain";
-import { integrationById, validateConnectionConfig } from "./integrations";
+import { assertSafeEndpoint, integrationById, validateConnectionConfig } from "./integrations";
 import type { ConnectionView } from "./integrations";
 import { scrubValueWithDeploymentSecrets } from "./secrets";
-import type { NinjaCredentials } from "./bindings";
+import type { HaloCredentials, NinjaCredentials } from "./bindings";
 
 /** Deployment credential surface read by the management test path (CON-01).
  * Required-secret values are presence-checked only — never persisted,
@@ -28,8 +28,7 @@ import type { NinjaCredentials } from "./bindings";
  * (Bindings extends NinjaCredentials); test doubles pass plain records.
  * No index signature: Bindings has none, and required-secret env vars are
  * read through the narrow accessor below. */
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type -- marker interface: Bindings must satisfy the management env by construction
-export interface SecretEnv extends NinjaCredentials {}
+export interface SecretEnv extends NinjaCredentials, HaloCredentials {}
 
 function secretValue(env: SecretEnv, name: string): string | undefined {
   const value: unknown = (env as Record<string, unknown>)[name];
@@ -153,6 +152,12 @@ function parseEnabled(value: unknown): boolean | undefined {
   return value;
 }
 
+/** Deployment environment carried into Connection validation (issue #239).
+ * Routes pass the Worker's ENVIRONMENT var; unset means local/fixture.
+ * Echo endpoints gate on it: the loopback default serves local only. */
+export interface ConnectionWriteEnv {
+  readonly environment?: string;
+}
 /** Create a loose Connection mapping for the caller's Organization (CON-01).
  * One mapping per (org, Integration): re-creating answers 409. Managed rows
  * are installer-owned; this path creates loose rows only, and only when no
@@ -163,6 +168,7 @@ export async function createConnection(
   caller: Principal,
   integrationId: string,
   body: ConnectionWrite,
+  writeEnv: ConnectionWriteEnv = {},
 ): Promise<ConnectionView> {
   if (!UUID.test(integrationId)) throw invalid("UNKNOWN_INTEGRATION", "Unknown Integration id.", 404);
   const def = integrationById(integrationId);
@@ -170,7 +176,7 @@ export async function createConnection(
   if (body.config === undefined) {
     throw invalid("CONNECTION_SCHEMA_INVALID", "A Connection create needs a config object.");
   }
-  const config = validateConnectionConfig(def, body.config);
+  const config = validateConnectionConfig(def, body.config, { environment: writeEnv.environment });
   const displayName = parseDisplayName(body.displayName);
   const enabled = parseEnabled(body.enabled) ?? true;
   const existing = await ownedRow(db, caller, integrationId);
@@ -198,6 +204,7 @@ export async function updateConnection(
   caller: Principal,
   integrationId: string,
   body: ConnectionWrite,
+  writeEnv: ConnectionWriteEnv = {},
 ): Promise<ConnectionView> {
   if (!UUID.test(integrationId)) throw invalid("UNKNOWN_INTEGRATION", "Unknown Integration id.", 404);
   const def = integrationById(integrationId);
@@ -218,7 +225,7 @@ export async function updateConnection(
     body.config === undefined
       ? { endpoint: row.endpoint }
       : { endpoint: row.endpoint, ...(body.config as Record<string, unknown>) };
-  const config = validateConnectionConfig(def, merged);
+  const config = validateConnectionConfig(def, merged, { environment: writeEnv.environment });
   const displayName = body.displayName === undefined ? row.display_name : parseDisplayName(body.displayName);
   const enabled = parseEnabled(body.enabled) ?? (row.enabled ?? 1) === 1;
   const now = new Date().toISOString();
@@ -328,6 +335,19 @@ export async function testConnection(
       };
     }
   }
+  // Re-parse the persisted endpoint before any probe fetch: rows written
+  // before #236 or outside the validated paths fail closed here as invalid
+  // configuration, never as a vendor fetch to an unsafe target.
+  try {
+    assertSafeEndpoint(def.name, row.endpoint);
+  } catch {
+    return {
+      ok: false,
+      checkedAt,
+      code: "INVALID_CONNECTION",
+      detail: "This Connection endpoint is not a safe URL: update it before testing.",
+    };
+  }
   const fetchImpl = vendor.fetchImpl ?? globalThis.fetch;
   try {
     if (def.name === "echo") {
@@ -343,6 +363,24 @@ export async function testConnection(
         return { ok: false, checkedAt, code: "CONNECTION_TEST_FAILED", detail: def.health.remediation };
       }
       return { ok: true, checkedAt, detail: "The echo test call round-tripped." };
+    }
+    // HaloPSA Code Mode (TOOL-01): origin-reachability probe only, mirroring
+    // the NinjaOne posture (token host answers 200/401 either way proves
+    // reachability; no listing, no persistence). The pinned-contract search/
+    // inspect/execute path stays on the Code Mode routes.
+    if (def.name === "halo") {
+      const probeUrl = new URL("/api/Tickets", row.endpoint).toString();
+      const response = await fetchImpl(probeUrl, {
+        method: "HEAD",
+        redirect: "manual",
+        signal: AbortSignal.timeout(5000),
+        headers: { Accept: "application/json" },
+      });
+      await response.body?.cancel();
+      if (response.status >= 500) {
+        return { ok: false, checkedAt, code: "CONNECTION_TEST_FAILED", detail: def.health.remediation };
+      }
+      return { ok: true, checkedAt, detail: "The Halo origin answered." };
     }
     // NinjaOne: token-endpoint probe only. No org listing, no persistence —
     // a 200/401 from the token host proves reachability either way (401

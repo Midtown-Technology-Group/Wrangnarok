@@ -18,8 +18,8 @@
 // in src/domain.ts with a fixed platform timeout. Saga source carries identity
 // and discovery metadata only — never timeouts, retries, or schedules.
 import type { WorkflowSleepDuration, WorkflowStep } from "cloudflare:workers";
-import { stepRetryLimit, UUID } from "./domain";
-import type { EchoInput, NinjaOrgsResult } from "./domain";
+import { checkpointRetryLimit, stepRetryLimit, UUID, vendorRetryLimit } from "./domain";
+import type { EchoInput, NinjaOrgsResult, SagaRuntimePolicy } from "./domain";
 import type { EchoConnection } from "./integrations/echo";
 import type { NinjaConnection, NinjaSecrets } from "./integrations/ninjaone";
 
@@ -36,10 +36,15 @@ export interface SagaStep {
  * real Integration Actions in src/integrations/*. Calling them outside
  * step.do() is a determinism violation and fails the contract test. */
 export interface EchoIntegrationHandle {
-  echo(connection: EchoConnection, input: EchoInput, operationId: string): Promise<EchoInput>;
+  echo(connection: EchoConnection, input: EchoInput, operationId: string, timeoutMs?: number): Promise<EchoInput>;
 }
 export interface NinjaOneIntegrationHandle {
-  listOrganizations(connection: NinjaConnection, secrets: NinjaSecrets, executionId?: string): Promise<NinjaOrgsResult>;
+  listOrganizations(
+    connection: NinjaConnection,
+    secrets: NinjaSecrets,
+    executionId?: string,
+    timeoutMs?: number,
+  ): Promise<NinjaOrgsResult>;
 }
 export interface SagaIntegrations {
   readonly echo: EchoIntegrationHandle;
@@ -311,12 +316,12 @@ export function buildCatalog(defs: readonly SagaDefinition[]): readonly CatalogE
  * WorkflowStep. Every retry limit resolves through stepRetryLimit (vendor
  * steps 0, idempotent D1 checkpoints up to the operator ceiling 2); the
  * 10-second step timeout is fixed platform mapping, not per-Saga policy. */
-export function bindSagaStep(native: WorkflowStep): SagaStep {
+export function bindSagaStep(native: WorkflowStep, policy?: SagaRuntimePolicy): SagaStep {
   return {
     do<T>(name: string, fn: () => Promise<T>): Promise<T> {
       return native.do(
         name,
-        { retries: { limit: stepRetryLimit(name), delay: "1 second" }, timeout: "10 seconds" },
+        { retries: { limit: retryLimitForStep(name, policy), delay: "1 second" }, timeout: "10 seconds" },
         () => fn() as unknown as Promise<never>,
       ) as unknown as Promise<T>;
     },
@@ -324,6 +329,19 @@ export function bindSagaStep(native: WorkflowStep): SagaStep {
       return native.sleep(name, duration as WorkflowSleepDuration);
     },
   };
+}
+/** Effective retry limit for one step under an applied policy snapshot:
+ * vendor/Integration steps resolve through the operator vendor ceiling
+ * (default 0); idempotent D1 checkpoints resolve through the operator
+ * checkpoint ceiling (default 2); unknown names fail closed to 0. Business
+ * and expected failures still throw NonRetryableError, so the engine never
+ * retries a non-idempotent mutation. Without a snapshot (old rows, unit
+ * doubles) this collapses to the code table. */
+export function retryLimitForStep(stepName: string, policy?: SagaRuntimePolicy): number {
+  if (policy === undefined) return stepRetryLimit(stepName);
+  const base = stepRetryLimit(stepName);
+  if (base === 0) return vendorRetryLimit(policy);
+  return Math.min(base, checkpointRetryLimit(policy));
 }
 
 /** Fail unless value is plain JSON (plain objects, arrays, strings, finite

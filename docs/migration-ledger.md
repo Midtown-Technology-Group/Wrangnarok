@@ -19,10 +19,12 @@ must update every importing test in the same commit.
 | 0007   | 0007_org_membership.sql         | AUTH-01 | organizations, membership            |
 | 0008   | 0008_executions_org_fk.sql      | AUTH-01 | executions org foreign key           |
 | 0009   | 0009_tables.sql                 | TABLE-02| managed tables                       |
+| 0014   | 0014_execution_logs.sql         | OBS-02  | execution logs (renumbered from colliding 0009 on 2026-09-11; was 0009_execution_logs.sql from #200) |
 | 0010   | 0010_solutions_activation.sql   | SOL-01  | bundle_active pointer, managed rows, immutability triggers (renumbered from colliding 0005 on 2026-09-11) |
 | 0021   | 0021_endpoints.sql              | TRG-02  | webhook endpoints (renumbered from colliding 0009 on 2026-09-11; was 0009_endpoints.sql from #210) |
 | 0019   | 0019_files.sql                  | FILE-01 | managed file locations, policies, capabilities (renumbered from colliding 0007 on 2026-09-11; was 0007_files.sql from #203) |
 | 0023   | 0023_config.sql                 | CON-02  | scoped config + secret references (issue #147) |
+| 0024   | 0024_tool_enrollments.sql       | TOOL-01 | opt-in Saga tool enrollments (issue #170) |
 
 ## Resolved collisions
 
@@ -34,6 +36,10 @@ must update every importing test in the same commit.
   the endpoints file to 0021_endpoints.sql plus its two test imports. Both
   files are additive CREATE TABLE IF NOT EXISTS, so already-applied local/dev
   databases converge on re-application.
+- 0009_tables.sql vs 0009_execution_logs.sql: resolved 2026-09-11 by
+  renumbering the logs file to the reserved 0014_execution_logs.sql plus its
+  test import. Additive CREATE TABLE plus CREATE INDEX statements, so
+  already-applied local/dev databases converge on re-application.
 
 ## Reserved (assigned, not yet merged — do not reuse)
 
@@ -42,7 +48,6 @@ must update every importing test in the same commit.
 | 0011   | CON-01  | #146  | connection admin             |
 | 0012   | RUN-01  | #135  | saga runtime policies        |
 | 0013   | AUTH-02 | #143  | resource roles               |
-| 0014   | OBS-02  | #153  | execution logs               |
 | 0015   | RUN-02  | #136  | child invocation lineage     |
 | 0016   | TRG-01  | #137  | schedules                    |
 | 0017   | SOL-03  | #163  | solution export (if DDL needed) |

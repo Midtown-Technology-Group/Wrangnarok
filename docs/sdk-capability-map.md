@@ -19,7 +19,7 @@ context, and typed errors. Wrangnarok maps them as follows:
 | --- | --- | --- | --- |
 | `workflows` (list, metadata) | `listSagas` / `inspectSaga` in `src/sdk.ts` over `GET /api/sagas` | Supported | Git-owned static Catalog (ADR 002), not a runtime registry. |
 | `executions` (list) | `listHistory` / `getExecution` over `GET /api/executions[/:id]` | Supported | Summaries only on list; input/result only on detail. Cursor pagination. |
-| `workflows.execute` + WebSocket tail | `submitExecution` over `POST /api/executions` + terminal poll | Partial | No WebSocket/log stream. Submit returns 202 + `statusUrl`; the client polls to terminal. Live logs belong to OBS-02. |
+| `workflows.execute` + WebSocket tail | `submitExecution` over `POST /api/executions` + terminal poll; author logs via `tailLogs`/`searchLogs` over `GET /api/executions/:id/logs` and `GET /api/logs` | Partial | Submit returns 202 + `statusUrl`; the client polls to terminal. Author logs are durable D1 rows with cursor-poll reconnect (no WebSocket/log stream; live-push needs an earned ADR). |
 | `workflows` cancel | `cancelExecution` over `POST /api/executions/:id/cancel` | Supported | Owner-only, exact 64-hex ID; same caller policy as the UI. |
 | `@workflow` decorator + `context` / `ExecutionContext` | `defineSaga` + `SagaStep` (`step.do`/`step.sleep`) in `src/saga.ts` | Supported | Determinism rules enforced by `test/saga-contract.test.ts`. |
 | `data_provider` decorator | None | Tracked | Bounded sync/provider execution belongs to RUN-03. |
@@ -29,15 +29,15 @@ context, and typed errors. Wrangnarok maps them as follows:
 | `integrations` (+ OAuth tokens) | `IntegrationDefinition` in `src/integrations/index.ts`; no management API | Tracked | Connection management belongs to CON-01; OAuth lifecycle to OAUTH-01. |
 | `organizations`, `roles`, `users` | None | Tracked | Organization/user/role lifecycle belongs to AUTH-01/AUTH-02. |
 | `tables` | None | Tracked | Author Tables belong to TABLE-01 (#117) and TABLE-02. |
-| `forms` | None | Tracked | Forms belong to FORM-01 (#118) and FORM-02. |
+| `forms` | `listForms` / `getForm` / `createForm` / `updateForm` / `deleteForm` / `startForm` / `getFormProviders` / `submitForm` in `src/sdk.ts` over `GET/POST /api/forms`, `GET/PUT/DELETE /api/forms/:name`, `POST /api/forms/:name/startup`, `GET /api/forms/:name/providers`, `POST /api/forms/:name/submit` | Supported | Dynamic forms (FORM-02, issue #155): designer CRUD, startup handles (peeked for validation, consumed only after validation passes), providers, submit/schedule. Embed/publication stays Tracked under EMBED-01. |
 | `files`, `artifacts` | `listArtifacts` / `fetchArtifactDetail` / `deleteArtifact` / CLI `artifacts artifact upload download rename bind unbind bindings retention cleanup` over `/api/artifacts/*` | Partial | Generated/uploaded Artifacts ship (FILE-02, ADR 019); managed file locations with signed URLs belong to FILE-01. |
 | `files`, `artifacts` | Managed file locations over `GET/POST/PUT/DELETE /api/files*` + `/api/file-locations*` + `/api/file-policies*` | Partial | FILE-01 ships locations, policies, proxy upload/download, finalize verification, versioned mutation (ADR 019); retention/artifacts stay Tracked under FILE-02. |
 | `knowledge` | None | Tracked | Knowledge/memory belongs to AI-05/AI-06. |
 | `agents`, `ai` (complete/stream) | None | Tracked | Agents/AI belong to AI-01/AI-02/AI-03. |
 | `events` (sources/subscriptions) | None | Tracked | Events belong to TRG-03. |
 | Typed errors (`UserError`, `WorkflowError`, `ValidationError`, ...) | `SdkError` + `SDK_ERROR_CODES` in `src/sdk.ts` | Supported | Same envelope `{ error: { code, message } }`; callers switch on `code`. |
-| Enums (`ExecutionStatus`, `ConfigType`, `FormFieldType`) | `SDK_TERMINAL_STATUSES`, `SDK_ERROR_CODES`, `ExecutionStatus` in `src/domain.ts` | Partial | Only statuses and error codes are modeled; config/form enums arrive with their modules. |
-| SDK models (single source of truth) | Wire guards (`parseSagaCatalog`, `parseExecutionDetail`, `parseHistoryPage`) | Supported | Guards fail loud with `SDK_CLIENT_MISMATCH` instead of trusting the wire. |
+| Enums (`ExecutionStatus`, `ConfigType`, `FormFieldType`) | `SDK_TERMINAL_STATUSES`, `SDK_ERROR_CODES`, `ExecutionStatus` in `src/domain.ts` plus `FORM_FIELD_TYPES` in `src/forms.ts` | Supported | Statuses, error codes, and the closed 17-type form field set are modeled; config types stay with CON-02. |
+| SDK models (single source of truth) | Wire guards (`parseSagaCatalog`, `parseExecutionDetail`, `parseHistoryPage`, `parseFormList`, `parseFormDetail`, `parseFormStartup`, `parseFormProviders`, `parseFormSubmit`) | Supported | Guards fail loud with `SDK_CLIENT_MISMATCH` instead of trusting the wire. |
 
 ## 2. CLI surface (`api/bifrost/cli.py` vs `scripts/wrangnarok.mjs`)
 
@@ -53,7 +53,7 @@ the UI: Bearer token, Organization from auth context, exact IDs only):
 | --- | --- | --- |
 | `workflows list` (`GET /api/workflows`) | `sagas` (`GET /api/sagas`) | Supported |
 | `workflows get <ref>` (list-and-filter; no per-record GET upstream) | `inspect --saga NAME\|UUID` (`GET /api/sagas` + local resolve) | Supported |
-| `workflows execute <ref>` + log tail | `submit --saga NAME\|UUID [--input JSON\|@FILE] [--key KEY] [--no-wait]` (202 + poll to terminal) | Partial (poll, no log stream) |
+| `workflows execute <ref>` + log tail | `submit --saga NAME\|UUID [--input JSON\|@FILE] [--key KEY] [--no-wait]` (202 + poll to terminal); `logs --id HEX [--level L] [--follow]`, `log-search [--level L] [--saga NAME\|UUID] [--from DATE] [--to DATE]` (cursor-poll over durable rows) | Partial (poll, no log stream) |
 | `workflows update/delete/grant-role/revoke-role` | None (Git-owned registration; no runtime mutation) | Tracked (AUTH-02 for grants) |
 | `workflows register` (workspace `.py` file) | `scaffold --name SLUG --id UUID` (offline `defineSaga` template; registration stays Git-owned) | Partial (adapted: no runtime registration by design) |
 | `run` (direct local workflow file, silent JSON) | `preview --saga NAME\|UUID [--input JSON\|@FILE] [--check-env]` (read-only `POST /api/dev/preview`: authoritative parse, no D1 writes, no dispatch) | Supported (adapted: `wrangler dev` is the edit loop; preview is the validation loop) |

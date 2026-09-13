@@ -3,7 +3,7 @@
 // (reference: vendor/upstream). Structure borrowed; Wrangnarök error shape only.
 
 /** Structured error body served by the Worker: { error: { code, message } }.
- * FORM-01 validation failures add an optional details list of per-field
+ * Form validation failures add an optional details list of per-field
  * failures; the client passes it through without interpreting it. */
 export interface WorkerErrorBody {
   error: {
@@ -16,12 +16,16 @@ export interface WorkerErrorBody {
 export class ApiError extends Error {
   public readonly code: string;
   public readonly status: number;
+  /** Structured per-field failures from the Worker 422 envelope (forms).
+   * Absent for non-validation failures; the renderer reads it read-only. */
+  public readonly details: unknown;
 
-  constructor(code: string, message: string, status: number) {
+  constructor(code: string, message: string, status: number, details: unknown = null) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.status = status;
+    this.details = details;
   }
 
   isUnimplemented(): boolean {
@@ -33,14 +37,16 @@ export class ApiError extends Error {
 export async function parseApiError(response: Response): Promise<ApiError> {
   let code = "REQUEST_FAILED";
   let message = `Request failed with status ${response.status}.`;
+  let details: unknown = null;
   try {
     const body = (await response.json()) as Partial<WorkerErrorBody>;
     if (body.error?.code) code = body.error.code;
     if (body.error?.message) message = body.error.message;
+    if (body.error?.details !== undefined) details = body.error.details;
   } catch {
     // Keep the status-based fallback.
   }
-  return new ApiError(code, message, response.status);
+  return new ApiError(code, message, response.status, details);
 }
 
 /** Extract a human-readable message from any error value. */

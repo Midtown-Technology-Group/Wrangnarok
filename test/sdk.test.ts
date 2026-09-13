@@ -16,9 +16,26 @@ import {
   localCatalog,
   parseAuditPage,
   parseExecutionDetail,
+  parseFormDetail,
+  parseFormList,
+  parseFormProviders,
+  parseFormStartup,
+  parseFormSubmit,
   parseHistoryPage,
   parseNotification,
   parseNotifications,
+  parseRuntimePolicy,
+  parseScheduleDelivery,
+  parseScheduleDetail,
+  parseScheduleList,
+  parseOpsConnectionHealth,
+  parseOpsHealth,
+  parseOpsJobs,
+  parseOpsMetrics,
+  parseOpsPreflight,
+  parseOpsRepairOutcome,
+  parseOpsScheduledTasks,
+  parseOpsVersion,
   parseSagaCatalog,
   parseSdkError,
   scaffoldSaga,
@@ -61,6 +78,21 @@ describe("SDK contract version and descriptor (issue #140)", () => {
     expect(descriptor.routes.map((route) => `${route.method} ${route.path}`)).toEqual(
       expect.arrayContaining(["GET /api/audit", "GET /api/notifications", "DELETE /api/notifications/:id"]),
     );
+    // OPS-02 (issue #173): diagnostics/repair routes and codes stay in the
+    // contract list alongside the OPS-01 surface.
+    expect(descriptor.capabilities.find((entry) => entry.name === "ops-diagnostics-repairs")?.status).toBe("supported");
+    expect(descriptor.routes.map((route) => `${route.method} ${route.path}`)).toEqual(
+      expect.arrayContaining([
+        "GET /api/ops/version",
+        "GET /api/ops/health",
+        "GET /api/ops/metrics",
+        "GET /api/ops/scheduled-tasks",
+        "GET /api/ops/jobs",
+        "GET /api/ops/preflight",
+        "GET /api/ops/connections",
+        "POST /api/ops/repairs",
+      ]),
+    );
     for (const code of [
       "CANCELLATION_UNCONFIRMED",
       "STABLE_IDENTITY_REMAP_REQUIRED",
@@ -73,6 +105,13 @@ describe("SDK contract version and descriptor (issue #140)", () => {
       "INVALID_NOTIFICATION",
       "INVALID_NOTIFICATION_ID",
       "NOTIFICATION_NOT_FOUND",
+      "INVALID_REPAIR",
+      "INVALID_REPAIR_KIND",
+      "INVALID_REPAIR_TARGET",
+      "INVALID_REPAIR_KEY",
+      "EXECUTION_NOT_REPAIRABLE",
+      "REPAIR_FORBIDDEN",
+      "REPAIR_UNAVAILABLE",
     ]) {
       expect(SDK_ERROR_CODES).toContain(code);
     }
@@ -83,6 +122,61 @@ describe("SDK contract version and descriptor (issue #140)", () => {
       expect.arrayContaining(["GET /api/config", "POST /api/config", "PUT /api/config/:id"]),
     );
     for (const code of ["CONFIG_REQUIREMENT_UNSATISFIED", "SECRET_NOT_CONFIGURED", "MANAGED_RESOURCE"]) {
+      expect(SDK_ERROR_CODES).toContain(code);
+    }
+    // FORM-02 (issue #155): dynamic forms are a supported capability with
+    // designer, startup, provider, and submit routes plus error codes.
+    expect(descriptor.capabilities.find((entry) => entry.name === "dynamic-forms")?.status).toBe("supported");
+    expect(descriptor.routes.map((route) => `${route.method} ${route.path}`)).toEqual(
+      expect.arrayContaining([
+        "GET /api/forms",
+        "POST /api/forms",
+        "GET /api/forms/:name",
+        "PUT /api/forms/:name",
+        "DELETE /api/forms/:name",
+        "POST /api/forms/:name/startup",
+        "GET /api/forms/:name/providers",
+        "POST /api/forms/:name/submit",
+      ]),
+    );
+    for (const code of [
+      "INVALID_FORM",
+      "FORM_NOT_FOUND",
+      "STALE_FORM_HANDLE",
+      "INVALID_PREFILL",
+      "PREFILL_NOT_ALLOWED",
+      "INVALID_SCHEDULE",
+      "IDEMPOTENCY_CONFLICT",
+    ]) {
+      expect(SDK_ERROR_CODES).toContain(code);
+    }
+    // RUN-01 (ADR 018): persisted runtime policy is a supported capability
+    // with its routes and error codes in the contract.
+    expect(descriptor.capabilities.find((entry) => entry.name === "runtime-policy")?.status).toBe("supported");
+    expect(descriptor.routes.map((route) => `${route.method} ${route.path}`)).toEqual(
+      expect.arrayContaining(["GET /api/sagas/:id/policy", "PUT /api/sagas/:id/policy"]),
+    );
+    for (const code of ["INVALID_POLICY", "SAGA_PAUSED", "ADMISSION_LIMITED"]) {
+      expect(SDK_ERROR_CODES).toContain(code);
+    }
+    // TRG-01 (issue #137, ADR 012): schedules are a supported capability
+    // with operator routes, delivery visibility, and error codes.
+    expect(descriptor.capabilities.find((entry) => entry.name === "scheduled-triggers")?.status).toBe("supported");
+    expect(descriptor.routes.map((route) => `${route.method} ${route.path}`)).toEqual(
+      expect.arrayContaining([
+        "GET /api/schedules",
+        "POST /api/schedules",
+        "GET /api/schedules/:name",
+        "DELETE /api/schedules/:name",
+        "POST /api/schedules/:name/enable",
+        "POST /api/schedules/:name/disable",
+        "GET /api/schedules/:name/deliveries",
+      ]),
+    );
+    for (const code of ["INVALID_SCHEDULE", "SCHEDULE_CONFLICT", "SCHEDULE_IDENTITY_FORBIDDEN"]) {
+      expect(SDK_ERROR_CODES).toContain(code);
+    }
+    for (const code of ["STABLE_IDENTITY_REMAP_REQUIRED", "SYNC_CONFLICT", "INVALID_GIT_TARGET", "DEPLOY_BLOCKED"]) {
       expect(SDK_ERROR_CODES).toContain(code);
     }
     for (const capability of descriptor.capabilities) {
@@ -253,7 +347,7 @@ describe("SDK automation client: local happy/denied/error examples", () => {
     expect(diagnosis.hint).toBeNull();
     const page = await client.listHistory({});
     expect(parseHistoryPage(JSON.parse(JSON.stringify(page))).executions.length).toBeGreaterThan(0);
-  });
+  }, 25000);
 
   it("keeps the same caller policy as the UI: denied callers get 401/404, never data", async () => {
     const key = "sdk-client-denied-001";
@@ -293,7 +387,7 @@ describe("SDK automation client: local happy/denied/error examples", () => {
         )
       ).code,
     ).toBe("FORBIDDEN");
-  });
+  }, 25000);
 
   it("surfaces validation and contract errors with stable codes", async () => {
     const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) =>
@@ -363,6 +457,15 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       startedAt: "2026-09-11T00:00:01.000Z",
       completedAt: "2026-09-11T00:00:02.000Z",
       runtimeStatus: null,
+      policy: {
+        sagaId: helloSaga.id,
+        version: 1,
+        policy: {
+          timeout: { vendorTimeoutMs: 0, stepTimeout: "10 seconds" },
+          retry: { checkpointRetries: 2, vendorRetries: 0 },
+          admission: { enabled: true, maxConcurrent: 0 },
+        },
+      },
       input: { name: "Ada" },
       result: { greeting: "Hello, Ada!", name: "Ada" },
       error: null,
@@ -511,6 +614,35 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     ).rejects.toMatchObject({ code: "SDK_CLIENT_NETWORK" });
   });
 
+  it("reads and writes saga runtime policy through the typed client", async () => {
+    const served = {
+      policy: {
+        sagaId: helloSaga.id,
+        sagaName: "hello",
+        version: 2,
+        updatedAt: "2026-09-11T00:00:00.000Z",
+        timeout: { vendorTimeoutMs: 250, stepTimeout: "10 seconds" },
+        retry: { checkpointRetries: 2, vendorRetries: 1 },
+        admission: { enabled: true, maxConcurrent: 3 },
+      },
+    };
+    const got = stub([json(catalog), json(served)]);
+    const reader = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: got.fetchImpl });
+    expect(await reader.getSagaPolicy("hello")).toMatchObject({ sagaId: helloSaga.id, version: 2 });
+    expect(got.calls[1]?.url).toBe(`http://local.test/api/sagas/${helloSaga.id}/policy`);
+    const put = stub([json(served)]);
+    const writer = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: put.fetchImpl });
+    expect(await writer.updateSagaPolicy(helloSaga.id, { admission: { maxConcurrent: 3 } })).toMatchObject({
+      admission: { maxConcurrent: 3 },
+    });
+    expect(put.calls[0]?.init.method).toBe("PUT");
+    expect(String(put.calls[0]?.init.body)).toContain("maxConcurrent");
+    const fallback = stub([json(catalog), json(served)]);
+    const fallbackClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: fallback.fetchImpl });
+    expect(await fallbackClient.updateSagaPolicy("hello", undefined)).toMatchObject({ version: 2 });
+    expect(String(fallback.calls[1]?.init.body)).toBe("{}");
+  });
+
   it("cancels with exact IDs and guards the cancel shape", async () => {
     const id = "c".repeat(64);
     const { calls, fetchImpl } = stub([json({ executionId: id, status: "Cancelled", cancelled: true })]);
@@ -570,6 +702,119 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     await expect(
       createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: malformed.fetchImpl }).listAuditEvents(),
     ).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
+  });
+
+  it("reads diagnostics and repairs through the typed client", async () => {
+    const counters = {
+      total: 1,
+      pending: 0,
+      pendingUndispatched: 0,
+      running: 0,
+      cancelling: 0,
+      succeeded: 0,
+      failed: 1,
+      timedOut: 0,
+      cancelled: 0,
+    };
+    const versionStub = stub([
+      json({ version: { sdkVersion: "1", sagaCatalog: { count: 5, revision: "r" }, migrationsApplied: [] } }),
+    ]);
+    const versionClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: versionStub.fetchImpl,
+    });
+    expect((await versionClient.getOpsVersion()).sdkVersion).toBe("1");
+    expect(versionStub.calls[0]?.url).toBe("http://local.test/api/ops/version");
+    const healthStub = stub([
+      json({ status: "ok", database: "ok", worker: "ok", checkedAt: "2026-09-12T00:00:00.000Z" }),
+    ]);
+    const healthClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: healthStub.fetchImpl,
+    });
+    expect((await healthClient.getOpsHealth()).status).toBe("ok");
+    const metricsStub = stub([
+      json({ metrics: { generatedAt: "2026-09-12T00:00:00.000Z", executions: counters, recentFailures: [] } }),
+    ]);
+    const metricsClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: metricsStub.fetchImpl,
+    });
+    expect((await metricsClient.getOpsMetrics(5)).executions.failed).toBe(1);
+    expect(metricsStub.calls[0]?.url).toBe("http://local.test/api/ops/metrics?recent=5");
+    await expect(metricsClient.getOpsMetrics(99)).rejects.toMatchObject({ code: "SDK_INVALID_REF" });
+    const tasksStub = stub([json({ tasks: [] })]);
+    const tasksClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: tasksStub.fetchImpl,
+    });
+    expect(await tasksClient.listOpsScheduledTasks()).toEqual([]);
+    const jobsStub = stub([
+      json({
+        jobs: {
+          generatedAt: "2026-09-12T00:00:00.000Z",
+          executions: counters,
+          appBuilds: { queued: 0, running: 0, succeeded: 0, failed: 0, interrupted: [] },
+        },
+      }),
+    ]);
+    const jobsClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: jobsStub.fetchImpl });
+    expect((await jobsClient.getOpsJobs()).appBuilds.succeeded).toBe(0);
+    const preflightStub = stub([json({ checkedAt: "2026-09-12T00:00:00.000Z", integrations: [] })]);
+    const preflightClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: preflightStub.fetchImpl,
+    });
+    expect((await preflightClient.getOpsPreflight()).integrations).toEqual([]);
+    const connsStub = stub([json({ connections: [] })]);
+    const connsClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: connsStub.fetchImpl,
+    });
+    expect((await connsClient.getOpsConnectionHealth()).connections).toEqual([]);
+    // Repairs inspect by default (dryRun:true) and commit explicitly.
+    const repairBody = {
+      repair: { kind: "cleanup-pending-uploads", dryRun: true, targetId: null, action: "a", result: {} },
+    };
+    const inspectStub = stub([json(repairBody)]);
+    const inspectClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: inspectStub.fetchImpl,
+    });
+    const inspected = await inspectClient.runOpsRepair({ kind: "cleanup-pending-uploads" });
+    expect(inspected.dryRun).toBe(true);
+    expect(JSON.parse(String(inspectStub.calls[0]?.init.body)).dryRun).toBe(true);
+    const executeStub = stub([json({ repair: { ...repairBody.repair, dryRun: false } })]);
+    const executeClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: executeStub.fetchImpl,
+    });
+    const executed = await executeClient.runOpsRepair({ kind: "cleanup-pending-uploads", dryRun: false });
+    expect(executed.dryRun).toBe(false);
+    expect(inspectStub.calls[0]?.init.method).toBe("POST");
+    // Malformed diagnostics payloads fail as SDK_CLIENT_MISMATCH.
+    const malformedVersion = stub([json({ nope: true })]);
+    const malformedVersionClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: malformedVersion.fetchImpl,
+    });
+    await expect(malformedVersionClient.getOpsVersion()).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
+    const malformedMetrics = stub([json({ nope: true })]);
+    const malformedMetricsClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: malformedMetrics.fetchImpl,
+    });
+    await expect(malformedMetricsClient.getOpsMetrics()).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
   });
 
   it("lists history with filters, cursors, and saga resolution", async () => {
@@ -632,6 +877,8 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       "NINJA_UNAUTHORIZED",
       "NINJA_NOT_CONFIGURED",
       "EXECUTION_CANCELLED",
+      "SAGA_PAUSED",
+      "ADMISSION_LIMITED",
       "DISPATCH_UNCONFIRMED",
     ];
     for (const code of codes) {
@@ -672,6 +919,21 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     expect(() => parseExecutionDetail(null)).toThrow(/unexpected shape/);
     expect(() => parseExecutionDetail({ ...detail(), operations: [{ name: 1 }] })).toThrow(/unexpected shape/);
     expect(() => parseExecutionDetail({ ...detail(), operations: "x" })).toThrow(/unexpected shape/);
+    expect(() => parseExecutionDetail({ ...detail(), policy: undefined })).toThrow(/unexpected shape/);
+    expect(() => parseRuntimePolicy({ policy: { nope: true } })).toThrow(/unexpected shape/);
+    expect(
+      parseRuntimePolicy({
+        policy: {
+          sagaId: helloSaga.id,
+          sagaName: "hello",
+          version: 1,
+          updatedAt: "2026-09-11T00:00:00.000Z",
+          timeout: { vendorTimeoutMs: 0, stepTimeout: "10 seconds" },
+          retry: { checkpointRetries: 2, vendorRetries: 0 },
+          admission: { enabled: true, maxConcurrent: 0 },
+        },
+      }).sagaId,
+    ).toBe(helloSaga.id);
     expect(() => parseHistoryPage({})).toThrow(/unexpected shape/);
     expect(() => parseHistoryPage({ executions: [{ sagaId: 1 }], hasMore: false })).toThrow(/unexpected shape/);
     expect(() => parseHistoryPage({ executions: [], hasMore: false, nextCursor: 7 })).toThrow(/unexpected shape/);
@@ -685,6 +947,207 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     expect(() => parseNotifications({})).toThrow(/unexpected shape/);
     expect(() => parseNotifications({ notifications: [{ id: 1 }] })).toThrow(/unexpected shape/);
     expect(() => parseNotification({})).toThrow(/unexpected shape/);
+    // OPS-02 wire guards (issue #173): diagnostics and repair payloads.
+    expect(() => parseOpsVersion({})).toThrow(/unexpected shape/);
+    expect(() => parseOpsVersion({ version: { sdkVersion: 1 } })).toThrow(/unexpected shape/);
+    expect(() => parseOpsHealth({})).toThrow(/unexpected shape/);
+    expect(() => parseOpsMetrics({})).toThrow(/unexpected shape/);
+    expect(() => parseOpsMetrics({ metrics: { generatedAt: "x", executions: {}, recentFailures: [] } })).toThrow(
+      /unexpected shape/,
+    );
+    expect(() =>
+      parseOpsMetrics({
+        metrics: {
+          generatedAt: "x",
+          executions: {
+            total: 0,
+            pending: 0,
+            pendingUndispatched: 0,
+            running: 0,
+            cancelling: 0,
+            succeeded: 0,
+            failed: 0,
+            timedOut: 0,
+            cancelled: 0,
+          },
+          recentFailures: [{ executionId: 1 }],
+        },
+      }),
+    ).toThrow(/unexpected shape/);
+    expect(() => parseOpsScheduledTasks({})).toThrow(/unexpected shape/);
+    expect(() => parseOpsScheduledTasks({ tasks: [{ id: 1 }] })).toThrow(/unexpected shape/);
+    expect(() => parseOpsJobs({})).toThrow(/unexpected shape/);
+    expect(() => parseOpsJobs({ jobs: { generatedAt: "x" } })).toThrow(/unexpected shape/);
+    expect(() => parseOpsPreflight({})).toThrow(/unexpected shape/);
+    expect(() => parseOpsPreflight({ checkedAt: "x", integrations: [{ integrationId: 1 }] })).toThrow(
+      /unexpected shape/,
+    );
+    expect(() => parseOpsConnectionHealth({})).toThrow(/unexpected shape/);
+    expect(() => parseOpsConnectionHealth({ connections: [{ integrationId: 1 }] })).toThrow(/unexpected shape/);
+    expect(() => parseOpsRepairOutcome({})).toThrow(/unexpected shape/);
+    expect(() => parseOpsRepairOutcome({ repair: { kind: 1 } })).toThrow(/unexpected shape/);
+    // OPS-02 guard arms (issue #173): boundary and entry shapes.
+    expect(() => parseOpsVersion({ version: 1 })).toThrow(/unexpected shape/);
+    expect(() => parseOpsVersion({ version: { sdkVersion: "1", sagaCatalog: {}, migrationsApplied: [] } })).toThrow(
+      /unexpected shape/,
+    );
+    expect(() =>
+      parseOpsVersion({ version: { sdkVersion: "1", sagaCatalog: { count: 1 }, migrationsApplied: [] } }),
+    ).toThrow(/unexpected shape/);
+    expect(() => parseOpsHealth({ status: "ok", database: "ok", worker: 1, checkedAt: "x" })).toThrow(
+      /unexpected shape/,
+    );
+    expect(() => parseOpsMetrics({ metrics: 1 })).toThrow(/unexpected shape/);
+    expect(() => parseOpsMetrics({ metrics: { generatedAt: 1, executions: {}, recentFailures: [] } })).toThrow(
+      /unexpected shape/,
+    );
+    expect(() =>
+      parseOpsMetrics({
+        metrics: {
+          generatedAt: "x",
+          executions: {
+            total: 0,
+            pending: 0,
+            pendingUndispatched: 0,
+            running: 0,
+            cancelling: 0,
+            succeeded: 0,
+            failed: 0,
+            timedOut: 0,
+            cancelled: 0,
+          },
+          recentFailures: [{ executionId: "a", sagaName: "s", status: "Failed", code: 1, completedAt: null }],
+        },
+      }),
+    ).toThrow(/unexpected shape/);
+    expect(() => parseOpsScheduledTasks({ tasks: 1 })).toThrow(/unexpected shape/);
+    expect(() =>
+      parseOpsScheduledTasks({
+        tasks: [{ id: "a", name: "n", kind: "endpoint", enabled: true, cadence: 1, detail: "d" }],
+      }),
+    ).toThrow(/unexpected shape/);
+    expect(() => parseOpsJobs({ jobs: { generatedAt: "x", executions: {}, appBuilds: {} } })).toThrow(
+      /unexpected shape/,
+    );
+    expect(() =>
+      parseOpsJobs({
+        jobs: {
+          generatedAt: "x",
+          executions: {
+            total: 0,
+            pending: 0,
+            pendingUndispatched: 0,
+            running: 0,
+            cancelling: 0,
+            succeeded: 0,
+            failed: 0,
+            timedOut: 0,
+            cancelled: 0,
+          },
+          appBuilds: { queued: 0, running: 0, succeeded: 0, failed: 0, interrupted: [{ appId: 1 }] },
+        },
+      }),
+    ).toThrow(/unexpected shape/);
+    expect(() => parseOpsPreflight({ checkedAt: "x", integrations: 1 })).toThrow(/unexpected shape/);
+    expect(() =>
+      parseOpsPreflight({
+        checkedAt: "x",
+        integrations: [
+          {
+            integrationId: "i",
+            integrationName: "n",
+            connected: true,
+            enabled: true,
+            missingSecrets: "x",
+            ready: true,
+          },
+        ],
+      }),
+    ).toThrow(/unexpected shape/);
+    expect(() => parseOpsConnectionHealth({ connections: 1 })).toThrow(/unexpected shape/);
+    expect(() =>
+      parseOpsRepairOutcome({ repair: { kind: "k", dryRun: true, targetId: 1, action: "a", result: null } }),
+    ).toThrow(/unexpected shape/);
+    expect(() =>
+      parseOpsRepairOutcome({ repair: { kind: "k", dryRun: "yes", targetId: null, action: "a", result: null } }),
+    ).toThrow(/unexpected shape/);
+    // OPS-02 guard entry arms (issue #173): malformed list entries.
+    const counters = {
+      total: 0,
+      pending: 0,
+      pendingUndispatched: 0,
+      running: 0,
+      cancelling: 0,
+      succeeded: 0,
+      failed: 0,
+      timedOut: 0,
+      cancelled: 0,
+    };
+    expect(() =>
+      parseOpsMetrics({
+        metrics: {
+          generatedAt: "x",
+          executions: counters,
+          recentFailures: [{ executionId: "a", sagaName: "s", status: "Failed", code: null, completedAt: 7 }],
+        },
+      }),
+    ).toThrow(/unexpected shape/);
+    expect(() =>
+      parseOpsScheduledTasks({
+        tasks: [{ id: "a", name: "n", kind: 7, enabled: true, cadence: null, detail: "d" }],
+      }),
+    ).toThrow(/unexpected shape/);
+    expect(() =>
+      parseOpsScheduledTasks({
+        tasks: [{ id: "a", name: "n", kind: "endpoint", enabled: "yes", cadence: null, detail: "d" }],
+      }),
+    ).toThrow(/unexpected shape/);
+    expect(() =>
+      parseOpsScheduledTasks({
+        tasks: [{ id: "a", name: "n", kind: "endpoint", enabled: true, cadence: null, detail: 7 }],
+      }),
+    ).toThrow(/unexpected shape/);
+    expect(() =>
+      parseOpsJobs({
+        jobs: {
+          generatedAt: "x",
+          executions: counters,
+          appBuilds: { queued: 0, running: 0, succeeded: 0, failed: 0, interrupted: [{ appId: "a" }] },
+        },
+      }),
+    ).toThrow(/unexpected shape/);
+    expect(() =>
+      parseOpsPreflight({
+        checkedAt: "x",
+        integrations: [
+          {
+            integrationId: "i",
+            integrationName: "n",
+            connected: true,
+            enabled: true,
+            missingSecrets: [],
+            ready: "yes",
+          },
+        ],
+      }),
+    ).toThrow(/unexpected shape/);
+    expect(() =>
+      parseOpsConnectionHealth({
+        connections: [
+          {
+            integrationId: "i",
+            integrationName: "n",
+            connected: true,
+            enabled: true,
+            testHint: "t",
+            remediation: 7,
+          },
+        ],
+      }),
+    ).toThrow(/unexpected shape/);
+    expect(() =>
+      parseOpsRepairOutcome({ repair: { kind: "k", dryRun: true, targetId: null, action: 7, result: null } }),
+    ).toThrow(/unexpected shape/);
   });
 
   it("validates every schema branch offline", () => {
@@ -728,5 +1191,297 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     expect(() => scaffoldSaga({ ...good, description: "" })).toThrow(/1-280/);
     expect(() => scaffoldSaga({ ...good, revision: "" })).toThrow(/diagnostic marker/);
     expect(localCatalog()).toHaveLength(SAGA_CATALOG.length);
+  });
+
+  it("guards every form wire shape against drift", () => {
+    expect(() => parseFormList({})).toThrow(/unexpected shape/);
+    expect(() => parseFormList({ forms: [{ id: 1 }] })).toThrow(/unexpected shape/);
+    expect(parseFormList({ forms: [] })).toEqual([]);
+    const detail = {
+      form: {
+        id: "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
+        name: "contact",
+        sagaId: helloSaga.id,
+        allowPrefill: false,
+        fields: [{ name: "name", type: "text", required: true, maxLength: 1024 }],
+      },
+    };
+    expect(parseFormDetail(detail).name).toBe("contact");
+    expect(() => parseFormDetail({})).toThrow(/unexpected shape/);
+    expect(() => parseFormDetail({ form: { name: 1 } })).toThrow(/unexpected shape/);
+    expect(() =>
+      parseFormDetail({
+        form: { ...detail.form, fields: [{ name: "x", type: "watermelon", required: false, maxLength: 8 }] },
+      }),
+    ).toThrow(/unexpected shape/);
+    const started = { form: "contact", handle: "h", expiresAt: "t", snapshot: {}, options: {} };
+    expect(() => parseFormStartup(started)).toThrow(/unexpected shape/);
+    expect(parseFormStartup({ ...started, handle: "a".repeat(64) }).handle).toBe("a".repeat(64));
+    expect(() => parseFormStartup({})).toThrow(/unexpected shape/);
+    expect(parseFormProviders({ form: "c", options: {} }).errors).toEqual({});
+    expect(() => parseFormProviders({})).toThrow(/unexpected shape/);
+    expect(() => parseFormList({ forms: [{ id: "x", name: "contact", sagaId: helloSaga.id }] })).toThrow(
+      /unexpected shape/,
+    );
+    // TRG-01 (issue #137): schedule guards accept the served shape and reject drift.
+    const scheduleShape = {
+      id: "a".repeat(64),
+      name: "morning-digest",
+      sagaId: helloSaga.id,
+      sagaName: "hello",
+      kind: "recurring",
+      cron: "* * * * *",
+      timezone: "UTC",
+      enabled: true,
+      input: { name: "sched" },
+      runAt: null,
+      nextDueAt: "2026-09-12T10:01:00.000Z",
+      lastWindow: null,
+      createdAt: "2026-09-12T10:00:00.000Z",
+      updatedAt: "2026-09-12T10:00:00.000Z",
+    };
+    expect(parseScheduleList({ schedules: [scheduleShape] })).toHaveLength(1);
+    expect(parseScheduleDetail({ schedule: scheduleShape }).name).toBe("morning-digest");
+    expect(
+      parseScheduleDelivery({
+        delivery: { schedule: "morning-digest", window: "2026-09-12T10:01", executionId: "a".repeat(64) },
+      }).executionId,
+    ).toBe("a".repeat(64));
+    expect(() => parseScheduleList({})).toThrow(/unexpected shape/);
+    expect(() => parseScheduleList({ schedules: [{ name: 1 }] })).toThrow(/unexpected shape/);
+    expect(() => parseScheduleList({ schedules: [{ ...scheduleShape, id: "not-hex" }] })).toThrow(/unexpected shape/);
+    expect(() => parseScheduleList({ schedules: [{ ...scheduleShape, enabled: "yes" }] })).toThrow(/unexpected shape/);
+    expect(() => parseScheduleDetail({})).toThrow(/unexpected shape/);
+    expect(() => parseScheduleDetail({ schedule: { ...scheduleShape, kind: "whenever" } })).toThrow(/unexpected shape/);
+    expect(() => parseScheduleDetail({ schedule: { ...scheduleShape, name: "UPPER" } })).toThrow(/unexpected shape/);
+    expect(() => parseScheduleDelivery({})).toThrow(/unexpected shape/);
+    expect(() => parseScheduleDelivery({ delivery: { schedule: "x", window: "y" } })).toThrow(/unexpected shape/);
+    const receipt = {
+      form: "contact",
+      executionId: "a".repeat(64),
+      replayed: false,
+      statusUrl: `/api/executions/${"a".repeat(64)}`,
+    };
+    expect(parseFormSubmit(receipt).executionId).toBe("a".repeat(64));
+    expect(() => parseFormSubmit({ ...receipt, replayed: "yes" })).toThrow(/unexpected shape/);
+    expect(() => parseFormSubmit({ ...receipt, scheduled: 1 })).toThrow(/unexpected shape/);
+    expect(() => parseFormSubmit({})).toThrow(/unexpected shape/);
+    // Guard chains short-circuit on non-records and on every field failure,
+    // so malformed wire shapes fail loud instead of trusting partial data.
+    expect(() => parseFormList(null)).toThrow(/unexpected shape/);
+    expect(() => parseFormList({ forms: [null] })).toThrow(/unexpected shape/);
+    expect(() => parseFormDetail(null)).toThrow(/unexpected shape/);
+    expect(() => parseFormStartup({ ...started, snapshot: null })).toThrow(/unexpected shape/);
+    expect(() => parseFormStartup({ ...started, options: null })).toThrow(/unexpected shape/);
+    expect(() => parseFormProviders({ form: "c", options: null })).toThrow(/unexpected shape/);
+    expect(() => parseFormSubmit({ ...receipt, executionId: "short" })).toThrow(/unexpected shape/);
+    expect(() => parseFormSubmit({ ...receipt, statusUrl: 7 })).toThrow(/unexpected shape/);
+  });
+
+  it("drives forms through the typed client with offline guards", async () => {
+    const detail = {
+      form: {
+        id: "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
+        name: "contact",
+        sagaId: helloSaga.id,
+        allowPrefill: false,
+        fields: [{ name: "name", type: "text", required: true, maxLength: 1024 }],
+      },
+    };
+    const started = { form: "contact", handle: "a".repeat(64), expiresAt: "t", snapshot: {}, options: {} };
+    const receiptId = "b".repeat(64);
+    const receipt = {
+      form: "contact",
+      executionId: receiptId,
+      replayed: false,
+      statusUrl: `/api/executions/${receiptId}`,
+    };
+    const { fetchImpl } = stub([
+      json({
+        forms: [{ id: "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5", name: "contact", sagaId: helloSaga.id }],
+      }),
+      json(detail),
+      json(detail),
+      json(detail),
+      json({ deleted: "contact" }),
+      json(started),
+      json({ form: "contact", options: {}, errors: {} }),
+      json(receipt),
+    ]);
+    const client = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+    expect(await client.listForms()).toHaveLength(1);
+    expect((await client.getForm("contact")).name).toBe("contact");
+    const fields = [{ name: "name", type: "text", required: true }];
+    expect((await client.createForm({ name: "contact", sagaId: helloSaga.id, fields })).name).toBe("contact");
+    expect((await client.updateForm("contact", { sagaId: helloSaga.id, fields })).name).toBe("contact");
+    await client.deleteForm("contact");
+    expect((await client.startForm("contact")).handle).toBe("a".repeat(64));
+    expect((await client.getFormProviders("contact")).form).toBe("contact");
+    const submitted = await client.submitForm({ form: "contact", handle: "a".repeat(64), key: "form-sdk-test-0001" });
+    expect(submitted.executionId).toBe(receiptId);
+    await expect(client.getForm("Bad Name")).rejects.toMatchObject({ code: "SDK_INVALID_REF" });
+    await expect(client.submitForm({ form: "contact", handle: "nope" })).rejects.toMatchObject({
+      code: "SDK_INVALID_REF",
+    });
+    const malformed = stub([json({ nope: true })]);
+    await expect(
+      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: malformed.fetchImpl }).listForms(),
+    ).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
+  });
+
+  it("covers client optional branches: history, config, forms, submit, readJson", async () => {
+    // listHistory with no query sends a bare URL (empty suffix branch).
+    const bare = stub([json({ executions: [], hasMore: false, nextCursor: null })]);
+    const bareClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: bare.fetchImpl });
+    expect((await bareClient.listHistory()).executions).toEqual([]);
+    expect(bare.calls[0]?.url).toBe("http://local.test/api/executions");
+    // listHistory with a cursor appends the cursor param.
+    const paged = stub([
+      json(catalog),
+      json({
+        executions: [{ executionId: "d".repeat(64), sagaId: helloSaga.id, status: "Failed" }],
+        hasMore: false,
+        nextCursor: null,
+      }),
+    ]);
+    const pagedClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: paged.fetchImpl });
+    await pagedClient.listHistory({ saga: "hello", cursor: "abc" });
+    expect(paged.calls[1]?.url).toContain("cursor=abc");
+    // listNotifications with and without a limit (suffix branches).
+    const noLimit = stub([json({ notifications: [] })]);
+    const noLimitClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: noLimit.fetchImpl });
+    expect(await noLimitClient.listNotifications()).toEqual([]);
+    expect(noLimit.calls[0]?.url).toBe("http://local.test/api/notifications");
+    const withLimit = stub([json({ notifications: [] })]);
+    const withLimitClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: withLimit.fetchImpl,
+    });
+    await withLimitClient.listNotifications(5);
+    expect(withLimit.calls[0]?.url).toContain("limit=5");
+    // setConfig without value/description omits both keys (spread branches).
+    const entry = {
+      config: {
+        id: "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
+        key: "k",
+        type: "int",
+        value: 1,
+        description: null,
+        managedBy: null,
+        updatedAt: "t",
+        updatedBy: "u",
+      },
+    };
+    const setBare = stub([json(entry)]);
+    const setBareClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: setBare.fetchImpl });
+    await setBareClient.setConfig({ key: "k", type: "int" });
+    expect(JSON.parse(String(setBare.calls[0]?.init.body))).toEqual({ key: "k", type: "int" });
+    // updateConfig with a full patch sends every key; bad ids fail offline.
+    const setFull = stub([json(entry)]);
+    const setFullClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: setFull.fetchImpl });
+    await setFullClient.updateConfig({
+      id: "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
+      key: "k",
+      type: "int",
+      value: 2,
+      description: "d",
+    });
+    expect(JSON.parse(String(setFull.calls[0]?.init.body))).toMatchObject({ key: "k", value: 2 });
+    await expect(setFullClient.updateConfig({ id: "nope" })).rejects.toMatchObject({ code: "SDK_INVALID_REF" });
+    await expect(setFullClient.deleteConfig("nope")).rejects.toMatchObject({ code: "SDK_INVALID_REF" });
+    // Form create/update with all optional metadata sends every key.
+    const detailAll = {
+      form: {
+        id: "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
+        name: "contact",
+        sagaId: helloSaga.id,
+        title: "T",
+        description: "D",
+        allowPrefill: true,
+        fields: [],
+      },
+    };
+    const formStub = stub([
+      json(detailAll),
+      json(detailAll),
+      json({ form: "contact", handle: "a".repeat(64), expiresAt: "t", snapshot: {}, options: {} }),
+    ]);
+    const formClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: formStub.fetchImpl });
+    const fullFields = [{ name: "name", type: "text", required: true }];
+    await formClient.createForm({
+      name: "contact",
+      sagaId: helloSaga.id,
+      title: "T",
+      description: "D",
+      allowPrefill: true,
+      fields: fullFields,
+    });
+    expect(JSON.parse(String(formStub.calls[0]?.init.body))).toMatchObject({ title: "T", allowPrefill: true });
+    await formClient.updateForm("contact", {
+      sagaId: helloSaga.id,
+      title: "T",
+      description: "D",
+      allowPrefill: true,
+      fields: fullFields,
+    });
+    expect(JSON.parse(String(formStub.calls[1]?.init.body))).toMatchObject({ title: "T", allowPrefill: true });
+    // startForm with prefill wraps it; submitForm with all optionals sends them.
+    await formClient.startForm("contact", { name: "Ada" });
+    expect(JSON.parse(String(formStub.calls[2]?.init.body))).toEqual({ prefill: { name: "Ada" } });
+    const receiptId = "c".repeat(64);
+    const receiptStub = stub([
+      json({ form: "contact", executionId: receiptId, replayed: false, statusUrl: `/api/executions/${receiptId}` }),
+    ]);
+    const receiptClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: receiptStub.fetchImpl,
+    });
+    const future = new Date(Date.now() + 3600 * 1000).toISOString();
+    await receiptClient.submitForm({
+      form: "contact",
+      handle: "a".repeat(64),
+      values: { name: "Ada" },
+      scheduleAt: future,
+      key: "form-sdk-full-0001",
+    });
+    expect(JSON.parse(String(receiptStub.calls[0]?.init.body))).toMatchObject({ scheduleAt: future });
+    await expect(
+      receiptClient.submitForm({ form: "contact", handle: "a".repeat(64), key: "bad key!!" }),
+    ).rejects.toMatchObject({ code: "SDK_INVALID_REF" });
+    // readJson on a failed response without an envelope keeps the fallback
+    // message; a non-Error throw becomes SDK_CLIENT_NETWORK.
+    const failedBare = stub([json({ nope: true }, 422)]);
+    const failedClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: failedBare.fetchImpl,
+    });
+    await expect(failedClient.getForm("contact")).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
+    const boom = stub([new Error("down")]);
+    const boomClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: boom.fetchImpl });
+    await expect(boomClient.listForms()).rejects.toMatchObject({ code: "SDK_CLIENT_NETWORK" });
+    // previewSaga without input sends {} (default-arg branch).
+    const previewStub = stub([
+      json(catalog),
+      json({
+        preview: {
+          saga: { id: helloSaga.id, name: "hello", revision: "hello-v1" },
+          input: {},
+          environmentChecked: false,
+          environment: [],
+          persisted: false,
+          dispatched: false,
+        },
+      }),
+    ]);
+    const previewClient = createSdkClient({
+      base: "http://local.test",
+      token: "tok",
+      fetchImpl: previewStub.fetchImpl,
+    });
+    expect((await previewClient.previewSaga({ saga: "hello" })).input).toEqual({});
+    expect(JSON.parse(String(previewStub.calls[1]?.init.body))).toMatchObject({ input: {} });
   });
 });

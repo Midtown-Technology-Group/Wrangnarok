@@ -1,0 +1,11 @@
+# TABLE-01 lane scope (issue #117): minimal author Tables migration slice over D1.
+src/tables.ts
+src/index.ts
+src/sdk.ts
+migrations/0009_tables.sql
+test/tables.test.ts
+test/tables-unit.test.ts
+docs/upstream-parity.md
+scripts/check-bundle-budget.mjs
+scopes/table-01.scope
+package.json

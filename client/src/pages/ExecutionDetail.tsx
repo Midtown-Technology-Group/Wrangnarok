@@ -9,9 +9,15 @@
 // after a newer one, or after unmount) are discarded by sequence number.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { cancelExecution, fetchExecutionDetail, isTerminalStatus } from "../lib/api-client";
+import {
+  cancelExecution,
+  fetchExecutionDetail,
+  fetchExecutionLogs,
+  isTerminalStatus,
+  mergeLogPages,
+} from "../lib/api-client";
 import { ApiError, getErrorMessage } from "../lib/api-error";
-import type { ExecutionDetail as Detail } from "../lib/client-types";
+import type { ExecutionDetail as Detail, LogEntry } from "../lib/client-types";
 import { StatusBadge } from "../components/StatusBadge";
 
 /** Poll cadence for active Executions (mirrors upstream useExecution: 2s). */
@@ -53,6 +59,9 @@ export function ExecutionDetailView(props: { initial?: Detail }): React.JSX.Elem
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [cancelNotice, setCancelNotice] = useState<string | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logError, setLogError] = useState<string | null>(null);
+  const logCursorRef = useRef<string | null>(null);
   const seqRef = useRef(0);
 
   // Live poll: refetch while the stored status is active. Stops at terminal
@@ -72,6 +81,19 @@ export function ExecutionDetailView(props: { initial?: Detail }): React.JSX.Elem
         if (unmounted || seqRef.current !== sequence) return false;
         setData(next);
         setError(null);
+        // OBS-02 log tail rides the same 2s tick: each poll refetches from
+        // the last cursor, merges by seq (reconnect replays dedupe), and
+        // keeps the cursor for the next tick. D1 is the source of truth.
+        try {
+          const page = await fetchExecutionLogs(id, { cursor: logCursorRef.current ?? undefined });
+          if (unmounted || seqRef.current !== sequence) return false;
+          setLogs((prev) => mergeLogPages(prev, page.logs));
+          if (page.nextCursor) logCursorRef.current = page.nextCursor;
+          setLogError(null);
+        } catch (logErr) {
+          if (unmounted || seqRef.current !== sequence) return false;
+          setLogError(getErrorMessage(logErr, "Could not load author logs."));
+        }
         return !isTerminalStatus(next.status);
       } catch (err) {
         if (unmounted || seqRef.current !== sequence) return false;
@@ -185,6 +207,12 @@ export function ExecutionDetailView(props: { initial?: Detail }): React.JSX.Elem
             </dd>
             <dt>Dispatch</dt>
             <dd className="muted">{data.dispatchConfirmed ? "confirmed" : "unconfirmed (Pending receipt only)"}</dd>
+            <dt>Runtime policy</dt>
+            <dd className="muted" data-testid="detail-policy">
+              {data.policy
+                ? `v${data.policy.version} · vendor timeout ${data.policy.policy.timeout.vendorTimeoutMs === 0 ? "default" : `${data.policy.policy.timeout.vendorTimeoutMs}ms`} · checkpoint retries ${data.policy.policy.retry.checkpointRetries} · vendor retries ${data.policy.policy.retry.vendorRetries} · ${data.policy.policy.admission.enabled ? "admission open" : "paused"}${data.policy.policy.admission.maxConcurrent > 0 ? ` · max ${data.policy.policy.admission.maxConcurrent} concurrent` : ""}`
+                : "default policy"}
+            </dd>
             <dt>Created</dt>
             <dd className="muted">{data.createdAt}</dd>
             <dt>Started</dt>
@@ -247,6 +275,33 @@ export function ExecutionDetailView(props: { initial?: Detail }): React.JSX.Elem
                       {boundedJsonPreview(op.error).text}
                     </pre>
                   ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+          <h2>Author logs</h2>
+          {logError ? (
+            <p role="alert" className="alert" data-testid="logs-error">
+              {logError}
+            </p>
+          ) : null}
+          {logs.length === 0 ? (
+            <p className="empty-state" data-testid="logs-empty">
+              No author logs yet — Sagas emit bounded INFO/WARN/ERROR/PROGRESS rows here (DEBUG stays hidden).
+            </p>
+          ) : (
+            <ul aria-label="Author logs" className="ops-list">
+              {logs.map((entry) => (
+                <li key={entry.seq} data-testid="log-row" className="op-row op-row--detail">
+                  <div className="op-head">
+                    <span className="op-name">
+                      [{entry.level}] {entry.message}
+                    </span>
+                    <span className="muted muted--small">#{entry.seq}</span>
+                  </div>
+                  <div className="muted muted--small">
+                    {entry.sagaName} · {entry.createdAt}
+                  </div>
                 </li>
               ))}
             </ul>

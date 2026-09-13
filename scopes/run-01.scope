@@ -12,7 +12,7 @@ src/integrations/echo.ts
 src/integrations/ninjaone.ts
 src/index.ts
 src/sdk.ts
-migrations/0009_saga_policies.sql
+migrations/0012_saga_policies.sql
 test/runtime-policy.test.ts
 test/execution-detail.test.tsx
 test/access-auth.test.ts

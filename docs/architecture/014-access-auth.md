@@ -63,3 +63,32 @@ Access (Zero Trust)**, verified in-Worker:
   until Phase 3 membership lands.
 - If Access is ever removed, delete the policy and the Worker falls back to
   LAB-only; no code removal required (unconfigured = inert).
+
+## AUTH-03 Adaptation Mapping (issue #144)
+
+Upstream `api/src/routers/auth.py`, `workflow_keys.py`, `oauth_sso.py`,
+`oauth_config.py`, `mfa.py`, `passkeys.py` (plus `test_auth.py` and
+`test_security.py` as intent evidence) split into two Wrangnarök
+responsibilities. Identity verification is delegated to Cloudflare Access as
+the IdP boundary; credential scoping and revocation stay in Worker code plus
+D1. `test/machine-credentials.test.ts` is the acceptance evidence — this
+section maps, it does not prove.
+
+| Upstream function | Wrangnarök responsibility | Outcome |
+| --- | --- | --- |
+| Login, SSO, session lifecycle (`auth.py`, `oauth_sso.py`, `oauth_config.py`) | Delegated: Access fronts the route and validates the login; the Worker verifies the assertion (RS256, `aud`, expiry) and the membership gate resolves authorization per request. No local password database, no session cookies, no server sessions (`What this ADR does NOT do` above). | Adapted: equivalent delegated sign-in without local credential storage. Session revocation is Access/IdP-side (policy change, token expiry); the Worker holds nothing to expire, so per-request membership re-resolution is the revocation path for org access. |
+| MFA, passkeys, trusted-device, recovery (`mfa.py`, `passkeys.py`) | Delegated: enforced by the Access/IdP policy (IdP MFA, WebAuthn), proven in-Worker only as 401 on expired/forged/wrong-audience assertions. | Adapted with a non-equivalent outcome: there is no in-app MFA enrollment, passkey registry, trusted-device list, or recovery flow. Operators get the IdP's authenticator guarantees instead of a second credential store — a deliberate Cloudflare-native trade, not feature-for-feature parity. |
+| User API keys, workflow keys (`workflow_keys.py`) | In-product: Access service tokens (`common_name` allowlist, least privilege) for automation callers plus TRG-02 endpoint keys (per-endpoint SHA-256 digest, expiry, disable/rotate revocation, no raw-secret readback, derived `wep-` delivery keys) for scoped Saga invocation. Authenticated deliveries run under `endpoint:<id>` principals invisible to operator sessions. | Adapted: revocable scoped machine credentials with expiry/rotation/audit. Non-equivalent by design: no user-minted/self-service keys, no per-key fine-grained scopes beyond the bound Saga, and service tokens still gate on the allowlist until Phase 3 folds services into membership. |
+| Caller identity proof (who verified this caller) | In-product: `GET /api/auth/me` plus the SDK `whoAmI()` client over the same route, reporting the verified credential class (`human`, `service`, `fixture`, `endpoint`) with membership role/kind. | New local surface (no upstream equivalent claimed): discovery, CLI, and MCP clients preserve the same identity by calling the same route as the browser UI. |
+
+Explicit limits carried from the issue acceptance:
+
+- Fixture LAB auth is local/CI only and explicitly non-production; the
+  identity view flags it (`fixture: true`).
+- External-user onboarding rides the AUTH-01 invitation path (`ordinary` or
+  `external` kind; external users can never hold admin); first verified use
+  activates invited memberships, including service identities.
+- Access seat-limit/cost posture: Zero Trust free covers 50 users (Decision
+  above); beyond that Cloudflare bills per seat, so large external-user
+  populations are a cost decision, not a code change. No paid tier is
+  purchased or required by this slice.

@@ -29,11 +29,19 @@ import type {
   ExecutionDetail,
   ExecutionHistoryResponse,
   ExecutionStatus,
+  LogEntry,
+  LogPage,
   NotificationsResponse,
   FileLocation,
   FileLocationsResponse,
   FileMeta,
   FilesResponse,
+  FormDetail,
+  FormProvidersResponse,
+  FormStartupResponse,
+  FormSubmitResponse,
+  FormsResponse,
+  FormSummary,
   IntegrationsResponse,
   IntegrationSummary,
   SagasResponse,
@@ -156,6 +164,63 @@ export async function fetchExecutionDetail(id: string): Promise<ExecutionDetail>
 
 /** Terminal Execution statuses: polling stops here (mirrors upstream's terminal set). */
 export const TERMINAL_STATUSES: readonly ExecutionStatus[] = ["Succeeded", "Failed", "TimedOut", "Cancelled"];
+
+function isLogEntry(value: unknown): value is LogEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["seq"] === "number" &&
+    typeof v["executionId"] === "string" &&
+    typeof v["level"] === "string" &&
+    typeof v["message"] === "string" &&
+    typeof v["createdAt"] === "string"
+  );
+}
+
+function isLogPage(value: unknown): value is LogPage {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (!Array.isArray(v["logs"]) || typeof v["hasMore"] !== "boolean") return false;
+  if (!(v["logs"] as unknown[]).every(isLogEntry)) return false;
+  return !("nextCursor" in v) || typeof v["nextCursor"] === "string" || v["nextCursor"] === null;
+}
+
+export interface LogTailQuery {
+  level?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+/** GET /api/executions/:id/logs — scoped author-log tail for one Execution.
+ * DEBUG rows are hidden unless the caller asks (level=DEBUG). Polling view
+ * over durable rows: reconnect by refetching from nextCursor. */
+export async function fetchExecutionLogs(id: string, query: LogTailQuery = {}): Promise<LogPage> {
+  if (!/^[a-f0-9]{64}$/.test(id)) throw new Error("Unexpected Execution ID shape.");
+  const params = new URLSearchParams();
+  if (query.level) params.set("level", query.level);
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.cursor) params.set("cursor", query.cursor);
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+  const data = await get(`/api/executions/${id}/logs${suffix}`);
+  if (!isLogPage(data)) throw new Error("Unexpected log page shape.");
+  return data;
+}
+
+/** Merge a freshly polled page into the client's durable view: dedupe by seq
+ * (reconnect replays are idempotent) and keep deterministic seq order. Pure;
+ * shared with the CLI follow mode. */
+export function mergeLogPages(existing: readonly LogEntry[], page: readonly LogEntry[]): LogEntry[] {
+  const seen = new Set(existing.map((entry) => entry.seq));
+  const merged = [...existing];
+  for (const entry of page) {
+    if (!seen.has(entry.seq)) {
+      seen.add(entry.seq);
+      merged.push(entry);
+    }
+  }
+  merged.sort((a, b) => a.seq - b.seq);
+  return merged;
+}
 
 export function isTerminalStatus(status: string): boolean {
   return (TERMINAL_STATUSES as readonly string[]).includes(status);
@@ -738,4 +803,213 @@ export async function testConnection(integrationId: string): Promise<ConnectionT
     throw new Error("Unexpected connection test response shape.");
   }
   return { test: test as ConnectionTestResponse["test"] };
+}
+
+const FORM_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const STABLE_UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+
+/** Closed form field type set (mirrors FORM_FIELD_TYPES in src/forms.ts;
+ * duplicated rather than imported so the browser bundle never depends on
+ * Worker domain modules; drift is pinned by test/form-ui.test.tsx). */
+const FORM_FIELD_TYPES = [
+  "text",
+  "number",
+  "boolean",
+  "email",
+  "date",
+  "time",
+  "datetime",
+  "select",
+  "multiselect",
+  "textarea",
+  "url",
+  "tel",
+  "file",
+  "hidden",
+  "heading",
+  "paragraph",
+  "divider",
+] as const;
+
+function isFormFieldDef(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["name"] === "string" &&
+    typeof v["type"] === "string" &&
+    (FORM_FIELD_TYPES as readonly string[]).includes(v["type"] as string) &&
+    typeof v["required"] === "boolean" &&
+    typeof v["maxLength"] === "number"
+  );
+}
+
+function checkFormName(name: string): void {
+  if (!FORM_NAME.test(name)) throw new Error("Unexpected form name shape.");
+}
+
+function isFormSummary(value: unknown): value is FormSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    STABLE_UUID.test(v["id"]) &&
+    typeof v["name"] === "string" &&
+    FORM_NAME.test(v["name"]) &&
+    typeof v["sagaId"] === "string" &&
+    STABLE_UUID.test(v["sagaId"])
+  );
+}
+
+function isFormDetail(value: unknown): value is FormDetail {
+  if (!isFormSummary(value)) return false;
+  const v = value as unknown as Record<string, unknown>;
+  return (
+    Array.isArray(v["fields"]) &&
+    (v["fields"] as unknown[]).every(isFormFieldDef) &&
+    typeof v["allowPrefill"] === "boolean" &&
+    (v["title"] === undefined || typeof v["title"] === "string") &&
+    (v["description"] === undefined || typeof v["description"] === "string")
+  );
+}
+
+/** GET /api/forms — org-scoped form summaries (FORM-02 designer list). */
+export async function listForms(): Promise<FormsResponse> {
+  const data = await get("/api/forms");
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { forms?: unknown }).forms)) {
+    throw new Error("Unexpected forms response shape.");
+  }
+  const forms = (data as { forms: unknown[] }).forms;
+  if (!forms.every(isFormSummary)) throw new Error("Unexpected forms response shape.");
+  return { forms };
+}
+
+/** GET /api/forms/:name — one declaration (server-authoritative fields). */
+export async function fetchFormDetail(name: string): Promise<FormDetail> {
+  checkFormName(name);
+  const data = await get(`/api/forms/${name}`);
+  const form = (data as { form?: unknown }).form;
+  if (!isFormDetail(form)) throw new Error("Unexpected form response shape.");
+  return form;
+}
+
+/** POST /api/forms — create a declaration (400 INVALID_FORM on bad fields). */
+export async function createForm(body: {
+  name: string;
+  sagaId: string;
+  title?: string;
+  description?: string;
+  allowPrefill?: boolean;
+  fields: unknown[];
+}): Promise<FormDetail> {
+  checkFormName(body.name);
+  const data = await postJson("/api/forms", body);
+  const form = (data as { form?: unknown }).form;
+  if (!isFormDetail(form)) throw new Error("Unexpected form response shape.");
+  return form;
+}
+
+/** PUT /api/forms/:name — replace a declaration wholesale. */
+export async function updateForm(
+  name: string,
+  body: { sagaId: string; title?: string; description?: string; allowPrefill?: boolean; fields: unknown[] },
+): Promise<FormDetail> {
+  checkFormName(name);
+  const data = await putJson(`/api/forms/${name}`, body);
+  const form = (data as { form?: unknown }).form;
+  if (!isFormDetail(form)) throw new Error("Unexpected form response shape.");
+  return form;
+}
+
+/** DELETE /api/forms/:name — delete a declaration. */
+export async function deleteForm(name: string): Promise<void> {
+  checkFormName(name);
+  const token = getToken();
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(`/api/forms/${name}`, { method: "DELETE", headers });
+  if (!response.ok) throw await parseApiError(response);
+}
+
+/** POST /api/forms/:name/startup — mint a session-bound handle plus the
+ * resolved snapshot (defaults, opt-in prefill, provider options). */
+export async function startFormSession(name: string, prefill?: Record<string, unknown>): Promise<FormStartupResponse> {
+  checkFormName(name);
+  const data = await postJson(`/api/forms/${name}/startup`, prefill === undefined ? {} : { prefill });
+  const body = data as { form?: unknown; handle?: unknown; expiresAt?: unknown; snapshot?: unknown; options?: unknown };
+  if (
+    typeof body.form !== "string" ||
+    typeof body.handle !== "string" ||
+    typeof body.expiresAt !== "string" ||
+    typeof body.snapshot !== "object" ||
+    body.snapshot === null ||
+    typeof body.options !== "object" ||
+    body.options === null
+  ) {
+    throw new Error("Unexpected form startup response shape.");
+  }
+  return {
+    form: body.form,
+    handle: body.handle,
+    expiresAt: body.expiresAt,
+    snapshot: body.snapshot as Record<string, unknown>,
+    options: body.options as Record<string, string[]>,
+  };
+}
+
+/** GET /api/forms/:name/providers — resolved select options (denied tables
+ * yield empty lists with per-field errors, never a leak). */
+export async function fetchFormProviders(name: string): Promise<FormProvidersResponse> {
+  checkFormName(name);
+  const data = await get(`/api/forms/${name}/providers`);
+  const body = data as { form?: unknown; options?: unknown; errors?: unknown };
+  if (typeof body.form !== "string" || typeof body.options !== "object" || body.options === null) {
+    throw new Error("Unexpected form providers response shape.");
+  }
+  return {
+    form: body.form,
+    options: body.options as Record<string, string[]>,
+    errors: (body.errors ?? {}) as Record<string, string>,
+  };
+}
+
+/** POST /api/forms/:name/submit — consume a startup handle and submit
+ * (immediate dispatch or { scheduleAt } deferred receipt). */
+export async function submitForm(
+  name: string,
+  body: { handle: string; values?: Record<string, unknown>; scheduleAt?: string },
+  idempotencyKey: string,
+): Promise<FormSubmitResponse> {
+  checkFormName(name);
+  const token = getToken();
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    "Idempotency-Key": idempotencyKey,
+  };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(`/api/forms/${name}/submit`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw await parseApiError(response);
+  const data = (await response.json()) as {
+    form?: unknown;
+    executionId?: unknown;
+    replayed?: unknown;
+    statusUrl?: unknown;
+    scheduled?: unknown;
+    scheduleAt?: unknown;
+  };
+  if (typeof data.form !== "string" || typeof data.executionId !== "string" || typeof data.statusUrl !== "string") {
+    throw new Error("Unexpected form submit response shape.");
+  }
+  return {
+    form: data.form,
+    executionId: data.executionId,
+    replayed: data.replayed === true,
+    statusUrl: data.statusUrl,
+    ...(data.scheduled === true ? { scheduled: true as const } : {}),
+    ...(typeof data.scheduleAt === "string" ? { scheduleAt: data.scheduleAt } : {}),
+  };
 }

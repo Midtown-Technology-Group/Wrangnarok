@@ -5,7 +5,9 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
-import { EXECUTION_ID, Fault, NINJA_INTEGRATION_ID, ninjaSaga, parseNinjaOrgsInput } from "../domain";
+import { EXECUTION_ID, Fault, NINJA_INTEGRATION_ID, NINJA_TIMEOUT_MS, ninjaSaga, parseNinjaOrgsInput } from "../domain";
+import { parseStoredPolicy } from "../executions";
+import { vendorDeadlineMs } from "../domain";
 import type { ExecutionParams, NinjaOrgsResult, SafeError } from "../domain";
 import { defineSaga, withOperation } from "../saga";
 import { scrubExecutionError, scrubExecutionValue } from "../secrets";
@@ -49,6 +51,16 @@ export const ninjaOrgsSagaDef = defineSaga<NinjaOrgsResult>({
       );
       const outcome = await step.do("ninja-list-orgs-v1", async () => {
         await beginOperation(ctx.db, id, "ninja-list-orgs-v1", 1);
+        // RUN-01 (ADR 018): vendor deadline from the Execution snapshot.
+        const applied = await ctx.db
+          .prepare("SELECT policy_json FROM executions WHERE id=?")
+          .bind(id)
+          .first<{ policy_json: string | null }>()
+          .catch(() => null);
+        const deadline = vendorDeadlineMs(
+          applied?.policy_json == null ? parseStoredPolicy(null) : parseStoredPolicy(applied.policy_json),
+          NINJA_TIMEOUT_MS,
+        );
         // Phase 1b (ADR 010): exact-org Connection resolution through the
         // step's own OrgCtx. NinjaOne is declared required, so a miss fails
         // loud with 424 as a structured step result (no retry via
@@ -74,7 +86,7 @@ export const ninjaOrgsSagaDef = defineSaga<NinjaOrgsResult>({
         // so this step never branches on credentials.
         let result: NinjaOrgsResult;
         try {
-          result = await ctx.integrations.ninjaone.listOrganizations(connection, ctx.secrets, id);
+          result = await ctx.integrations.ninjaone.listOrganizations(connection, ctx.secrets, id, deadline);
         } catch (error) {
           // Raw transport errors must not leak vendor-shaped text into step
           // results: Faults already carry fixed safe text (scrubbed at the

@@ -91,9 +91,12 @@ Explore the strongest ideas from Bifrost Solutions without blindly cloning their
 Only after the ordinary orchestration platform is coherent:
 
 - opt-in tool exposure for Sagas/Integration Actions
-- agent/MCP integration
-- tool discovery metadata
-- permission preservation through AI callers
+- authorized inbound MCP gateway with permission preservation through AI callers
+- progressive OpenAPI Code Mode for broad vendor APIs rather than one handwritten MCP/tool wrapper per endpoint (ADR 022)
+- host-mediated Integration execution: model code gets a constrained request capability, never Connection credentials or unrestricted network access
+- HaloPSA proof: natural-language discovery + authorized read/mutation against Halo's OpenAPI surface with no endpoint-specific tool wrapper
+- curated semantic tools/Sagas retained for stable business operations, orchestration, validation, and compensation
+- tool discovery metadata, operation risk classification, audit/provenance, and deny-by-default mutation policy
 
 ## Continuous upstream-spec work
 

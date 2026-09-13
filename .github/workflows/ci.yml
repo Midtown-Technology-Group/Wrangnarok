@@ -43,6 +43,34 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev
 
+      # Dev-tool findings do not block merges, but they still matter for the
+      # developer/CI supply chain. Surface high/critical findings in logs and
+      # the Actions job summary while leaving the production audit authoritative.
+      - name: Audit all dependencies (advisory)
+        shell: bash
+        run: |
+          set +e
+          audit_output="$(npm audit --audit-level=high 2>&1)"
+          audit_status=$?
+          set -e
+
+          printf '%s\n' "$audit_output"
+
+          {
+            echo "### Full dependency audit (advisory)"
+            echo
+            if [[ $audit_status -eq 0 ]]; then
+              echo "✅ No high/critical vulnerabilities reported in the full dependency tree."
+            else
+              echo "⚠️ npm audit reported high/critical findings in the full dependency tree."
+              echo "The blocking production-only audit above remains the merge gate; investigate dev-tool findings separately."
+            fi
+            echo
+            echo '```text'
+            printf '%s\n' "$audit_output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Guardrails (secrets, banned patterns)
         shell: bash
         run: |

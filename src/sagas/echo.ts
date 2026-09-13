@@ -5,7 +5,9 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
-import { echoSaga, ECHO_INTEGRATION_ID, EXECUTION_ID, Fault, parseInput } from "../domain";
+import { echoSaga, ECHO_INTEGRATION_ID, EXECUTION_ID, Fault, parseInput, VENDOR_TIMEOUT_MS } from "../domain";
+import { parseStoredPolicy } from "../executions";
+import { vendorDeadlineMs } from "../domain";
 import type { EchoInput, ExecutionParams, SafeError } from "../domain";
 import { defineSaga, withOperation } from "../saga";
 import { scrubExecutionError, scrubExecutionValue } from "../secrets";
@@ -43,6 +45,18 @@ export const echoSagaDef = defineSaga<EchoInput>({
       );
       const outcome = await step.do("echo-http-v1", async () => {
         await beginOperation(ctx.db, id, "echo-http-v1", 1);
+        // RUN-01 (ADR 018): the vendor deadline resolves through the
+        // Execution's snapshotted policy (timeout 0 keeps the Integration
+        // default, custom overrides it). 0 disables only the override.
+        const applied = await ctx.db
+          .prepare("SELECT policy_json FROM executions WHERE id=?")
+          .bind(id)
+          .first<{ policy_json: string | null }>()
+          .catch(() => null);
+        const deadline = vendorDeadlineMs(
+          applied?.policy_json == null ? parseStoredPolicy(null) : parseStoredPolicy(applied.policy_json),
+          VENDOR_TIMEOUT_MS,
+        );
         // Phase 1b (ADR 010): exact-org Connection resolution through the
         // step's own OrgCtx. Echo is declared required, so a miss fails loud
         // with 424 as a structured step result (no retry via NonRetryableError
@@ -64,7 +78,12 @@ export const echoSagaDef = defineSaga<EchoInput>({
         const connection = resolved.connection;
         let result: EchoInput;
         try {
-          result = await ctx.integrations.echo.echo(connection, prepared.input, `${id}-${stepOrg.operationId}`);
+          result = await ctx.integrations.echo.echo(
+            connection,
+            prepared.input,
+            `${id}-${stepOrg.operationId}`,
+            deadline,
+          );
         } catch (error) {
           // Raw echo transport errors map to the generic failure; Fault text is
           // fixed-shape and scrubbed against this Execution's registry.

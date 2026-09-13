@@ -207,9 +207,37 @@ it("lists organizations and truncates the persisted summary to the bound", async
   expect(result.organizations[0]).toEqual({ id: 1, name: "Org 1" });
 });
 
-it("pins the echo Integration to its fixture endpoint", async () => {
-  const fault = await faultOf(echo({ endpoint: "https://example.invalid/echo" }, { message: "hi" }, "op-1"));
-  expect(fault).toMatchObject({ status: 500, code: "INVALID_CONNECTION" });
+it("pins the echo Integration to its loopback fixture (issues #236 #239)", async () => {
+  // Main's #236 safe-URL policy keeps echo loopback-only at the Action: the
+  // exact fixture pin plus the use-time guard fail any other endpoint closed
+  // before a vendor fetch — cleartext and public HTTPS alike. The #239
+  // environment gate (omitted/explicit-loopback defaults outside local) lives
+  // at the Connection validation boundary, pinned in test/integrations.test.ts.
+  const cleartext = await faultOf(echo({ endpoint: "http://example.invalid/echo" }, { message: "hi" }, "op-1"));
+  expect(cleartext).toMatchObject({ status: 500, code: "INVALID_CONNECTION" });
+  const publicHttps = await faultOf(echo({ endpoint: "https://echo.example.com/hook" }, { message: "hi" }, "op-1"));
+  expect(publicHttps).toMatchObject({ status: 500, code: "INVALID_CONNECTION" });
+});
+
+it("fails closed on unsafe persisted endpoints before any vendor fetch (issue #236)", async () => {
+  // Unsafe values never reach fetch: the guard parses first, so the mock
+  // would explode if the Action attempted a request.
+  mockVendor(() => {
+    throw new Error("must not fetch an unsafe endpoint");
+  });
+  const secrets = { clientId: "id", clientSecret: "secret" };
+  expect(await faultOf(listOrganizations({ endpoint: "http://10.9.9.9/api" }, secrets))).toMatchObject({
+    status: 500,
+    code: "INVALID_CONNECTION",
+  });
+  expect(await faultOf(listOrganizations({ endpoint: "not-a-url" }, secrets))).toMatchObject({
+    status: 500,
+    code: "INVALID_CONNECTION",
+  });
+  expect(await faultOf(echo({ endpoint: "http://10.9.9.9/echo" }, { message: "hi" }, "op-1"))).toMatchObject({
+    status: 500,
+    code: "INVALID_CONNECTION",
+  });
 });
 
 it("maps echo transport faults without leaking vendor detail", async () => {

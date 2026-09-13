@@ -10,6 +10,7 @@ import {
   NINJA_TOKEN_PATH,
 } from "../domain";
 import type { NinjaOrgSummary, NinjaOrgsResult } from "../domain";
+import { assertSafeEndpoint } from "./index";
 import { registerExecutionSecrets, scrubTextWithSecrets } from "../secrets";
 export const ninjaIntegration = Object.freeze({ id: NINJA_INTEGRATION_ID, name: "ninjaone" });
 export interface NinjaConnection {
@@ -36,11 +37,16 @@ export async function listOrganizations(
   connection: NinjaConnection,
   secrets: NinjaSecrets,
   executionId?: string,
+  timeoutMs?: number,
 ): Promise<NinjaOrgsResult> {
+  const deadline = timeoutMs ?? NINJA_TIMEOUT_MS;
   const { clientId, clientSecret } = secrets;
   if (!clientId || !clientSecret) {
     throw new Fault(502, "NINJA_NOT_CONFIGURED", "NinjaOne credentials are not configured.");
   }
+  // Re-parse the persisted endpoint before any fetch: persist-time validation
+  // covers new writes, this covers rows that predate it.
+  assertSafeEndpoint("ninjaone", connection.endpoint);
   if (executionId !== undefined) registerExecutionSecrets(executionId, [clientId, clientSecret]);
   // Scrub substrings out of every outward Fault message before it can reach a
   // step result, D1 row, or Workflow terminal value. Vendor bodies are still
@@ -51,7 +57,7 @@ export async function listOrganizations(
   // reach D1, ExecutionHistory, logs, or Workflow persisted state.
   let token: string;
   try {
-    token = await fetchToken(connection, { clientId, clientSecret });
+    token = await fetchToken(connection, { clientId, clientSecret }, deadline);
   } catch (error) {
     if (error instanceof Fault) throw new Fault(error.status, error.code, clean(error.message));
     throw error;
@@ -63,14 +69,14 @@ export async function listOrganizations(
   // fires) or merely late (resolves after the deadline because the transport
   // ignored the abort) surfaces NINJA_VENDOR_TIMEOUT.
   const started = Date.now();
-  const timedOut = () => Date.now() - started >= NINJA_TIMEOUT_MS;
+  const timedOut = () => Date.now() - started >= deadline;
   let response: Response;
   try {
     try {
       response = await fetch(`${connection.endpoint}${NINJA_ORGS_PATH}`, {
         method: "GET",
         redirect: "manual",
-        signal: AbortSignal.timeout(NINJA_TIMEOUT_MS),
+        signal: AbortSignal.timeout(deadline),
         headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
       });
     } catch (error) {
@@ -129,7 +135,11 @@ export async function listOrganizations(
   }
 }
 
-async function fetchToken(connection: NinjaConnection, credentials: NinjaCredentials): Promise<string> {
+async function fetchToken(
+  connection: NinjaConnection,
+  credentials: NinjaCredentials,
+  timeoutMs = NINJA_TIMEOUT_MS,
+): Promise<string> {
   // Regional token host derived from the Connection endpoint, so an EU/OC
   // Connection authenticates against its own region with no code change.
   // Scope is pinned read-only; the M2M app carries nothing broader.
@@ -139,7 +149,7 @@ async function fetchToken(connection: NinjaConnection, credentials: NinjaCredent
     response = await fetch(tokenUrl, {
       method: "POST",
       redirect: "manual",
-      signal: AbortSignal.timeout(NINJA_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
       body: new URLSearchParams({
         grant_type: "client_credentials",

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0
 import { Fault, hash, UUID } from "./domain";
 import type { Principal } from "./domain";
-import { verifyAccess, type AccessEnv } from "./access";
+import { credentialClassFor, verifyAccess, type AccessEnv, type CredentialClass } from "./access";
 import { ensureLabFixture } from "./orgs";
 export interface LabAuth {
   LAB_ENABLED?: string;
@@ -55,4 +55,35 @@ export async function authenticate(request: Request, env: LabAuth & AccessEnv): 
     }
   }
   return principal;
+}
+
+/** Caller identity view served by GET /api/auth/me.
+ *
+ * AUTH-03 (issue #144): the single read-only proof of which credential class
+ * the caller authenticated with. The class is derived from the verified
+ * Principal shape (access.ts), never from request input; the fixture flag
+ * marks LAB-only callers so operators can tell delegated human identity
+ * apart from local fixture use. No secret values ride this view: userId and
+ * orgId are identifiers, not credentials. */
+export interface CallerIdentity {
+  readonly userId: string;
+  readonly orgId: string;
+  readonly credentialClass: CredentialClass;
+  readonly viaAccess: boolean;
+  readonly fixture: boolean;
+}
+
+/** Describe an already-authenticated Principal for the identity view. Pure:
+ * the caller proves authentication first (authenticate above), then the
+ * membership gate in the route proves authorization. */
+export function describeCaller(principal: Principal, request: Request): CallerIdentity {
+  const viaAccess = request.headers.has("Cf-Access-Jwt-Assertion");
+  const credentialClass = credentialClassFor(principal.userId, viaAccess);
+  return {
+    userId: principal.userId,
+    orgId: principal.orgId,
+    credentialClass,
+    viaAccess,
+    fixture: credentialClass === "fixture",
+  };
 }

@@ -612,6 +612,22 @@ export interface DeletePreview {
   readonly connectionsManaged: number;
   readonly bundleInstalls: number;
   readonly memberships: number;
+  /** Owned resources removed with the org (loose rows plus dependents). */
+  readonly forms: number;
+  readonly apps: number;
+  readonly appsManaged: number;
+  readonly tables: number;
+  readonly tableRows: number;
+  readonly fileLocations: number;
+  readonly files: number;
+  readonly artifacts: number;
+  readonly endpoints: number;
+  readonly configsLoose: number;
+  readonly configsManaged: number;
+  readonly auditEvents: number;
+  readonly notifications: number;
+  readonly bundleActive: number;
+  readonly bundleOwnedRows: number;
   /** ExecutionHistory (executions + operations) is always retained. */
   readonly retained: readonly string[];
   readonly canDelete: boolean;
@@ -626,12 +642,75 @@ async function count(db: D1Database, sql: string, ...binds: (string | number)[])
   return row?.n ?? 0;
 }
 
+/** Tolerant count for tables that postdate AUTH-01 (#142): 0 when the
+ * migration has not been applied, so old databases preview cleanly. Real
+ * query errors still throw. */
+async function optionalCount(db: D1Database, sql: string, ...binds: (string | number)[]): Promise<number> {
+  try {
+    return await count(db, sql, ...binds);
+  } catch (error) {
+    if (isMissingTable(error)) return 0;
+    throw error;
+  }
+}
+
+/** Tolerant delete for the same post-AUTH-01 tables. */
+async function optionalExec(db: D1Database, sql: string, ...binds: (string | number)[]): Promise<void> {
+  try {
+    await db
+      .prepare(sql)
+      .bind(...binds)
+      .run();
+  } catch (error) {
+    if (isMissingTable(error)) return;
+    throw error;
+  }
+}
+
+/** Tolerant select for the same post-AUTH-01 tables. */
+async function selectAll<T>(db: D1Database, sql: string, ...binds: (string | number)[]): Promise<T[]> {
+  try {
+    const rows = await db
+      .prepare(sql)
+      .bind(...binds)
+      .all<T>();
+    return rows.results;
+  } catch (error) {
+    if (isMissingTable(error)) return [];
+    throw error;
+  }
+}
+
+/** R2 key for a managed file object. The canonical layout lives in files.ts
+ * objectKey; duplicated here so the org lifecycle owns its delete path
+ * without importing the FILE-01 lane. */
+function fileObjectKey(orgId: string, location: string, path: string): string {
+  return `${orgId}/${location}/${path}`;
+}
+
+/** R2 key for one artifact version. The canonical layout lives in
+ * artifacts.ts artifactObjectKey; duplicated here for the same reason. */
+function artifactObjectKey(artifactId: string, version: number): string {
+  return `artifacts/${artifactId}/v${version}`;
+}
+
+export interface OrgDeleteStores {
+  readonly files?: R2Bucket | null;
+  readonly artifacts?: R2Bucket | null;
+}
+
 /**
  * Cascading-delete preview: counts everything the delete path would touch and
  * names what is retained. ExecutionHistory rows are never deleted — the
  * executions/operations tables keep their rows (dangling org_id, unreachable
- * through the API once the org row is gone). Managed Connections and bundle
- * install records block deletion until the owning bundle is uninstalled.
+ * through the API once the org row is gone).
+ *
+ * Managed Connections, bundle install records, and Solution-owned rows
+ * (solution-owned apps, managed bundle rows) block deletion until the owning
+ * bundle is uninstalled. Every other org-owned row (forms, loose apps,
+ * tables, files, artifacts, endpoints, configs, audit) is counted and removed
+ * with the org; the empty-tables fallback (`.catch(() => 0)`) keeps old
+ * databases previewing cleanly.
  */
 export async function deletePreview(db: D1Database, orgId: string): Promise<DeletePreview> {
   const id = parseOrgId(orgId);
@@ -655,9 +734,45 @@ export async function deletePreview(db: D1Database, orgId: string): Promise<Dele
   ).catch(() => 0);
   const installs = await count(db, "SELECT COUNT(*) AS n FROM bundle_installs WHERE org_id=?", id).catch(() => 0);
   const memberships = await count(db, "SELECT COUNT(*) AS n FROM org_memberships WHERE org_id=?", id);
+  const forms = await optionalCount(db, "SELECT COUNT(*) AS n FROM forms WHERE org_id=?", id);
+  const apps = await optionalCount(db, "SELECT COUNT(*) AS n FROM apps WHERE org_id=?", id);
+  const appsManaged = await optionalCount(
+    db,
+    "SELECT COUNT(*) AS n FROM apps WHERE org_id=? AND owner_kind='solution'",
+    id,
+  );
+  const tables = await optionalCount(db, "SELECT COUNT(*) AS n FROM tables WHERE org_id=?", id);
+  const tableRows = await optionalCount(db, "SELECT COUNT(*) AS n FROM table_rows WHERE org_id=?", id);
+  const fileLocations = await optionalCount(db, "SELECT COUNT(*) AS n FROM file_locations WHERE org_id=?", id);
+  const files = await optionalCount(db, "SELECT COUNT(*) AS n FROM files WHERE org_id=?", id);
+  const artifacts = await optionalCount(db, "SELECT COUNT(*) AS n FROM artifacts WHERE org_id=?", id);
+  const endpoints = await optionalCount(db, "SELECT COUNT(*) AS n FROM endpoints WHERE org_id=?", id);
+  const configsLoose = await optionalCount(
+    db,
+    "SELECT COUNT(*) AS n FROM configs WHERE org_id=? AND managed_by IS NULL",
+    id,
+  );
+  const configsManaged = await optionalCount(
+    db,
+    "SELECT COUNT(*) AS n FROM configs WHERE org_id=? AND managed_by IS NOT NULL",
+    id,
+  ).catch(() => 0);
+  const auditEvents = await optionalCount(db, "SELECT COUNT(*) AS n FROM audit_events WHERE org_id=?", id);
+  const notifications = await optionalCount(db, "SELECT COUNT(*) AS n FROM notifications WHERE org_id=?", id);
+  const bundleActive = await optionalCount(db, "SELECT COUNT(*) AS n FROM bundle_active WHERE org_id=?", id);
+  const bundleConfig = await optionalCount(db, "SELECT COUNT(*) AS n FROM bundle_config WHERE org_id=?", id);
+  const bundleSagas = await optionalCount(db, "SELECT COUNT(*) AS n FROM bundle_sagas WHERE org_id=?", id);
   const blockedBy: string[] = [];
   if (managed > 0) blockedBy.push(`${managed} managed Connection(s): uninstall the owning bundle first.`);
   if (installs > 0) blockedBy.push(`${installs} bundle install record(s): uninstall bundles first.`);
+  if (appsManaged > 0) blockedBy.push(`${appsManaged} Solution-owned app(s): uninstall the owning bundle first.`);
+  const bundleOwnedRows = bundleActive + bundleConfig + bundleSagas;
+  if (bundleOwnedRows > 0) {
+    blockedBy.push(`${bundleOwnedRows} managed bundle row(s): uninstall bundles first.`);
+  }
+  if (configsManaged > 0) {
+    blockedBy.push(`${configsManaged} managed config(s): uninstall the owning bundle first.`);
+  }
   return {
     orgId: id,
     orgName: org.name,
@@ -667,34 +782,209 @@ export async function deletePreview(db: D1Database, orgId: string): Promise<Dele
     connectionsManaged: managed,
     bundleInstalls: installs,
     memberships,
+    forms,
+    apps,
+    appsManaged,
+    tables,
+    tableRows,
+    fileLocations,
+    files,
+    artifacts,
+    endpoints,
+    configsLoose,
+    configsManaged,
+    auditEvents,
+    notifications,
+    bundleActive,
+    bundleOwnedRows,
     retained: ["executions", "operations"],
     canDelete: blockedBy.length === 0,
     blockedBy: Object.freeze(blockedBy),
   };
 }
 
-/** Delete an Organization: removes memberships, Connections, and the org row.
- * Refuses while managed Connections or bundle installs exist. ExecutionHistory
- * is retained, never cascaded. The Connections delete is intentionally
- * unfenced (pre-0004 databases predate managed_by): reaching this line means
- * the preview already proved no managed rows and no installs exist. */
-export async function deleteOrg(
-  db: D1Database,
-  orgId: string,
-): Promise<{ orgId: string; deletedMemberships: number; deletedConnections: number }> {
+export interface OrgDeleteResult {
+  readonly orgId: string;
+  readonly deletedMemberships: number;
+  readonly deletedConnections: number;
+  readonly deletedForms: number;
+  readonly deletedApps: number;
+  readonly deletedTables: number;
+  readonly deletedTableRows: number;
+  readonly deletedFileLocations: number;
+  readonly deletedFiles: number;
+  readonly deletedArtifacts: number;
+  readonly deletedArtifactBindings: number;
+  readonly deletedEndpoints: number;
+  readonly deletedConfigs: number;
+  readonly deletedNotifications: number;
+  readonly deletedFileObjects: number;
+  readonly deletedArtifactObjects: number;
+}
+
+/** Delete an Organization: removes memberships, loose Connections, and every
+ * other org-owned row the preview counts, plus the org row itself.
+ *
+ * Refuses while managed Connections, bundle installs, Solution-owned apps,
+ * managed bundle rows, or managed configs exist. ExecutionHistory is retained,
+ * never cascaded. Audit events are retained for the same reason (audit of a
+ * deleted org must outlive it); notifications are org-scoped inbox rows and
+ * are removed.
+ *
+ * R2 bytes go first (FILES/FINAL objects, then artifact versions): an
+ * interruption between the byte deletes and the D1 batch leaves D1 rows the
+ * next delete (or artifact retention cleanup) picks up, never a deleted org
+ * over surviving bytes. R2 deletes are idempotent. Missing buckets are a
+ * 503: bytes must not be silently abandoned. */
+export async function deleteOrg(db: D1Database, orgId: string, stores?: OrgDeleteStores): Promise<OrgDeleteResult> {
   const preview = await deletePreview(db, orgId);
   if (!preview.canDelete) {
     throw new Fault(409, "DELETE_BLOCKED", `Organization cannot be deleted: ${preview.blockedBy.join(" ")}`);
   }
+  const id = preview.orgId;
+  let deletedFileObjects = 0;
+  let deletedArtifactObjects = 0;
+  const fileRows = await selectAll<{ location: string; path: string }>(
+    db,
+    "SELECT location, path FROM files WHERE org_id=?",
+    id,
+  );
+  if (fileRows.length > 0) {
+    const files = stores?.files ?? null;
+    if (!files) throw new Fault(503, "ORG_DELETE_STORE_MISSING", "File bytes cannot be removed: FILES is unavailable.");
+    for (const row of fileRows) {
+      await files.delete(fileObjectKey(id, row.location, row.path));
+      deletedFileObjects += 1;
+    }
+  }
+  const staging = await selectAll<{ staging_key: string | null }>(
+    db,
+    "SELECT staging_key FROM file_capabilities WHERE org_id=? AND staging_key IS NOT NULL",
+    id,
+  );
+  if (staging.length > 0) {
+    const files = stores?.files ?? null;
+    if (!files) throw new Fault(503, "ORG_DELETE_STORE_MISSING", "File bytes cannot be removed: FILES is unavailable.");
+    for (const row of staging) {
+      if (row.staging_key) {
+        await files.delete(row.staging_key);
+        deletedFileObjects += 1;
+      }
+    }
+  }
+  const artifactRows = await selectAll<{ id: string; version: number }>(
+    db,
+    "SELECT id, version FROM artifacts WHERE org_id=?",
+    id,
+  );
+  if (artifactRows.length > 0) {
+    const artifacts = stores?.artifacts ?? null;
+    if (!artifacts) {
+      throw new Fault(503, "ORG_DELETE_STORE_MISSING", "Artifact bytes cannot be removed: ARTIFACTS is unavailable.");
+    }
+    for (const row of artifactRows) {
+      const versions = await selectAll<{ version: number }>(
+        db,
+        "SELECT version FROM artifact_versions WHERE artifact_id=?",
+        row.id,
+      );
+      const seen = new Set<number>();
+      const keys: string[] = [];
+      for (const entry of versions) {
+        if (!seen.has(entry.version)) {
+          seen.add(entry.version);
+          keys.push(artifactObjectKey(row.id, entry.version));
+        }
+      }
+      if (!seen.has(row.version)) keys.push(artifactObjectKey(row.id, row.version));
+      for (const key of keys) {
+        await artifacts.delete(key);
+        deletedArtifactObjects += 1;
+      }
+    }
+  }
+  const artifactIds = await selectAll<{ id: string }>(db, "SELECT id FROM artifacts WHERE org_id=?", id);
+  let deletedArtifactBindings = 0;
+  if (artifactIds.length > 0) {
+    const placeholders = artifactIds.map(() => "?").join(",");
+    const bound = await db
+      .prepare(`SELECT COUNT(*) AS n FROM artifact_bindings WHERE artifact_id IN (${placeholders})`)
+      .bind(...artifactIds.map((row) => row.id))
+      .first<{ n: number }>()
+      .catch(() => ({ n: 0 }));
+    deletedArtifactBindings = bound?.n ?? 0;
+  }
+  const tableIds = await selectAll<{ id: string }>(db, "SELECT id FROM tables WHERE org_id=?", id);
+  // Core tables exist on every migrated database (forms is 0005, before the
+  // 0007 org store). Everything newer than AUTH-01 goes through optionalExec
+  // so old databases delete cleanly.
   await db.batch([
-    db.prepare("DELETE FROM org_memberships WHERE org_id=?").bind(preview.orgId),
-    db.prepare("DELETE FROM connections WHERE org_id=?").bind(preview.orgId),
-    db.prepare("DELETE FROM organizations WHERE id=?").bind(preview.orgId),
+    db.prepare("DELETE FROM org_memberships WHERE org_id=?").bind(id),
+    db.prepare("DELETE FROM connections WHERE org_id=?").bind(id),
+    db.prepare("DELETE FROM forms WHERE org_id=?").bind(id),
   ]);
+  await optionalExec(db, "DELETE FROM file_capabilities WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM file_policies WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM files WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM file_locations WHERE org_id=?", id);
+  await optionalExec(
+    db,
+    "DELETE FROM endpoint_events WHERE endpoint_id IN (SELECT id FROM endpoints WHERE org_id=?)",
+    id,
+  );
+  await optionalExec(
+    db,
+    "DELETE FROM endpoint_rate_windows WHERE endpoint_id IN (SELECT id FROM endpoints WHERE org_id=?)",
+    id,
+  );
+  await optionalExec(db, "DELETE FROM endpoints WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM configs WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM notifications WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM table_grants WHERE table_id IN (SELECT id FROM tables WHERE org_id=?)", id);
+  await optionalExec(db, "DELETE FROM table_rows WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM tables WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM artifact_retention WHERE org_id=?", id);
+  if (tableIds.length > 0) {
+    // D1 batch() caps at ~100 statements; grants/rows keyed by org are
+    // already gone above, so only per-table overflow rows remain here.
+    for (const table of tableIds) {
+      await optionalExec(db, "DELETE FROM table_grants WHERE table_id=?", table.id);
+      await optionalExec(db, "DELETE FROM table_rows WHERE table_id=?", table.id);
+    }
+  }
+  for (const row of artifactIds) {
+    await optionalExec(db, "DELETE FROM artifact_bindings WHERE artifact_id=?", row.id);
+    await optionalExec(db, "DELETE FROM artifact_versions WHERE artifact_id=?", row.id);
+  }
+  await optionalExec(db, "DELETE FROM artifacts WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM app_rows WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM app_file_tokens WHERE file_id IN (SELECT id FROM app_files WHERE org_id=?)", id);
+  await optionalExec(db, "DELETE FROM app_files WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM app_tables WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM app_grants WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM app_executions WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM app_jobs WHERE app_id IN (SELECT id FROM apps WHERE org_id=?)", id);
+  await optionalExec(db, "DELETE FROM app_deployments WHERE app_id IN (SELECT id FROM apps WHERE org_id=?)", id);
+  await optionalExec(db, "DELETE FROM app_revisions WHERE app_id IN (SELECT id FROM apps WHERE org_id=?)", id);
+  await optionalExec(db, "DELETE FROM apps WHERE org_id=?", id);
+  await db.batch([db.prepare("DELETE FROM organizations WHERE id=?").bind(id)]);
   return {
-    orgId: preview.orgId,
+    orgId: id,
     deletedMemberships: preview.memberships,
     deletedConnections: preview.connectionsLoose,
+    deletedForms: preview.forms,
+    deletedApps: preview.apps,
+    deletedTables: preview.tables,
+    deletedTableRows: preview.tableRows,
+    deletedFileLocations: preview.fileLocations,
+    deletedFiles: preview.files,
+    deletedArtifacts: preview.artifacts,
+    deletedArtifactBindings,
+    deletedEndpoints: preview.endpoints,
+    deletedConfigs: preview.configsLoose,
+    deletedNotifications: preview.notifications,
+    deletedFileObjects,
+    deletedArtifactObjects,
   };
 }
 

@@ -32,7 +32,12 @@
 export const SCRUB_PLACEHOLDER = "[REDACTED]";
 export const MIN_SCRUB_SECRET_LENGTH = 8;
 
-type SecretEnv = { readonly NINJA_CLIENT_ID?: string; readonly NINJA_CLIENT_SECRET?: string };
+type SecretEnv = {
+  readonly NINJA_CLIENT_ID?: string;
+  readonly NINJA_CLIENT_SECRET?: string;
+  readonly HALO_CLIENT_ID?: string;
+  readonly HALO_CLIENT_SECRET?: string;
+};
 
 /** Normalize candidate secrets: keep strings at or above the floor, dedupe,
  * longest-first so nested values scrub outermost first. */
@@ -145,7 +150,12 @@ export function scrubExecutionError<T extends { readonly code: string; readonly 
 // responses and error envelopes scrub with the deployment credentials from
 // env. Token substrings are already gone from D1 by write-time scrubbing.
 export function deploymentSecretsFromEnv(env: SecretEnv): string[] {
-  return normalizeSecretList([env.NINJA_CLIENT_ID, env.NINJA_CLIENT_SECRET]);
+  return normalizeSecretList([
+    env.NINJA_CLIENT_ID,
+    env.NINJA_CLIENT_SECRET,
+    env.HALO_CLIENT_ID,
+    env.HALO_CLIENT_SECRET,
+  ]);
 }
 
 export function scrubTextWithDeploymentSecrets(text: string, env: SecretEnv): string {

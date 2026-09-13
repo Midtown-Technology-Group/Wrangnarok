@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0
 import { boundedJson, ECHO_INTEGRATION_ID, Fault, parseInput, VENDOR_TIMEOUT_MS } from "../domain";
 import type { EchoInput } from "../domain";
+import { assertSafeEndpoint } from "./index";
 export const echoIntegration = Object.freeze({ id: ECHO_INTEGRATION_ID, name: "echo" });
 export interface EchoConnection {
   endpoint: string;
@@ -14,19 +15,23 @@ export async function echo(
   connection: EchoConnection,
   input: EchoInput,
   operationId: string,
-  timeoutMs = VENDOR_TIMEOUT_MS,
+  timeoutMs?: number,
 ): Promise<EchoInput> {
+  const deadline = timeoutMs ?? VENDOR_TIMEOUT_MS;
   // The first slice supports only this local vendor fixture, not arbitrary user URLs.
+  // The safe-URL guard parses the persisted value before the exact pin, so
+  // rows that predate persist-time validation fail closed here too.
+  assertSafeEndpoint("echo", connection.endpoint);
   if (connection.endpoint !== "http://127.0.0.1:8788/echo") {
     throw new Fault(500, "INVALID_CONNECTION", "The echo Integration requires its local fixture endpoint.");
   }
   const started = Date.now();
-  const timedOut = () => Date.now() - started >= timeoutMs;
+  const timedOut = () => Date.now() - started >= deadline;
   try {
     const response = await fetch(connection.endpoint, {
       method: "POST",
       redirect: "manual",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(deadline),
       headers: { "Content-Type": "application/json", "Idempotency-Key": operationId },
       body: JSON.stringify(input),
     });

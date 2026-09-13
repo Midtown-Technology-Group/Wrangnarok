@@ -71,3 +71,46 @@ Durable rows (not ephemeral TTLs — D1 has no key expiry, and durability is the
 - **Redis/KV ephemerality with TTLs (upstream-faithful):** rejected — adds a primitive for data whose whole value is durability; D1 rows plus dismissal are simpler and survive reconnects by construction.
 - **WebSocket/DO live delivery:** rejected for v1 — polling over durable state is the accepted first slice; a push design needs its own ADR when reconnect/progress demands it.
 - **Superuser-only audit reads now:** rejected — no superuser concept exists; inventing one here would pre-empt AUTH-02. Org-scoped reads with the documented limitation are the honest v1.
+
+## Extension: Cloudflare-native diagnostics and repairs (OPS-02, issue #173)
+
+Upstream Bifrost keeps operator diagnostics as queue/worker/process
+surfaces (`health.py`, `version.py`, `metrics.py`, `jobs.py`,
+`platform_jobs.py`, `scheduler_diagnostics.py`, `platform/workers.py`,
+`maintenance.py`). Wrangnarök maps each to the primitives it actually runs
+on — Worker, Workflow, D1 — and never invents container or RabbitMQ names.
+
+**Reads (all Organization-scoped, all credential-free local):**
+
+- `GET /api/ops/version`: SDK contract version, static Catalog fingerprint,
+  applied `d1_migrations` journal (best-effort, empty when unreadable).
+- `GET /api/ops/health`: Worker/D1 liveness (`SELECT 1`), 200 ok or 503
+  degraded. No vendor, no metering, no secrets.
+- `GET /api/ops/metrics` (`?recent=1-50`): per-status Execution counts,
+  undispatched-Pending admission backlog, newest terminal failures with safe
+  error codes (inputs/results never ride along).
+- `GET /api/ops/scheduled-tasks`: durable endpoint inventory (the trigger
+  surface that exists); cadence stays honestly null until TRG-01 schedules.
+- `GET /api/ops/jobs`: Execution backlog counters plus app deploy-job
+  aggregates with interrupted flags (building with no live job row).
+- `GET /api/ops/preflight`: static per-Integration mapping presence and
+  missing deployment-secret names (never values, never vendor HTTP).
+- `GET /api/ops/connections`: per-Integration Connection health with the
+  registry test hints (live probes stay on the per-Connection test route).
+
+**Repairs (`POST /api/ops/repairs`, inspect-then-act double-commit):**
+dryRun omitted or true only inspects (no writes, no dispatch, no deletes);
+explicit dryRun:false executes behind the admin gate (`isAdminCaller`) and
+emits a best-effort `ops.repair.<kind>` audit event. Kinds: retry-execution
+(fresh key, original-input replay), cancel-execution (owner-cancel state
+machine), cleanup-pending-uploads (pending file rows only), cleanup-expired-
+tokens (expired capability rows only), repair-stuck-build (conditional
+status restore, fenced on still-building). Ordinary members may inspect;
+only admins may commit. Production stays manual per ADR 004; nothing here
+runs on a schedule. No new D1 tables, no new primitives: the slice reads
+and repairs rows the product already owns.
+
+**Explicit non-goals:** recurring-schedule rows (TRG-01), live vendor probes
+in preflight, documentation/index repair (no index exists), distributed
+upload locks (single-writer D1 needs none), provider metering (unavailable,
+never fabricated), and role-gated audit reads (AUTH-02 owns them).

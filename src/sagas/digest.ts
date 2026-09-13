@@ -12,9 +12,13 @@ import {
   EXECUTION_ID,
   Fault,
   NINJA_INTEGRATION_ID,
+  NINJA_TIMEOUT_MS,
   parseDigestInput,
   shapeDigest,
+  VENDOR_TIMEOUT_MS,
 } from "../domain";
+import { parseStoredPolicy } from "../executions";
+import { vendorDeadlineMs } from "../domain";
 import type { DigestResult, EchoInput, ExecutionParams, NinjaOrgsResult, SafeError } from "../domain";
 import { defineSaga, withOperation } from "../saga";
 import { scrubExecutionError, scrubExecutionValue } from "../secrets";
@@ -61,6 +65,16 @@ export const digestSagaDef = defineSaga<DigestResult>({
       );
       const orgs = await step.do("ninja-list-orgs-v1", async () => {
         await beginOperation(ctx.db, id, "ninja-list-orgs-v1", 1);
+        // RUN-01 (ADR 018): vendor deadline from the Execution snapshot.
+        const appliedNinja = await ctx.db
+          .prepare("SELECT policy_json FROM executions WHERE id=?")
+          .bind(id)
+          .first<{ policy_json: string | null }>()
+          .catch(() => null);
+        const ninjaDeadline = vendorDeadlineMs(
+          appliedNinja?.policy_json == null ? parseStoredPolicy(null) : parseStoredPolicy(appliedNinja.policy_json),
+          NINJA_TIMEOUT_MS,
+        );
         // Phase 1b (ADR 010): exact-org resolution through the step's own
         // OrgCtx. NinjaOne is declared required, so a miss fails loud with 424.
         const stepOrg = withOperation(prepared.orgCtx, "ninja-list-orgs-v1");
@@ -82,7 +96,7 @@ export const digestSagaDef = defineSaga<DigestResult>({
         // this step never branches on credentials.
         let result: NinjaOrgsResult;
         try {
-          result = await ctx.integrations.ninjaone.listOrganizations(connection, ctx.secrets, id);
+          result = await ctx.integrations.ninjaone.listOrganizations(connection, ctx.secrets, id, ninjaDeadline);
         } catch (error) {
           const safe =
             error instanceof Fault
@@ -106,6 +120,16 @@ export const digestSagaDef = defineSaga<DigestResult>({
       }
       const echoed = await step.do("echo-digest-v1", async () => {
         await beginOperation(ctx.db, id, "echo-digest-v1", 2);
+        // RUN-01 (ADR 018): vendor deadline from the Execution snapshot.
+        const appliedEcho = await ctx.db
+          .prepare("SELECT policy_json FROM executions WHERE id=?")
+          .bind(id)
+          .first<{ policy_json: string | null }>()
+          .catch(() => null);
+        const echoDeadline = vendorDeadlineMs(
+          appliedEcho?.policy_json == null ? parseStoredPolicy(null) : parseStoredPolicy(appliedEcho.policy_json),
+          VENDOR_TIMEOUT_MS,
+        );
         // Phase 1b (ADR 010): exact-org resolution through the step's own
         // OrgCtx. Echo is declared required, so a miss fails loud with 424.
         // The outbound key derives from the step ctx, so the stable operation
@@ -130,6 +154,7 @@ export const digestSagaDef = defineSaga<DigestResult>({
             connection,
             shapeDigest(orgs.result),
             `${id}-${stepOrg.operationId}`,
+            echoDeadline,
           );
         } catch (error) {
           const safe =

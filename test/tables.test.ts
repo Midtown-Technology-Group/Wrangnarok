@@ -14,17 +14,25 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { Fault } from "../src/domain";
+import type { Principal } from "../src/domain";
+import { defineSaga } from "../src/saga";
+import type { SagaEventContext, SagaStep } from "../src/saga";
 import migration1 from "../migrations/0001_initial.sql?raw";
 import migration7 from "../migrations/0007_org_membership.sql?raw";
 import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
 import migration9 from "../migrations/0009_tables.sql?raw";
 import {
+  createTable as declareTable,
+  insertRow,
+  loadTable,
   lookupPath,
   parseBatchBody,
   parseDocument,
   parseTableQuery,
+  readRow,
   TABLE_BATCH_MAX,
   TABLE_QUERY_ROW_CAP,
+  updateRow,
 } from "../src/tables";
 
 const bindings = env as unknown as Bindings;
@@ -641,6 +649,78 @@ describe("TABLE-02 large-table bounded-memory regression", () => {
     expect(even.length).toBe(30);
     expect(new Set(even).size).toBe(30);
     expect(even.every((id, i) => i === 0 || even[i - 1]! < id)).toBe(true);
+  });
+});
+
+describe("TABLE-01 Saga exit proof: a Saga reads and writes author rows", () => {
+  // Exit criterion for issue #117: a ported Saga can actually use the slice.
+  // The fixture is a real code-first Saga definition (stable UUID identity,
+  // every durable effect inside step.do) run against real local D1 in workerd
+  // with an inline step runner; the Organization context is the Saga
+  // caller's own Principal (org-scoped, deny-by-absence), mirroring how the
+  // Workflow adapter threads OrgCtx from the immutable Execution row.
+  const TABLE_SAGA_ID = "12345678-1234-4234-8234-1234567890ab";
+  const inlineStep: SagaStep = {
+    do: async <T>(_name: string, fn: () => Promise<T>): Promise<T> => fn(),
+    sleep: async () => {},
+  };
+
+  interface LedgerOutput {
+    readonly written: string;
+    readonly readBack: Record<string, unknown>;
+  }
+
+  const ledgerSaga = defineSaga<LedgerOutput>({
+    id: TABLE_SAGA_ID,
+    name: "table-ledger-fixture",
+    revision: "table-01-proof",
+    description: "TABLE-01 exit fixture: write then read one author row.",
+    requiredIntegrations: [],
+    parse: (value: unknown) => value,
+    run: async (ctx: SagaEventContext, step: SagaStep): Promise<LedgerOutput> => {
+      const caller: Principal = { orgId: ORG, userId: OWNER };
+      const written = await step.do("write-row-v1", async () => {
+        const table = await loadTable(ctx.db, caller.orgId, "ledger");
+        if (!table) throw new Error("Table ledger is missing.");
+        const doc = await insertRow(ctx.db, caller, table, "entry-1", { amount: 7 });
+        return doc.id;
+      });
+      const readBack = await step.do("read-row-v1", async () => {
+        const table = await loadTable(ctx.db, caller.orgId, "ledger");
+        if (!table) throw new Error("Table ledger is missing.");
+        return (await readRow(ctx.db, caller, table, written)).data;
+      });
+      return { written, readBack };
+    },
+  });
+
+  it("writes then reads an author row through step.do over real D1", async () => {
+    const caller: Principal = { orgId: ORG, userId: OWNER };
+    await declareTable(bindings.DB, caller, "ledger");
+    const ctx = { executionId: "test-execution", db: bindings.DB, integrations: {}, secrets: {} };
+    const output = await ledgerSaga.run(ctx as unknown as SagaEventContext, inlineStep);
+    expect(output).toEqual({ written: "entry-1", readBack: { amount: 7 } });
+    // The row survives the Saga: a direct domain read sees the same document.
+    const table = (await loadTable(bindings.DB, ORG, "ledger"))!;
+    expect((await readRow(bindings.DB, caller, table, "entry-1")).data).toEqual({ amount: 7 });
+  });
+
+  it("replaces a row through a second Saga pass and keeps deny-by-absence", async () => {
+    const caller: Principal = { orgId: ORG, userId: OWNER };
+    await declareTable(bindings.DB, caller, "ledger");
+    const ctx = { executionId: "test-execution", db: bindings.DB, integrations: {}, secrets: {} };
+    await ledgerSaga.run(ctx as unknown as SagaEventContext, inlineStep);
+    const revised = await inlineStep.do("replace-row-v1", async () => {
+      const table = (await loadTable(bindings.DB, ORG, "ledger"))!;
+      return updateRow(bindings.DB, caller, table, "entry-1", { amount: 8 });
+    });
+    expect(revised.data).toEqual({ amount: 8 });
+    // A stranger with no grant still cannot read the Saga's row.
+    const stranger: Principal = { orgId: ORG, userId: OTHER_USER };
+    const table = (await loadTable(bindings.DB, ORG, "ledger"))!;
+    await expect(readRow(bindings.DB, stranger, table, "entry-1")).rejects.toMatchObject({
+      code: "TABLE_NOT_FOUND",
+    });
   });
 });
 

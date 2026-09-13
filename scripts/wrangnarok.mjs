@@ -328,6 +328,107 @@ function printCancel(outcome) {
   else console.log(`${outcome.executionId} ${outcome.status} (already in progress; another request won the race)`);
 }
 
+// OBS-02 (issue #153): scoped log tail + operator search rendering. One line
+// per row (seq, level, saga, message); loaded-slice counts are never totals.
+function printLogs(page, { pages }) {
+  if (emit(page)) return;
+  for (const row of page.logs ?? []) {
+    console.log(`#${row.seq}\t${row.level}\t${row.sagaName}\t${row.message}`);
+  }
+  if (page.hasMore)
+    console.log(`# ${(page.logs ?? []).length} loaded across ${pages} page(s); more available server-side.`);
+  else console.log(`# ${(page.logs ?? []).length} loaded (complete under these filters).`);
+}
+
+// OBS-02 merge helper (mirrors mergeLogPages in src/logs.ts): dedupe a
+// freshly polled page by seq and keep deterministic seq order. Pure.
+function mergeLogRows(existing, page) {
+  const seen = new Set(existing.map((entry) => entry.seq));
+  const merged = [...existing];
+  for (const entry of page) {
+    if (!seen.has(entry.seq)) {
+      seen.add(entry.seq);
+      merged.push(entry);
+    }
+  }
+  merged.sort((a, b) => a.seq - b.seq);
+  return merged;
+}
+
+function printOpsVersion(version) {
+  if (emit({ version })) return;
+  console.log(`sdk: ${version.sdkVersion} sagas: ${version.sagaCatalog?.count ?? 0}`);
+  for (const name of version.migrationsApplied ?? []) console.log(`  migration ${name}`);
+  if ((version.migrationsApplied ?? []).length === 0) console.log("  (no migration journal visible)");
+}
+
+function printOpsHealth(health) {
+  if (emit(health)) return;
+  console.log(`${health.status} worker=${health.worker} database=${health.database} checked=${health.checkedAt}`);
+}
+
+function printOpsMetrics(metrics) {
+  if (emit({ metrics })) return;
+  const e = metrics.executions ?? {};
+  console.log(
+    `executions total=${e.total ?? 0} pending=${e.pending ?? 0} (undispatched ${e.pendingUndispatched ?? 0}) running=${e.running ?? 0} failed=${e.failed ?? 0} timedOut=${e.timedOut ?? 0}`,
+  );
+  for (const failure of metrics.recentFailures ?? []) {
+    console.log(`  ${failure.executionId} ${failure.sagaName} ${failure.status} ${failure.code ?? "no-code"}`);
+  }
+  if ((metrics.recentFailures ?? []).length === 0) console.log("  (no recent failures)");
+}
+
+function printOpsTasks(tasks) {
+  if (emit({ tasks })) return;
+  for (const task of tasks ?? []) {
+    console.log(
+      `${task.name}\t${task.kind}\t${task.enabled ? "enabled" : "disabled"}\tcadence=${task.cadence ?? "none"}`,
+    );
+    console.log(`  ${task.detail}`);
+  }
+  if ((tasks ?? []).length === 0) console.log("(no scheduled tasks; recurring schedules arrive with TRG-01)");
+}
+
+function printOpsJobs(jobs) {
+  if (emit({ jobs })) return;
+  const e = jobs.executions ?? {};
+  const b = jobs.appBuilds ?? {};
+  console.log(`executions total=${e.total ?? 0} pending=${e.pending ?? 0} running=${e.running ?? 0}`);
+  console.log(
+    `builds queued=${b.queued ?? 0} running=${b.running ?? 0} succeeded=${b.succeeded ?? 0} failed=${b.failed ?? 0}`,
+  );
+  for (const stuck of b.interrupted ?? []) console.log(`  interrupted ${stuck.appId} ${stuck.appName}`);
+  if ((b.interrupted ?? []).length === 0) console.log("  (no interrupted builds)");
+}
+
+function printOpsPreflight(preflight) {
+  if (emit(preflight)) return;
+  for (const entry of preflight.integrations ?? []) {
+    console.log(
+      `${entry.integrationName}\t${entry.connected ? (entry.enabled ? "connected" : "disabled") : "missing"}\t${entry.ready ? "ready" : "not-ready"}`,
+    );
+    if ((entry.missingSecrets ?? []).length > 0) console.log(`  missing secrets: ${entry.missingSecrets.join(", ")}`);
+  }
+}
+
+function printOpsConnections(connections) {
+  if (emit({ connections })) return;
+  for (const entry of connections ?? []) {
+    console.log(
+      `${entry.integrationName}\t${entry.connected ? (entry.enabled ? "connected" : "disabled") : "missing"}`,
+    );
+    console.log(`  test: ${entry.testHint}`);
+  }
+}
+
+function printOpsRepair(repair) {
+  if (emit({ repair })) return;
+  console.log(`${repair.kind} ${repair.dryRun ? "(dry-run)" : "(executed)"} target=${repair.targetId ?? "-"}`);
+  console.log(repair.action);
+  console.log(`result: ${JSON.stringify(repair.result)}`);
+}
+
 function printArtifacts(artifacts, hasMore) {
   if (emit({ artifacts, hasMore })) return;
   for (const entry of artifacts ?? []) {
@@ -408,6 +509,15 @@ Commands:
                                           Query Execution summaries (server filters,
                                           cursor traversal; loaded counts are not totals)
   cancel --id HEX                         Cancel one Execution (exact ID only)
+  logs --id HEX [--level L[,L2]] [--limit N] [--cursor CURSOR] [--follow]
+                                          Scoped log tail for one Execution
+                                          (DEBUG hidden unless asked; --follow
+                                          polls from the cursor, dedupes by seq)
+  log-search [--level L[,L2]] [--saga NAME|UUID] [--saga-name NAME]
+             [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--limit N] [--all]
+                                          Operator search across the caller's
+                                          own rows (date/level/Saga filters,
+                                          cursor traversal)
   audit [--action PREFIX] [--outcome success|failure] [--search TEXT]
         [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--limit N] [--all]
                                           Query audit events (server filters,
@@ -415,6 +525,20 @@ Commands:
   notifications [--limit N]               List the notifications inbox
   notification --id UUID                  Fetch one notification
   dismiss-notification --id UUID          Dismiss one notification (exact ID only)
+  ops-version                             Product version contract (SDK/catalog/migrations)
+  ops-health                              Worker/D1 liveness (no vendor, no metering)
+  ops-metrics [--recent N]                Execution counts, admission backlog, failures
+  ops-scheduled-tasks                     Scheduled-task status (durable endpoints)
+  ops-jobs                                Platform job progress (executions + builds)
+  ops-preflight                           Static dependency preflight (no vendor HTTP)
+  ops-connections                         Per-Integration Connection health
+  ops-repair --kind KIND [--id ID] [--key KEY] [--execute]
+                                          Inspect (default) or execute* a repair:
+                                          retry-execution, cancel-execution,
+                                          cleanup-pending-uploads,
+                                          cleanup-expired-tokens,
+                                          repair-stuck-build
+                                          * execute runs dryRun:false (admin only)
   artifacts [--limit N]                   List Artifact summaries (no bytes)
   artifact --id UUID                      Fetch one Artifact (versions + bindings)
   upload --name NAME [--mime TYPE] [--file PATH]
@@ -708,6 +832,95 @@ export async function runCommand(ctx, deps = {}) {
         "execution cancel",
       );
     }
+    case "logs": {
+      // Scoped tail for one Execution (OBS-02). Without --follow this is one
+      // page (plus --all cursor traversal). With --follow it keeps polling
+      // from the returned cursor and merges by seq, so a disconnect backfills
+      // from durable state and replayed rows dedupe. D1 is the source of
+      // truth; the stream is never it. Test hook: deps.maxFollowPasses caps
+      // passes (selftest uses 2); production passes no cap.
+      const id = checkExecutionId(ctx.id);
+      const levels = (ctx.levelFilter ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (const level of levels) {
+        if (!["DEBUG", "INFO", "WARN", "ERROR", "PROGRESS"].includes(level)) {
+          fail("USAGE", "--level must be DEBUG|INFO|WARN|ERROR|PROGRESS (comma-separated ok).");
+        }
+      }
+      const collected = [];
+      let cursor = ctx.cursor;
+      let pages = 0;
+      let hasMore;
+      let passes = 0;
+      for (;;) {
+        const params = new URLSearchParams();
+        if (levels.length > 0) params.set("level", levels.join(","));
+        if (ctx.limit) params.set("limit", String(ctx.limit));
+        if (cursor) params.set("cursor", cursor);
+        const suffix = params.size > 0 ? `?${params.toString()}` : "";
+        const data = await readJson(
+          await fetchImpl(`${ctx.base}/api/executions/${id}/logs${suffix}`, { headers: full.headers }),
+          "log tail",
+        );
+        if (!Array.isArray(data.logs)) fail("SERVER_MISMATCH", "log tail has no logs array.");
+        const merged = mergeLogRows(collected, data.logs);
+        collected.length = 0;
+        collected.push(...merged);
+        pages += 1;
+        passes += 1;
+        hasMore = data.hasMore === true;
+        cursor = typeof data.nextCursor === "string" ? data.nextCursor : undefined;
+        if (!ctx.follow) {
+          if (!ctx.all || !hasMore || !cursor) break;
+          continue;
+        }
+        if (deps.maxFollowPasses !== undefined && passes >= deps.maxFollowPasses) break;
+        await sleep(ctx.pollMs);
+      }
+      return { logs: collected, hasMore, nextCursor: cursor ?? null, pages };
+    }
+    case "log-search": {
+      // Operator search across the caller's own rows (OBS-02): date/level/Saga
+      // filters plus cursor traversal. --all preserves filters per page.
+      const levels = (ctx.levelFilter ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (const level of levels) {
+        if (!["DEBUG", "INFO", "WARN", "ERROR", "PROGRESS"].includes(level)) {
+          fail("USAGE", "--level must be DEBUG|INFO|WARN|ERROR|PROGRESS (comma-separated ok).");
+        }
+      }
+      const sagaId = ctx.sagaFilter ? await resolveSagaId(full, ctx.sagaFilter) : undefined;
+      const collected = [];
+      let cursor;
+      let pages = 0;
+      let hasMore;
+      for (;;) {
+        const params = new URLSearchParams();
+        if (levels.length > 0) params.set("level", levels.join(","));
+        if (sagaId) params.set("sagaId", sagaId);
+        if (ctx.sagaNameFilter) params.set("sagaName", ctx.sagaNameFilter);
+        if (ctx.from) params.set("startDate", ctx.from);
+        if (ctx.to) params.set("endDate", ctx.to);
+        if (ctx.limit) params.set("limit", String(ctx.limit));
+        if (cursor) params.set("cursor", cursor);
+        const suffix = params.size > 0 ? `?${params.toString()}` : "";
+        const data = await readJson(
+          await fetchImpl(`${ctx.base}/api/logs${suffix}`, { headers: full.headers }),
+          "log search",
+        );
+        if (!Array.isArray(data.logs)) fail("SERVER_MISMATCH", "log search has no logs array.");
+        collected.push(...data.logs);
+        pages += 1;
+        hasMore = data.hasMore === true;
+        cursor = typeof data.nextCursor === "string" ? data.nextCursor : undefined;
+        if (!ctx.all || !hasMore || !cursor) break;
+      }
+      return { logs: collected, hasMore, nextCursor: cursor ?? null, pages };
+    }
     case "audit": {
       // Cursor traversal: --all follows nextCursor while preserving the
       // active filters; otherwise one page. Loaded counts are not totals.
@@ -762,6 +975,77 @@ export async function runCommand(ctx, deps = {}) {
       return readJson(
         await fetchImpl(`${ctx.base}/api/notifications/${ctx.id}`, { method: "DELETE", headers: full.headers }),
         "notification dismissal",
+      );
+    }
+    case "ops-version": {
+      return readJson(await fetchImpl(`${ctx.base}/api/ops/version`, { headers: full.headers }), "ops version");
+    }
+    case "ops-health": {
+      return readJson(await fetchImpl(`${ctx.base}/api/ops/health`, { headers: full.headers }), "ops health");
+    }
+    case "ops-metrics": {
+      // ?recent= bounds the failure tail (1-50, default 10 server-side).
+      if (
+        ctx.opsRecent !== undefined &&
+        (!Number.isInteger(ctx.opsRecent) || ctx.opsRecent < 1 || ctx.opsRecent > 50)
+      ) {
+        fail("USAGE", "--recent must be an integer from 1 to 50.");
+      }
+      const suffix = ctx.opsRecent === undefined ? "" : `?recent=${ctx.opsRecent}`;
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/ops/metrics${suffix}`, { headers: full.headers }),
+        "ops metrics",
+      );
+    }
+    case "ops-scheduled-tasks": {
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/ops/scheduled-tasks`, { headers: full.headers }),
+        "ops scheduled tasks",
+      );
+    }
+    case "ops-jobs": {
+      return readJson(await fetchImpl(`${ctx.base}/api/ops/jobs`, { headers: full.headers }), "ops jobs");
+    }
+    case "ops-preflight": {
+      return readJson(await fetchImpl(`${ctx.base}/api/ops/preflight`, { headers: full.headers }), "ops preflight");
+    }
+    case "ops-connections": {
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/ops/connections`, { headers: full.headers }),
+        "ops connection health",
+      );
+    }
+    case "ops-repair": {
+      // Inspect-then-act: default inspects (dryRun:true, no writes); --execute
+      // commits (dryRun:false, admin only server-side). Destructive target
+      // IDs stay exact, mirroring cancel/dismiss.
+      const kind = ctx.repairKind;
+      const kinds = [
+        "retry-execution",
+        "cancel-execution",
+        "cleanup-pending-uploads",
+        "cleanup-expired-tokens",
+        "repair-stuck-build",
+      ];
+      if (!kinds.includes(kind)) fail("USAGE", `--kind must be one of ${kinds.join("|")}.`);
+      const needsTarget = ["retry-execution", "cancel-execution", "repair-stuck-build"].includes(kind);
+      if (needsTarget && !ctx.id) fail("USAGE", "ops-repair needs --id for retry, cancel, and stuck-build kinds.");
+      if (!needsTarget && ctx.id) fail("USAGE", "ops-repair cleanup kinds take no --id.");
+      if (kind === "retry-execution" && !ctx.key) fail("USAGE", "ops-repair retry-execution needs --key.");
+      if (kind !== "retry-execution" && ctx.key) fail("USAGE", "only retry-execution takes --key.");
+      if (kind === "retry-execution" || kind === "cancel-execution") checkExecutionId(ctx.id);
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/ops/repairs`, {
+          method: "POST",
+          headers: full.headers,
+          body: JSON.stringify({
+            kind,
+            ...(ctx.id === undefined ? {} : { targetId: ctx.id }),
+            ...(ctx.key === undefined ? {} : { idempotencyKey: ctx.key }),
+            dryRun: !ctx.repairExecute,
+          }),
+        }),
+        "ops repair",
       );
     }
     case "artifacts": {
@@ -1070,26 +1354,33 @@ async function main() {
     scaffoldId: command === "scaffold" ? arg("id") : undefined,
     scaffoldDescription: command === "scaffold" ? arg("description") : undefined,
     scaffoldRevision: command === "scaffold" ? arg("revision") : undefined,
-    sagaFilter: command === "history" || command === "org-executions" ? arg("saga") : undefined,
+    sagaFilter:
+      command === "history" || command === "log-search" || command === "org-executions" ? arg("saga") : undefined,
+    sagaNameFilter: command === "log-search" ? arg("saga-name") : undefined,
     id:
       command === "detail" ||
       command === "cancel" ||
       command === "diagnose" ||
+      command === "logs" ||
       command === "notification" ||
       command === "dismiss-notification" ||
+      command === "ops-repair" ||
       orgCommands.has(command)
         ? arg("id")
         : undefined,
-    key: command === "submit" ? arg("key") : undefined,
+    key: command === "submit" || command === "ops-repair" ? arg("key") : undefined,
     input: command === "submit" || command === "preview" ? readInput() : undefined,
     statusFilter: command === "history" || command === "org-executions" ? arg("status") : undefined,
+    levelFilter: command === "logs" || command === "log-search" ? arg("level") : undefined,
+    cursor: command === "logs" ? arg("cursor") : undefined,
+    limit: limit === undefined ? undefined : Number(limit),
+    from: command === "history" || command === "log-search" || command === "audit" ? arg("from") : undefined,
+    to: command === "history" || command === "log-search" || command === "audit" ? arg("to") : undefined,
+    all: command === "history" || command === "log-search" || command === "audit" ? flag("all") : false,
+    follow: command === "logs" ? flag("follow") : false,
     auditAction: command === "audit" ? arg("action") : undefined,
     auditOutcome: command === "audit" ? arg("outcome") : undefined,
     auditSearch: command === "audit" ? arg("search") : undefined,
-    limit: limit === undefined ? undefined : Number(limit),
-    from: command === "history" || command === "audit" ? arg("from") : undefined,
-    to: command === "history" || command === "audit" ? arg("to") : undefined,
-    all: command === "history" || command === "audit" ? flag("all") : false,
     wait: command === "submit" ? !flag("no-wait") : flag("wait"),
     artifactId:
       command === "artifact" ||
@@ -1108,6 +1399,11 @@ async function main() {
     bindingRef: command === "bind" || command === "unbind" || command === "bindings" ? arg("ref") : undefined,
     retentionDays: command === "retention" && arg("days") !== undefined ? Number(arg("days")) : undefined,
     cleanupRun: command === "cleanup" ? flag("run") : false,
+    // OPS-02 diagnostics: --recent bounds the metrics failure tail;
+    // --kind/--execute drive the repair double-commit (inspect by default).
+    opsRecent: command === "ops-metrics" && arg("recent") !== undefined ? Number(arg("recent")) : undefined,
+    repairKind: command === "ops-repair" ? arg("kind") : undefined,
+    repairExecute: command === "ops-repair" ? flag("execute") : false,
     name: command === "org-create" ? arg("name") : undefined,
     user: command === "invite" || command === "member-update" || userCommands.has(command) ? arg("user") : undefined,
     role: command === "invite" || command === "member-update" ? arg("role") : undefined,
@@ -1134,7 +1430,15 @@ async function main() {
   else if (command === "dismiss-notification") {
     if (parsed.json) console.log(JSON.stringify(result));
     else console.log("dismissed");
-  } else if (command === "org-executions" && Array.isArray(result.executions))
+  } else if (command === "ops-version") printOpsVersion(result.version);
+  else if (command === "ops-health") printOpsHealth(result);
+  else if (command === "ops-metrics") printOpsMetrics(result.metrics);
+  else if (command === "ops-scheduled-tasks") printOpsTasks(result.tasks);
+  else if (command === "ops-jobs") printOpsJobs(result.jobs);
+  else if (command === "ops-preflight") printOpsPreflight(result);
+  else if (command === "ops-connections") printOpsConnections(result.connections);
+  else if (command === "ops-repair") printOpsRepair(result.repair);
+  else if (command === "org-executions" && Array.isArray(result.executions))
     printHistory(result.executions, result.hasMore);
   else if (command === "orgs" && Array.isArray(result.orgs)) {
     if (asJson()) console.log(JSON.stringify(result));
@@ -1163,6 +1467,7 @@ async function main() {
     return;
   } else if (command === "detail") printDetail(result);
   else if (command === "cancel") printCancel(result);
+  else if (command === "logs" || command === "log-search") printLogs(result, { pages: result.pages ?? 1 });
   else if (command === "artifacts") printArtifacts(result.artifacts, result.hasMore);
   else if (command === "artifact") printArtifact(result.artifact);
   else if (command === "upload") printArtifact(result.artifact);
@@ -1443,6 +1748,89 @@ async function selftest() {
     check("contract url", stub.calls[0].url === "http://local.test/api/sdk");
   }
 
+  // logs tails one Execution with level/limit filters; --follow polls from
+  // the cursor and merges by seq so disconnect replays dedupe.
+  {
+    const id = "b".repeat(64);
+    const stub = stubFetch([
+      jsonResponse({ logs: [{ seq: 1, level: "INFO", message: "hi" }], hasMore: false, nextCursor: null }),
+    ]);
+    const result = await runCommand(
+      { ...base, command: "logs", id, levelFilter: "INFO", limit: 10 },
+      { fetchImpl: stub.fetch, ...noSleep },
+    );
+    check("logs tail", result.logs.length === 1 && result.pages === 1);
+    check("logs query", stub.calls[0].url === `http://local.test/api/executions/${id}/logs?level=INFO&limit=10`);
+  }
+  {
+    const id = "c".repeat(64);
+    const stub = stubFetch([
+      jsonResponse({ logs: [{ seq: 1, level: "INFO", message: "one" }], hasMore: true, nextCursor: "cur-1" }),
+      jsonResponse({
+        logs: [
+          { seq: 1, level: "INFO", message: "one" },
+          { seq: 2, level: "INFO", message: "two" },
+        ],
+        hasMore: false,
+        nextCursor: null,
+      }),
+    ]);
+    const result = await runCommand(
+      { ...base, command: "logs", id, follow: true },
+      { fetchImpl: stub.fetch, ...noSleep, maxFollowPasses: 2 },
+    );
+    check("logs follow dedupes", result.logs.length === 2 && result.logs[1].seq === 2);
+    check("logs follow resumes", stub.calls[1].url.includes("cursor=cur-1"));
+  }
+  {
+    const id = "d".repeat(64);
+    const stub = stubFetch([]);
+    let error = null;
+    const exit = process.exit;
+    process.exit = (code) => {
+      throw new Error(`exit:${code}`);
+    };
+    try {
+      await runCommand({ ...base, command: "logs", id, levelFilter: "Bogus" }, { fetchImpl: stub.fetch, ...noSleep });
+    } catch (e) {
+      error = e;
+    } finally {
+      process.exit = exit;
+    }
+    check("logs level gate", /exit:2/.test(String(error)) && stub.calls.length === 0);
+  }
+
+  // log-search forwards date/level/Saga filters and traverses cursors.
+  {
+    const uuid = "395e15f0-3627-41f6-8922-008ce37e3b35";
+    const stub = stubFetch([
+      jsonResponse({ sagas: [{ id: uuid, name: "hello", revision: "hello-v1" }] }),
+      jsonResponse({ logs: [{ seq: 1 }], hasMore: true, nextCursor: "cursor-2" }),
+      jsonResponse({ logs: [{ seq: 2 }], hasMore: false, nextCursor: null }),
+    ]);
+    const result = await runCommand(
+      {
+        ...base,
+        command: "log-search",
+        levelFilter: "INFO,PROGRESS",
+        sagaFilter: "hello",
+        from: "2026-09-01",
+        to: "2026-09-10",
+        limit: 1,
+        all: true,
+      },
+      { fetchImpl: stub.fetch, ...noSleep },
+    );
+    check("log-search traversal", result.logs.length === 2 && result.pages === 2);
+    check(
+      "log-search query keeps filters",
+      stub.calls[1].url.includes("level=INFO%2CPROGRESS") &&
+        stub.calls[1].url.includes(`sagaId=${uuid}`) &&
+        stub.calls[1].url.includes("startDate=2026-09-01"),
+    );
+    check("log-search cursor", stub.calls[2].url.includes("cursor=cursor-2"));
+  }
+
   // artifacts list forwards the limit filter only.
   {
     const stub = stubFetch([jsonResponse({ artifacts: [], hasMore: false })]);
@@ -1623,6 +2011,122 @@ async function selftest() {
       process.exit = exit;
     }
     check("dismiss exact id", /exit:2/.test(String(error)) && bad.calls.length === 0);
+  }
+
+  // OPS-02 diagnostics hit the exact /api/ops/* routes; metrics forwards
+  // ?recent= and gates out-of-range values before any fetch.
+  {
+    const versionStub = stubFetch([
+      jsonResponse({ version: { sdkVersion: "1", sagaCatalog: { count: 5, revision: "r" }, migrationsApplied: [] } }),
+    ]);
+    const version = await runCommand({ ...base, command: "ops-version" }, { fetchImpl: versionStub.fetch, ...noSleep });
+    check("ops-version url", versionStub.calls[0].url === "http://local.test/api/ops/version");
+    check("ops-version sdk", version.version.sdkVersion === "1");
+    const healthStub = stubFetch([
+      jsonResponse({ status: "ok", database: "ok", worker: "ok", checkedAt: "2026-09-12T00:00:00.000Z" }),
+    ]);
+    const health = await runCommand({ ...base, command: "ops-health" }, { fetchImpl: healthStub.fetch, ...noSleep });
+    check("ops-health url", healthStub.calls[0].url === "http://local.test/api/ops/health");
+    check("ops-health ok", health.status === "ok");
+    const metricsStub = stubFetch([
+      jsonResponse({
+        metrics: {
+          generatedAt: "2026-09-12T00:00:00.000Z",
+          executions: {
+            total: 0,
+            pending: 0,
+            pendingUndispatched: 0,
+            running: 0,
+            cancelling: 0,
+            succeeded: 0,
+            failed: 0,
+            timedOut: 0,
+            cancelled: 0,
+          },
+          recentFailures: [],
+        },
+      }),
+    ]);
+    await runCommand({ ...base, command: "ops-metrics", opsRecent: 5 }, { fetchImpl: metricsStub.fetch, ...noSleep });
+    check("ops-metrics query", metricsStub.calls[0].url === "http://local.test/api/ops/metrics?recent=5");
+    const badRecent = stubFetch([]);
+    let recentError = null;
+    const exitRecent = process.exit;
+    process.exit = (code) => {
+      throw new Error(`exit:${code}`);
+    };
+    try {
+      await runCommand({ ...base, command: "ops-metrics", opsRecent: 99 }, { fetchImpl: badRecent.fetch, ...noSleep });
+    } catch (e) {
+      recentError = e;
+    } finally {
+      process.exit = exitRecent;
+    }
+    check("ops-metrics recent gate", /exit:2/.test(String(recentError)) && badRecent.calls.length === 0);
+    for (const [command, path] of [
+      ["ops-scheduled-tasks", "/api/ops/scheduled-tasks"],
+      ["ops-jobs", "/api/ops/jobs"],
+      ["ops-preflight", "/api/ops/preflight"],
+      ["ops-connections", "/api/ops/connections"],
+    ]) {
+      const stub = stubFetch([jsonResponse({ ok: true })]);
+      await runCommand({ ...base, command }, { fetchImpl: stub.fetch, ...noSleep });
+      check(`ops ${command} url`, stub.calls[0].url === `http://local.test${path}`);
+    }
+  }
+
+  // OPS-02 repairs inspect by default (dryRun:true) and commit with
+  // --execute (dryRun:false); kinds and target IDs are gated pre-fetch.
+  {
+    const id = "e".repeat(64);
+    const inspectStub = stubFetch([jsonResponse({ repair: { kind: "cancel-execution", dryRun: true } })]);
+    const inspected = await runCommand(
+      { ...base, command: "ops-repair", repairKind: "cancel-execution", id },
+      { fetchImpl: inspectStub.fetch, ...noSleep },
+    );
+    check("ops-repair inspect url", inspectStub.calls[0].url === "http://local.test/api/ops/repairs");
+    check("ops-repair inspect dry", JSON.parse(inspectStub.calls[0].init.body).dryRun === true);
+    check("ops-repair inspect result", inspected.repair.dryRun === true);
+    const executeStub = stubFetch([jsonResponse({ repair: { kind: "cancel-execution", dryRun: false } })]);
+    await runCommand(
+      { ...base, command: "ops-repair", repairKind: "cancel-execution", id, repairExecute: true },
+      { fetchImpl: executeStub.fetch, ...noSleep },
+    );
+    check("ops-repair execute dry", JSON.parse(executeStub.calls[0].init.body).dryRun === false);
+    const badKind = stubFetch([]);
+    let kindError = null;
+    const exitKind = process.exit;
+    process.exit = (code) => {
+      throw new Error(`exit:${code}`);
+    };
+    try {
+      await runCommand(
+        { ...base, command: "ops-repair", repairKind: "nonsense", id },
+        { fetchImpl: badKind.fetch, ...noSleep },
+      );
+    } catch (e) {
+      kindError = e;
+    } finally {
+      process.exit = exitKind;
+    }
+    check("ops-repair kind gate", /exit:2/.test(String(kindError)) && badKind.calls.length === 0);
+    const badId = stubFetch([]);
+    let idError = null;
+    const exitId = process.exit;
+    process.exit = (code) => {
+      throw new Error(`exit:${code}`);
+    };
+    try {
+      await runCommand(
+        { ...base, command: "ops-repair", repairKind: "cancel-execution", id: "abc" },
+        { fetchImpl: badId.fetch, ...noSleep },
+      );
+    } catch (e) {
+      idError = e;
+    } finally {
+      process.exit = exitId;
+    }
+    check("ops-repair exact id", /exit:2/.test(String(idError)) && badId.calls.length === 0);
   }
 
   console.log(`wrangnarok cli selftest: ${passed} passed.`);

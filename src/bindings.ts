@@ -7,7 +7,14 @@ export interface NinjaCredentials {
   NINJA_CLIENT_ID?: string;
   NINJA_CLIENT_SECRET?: string;
 }
-export interface Bindings extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials {
+/** TOOL-01 HaloPSA Code Mode provider (issue #170): deployment credential
+ * surface for the lab proof Connection. Presence-checked at execution, never
+ * persisted, never returned through discovery. */
+export interface HaloCredentials {
+  HALO_CLIENT_ID?: string;
+  HALO_CLIENT_SECRET?: string;
+}
+export interface Bindings extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials, HaloCredentials {
   DB: D1Database;
   FILES: R2Bucket;
   ARTIFACTS?: R2Bucket;
