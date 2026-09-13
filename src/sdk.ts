@@ -1936,6 +1936,18 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
   if (!/^https?:\/\//.test(base)) {
     throw new SdkError("SDK_INVALID_REF", "The SDK base must be an http(s) URL.");
   }
+  // Credential-bearing requests (Bearer plus optional Cloudflare Access)
+  // must not ride cleartext to non-loopback hosts: require HTTPS except for
+  // explicit loopback development hosts, and strip Access credentials on any
+  // HTTP exception below.
+  const baseUrl = new URL(base);
+  // Loopback hosts only (localhost/127.0.0.1/::1) for local dev: every
+  // other http base rejects, including RFC 2606 .test names, so no
+  // credential-bearing request ever rides cleartext off-machine.
+  const loopback = baseUrl.hostname === "localhost" || baseUrl.hostname === "127.0.0.1" || baseUrl.hostname === "::1";
+  if (baseUrl.protocol !== "https:" && !loopback) {
+    throw new SdkError("SDK_INVALID_REF", "The SDK base must be https, except loopback development hosts.");
+  }
   if (!options.token) throw new SdkError("UNAUTHORIZED", "The SDK needs a bearer token.");
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 120000;
@@ -1946,7 +1958,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     "Content-Type": "application/json",
     Accept: "application/json",
   };
-  if (options.access) {
+  if (options.access && baseUrl.protocol === "https:") {
     headers["CF-Access-Client-Id"] = options.access.clientId;
     headers["CF-Access-Client-Secret"] = options.access.clientSecret;
   }

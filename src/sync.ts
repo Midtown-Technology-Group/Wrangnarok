@@ -175,6 +175,12 @@ export async function runProvider(
     const terminal = await providerTerminal(env.DB, id, caller);
     return { ...terminal, durationMs: Date.now() - started };
   }
+  // Any other non-Pending row (Running, Cancelling) is an in-flight receipt:
+  // the second caller gets 409 PROVIDER_IN_FLIGHT naming the poll path, never
+  // a 200 with no inline result.
+  if (row.status !== "Pending") {
+    throw new Fault(409, "PROVIDER_IN_FLIGHT", "This Execution is already running; poll its statusUrl for the result.");
+  }
   if (!effective.policy.admission.enabled) {
     throw new Fault(409, "SAGA_PAUSED", "This Saga is paused for this Organization; new Executions do not dispatch.");
   }
@@ -211,6 +217,11 @@ export async function runProvider(
   }
   await beginOperation(env.DB, id, "prepare-input-v1", 0);
   await finishOperation(env.DB, id, "prepare-input-v1", input);
+  // The provider-inline-v1 row begins Running BEFORE the Action: every
+  // failure path below then lands on a live operation row instead of dead
+  // writes against a row that does not exist yet. Success closes it at the
+  // end; failures mark it Failed alongside the Execution.
+  await beginOperation(env.DB, id, "provider-inline-v1", 1);
   const orgCtx = buildOrgCtx(
     {
       id: row.id,
@@ -261,7 +272,6 @@ export async function runProvider(
     await failExecution(env.DB, id, failure);
     throw new Fault(413, "PROVIDER_OUTPUT_TOO_LARGE", "The provider result exceeds its persisted bound.");
   }
-  await beginOperation(env.DB, id, "provider-inline-v1", 1);
   await finishOperation(env.DB, id, "provider-inline-v1", outcome.result);
   await env.DB.prepare(
     "UPDATE executions SET status='Succeeded',completed_at=?,result_json=? WHERE id=? AND status='Running'",
