@@ -979,11 +979,7 @@ export async function deleteOrg(db: D1Database, orgId: string, stores?: OrgDelet
   // them no dangling authority survives the org.
   await optionalExec(db, "DELETE FROM policy_rules WHERE org_id=?", id);
   await optionalExec(db, "DELETE FROM role_assignments WHERE org_id=?", id);
-  await optionalExec(
-    db,
-    "DELETE FROM role_grants WHERE role_id IN (SELECT id FROM resource_roles WHERE org_id=?)",
-    id,
-  );
+  await optionalExec(db, "DELETE FROM role_grants WHERE role_id IN (SELECT id FROM resource_roles WHERE org_id=?)", id);
   await optionalExec(db, "DELETE FROM resource_roles WHERE org_id=?", id);
   await db.batch([db.prepare("DELETE FROM organizations WHERE id=?").bind(id)]);
   return {
