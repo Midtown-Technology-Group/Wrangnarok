@@ -1728,10 +1728,23 @@ async function main() {
       // keeps regeneration explicit.
       const outPath = arg("out") ?? result.generated.path;
       const force = process.argv.includes("--force");
-      if (existsSync(outPath) && !force) {
-        fail("GENERATOR_EXISTS", `Refusing to overwrite ${outPath} without --force (regeneration must be explicit).`);
+      // Atomic exclusive create (flag "wx") instead of existsSync-then-write:
+      // the check-then-write form has a TOCTOU race and trips CodeQL.
+      if (force) {
+        writeFileSync(outPath, result.generated.content, "utf-8");
+      } else {
+        try {
+          writeFileSync(outPath, result.generated.content, { encoding: "utf-8", flag: "wx" });
+        } catch (error) {
+          if (error && error.code === "EEXIST") {
+            fail(
+              "GENERATOR_EXISTS",
+              `Refusing to overwrite ${outPath} without --force (regeneration must be explicit).`,
+            );
+          }
+          throw error;
+        }
       }
-      writeFileSync(outPath, result.generated.content, "utf-8");
       console.log(`generated ${outPath} (${result.generated.operations} operations)`);
       console.log(`spec: ${result.generated.specDigest.slice(0, 12)}`);
       for (const step of result.generated.next) console.log(`next: ${step}`);

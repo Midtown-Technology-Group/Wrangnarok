@@ -126,7 +126,11 @@ describe("INT-01 generator (issue #229)", () => {
   it("rejects classification typos, bad prefixes, http origins, and line breaks", () => {
     // Classification outside the closed risk set.
     expect(() =>
-      generateIntegrationModule(haloShaped(), { ...opts(), classifications: { Ticket_Get: "typo" } }, DIGEST),
+      generateIntegrationModule(
+        haloShaped(),
+        { ...opts(), classifications: { Ticket_Get: "typo" } as unknown as Record<string, "read"> },
+        DIGEST,
+      ),
     ).toThrow(expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }));
     // secretEnvPrefix must be a valid identifier fragment.
     expect(() =>
