@@ -448,7 +448,8 @@ export async function listSchedules(
 
 /** Disable (or re-enable) one schedule. Disabling fences future promotion;
  * already-promoted Executions keep their identity and run to terminal.
- * Deleting removes the row; deliveries stay as ExecutionHistory provenance. */
+ * Deleting removes the row plus its delivery rows (migration 0016 FK);
+ * ExecutionHistory provenance survives on the executions rows. */
 export async function setScheduleEnabled(
   db: D1Database,
   caller: Principal,
