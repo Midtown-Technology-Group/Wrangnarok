@@ -22,7 +22,7 @@ const TOKEN = "a".repeat(64);
 const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
 
 function authed(path: string, method: string, body?: unknown): Request {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers: { ...auth },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -328,7 +328,7 @@ describe("TRG-01 schedule CRUD (workerd)", () => {
       worker.fetch(new Request(url, { ...(init ?? {}), headers: { ...auth, ...(init?.headers ?? {}) } }), {
         ...bindings,
       })) as typeof fetch;
-    const client = createSdkClient({ base: "http://local.test", token: TOKEN, fetchImpl });
+    const client = createSdkClient({ base: "https://local.test", token: TOKEN, fetchImpl });
     // Malformed names fail before any fetch.
     await expect(client.getSchedule("UPPER")).rejects.toBeInstanceOf(SdkError);
     const created = await client.createSchedule({

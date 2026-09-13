@@ -43,7 +43,7 @@ const SECRET_SENTINEL = "test-client-secret-sentinel";
 const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
 
 function call(path: string, method = "GET", body?: unknown, extra: Record<string, string> = {}) {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers: { ...auth, ...extra },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -107,7 +107,7 @@ describe("Integration discovery (CON-01)", () => {
   });
 
   it("denies unauthenticated discovery and rejects query strings", async () => {
-    expect((await worker.fetch(new Request("http://local.test/api/integrations"), bindings)).status).toBe(401);
+    expect((await worker.fetch(new Request("https://local.test/api/integrations"), bindings)).status).toBe(401);
     const bad = await worker.fetch(call("/api/integrations?scope=all"), bindings);
     expect(bad.status).toBe(400);
     expect(await bad.json()).toMatchObject({ error: { code: "UNSUPPORTED_QUERY" } });
@@ -357,7 +357,7 @@ describe("Connection health (CON-01)", () => {
     expect(
       (
         await worker.fetch(
-          new Request(`http://local.test/api/connections/${ECHO_INTEGRATION_ID}/test`, { method: "POST" }),
+          new Request(`https://local.test/api/connections/${ECHO_INTEGRATION_ID}/test`, { method: "POST" }),
           bindings,
         )
       ).status,

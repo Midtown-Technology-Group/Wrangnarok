@@ -77,7 +77,7 @@ const INSTANCE_CTX: CallerCtx = {
 async function call(path: string, method: string, userId: string, body?: unknown, adminIds = USER_ADMIN) {
   const b = { ...bindings, LAB_USER_ID: userId, LAB_FIXTURE_USER_ID: USER_ADMIN, ADMIN_USER_IDS: adminIds };
   const res = await worker.fetch(
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       method,
       headers: {
         Authorization: `Bearer ${TOKEN}`,

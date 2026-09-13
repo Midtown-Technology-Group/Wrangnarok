@@ -45,7 +45,7 @@ function parsers() {
 }
 async function preview(body: unknown, headers: Record<string, string> = authHeaders()) {
   return worker.fetch(
-    new Request("http://local.test/api/dev/preview", {
+    new Request("https://local.test/api/dev/preview", {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -82,7 +82,7 @@ describe("DEV-02 read-only preview route", () => {
     // Read-only proof: no Execution row appeared and no history exists.
     expect(await executionCount()).toBe(before);
     const history = await worker.fetch(
-      new Request("http://local.test/api/executions", { headers: authHeaders() }),
+      new Request("https://local.test/api/executions", { headers: authHeaders() }),
       bindings,
     );
     expect(await history.json()).toMatchObject({ executions: [], hasMore: false });
@@ -144,7 +144,7 @@ describe("DEV-02 read-only preview route", () => {
 
   it("rejects non-JSON transport, non-object bodies, and bad opt-in flags", async () => {
     const text = await worker.fetch(
-      new Request("http://local.test/api/dev/preview", {
+      new Request("https://local.test/api/dev/preview", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "text/plain" },
         body: "{}",

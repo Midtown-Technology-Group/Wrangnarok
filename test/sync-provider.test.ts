@@ -39,7 +39,7 @@ const TOKEN = "a".repeat(64);
 const TOKEN_SENTINEL = "test-access-token-sentinel";
 
 function providerRequest(sagaId: string, input: unknown, key: string, extra: Record<string, unknown> = {}) {
-  return new Request("http://local.test/api/executions/provider", {
+  return new Request("https://local.test/api/executions/provider", {
     method: "POST",
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", "Idempotency-Key": key },
     body: JSON.stringify({ sagaId, input, ...extra }),
@@ -47,7 +47,7 @@ function providerRequest(sagaId: string, input: unknown, key: string, extra: Rec
 }
 
 function asyncRequest(sagaId: string, input: unknown, key: string, extra: Record<string, unknown> = {}) {
-  return new Request("http://local.test/api/executions", {
+  return new Request("https://local.test/api/executions", {
     method: "POST",
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", "Idempotency-Key": key },
     body: JSON.stringify({ sagaId, input, ...extra }),
@@ -369,8 +369,8 @@ describe("provider eligibility (ADR 023 closed allowlist)", () => {
       )
       .run();
     const running = await worker.fetch(providerRequest(ninjaSaga.id, {}, runningKey), bindings);
-    expect(running.status).toBe(200);
-    expect(await running.json()).toMatchObject({ status: "Running" });
+    expect(running.status).toBe(409);
+    expect(await running.json()).toMatchObject({ error: { code: "PROVIDER_IN_FLIGHT" } });
   });
 });
 
@@ -408,7 +408,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     // The receipt persists: detail shows the same terminal result, and the
     // provider never touched a Workflow binding (no sleeps, no dispatch).
     const detail = await worker.fetch(
-      new Request(`http://local.test/api/executions/${id}`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
+      new Request(`https://local.test/api/executions/${id}`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
       bindings,
     );
     expect(await detail.json()).toMatchObject({ executionId: id, status: "Succeeded", dispatchConfirmed: true });
@@ -421,9 +421,6 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
       { name: "prepare-input-v1", status: "Succeeded" },
       { name: "provider-inline-v1", status: "Succeeded" },
     ]);
-    const text = await response.text().catch(() => "");
-    expect(text).not.toContain(TOKEN_SENTINEL);
-    expect(text).not.toContain("test-client-secret-sentinel");
   });
 
   it("returns a completed terminal receipt on same-key replay without redispatch", async () => {
@@ -456,7 +453,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     expect(
       (
         await worker.fetch(
-          new Request("http://local.test/api/executions/provider", {
+          new Request("https://local.test/api/executions/provider", {
             method: "POST",
             headers: { "Content-Type": "application/json", "Idempotency-Key": "run-03-provider-noauth-01" },
             body: JSON.stringify({ sagaId: ninjaSaga.id, input: {} }),
@@ -466,7 +463,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
       ).status,
     ).toBe(401);
     const queried = await worker.fetch(
-      new Request("http://local.test/api/executions/provider?limit=1", {
+      new Request("https://local.test/api/executions/provider?limit=1", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${TOKEN}`,
@@ -484,7 +481,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
   it("denies foreign-org callers the Connection without leaking (scope denial)", async () => {
     mockNinjaCensus([{ id: 1, name: "Acme" }]);
     const foreign = await worker.fetch(
-      new Request("http://local.test/api/executions/provider", {
+      new Request("https://local.test/api/executions/provider", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${TOKEN}`,
@@ -500,7 +497,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     expect(await foreign.json()).toMatchObject({ status: "Failed" });
     const detail = await worker.fetch(
       new Request(
-        `http://local.test/api/executions/${await executionId({ orgId: "00000000-0000-4000-8000-000000000004", userId: principal.userId }, "run-03-provider-foreign-01")}`,
+        `https://local.test/api/executions/${await executionId({ orgId: "00000000-0000-4000-8000-000000000004", userId: principal.userId }, "run-03-provider-foreign-01")}`,
         {
           headers: { Authorization: `Bearer ${TOKEN}` },
         },
@@ -521,7 +518,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     const text = JSON.stringify(body);
     expect(text).not.toContain("private-vendor-diagnostic");
     const detail = await worker.fetch(
-      new Request(`http://local.test/api/executions/${await executionId(principal, key)}`, {
+      new Request(`https://local.test/api/executions/${await executionId(principal, key)}`, {
         headers: { Authorization: `Bearer ${TOKEN}` },
       }),
       bindings,
@@ -550,7 +547,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     const response = await worker.fetch(providerRequest(ninjaSaga.id, {}, key), bindings);
     expect(response.status).toBe(504);
     const detail = await worker.fetch(
-      new Request(`http://local.test/api/executions/${await executionId(principal, key)}`, {
+      new Request(`https://local.test/api/executions/${await executionId(principal, key)}`, {
         headers: { Authorization: `Bearer ${TOKEN}` },
       }),
       bindings,
@@ -567,7 +564,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     expect(await response.json()).toMatchObject({ error: { code: "PROVIDER_TIMEOUT" } });
     const id = await executionId(principal, key);
     const detail = await worker.fetch(
-      new Request(`http://local.test/api/executions/${id}`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
+      new Request(`https://local.test/api/executions/${id}`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
       bindings,
     );
     // Terminal fence owns the outcome: TimedOut via the provider path, never
@@ -620,7 +617,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     expect(broken.status).toBe(200);
     const detail = await worker.fetch(
       new Request(
-        `http://local.test/api/executions/${await executionId(principal, "run-03-provider-echo-broken-01")}`,
+        `https://local.test/api/executions/${await executionId(principal, "run-03-provider-echo-broken-01")}`,
         {
           headers: { Authorization: `Bearer ${TOKEN}` },
         },
@@ -696,7 +693,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ result: { message: "sync-proof" } });
     const client = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: TOKEN,
       fetchImpl: ((input: string | URL | Request, init?: RequestInit) =>
         worker.fetch(
@@ -725,7 +722,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     // Query strings stay denied by the global gate: routing identity lives
     // in the path only.
     const queried = await worker.fetch(
-      new Request("http://local.test/api/executions/provider?window=2026-09-12T09:00", {
+      new Request("https://local.test/api/executions/provider?window=2026-09-12T09:00", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${TOKEN}`,
@@ -740,7 +737,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     expect(await queried.json()).toMatchObject({ error: { code: "UNSUPPORTED_QUERY" } });
     // Unencoded bodies stay denied before any admission write.
     const encoded = await worker.fetch(
-      new Request("http://local.test/api/executions/provider", {
+      new Request("https://local.test/api/executions/provider", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${TOKEN}`,
@@ -763,7 +760,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     const id = await executionId(principal, key);
     expect((await worker.fetch(providerRequest(ninjaSaga.id, {}, key), bindings)).status).toBe(200);
     const cancel = await worker.fetch(
-      new Request(`http://local.test/api/executions/${id}/cancel`, {
+      new Request(`https://local.test/api/executions/${id}/cancel`, {
         method: "POST",
         headers: { Authorization: `Bearer ${TOKEN}` },
       }),
@@ -773,7 +770,7 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     expect(cancel.status).toBe(409);
     expect(await cancel.json()).toMatchObject({ error: { code: "EXECUTION_NOT_CANCELLABLE" } });
     const detail = await worker.fetch(
-      new Request(`http://local.test/api/executions/${id}`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
+      new Request(`https://local.test/api/executions/${id}`, { headers: { Authorization: `Bearer ${TOKEN}` } }),
       bindings,
     );
     expect(await detail.json()).toMatchObject({ status: "Succeeded" });

@@ -40,7 +40,7 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
 
 function call(path: string, method = "GET", body?: unknown, orgId = ORG, userId?: string) {
   return worker.fetch(
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       method,
       headers: headers(),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -272,7 +272,7 @@ it("reconciles interrupted jobs on read instead of reporting stale progress", as
 it("audits owner cancellation outcomes through the cancel route", async () => {
   // Undispatched Pending + vacuous native stop confirms: execution.cancel lands.
   const submitted = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: { ...headers(), "Idempotency-Key": "ops-cancel-confirmed-001" },
       body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "hello" } }),
@@ -294,7 +294,7 @@ it("audits owner cancellation outcomes through the cancel route", async () => {
     } as unknown as Bindings["ECHO_WORKFLOW"],
   };
   const cancelled = await worker.fetch(
-    new Request(`http://local.test/api/executions/${executionId}/cancel`, {
+    new Request(`https://local.test/api/executions/${executionId}/cancel`, {
       method: "POST",
       headers: headers(),
     }),
@@ -306,7 +306,7 @@ it("audits owner cancellation outcomes through the cancel route", async () => {
   // Ambiguous path: a dispatched Running row whose native instance vanished.
   // 503 + execution.cancel_unconfirmed (failure), retry-safe.
   const submitted2 = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: { ...headers(), "Idempotency-Key": "ops-cancel-ambiguous-001" },
       body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "hello" } }),
@@ -317,7 +317,7 @@ it("audits owner cancellation outcomes through the cancel route", async () => {
   const { executionId: id2 } = (await submitted2.json()) as { executionId: string };
   await bindings.DB.prepare("UPDATE executions SET status='Running' WHERE id=?").bind(id2).run();
   const ambiguous = await worker.fetch(
-    new Request(`http://local.test/api/executions/${id2}/cancel`, { method: "POST", headers: headers() }),
+    new Request(`https://local.test/api/executions/${id2}/cancel`, { method: "POST", headers: headers() }),
     vacuous,
   );
   expect(ambiguous.status).toBe(503);
@@ -462,7 +462,7 @@ it("serves version, health, metrics, scheduler, jobs, preflight, and connection 
 
 it("counts the admission backlog and surfaces recent failures without bodies", async () => {
   const submitted = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: { ...headers(), "Idempotency-Key": "ops-metrics-backlog-001" },
       body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "hello" } }),
@@ -599,7 +599,7 @@ it("gates repair execution behind admin membership with explicit commits", async
     LAB_FIXTURE_USER_ID: "00000000-0000-4000-8000-000000000002",
   };
   const stranger = await worker.fetch(
-    new Request("http://local.test/api/ops/repairs", {
+    new Request("https://local.test/api/ops/repairs", {
       method: "POST",
       headers: headers(),
       body: JSON.stringify({ kind: "cleanup-pending-uploads" }),
@@ -794,7 +794,7 @@ it("retries terminal executions and cancels live ones through repairs", async ()
   // Submit a terminal Failed execution, then retry it through the repair
   // route: the retry replays the original input under the fresh key.
   const submitted = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: { ...headers(), "Idempotency-Key": "ops-repair-retry-001" },
       body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "retry me" } }),

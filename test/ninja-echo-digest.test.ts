@@ -19,7 +19,7 @@ const SECRET_SENTINEL = "test-client-secret-sentinel";
 const TOKEN_SENTINEL = "test-access-token-sentinel";
 const EXPECTED_DIGEST = "NinjaOne organizations (2 total): Acme, Globex";
 function request(path: string, method = "GET", idempotencyKey = key) {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${"a".repeat(64)}`,

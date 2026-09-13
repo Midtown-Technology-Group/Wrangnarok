@@ -54,7 +54,7 @@ function authed(path: string, method: string, body?: unknown, orgId?: string) {
     ...(body === undefined ? {} : { "Content-Type": "application/json" }),
     ...(orgId === undefined ? {} : { "X-Organization-Id": orgId }),
   };
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -199,7 +199,7 @@ it("runs the multi-org allowed/denied matrix for ordinary/admin/external users",
     }),
   ).toMatchObject({ status: 201 });
   const submit = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${TOKEN}`,
@@ -603,7 +603,7 @@ it("removes owned resources and R2 bytes with the org, blocks managed rows", asy
     .bind(orgN, "uploads", "ghost.txt", 1, 3, "text/plain", "b".repeat(64), "ready", stamp, stamp)
     .run();
   const storeless = await worker.fetch(
-    new Request(`http://local.test/api/orgs/${orgN}`, {
+    new Request(`https://local.test/api/orgs/${orgN}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${TOKEN}` },
     }),
@@ -636,7 +636,7 @@ it("keeps in-flight jobs visible to org admins after a member is revoked", async
     }),
   ).toMatchObject({ status: 201 });
   const submit = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${TOKEN}`,
@@ -698,7 +698,7 @@ it("fails closed without migration 0007 and refuses cross-org elevation", async 
   const orgB = await seedSecondOrg();
   // Malformed scope headers fail closed.
   const bad = await worker.fetch(
-    new Request("http://local.test/api/sagas", {
+    new Request("https://local.test/api/sagas", {
       headers: { Authorization: `Bearer ${TOKEN}`, "X-Organization-Id": "not-a-uuid" },
     }),
     asUser(USER_ADMIN),
@@ -849,7 +849,7 @@ it("pins admin validation, error, and filter branches", async () => {
   const filterKey = `auth01-filter-${Date.now()}`;
   const filterInput = { sagaId: echoSaga.id, input: { message: "filter" } };
   const sub1 = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${TOKEN}`,
@@ -865,7 +865,7 @@ it("pins admin validation, error, and filter branches", async () => {
   // A second execution (distinct key, distinct row) gives the cursor pages
   // something to traverse.
   const sub2 = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${TOKEN}`,
@@ -957,7 +957,7 @@ it("pins admin validation, error, and filter branches", async () => {
     "CREATE TABLE org_memberships(org_id TEXT NOT NULL REFERENCES organizations(id), user_id TEXT NOT NULL REFERENCES users(user_id), role TEXT NOT NULL DEFAULT 'member', status TEXT NOT NULL DEFAULT 'invited', kind TEXT NOT NULL DEFAULT 'ordinary', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(org_id, user_id));",
   );
   const put = await worker.fetch(
-    new Request(`http://local.test/api/orgs`, { method: "PUT", headers: { Authorization: `Bearer ${TOKEN}` } }),
+    new Request(`https://local.test/api/orgs`, { method: "PUT", headers: { Authorization: `Bearer ${TOKEN}` } }),
     asUser(USER_ADMIN),
   );
   expect(put.status).toBe(400);

@@ -21,14 +21,14 @@ const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "0000
 const key = "timeout-sweeper-001";
 const auth = { Authorization: `Bearer ${"a".repeat(64)}`, "Content-Type": "application/json" };
 function submitRequest() {
-  return new Request("http://local.test/api/executions", {
+  return new Request("https://local.test/api/executions", {
     method: "POST",
     headers: { ...auth, "Idempotency-Key": key },
     body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "stuck" } }),
   });
 }
 function detailRequest(id: string) {
-  return new Request(`http://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } });
+  return new Request(`https://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } });
 }
 async function observedStatus(id: string): Promise<string> {
   const body = (await (await worker.fetch(detailRequest(id), bindings)).json()) as { status: string };
@@ -85,7 +85,7 @@ it("leaves a stuck Running execution alone until its owner cancels it", async ()
   expect(detail.runtimeStatus).not.toBe("complete");
   // The owner's cancel is the only exit a stuck run needs.
   const cancelled = await worker.fetch(
-    new Request(`http://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } }),
+    new Request(`https://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } }),
     bindings,
   );
   expect(cancelled.status).toBe(200);

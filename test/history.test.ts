@@ -25,7 +25,7 @@ const ROWS = [
 ] as const;
 const ids = new Map<string, string>();
 function listRequest(query = "") {
-  return new Request(`http://local.test/api/executions${query}`, { method: "GET", headers: { ...auth } });
+  return new Request(`https://local.test/api/executions${query}`, { method: "GET", headers: { ...auth } });
 }
 async function listBody(query = "") {
   const response = await worker.fetch(listRequest(query), bindings);
@@ -184,11 +184,11 @@ it("rejects bad filters with machine-readable codes", async () => {
   });
 });
 it("still rejects query strings on every other route", async () => {
-  const sagas = await worker.fetch(new Request("http://local.test/api/sagas?x=1", { headers: { ...auth } }), bindings);
+  const sagas = await worker.fetch(new Request("https://local.test/api/sagas?x=1", { headers: { ...auth } }), bindings);
   expect(sagas.status).toBe(400);
   expect(await sagas.json()).toMatchObject({ error: { code: "UNSUPPORTED_QUERY" } });
   const submit = await worker.fetch(
-    new Request("http://local.test/api/executions?x=1", {
+    new Request("https://local.test/api/executions?x=1", {
       method: "POST",
       headers: { ...auth, "Content-Type": "application/json", "Idempotency-Key": "history-query-guard-001" },
       body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "hello" } }),

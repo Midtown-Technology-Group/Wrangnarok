@@ -145,7 +145,7 @@ it("serves the catalog on a valid assertion without LAB configured", async () =>
     .bind(ORG.toLowerCase(), EMAIL.toLowerCase(), stamp, stamp)
     .run();
   const res = await worker.fetch(
-    new Request("http://local.test/api/sagas", { headers: { "Cf-Access-Jwt-Assertion": token } }),
+    new Request("https://local.test/api/sagas", { headers: { "Cf-Access-Jwt-Assertion": token } }),
     bindings,
   );
   expect(res.status).toBe(200);
@@ -157,7 +157,7 @@ it("serves the catalog on a valid assertion without LAB configured", async () =>
 it("keeps LAB behavior when no assertion header is present", async () => {
   const bindings = { ...(env as unknown as Bindings) };
   delete (bindings as Record<string, unknown>).LAB_ENABLED;
-  const res = await worker.fetch(new Request("http://local.test/api/sagas"), bindings);
+  const res = await worker.fetch(new Request("https://local.test/api/sagas"), bindings);
   expect(res.status).toBe(404);
   expect(await res.json()).toMatchObject({ error: { code: "NOT_FOUND" } });
   expect(new Fault(401, "UNAUTHORIZED", "Unauthorized.").status).toBe(401);

@@ -26,7 +26,7 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
 
 function call(path: string, method = "GET", body?: unknown, orgId = ORG, userId?: string) {
   return worker.fetch(
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       method,
       headers: headers(),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -59,7 +59,7 @@ async function uploadRoundtrip(
   expect(slot.status).toBe(200);
   const { entries: slotEntries } = (await slot.json()) as { entries: { token: string }[] };
   const put = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${slotEntries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${slotEntries[0]!.token}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": contentType },
       body: bytes as Uint8Array<ArrayBuffer>,
@@ -145,7 +145,7 @@ it("rejects completion mismatches and deletes the pending row", async () => {
   const slot = await call("/api/files/uploads", "POST", { entries: [{ location: "uploads", path: "a.txt" }] });
   const { entries: slotEntries } = (await slot.json()) as { entries: { token: string }[] };
   const put = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${slotEntries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${slotEntries[0]!.token}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
       body: bytes as Uint8Array<ArrayBuffer>,
@@ -182,7 +182,7 @@ it("rejects traversal, undeclared locations, and mismatched content types", asyn
   const slot = await call("/api/files/uploads", "POST", { entries: [{ location: "uploads", path: "img.bin" }] });
   const { entries: slotEntries } = (await slot.json()) as { entries: { token: string }[] };
   const put = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${slotEntries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${slotEntries[0]!.token}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "image/png" },
       body: new TextEncoder().encode("x") as Uint8Array<ArrayBuffer>,
@@ -238,7 +238,7 @@ it("versions overwrites and deletes with conflict fencing", async () => {
   const { entries: slotEntries } = (await slot.json()) as { entries: { token: string }[] };
   const bytes = new TextEncoder().encode("version two");
   const put = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${slotEntries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${slotEntries[0]!.token}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
       body: bytes as Uint8Array<ArrayBuffer>,
@@ -258,7 +258,7 @@ it("versions overwrites and deletes with conflict fencing", async () => {
   const slot2 = await call("/api/files/uploads", "POST", { entries: [{ location: "uploads", path: "doc.txt" }] });
   const { entries: slotEntries2 } = (await slot2.json()) as { entries: { token: string }[] };
   const put2 = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${slotEntries2[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${slotEntries2[0]!.token}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
       body: bytes as Uint8Array<ArrayBuffer>,
@@ -311,7 +311,7 @@ it("refuses new URLs after policy revocation and invalidates issued tokens", asy
   const issued = await call("/api/files/downloads", "POST", { entries: [{ location: "uploads", path: "rev.txt" }] });
   const { entries: issuedEntries } = (await issued.json()) as { entries: { token: string }[] };
   const before = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${issuedEntries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${issuedEntries[0]!.token}`, {
       headers: headers(),
     }),
     bindings,
@@ -323,7 +323,7 @@ it("refuses new URLs after policy revocation and invalidates issued tokens", asy
   // expiry. Revocation deletes the token row, so the token is unknown (401),
   // never a bearer leak or a disclosed distinguisher.
   const after = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${issuedEntries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${issuedEntries[0]!.token}`, {
       headers: headers(),
     }),
     bindings,
@@ -377,7 +377,7 @@ it("single-use upload tokens reject replays and bare Bearer PUTs", async () => {
   const slot = await call("/api/files/uploads", "POST", { entries: [{ location: "uploads", path: "once.txt" }] });
   const { entries: slotEntries } = (await slot.json()) as { entries: { token: string }[] };
   const first = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${slotEntries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${slotEntries[0]!.token}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
       body: new TextEncoder().encode("one") as Uint8Array<ArrayBuffer>,
@@ -386,7 +386,7 @@ it("single-use upload tokens reject replays and bare Bearer PUTs", async () => {
   );
   expect(first.status).toBe(200);
   const replay = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${slotEntries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${slotEntries[0]!.token}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
       body: new TextEncoder().encode("two") as Uint8Array<ArrayBuffer>,
@@ -395,7 +395,7 @@ it("single-use upload tokens reject replays and bare Bearer PUTs", async () => {
   );
   expect(replay.status).toBe(401);
   const bare = await worker.fetch(
-    new Request("http://local.test/api/files/content", {
+    new Request("https://local.test/api/files/content", {
       method: "PUT",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
       body: new TextEncoder().encode("three") as Uint8Array<ArrayBuffer>,

@@ -57,7 +57,7 @@ function labHeaders(extra: Record<string, string> = {}): Record<string, string> 
 }
 
 function call(path: string, init: RequestInit, envOverride: Bindings = bindings): Promise<Response> {
-  return worker.fetch(new Request(`http://local.test${path}`, init), envOverride);
+  return worker.fetch(new Request(`https://local.test${path}`, init), envOverride);
 }
 
 function authed(path: string, method: string, body?: unknown, extra?: Record<string, string>): Promise<Response> {
@@ -138,7 +138,7 @@ async function onboardAccessMember(userId: string, status: "invited" | "active" 
 
 async function accessRequest(token: string, envOverride?: Bindings): Promise<Response> {
   return worker.fetch(
-    new Request("http://local.test/api/auth/me", { headers: { "Cf-Access-Jwt-Assertion": token } }),
+    new Request("https://local.test/api/auth/me", { headers: { "Cf-Access-Jwt-Assertion": token } }),
     envOverride ?? accessBindings(),
   );
 }
@@ -182,7 +182,7 @@ describe("credential classes (pure, access.ts)", () => {
   it("describes the caller from the verified Principal, never request input", () => {
     const human = describeCaller(
       { userId: EMAIL, orgId: ACCESS_ORG },
-      new Request("http://local.test/api/auth/me", { headers: { "Cf-Access-Jwt-Assertion": "x" } }),
+      new Request("https://local.test/api/auth/me", { headers: { "Cf-Access-Jwt-Assertion": "x" } }),
     );
     expect(human).toEqual({
       userId: EMAIL,
@@ -193,7 +193,7 @@ describe("credential classes (pure, access.ts)", () => {
     });
     const fixture = describeCaller(
       { userId: LAB_USER, orgId: ORG },
-      new Request("http://local.test/api/auth/me", { headers: labHeaders() }),
+      new Request("https://local.test/api/auth/me", { headers: labHeaders() }),
     );
     expect(fixture.credentialClass).toBe("fixture");
     expect(fixture.fixture).toBe(true);
@@ -304,7 +304,7 @@ describe("GET /api/auth/me over the LAB fixture", () => {
     expect(await wrong.json()).toMatchObject({ error: { code: "UNAUTHORIZED" } });
     const off = { ...(bindings as unknown as Record<string, unknown>) } as unknown as Bindings;
     delete (off as unknown as Record<string, unknown>).LAB_ENABLED;
-    const missing = await worker.fetch(new Request("http://local.test/api/auth/me"), off);
+    const missing = await worker.fetch(new Request("https://local.test/api/auth/me"), off);
     expect(missing.status).toBe(404);
   });
 });
@@ -402,7 +402,7 @@ describe("Access human and service identity over the Worker", () => {
     const bare = { ...(bindings as unknown as Record<string, unknown>) } as unknown as Bindings;
     delete (bare as unknown as Record<string, unknown>).LAB_ENABLED;
     const unconfigured = await worker.fetch(
-      new Request("http://local.test/api/auth/me", { headers: { "Cf-Access-Jwt-Assertion": token } }),
+      new Request("https://local.test/api/auth/me", { headers: { "Cf-Access-Jwt-Assertion": token } }),
       bare,
     );
     expect(unconfigured.status).toBe(503);
@@ -431,7 +431,7 @@ describe("scoped endpoint credentials (workflow-key analogue)", () => {
     if (key !== null) headers["X-Endpoint-Key"] = key;
     if (eventId !== null) headers["X-Endpoint-Event-Id"] = eventId;
     return worker.fetch(
-      new Request(`http://local.test/api/endpoints/${name}`, {
+      new Request(`https://local.test/api/endpoints/${name}`, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
@@ -523,7 +523,7 @@ describe("SDK, CLI, and MCP clients preserve the same identity", () => {
 
   it("reads the same identity through the typed client", async () => {
     const client = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: TOKEN,
       fetchImpl: authedFetch as typeof fetch,
       pollMs: 0,
@@ -554,9 +554,9 @@ describe("SDK, CLI, and MCP clients preserve the same identity", () => {
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }) as typeof fetch;
-    const client = createSdkClient({ base: "http://local.test", token: TOKEN, fetchImpl });
+    const client = createSdkClient({ base: "https://local.test", token: TOKEN, fetchImpl });
     expect((await client.whoAmI()).credentialClass).toBe("human");
-    expect(seen).toEqual(["http://local.test/api/auth/me"]);
+    expect(seen).toEqual(["https://local.test/api/auth/me"]);
     expect(() => parseCallerIdentity({ caller: { credentialClass: "robot" } })).toThrow(SdkError);
     expect(() => parseCallerIdentity({})).toThrow(/unexpected shape/);
     // Every credential class parses, including the null role/kind shape the

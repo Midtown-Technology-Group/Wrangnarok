@@ -10,7 +10,7 @@ const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
 const key = "mvp-slice-test-001";
 function request(path: string, method = "GET", message = "hello", idempotencyKey = key) {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${"a".repeat(64)}`,
@@ -94,7 +94,7 @@ it("persists structured failure without copying the vendor error body", async ()
   expect(fetch).toHaveBeenCalledTimes(1);
 });
 it("denies unauthenticated requests and stays disabled by default", async () => {
-  expect((await worker.fetch(new Request("http://local.test/api/executions"), bindings)).status).toBe(401);
+  expect((await worker.fetch(new Request("https://local.test/api/executions"), bindings)).status).toBe(401);
   expect((await worker.fetch(request("/api/executions"), { ...bindings, LAB_ENABLED: "false" })).status).toBe(404);
 });
 

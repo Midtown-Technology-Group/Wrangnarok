@@ -33,7 +33,7 @@ function smokeRequest(
   body: unknown = {},
   idempotencyKey = key,
 ) {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${"a".repeat(64)}`,

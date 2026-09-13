@@ -124,7 +124,7 @@ it("renders the Dashboard summary with honestly-scoped sample counts", () => {
 
 it("enforces gray-out server-side: unmapped /api/* is UNIMPLEMENTED, not NOT_FOUND", async () => {
   const authed = (path: string) =>
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       headers: { Authorization: `Bearer ${"a".repeat(64)}` },
     });
   const response = await worker.fetch(authed("/api/dashboard"), bindings);
