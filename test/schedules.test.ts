@@ -23,6 +23,7 @@ import {
   type ScheduleRow,
 } from "../src/schedules";
 import { echoSaga, helloSaga } from "../src/domain";
+import type { Principal } from "../src/domain";
 
 function faultCode(fn: () => unknown): string {
   try {
@@ -352,10 +353,10 @@ describe("parser and persistence branch edges", () => {
       batch: async () => [],
     } as unknown as D1Database;
   }
-  const caller = {
+  const caller: Principal = {
     orgId: "00000000-0000-4000-8000-000000000001",
     userId: "00000000-0000-4000-8000-000000000002",
-  } as never;
+  };
   const sagaRef = {
     id: echoSaga.id,
     name: "echo",
