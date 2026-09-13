@@ -162,7 +162,15 @@ import { join } from "node:path";
 // safe-URL policy and response baseline measures locally below; the CI
 // number governs. Hand-written feature code, no new dependencies
 // (package.json unchanged versus main); deliberate feature headroom only.
-const BUDGET_BYTES = 590 * 1024;
+// 2026-09-13 (AUTH-02 P1 review fixes, issue #143): 600 KiB. The eight
+// thread fixes (App-write grant gates on three mutation routes, org-scoped
+// assignees, policy-rule uniqueness, UUID canonicalization, org auth
+// cleanup on delete, tool execute grants on both call paths, form write
+// authority on three routes) measure 609741 bytes in CI against the 590 KiB
+// line: ~5.5 KiB of hand-written authorization-boundary code, no new
+// dependencies (package.json unchanged versus main); deliberate feature
+// headroom only.
+const BUDGET_BYTES = 600 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");
