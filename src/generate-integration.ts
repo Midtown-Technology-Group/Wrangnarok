@@ -251,7 +251,6 @@ export async function execute${cap(prefix)}Operation(
   const operation: ContractOperation = inspectOperation(operations, call.operationId);
   authorizeOperation(operation, ${prefix}_DEFAULT_POLICY);
   const pinned = await pinnedContract();
-  const url = resolveRequestUrl(pinned, operation, { path: call.path, query: call.query });
   let endpointOrigin: string;
   try {
     endpointOrigin = new URL(view.endpoint).origin;
@@ -268,6 +267,14 @@ export async function execute${cap(prefix)}Operation(
   if (!allowed) {
     throw new Fault(403, "OPENAPI_ORIGIN_FORBIDDEN", "The Connection endpoint is not an allowed origin.");
   }
+  // Origin binding: resolve against the validated Connection endpoint
+  // origin, never the allowlist head. resolveRequestUrl binds to
+  // allowedOrigins[0]; with multiple configured origins the request (plus
+  // bearer credentials) would otherwise ride to the first origin while the
+  // Connection points elsewhere. Narrowing the contract to the validated
+  // endpoint keeps the spec digest identical (digest covers spec bytes only)
+  // while binding this request to the Connection's actual origin.
+  const url = resolveRequestUrl({ ...pinned, allowedOrigins: [endpointOrigin] }, operation, { path: call.path, query: call.query });
   const fetchImpl = vendor.fetchImpl ?? globalThis.fetch;
   const hasBody = call.body !== undefined;
   let response: Response;

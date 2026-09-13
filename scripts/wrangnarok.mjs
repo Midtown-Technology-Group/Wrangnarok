@@ -1722,7 +1722,17 @@ async function main() {
   } else if (command === "generate-integration") {
     if (parsed.json) console.log(JSON.stringify(result));
     else {
-      console.log(`generated ${result.generated.path} (${result.generated.operations} operations)`);
+      // Human mode writes the file like scaffold previews it: the operator
+      // commits the result. --out overrides the reported path (tests use a
+      // temp dir); refusal to overwrite an existing file without --force
+      // keeps regeneration explicit.
+      const outPath = arg("out") ?? result.generated.path;
+      const force = process.argv.includes("--force");
+      if (existsSync(outPath) && !force) {
+        fail("GENERATOR_EXISTS", `Refusing to overwrite ${outPath} without --force (regeneration must be explicit).`);
+      }
+      writeFileSync(outPath, result.generated.content, "utf-8");
+      console.log(`generated ${outPath} (${result.generated.operations} operations)`);
       console.log(`spec: ${result.generated.specDigest.slice(0, 12)}`);
       for (const step of result.generated.next) console.log(`next: ${step}`);
     }
