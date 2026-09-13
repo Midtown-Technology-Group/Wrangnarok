@@ -38,6 +38,7 @@ import { EXECUTION_ID } from "./domain";
 import type { OrgCtx } from "./saga";
 import { assertJsonSerializable } from "./saga";
 import { cancelExecution, visibleExecution, workflowForSaga } from "./executions";
+import { requireActiveInstall } from "./solutions";
 import type { ExecutionRow } from "./executions";
 import type { Bindings } from "./bindings";
 import { scrubExecutionValue } from "./secrets";
@@ -94,10 +95,14 @@ export async function childExecutionId(
 }
 
 /** Author-facing child options: the caller key disambiguates sibling
- * invocations of one child within a step; awaitTimeoutMs bounds the poll
- * loop inside awaitChildResult (the child keeps running on expiry). */
+ * invocations of one child within a step; callerStep disambiguates same-key
+ * invokes from different step.do callbacks (identity is
+ * (parent, step, child, key), so two callbacks sharing a key must pass
+ * distinct callerStep values); awaitTimeoutMs bounds the poll loop inside
+ * awaitChildResult (the child keeps running on expiry). */
 export interface InvokeChildOptions {
   readonly key?: string;
+  readonly callerStep?: string;
   readonly awaitTimeoutMs?: number;
 }
 
@@ -153,7 +158,13 @@ export function bindSagaChildren(
   step: { sleep(name: string, duration: string): Promise<void> },
 ): SagaChildren {
   return {
-    invoke: (childRef, input, options) => invokeChild(childEnv, childDispatchStep("invoke"), childRef, input, options),
+    // Dispatch identity is (parent, step, child, key): the step segment comes
+    // from options.callerStep at invoke time (default "invoke" preserves the
+    // established identity). Two step.do callbacks invoking the same child
+    // under the same key must pass distinct callerStep values, otherwise the
+    // second invoke converges on or conflicts with the first child's row.
+    invoke: (childRef, input, options) =>
+      invokeChild(childEnv, childDispatchStep(options?.callerStep ?? "invoke"), childRef, input, options),
     awaitResult: <T>(receipt: ChildReceipt, options?: InvokeChildOptions): Promise<T> =>
       awaitChildResult<T>(childEnv, step, receipt, options),
   };
@@ -189,7 +200,19 @@ export async function invokeChild(
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(key)) {
     throw new Fault(400, "CHILD_KEY_INVALID", "The child key must be 1 to 128 safe characters.");
   }
+  // The stepName parameter already carries the (parent, step, child, key)
+  // identity segment: bindSagaChildren computes it from options.callerStep
+  // (default "invoke" preserves the established identity). Validate the shape
+  // here so a malformed caller step fails closed before any write.
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(stepName)) {
+    throw new Fault(400, "CHILD_KEY_INVALID", "The caller step must be 1 to 128 safe characters.");
+  }
   const caller: Principal = { orgId: childEnv.parentOrg.orgId, userId: childEnv.parentOrg.userId };
+  // Active-install parity with top-level submit (SOL-01 gate): a child Saga
+  // absent from the org's active bundle (or pinned to another revision) is
+  // rejected here exactly as a top-level submit would reject it, so the same
+  // Saga cannot run or be denied depending only on the invocation path.
+  await requireActiveInstall(childEnv.env.DB, child.id, child.revision, caller.orgId);
   const inputJson = JSON.stringify(input);
   const dispatchKey = childDispatchKey(childEnv.parentExecutionId, stepName, child.id, key);
   const id = await childExecutionId(caller, childEnv.parentExecutionId, stepName, child.id, key);
@@ -268,15 +291,28 @@ export async function awaitChildResult<T>(
     throw new Fault(400, "CHILD_RECEIPT_INVALID", "The child receipt carries no 64-hex Execution ID.");
   }
   const caller: Principal = { orgId: childEnv.parentOrg.orgId, userId: childEnv.parentOrg.userId };
-  const timeoutMs = options.awaitTimeoutMs ?? childEnv.awaitTimeoutDefaultMs ?? 20000;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120000) {
-    throw new Fault(400, "CHILD_AWAIT_INVALID", "awaitTimeoutMs must be 1 to 120000 ms.");
+  // Deadline agreement with the enclosing step.do (10s platform timeout in
+  // the saga adapter): awaitChildResult runs inside step.do, so any deadline
+  // beyond ~9s would die under the outer step timeout instead of producing
+  // the documented CHILD_AWAIT_TIMEOUT. The bound stays under the step
+  // ceiling; longer waits belong across multiple step.do calls (poll steps),
+  // not one long sleep loop.
+  const timeoutMs = options.awaitTimeoutMs ?? childEnv.awaitTimeoutDefaultMs ?? 8000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 9000) {
+    throw new Fault(400, "CHILD_AWAIT_INVALID", "awaitTimeoutMs must be 1 to 9000 ms (inside the 10 s step timeout).");
   }
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     // Child reads stay org-scoped: a receipt smuggled from a foreign org
     // answers 404 (EXECUTION_NOT_FOUND) and the await fails closed.
     const row = await visibleExecution(childEnv.env.DB, receipt.executionId, caller);
+    // Lineage check: the row must belong to this parent (parent_execution_id)
+    // and match the receipt's Saga. A stale or constructed receipt naming an
+    // unrelated same-org Execution (top-level, sibling, or another parent's
+    // child) is rejected instead of returning foreign output as our own.
+    if (row.parent_execution_id !== childEnv.parentExecutionId || row.saga_id !== receipt.sagaId) {
+      throw new Fault(400, "CHILD_RECEIPT_INVALID", "The child receipt does not belong to this parent Execution.");
+    }
     const terminal = childTerminalOf(row.status);
     if (terminal === "Succeeded") {
       try {

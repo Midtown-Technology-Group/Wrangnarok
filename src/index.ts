@@ -1221,8 +1221,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         // Best-effort child fan-out (RUN-02, ADR 018): still-active direct
         // children get the same mark-terminate-classify treatment. Ambiguous
         // children stay active and inspectable; parent confirmation never
-        // depends on child outcomes.
-        await cancelDirectChildren(env, caller, row.id);
+        // depends on child outcomes. Fan-out failures (enumeration or per-child
+        // D1 writes) must not strand a confirmed parent in Cancelling, so the
+        // fan-out is isolated: on failure the parent still confirms.
+        try {
+          await cancelDirectChildren(env, caller, row.id);
+        } catch {
+          // Best-effort only: fall through to parent confirmation.
+        }
         await cancelExecution(env.DB, row.id);
         // OPS-01 audit: owner cancellation confirmed (best-effort; a failed
         // insert never fails the cancel itself).
