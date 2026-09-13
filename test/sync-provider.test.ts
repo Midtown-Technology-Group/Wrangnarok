@@ -385,7 +385,10 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     const response = await worker.fetch(providerRequest(ninjaSaga.id, {}, key), bindings);
     expect(response.status).toBe(200);
     expect(response.headers.get("Location")).toBe(`/api/executions/${id}`);
-    const body = parseProviderOutcome(await response.json());
+    const text = await response.clone().text();
+    expect(text).not.toContain(TOKEN_SENTINEL);
+    expect(text).not.toContain("test-client-secret-sentinel");
+    const body = parseProviderOutcome(JSON.parse(text) as unknown);
     expect(body).toMatchObject({
       executionId: id,
       sagaId: ninjaSaga.id,
