@@ -67,6 +67,15 @@ import { join } from "node:path";
 // same deliberate feature headroom, not dependency bloat: package.json is
 // unchanged. Remeasure after merge; shrink the raise if the combined bundle
 // lands lower.
+// 2026-09-11 (TRG-01 over OPS-01, issue #137): schedule surface
+// (src/schedules.ts: cron validation, IANA timezone labels, UTC window math,
+// server-derived window keys, preview, bounded scan/admission; 7 schedule
+// routes plus the scheduled() Cron tick; Scheduled status plus schedule
+// error codes; no new dependencies) stacks on the contemporary main surface
+// with the same deliberate feature headroom, not dependency bloat:
+// package.json is unchanged versus main. Remeasure after merge; shrink the
+// raise if the combined bundle lands lower. Budget stays at the FORM-02
+// 555 KiB line (main HEAD); the TRG-01 surface must fit inside it.
 // 2026-09-11 (AUTH-01 follow-up): 390 KiB. Cascading-delete accounting over
 // every post-AUTH-01 org-owned table (forms, apps, tables, files, artifacts,
 // endpoints, configs, audit; R2 bytes first, managed rows block) stacks on

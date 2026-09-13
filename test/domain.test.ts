@@ -77,6 +77,12 @@ describe("MVP slice contracts", () => {
     expect(stepRetryLimit("some-future-mutation-v1")).toBe(0);
   });
   it("restricts execution transitions to the canonical table", () => {
+    expect(canTransition("Scheduled", "Pending")).toBe(true);
+    expect(canTransition("Scheduled", "Cancelling")).toBe(true);
+    expect(canTransition("Scheduled", "Running")).toBe(false);
+    expect(canTransition("Scheduled", "Scheduled")).toBe(false);
+    expect(canTransition("Pending", "Scheduled")).toBe(false);
+    expect(canTransition("Running", "Scheduled")).toBe(false);
     expect(canTransition("Pending", "Running")).toBe(true);
     expect(canTransition("Pending", "Cancelling")).toBe(true);
     expect(canTransition("Running", "Succeeded")).toBe(true);
@@ -96,6 +102,7 @@ describe("MVP slice contracts", () => {
         "TimedOut",
         "Cancelling",
         "Cancelled",
+        "Scheduled",
       ] as const) {
         expect(canTransition(terminal, next)).toBe(false);
       }
