@@ -724,7 +724,11 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     const queried = await worker.fetch(
       new Request("http://local.test/api/executions/provider?window=2026-09-12T09:00", {
         method: "POST",
-        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", "Idempotency-Key": "run-03-provider-query-001" },
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          "Content-Type": "application/json",
+          "Idempotency-Key": "run-03-provider-query-001",
+        },
         body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "sync-proof" } }),
       }),
       bindings,
@@ -735,7 +739,11 @@ describe("inline provider execution (POST /api/executions/provider)", () => {
     const encoded = await worker.fetch(
       new Request("http://local.test/api/executions/provider", {
         method: "POST",
-        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain", "Idempotency-Key": "run-03-provider-415-001" },
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          "Content-Type": "text/plain",
+          "Idempotency-Key": "run-03-provider-415-001",
+        },
         body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "sync-proof" } }),
       }),
       bindings,
