@@ -5,17 +5,24 @@ Lane workers: you inherit the project prompt overlay. These rules are lane speci
 ## Lane discipline (one lane per worktree)
 
 - Work only in your assigned worktree under the scratch root (`$env:TEMP\opencode`, one subdirectory per branch, slashes sanitized). Never work two lanes in one checkout. Never create worktrees inside the main checkout.
-- Branch from `origin/main`. Small PRs. `automerge` label AND `@mergifyio queue` comment together at PR creation. Remove the worktree (`git worktree remove`) when its PR merges.
+- Branch from `origin/main`. Small PRs. Native GitHub merge queue owns merging into `main`: required check is `Validate`, use Merge-when-ready / merge-queue control, no Mergify. Remove the worktree (`git worktree remove`) when its PR merges.
 - Never merge a red PR. Never force-push a shared lane branch. Merge method is merge commits unless an ADR says otherwise.
-- Mergify queue runs speculative checks (up to 3 parallel, batch 3). Branch protection requires Validate but NOT up-to-date: rebase ONLY on reported conflict, never for currency.
+- The native queue tests each PR against predicted main, so rebase ONLY on reported conflict, never for currency.
 
-## Own your PR to green
+## Own your issue and shepherd your PR to green
 
-Opening the PR is not done. Keep watching your PR's checks until merged:
+You are responsible for your assigned parity issue AND for shepherding its PR from open to merged. Opening the PR is not done. A finished local todos list with an open PR means the job is still open. Do NOT go idle.
 
 - Red CI: fix forward on your branch (never force-push), re-run the FULL gate locally, push.
 - CONFLICTING: merge origin/main, resolve keeping your slice's code, re-run the FULL gate, push.
-- A finished local todos list with a red or conflicting PR means the job is still open. Do NOT go idle.
+- Open review threads BLOCK merging (conversation resolution is required on `main`). Address every thread on your PR: fix the code where the reviewer is right (bot reviewers included — coderabbitai and the codex connector have found genuine P1s), reply where they are wrong, then resolve the thread. Never resolve a thread without either a code fix or a written rebuttal.
+- Merge queue: once checks are green and threads are resolved, queue the PR (`gh pr merge <number>` with no strategy flag — the queue owns the strategy). Watch it until it shows MERGED.
+
+## Heartbeat
+
+- Within 10 minutes of spawn, make your first visible move: a commit, a PR comment, a status report to the coordinator, or a BLOCKED report with the exact blocker. Spawns that show no activity after 15 minutes are assumed dead and will be replaced.
+- Report status to the coordinator at least every 30 minutes while your PR is open: checks state, open thread count, next action. Two lines max.
+- If you are blocked on another lane or on the coordinator, say so immediately — do not wait silently.
 
 ## Scope and migrations
 
