@@ -13,7 +13,10 @@ import {
   parseScheduleInput,
   parseScheduleName,
   parseScheduleTimezone,
+  promoteWindow,
 } from "../src/schedules";
+import type { ScheduleRow } from "../src/schedules";
+import type { submit } from "../src/executions";
 import { SAGA_DEFINITIONS } from "../src/sagas";
 
 describe("TRG-01 branch coverage", () => {
@@ -95,5 +98,236 @@ describe("TRG-01 branch coverage", () => {
     expect(() => parseScheduleInput({ message: "x".repeat(5000) }, permissive)).toThrow(/4096-byte/);
     expect(parseScheduleInput({ message: "hi" }, permissive)).toEqual({ message: "hi" });
     expect(parseScheduleInput(undefined, permissive)).toEqual({});
+  });
+});
+
+describe("TRG-01 pre-dispatch fence (fake D1, no workerd)", () => {
+  const ORG = "00000000-0000-4000-8000-000000000001";
+  const USER = "00000000-0000-4000-8000-000000000002";
+
+  function scheduleRow(): ScheduleRow {
+    const stamp = new Date().toISOString();
+    return {
+      id: "schedule-fence-probe",
+      org_id: ORG,
+      name: "fence-probe",
+      saga_id: helloSaga.id,
+      kind: "recurring",
+      cron: "* * * * *",
+      timezone: "UTC",
+      enabled: 1,
+      input_json: JSON.stringify({ name: "sched" }),
+      run_as_user_id: USER,
+      run_at: null,
+      next_due_at: stamp,
+      last_window: null,
+      created_at: stamp,
+      updated_at: stamp,
+    };
+  }
+
+  interface FenceStore {
+    schedule?: ScheduleRow | null;
+    fenceThrows?: unknown;
+    org?: Record<string, unknown> | null;
+    user?: Record<string, unknown> | null;
+    membership?: Record<string, unknown> | null;
+    authorityThrows?: unknown;
+  }
+
+  function fenceDb(store: FenceStore): D1Database {
+    return {
+      prepare: (sql: string) => ({
+        bind: () => ({
+          first: async () => {
+            if (sql.startsWith("SELECT * FROM schedules WHERE id=")) {
+              if (store.fenceThrows !== undefined) throw store.fenceThrows;
+              return (store.schedule ?? null) as unknown;
+            }
+            if (store.authorityThrows !== undefined) throw store.authorityThrows;
+            if (sql.startsWith("SELECT * FROM organizations")) return (store.org ?? null) as unknown;
+            if (sql.startsWith("SELECT * FROM users")) return (store.user ?? null) as unknown;
+            if (sql.startsWith("SELECT * FROM org_memberships")) return (store.membership ?? null) as unknown;
+            if (sql.startsWith("SELECT execution_id FROM schedule_deliveries")) return null;
+            throw new Error(`unexpected query: ${sql}`);
+          },
+          run: async () => ({ success: true, meta: { changes: 1 } }),
+        }),
+      }),
+    } as unknown as D1Database;
+  }
+
+  function stubSubmit(): { calls: () => number; submit: typeof submit } {
+    let calls = 0;
+    const submitFn: typeof submit = (async () => {
+      calls += 1;
+      return { executionId: "stub-execution", replayed: false, statusUrl: "/api/executions/stub-execution" };
+    }) as typeof submit;
+    return { calls: () => calls, submit: submitFn };
+  }
+
+  const ACTIVE = {
+    org: { id: ORG, status: "active" },
+    user: { user_id: USER, status: "active" },
+    membership: { org_id: ORG, user_id: USER, status: "active" },
+  };
+
+  it("promotes when the re-read row and run-as authority are live", async () => {
+    const stub = stubSubmit();
+    const report = await promoteWindow(
+      fenceDb({ schedule: scheduleRow(), ...ACTIVE }),
+      { DB: fenceDb({}) } as never,
+      scheduleRow(),
+      "2026-09-12T10:01",
+      SAGA_DEFINITIONS,
+      stub.submit,
+    );
+    expect(stub.calls()).toBe(1);
+    expect(report).toMatchObject({ scheduleName: "fence-probe", window: "2026-09-12T10:01" });
+  });
+  it("reports a deleted row without touching submit", async () => {
+    const stub = stubSubmit();
+    await expect(
+      promoteWindow(
+        fenceDb({ schedule: null, ...ACTIVE }),
+        { DB: fenceDb({}) } as never,
+        scheduleRow(),
+        "2026-09-12T10:01",
+        SAGA_DEFINITIONS,
+        stub.submit,
+      ),
+    ).rejects.toMatchObject({ code: "SCHEDULE_GONE" });
+    expect(stub.calls()).toBe(0);
+  });
+  it("treats a fence re-read failure as a gone row, never a dispatch", async () => {
+    const stub = stubSubmit();
+    await expect(
+      promoteWindow(
+        fenceDb({ schedule: scheduleRow(), fenceThrows: new Error("D1 hiccup"), ...ACTIVE }),
+        { DB: fenceDb({}) } as never,
+        scheduleRow(),
+        "2026-09-12T10:01",
+        SAGA_DEFINITIONS,
+        stub.submit,
+      ),
+    ).rejects.toMatchObject({ code: "SCHEDULE_GONE" });
+    expect(stub.calls()).toBe(0);
+  });
+  it("lets an instance admin dispatch without membership rows", async () => {
+    const stub = stubSubmit();
+    const report = await promoteWindow(
+      fenceDb({ schedule: scheduleRow(), org: null, user: null, membership: null }),
+      { DB: fenceDb({}), ADMIN_USER_IDS: USER } as never,
+      scheduleRow(),
+      "2026-09-12T10:01",
+      SAGA_DEFINITIONS,
+      stub.submit,
+    );
+    expect(stub.calls()).toBe(1);
+    expect(report.scheduleName).toBe("fence-probe");
+  });
+  it("fails closed when the run-as org is gone", async () => {
+    const stub = stubSubmit();
+    await expect(
+      promoteWindow(
+        fenceDb({ schedule: scheduleRow(), org: null, user: ACTIVE.user, membership: ACTIVE.membership }),
+        { DB: fenceDb({}) } as never,
+        scheduleRow(),
+        "2026-09-12T10:01",
+        SAGA_DEFINITIONS,
+        stub.submit,
+      ),
+    ).rejects.toMatchObject({ code: "ORG_NOT_FOUND" });
+    expect(stub.calls()).toBe(0);
+  });
+  it("treats pre-migration rows without a status column as active", async () => {
+    // Covers the `?? "active"` fallbacks: rows predating the status column
+    // read as active, so old databases fence on membership, not on shape.
+    const stub = stubSubmit();
+    const report = await promoteWindow(
+      fenceDb({ schedule: scheduleRow(), org: { id: ORG }, user: { user_id: USER }, membership: ACTIVE.membership }),
+      { DB: fenceDb({}) } as never,
+      scheduleRow(),
+      "2026-09-12T10:01",
+      SAGA_DEFINITIONS,
+      stub.submit,
+    );
+    expect(stub.calls()).toBe(1);
+    expect(report.scheduleName).toBe("fence-probe");
+  });
+  it("fails closed when the run-as user row is gone", async () => {
+    const stub = stubSubmit();
+    await expect(
+      promoteWindow(
+        fenceDb({ schedule: scheduleRow(), org: ACTIVE.org, user: null, membership: ACTIVE.membership }),
+        { DB: fenceDb({}) } as never,
+        scheduleRow(),
+        "2026-09-12T10:01",
+        SAGA_DEFINITIONS,
+        stub.submit,
+      ),
+    ).rejects.toMatchObject({ code: "ORG_NOT_FOUND" });
+    expect(stub.calls()).toBe(0);
+  });
+  it("fails closed when the run-as membership row is gone", async () => {
+    const stub = stubSubmit();
+    await expect(
+      promoteWindow(
+        fenceDb({ schedule: scheduleRow(), org: ACTIVE.org, user: ACTIVE.user, membership: null }),
+        { DB: fenceDb({}) } as never,
+        scheduleRow(),
+        "2026-09-12T10:01",
+        SAGA_DEFINITIONS,
+        stub.submit,
+      ),
+    ).rejects.toMatchObject({ code: "ORG_NOT_FOUND" });
+    expect(stub.calls()).toBe(0);
+  });
+  it("never activates an invited membership from the tick", async () => {
+    const stub = stubSubmit();
+    await expect(
+      promoteWindow(
+        fenceDb({
+          schedule: scheduleRow(),
+          org: ACTIVE.org,
+          user: ACTIVE.user,
+          membership: { org_id: ORG, user_id: USER, status: "invited" },
+        }),
+        { DB: fenceDb({}) } as never,
+        scheduleRow(),
+        "2026-09-12T10:01",
+        SAGA_DEFINITIONS,
+        stub.submit,
+      ),
+    ).rejects.toMatchObject({ code: "MEMBERSHIP_SUSPENDED" });
+    expect(stub.calls()).toBe(0);
+  });
+  it("fails loud when the authority store predates migration 0007", async () => {
+    const stub = stubSubmit();
+    await expect(
+      promoteWindow(
+        fenceDb({ schedule: scheduleRow(), authorityThrows: new Error("no such table: organizations") }),
+        { DB: fenceDb({}) } as never,
+        scheduleRow(),
+        "2026-09-12T10:01",
+        SAGA_DEFINITIONS,
+        stub.submit,
+      ),
+    ).rejects.toMatchObject({ code: "ORG_STORE_NOT_MIGRATED" });
+    expect(stub.calls()).toBe(0);
+  });
+  it("rethrows non-table authority failures instead of masking them", async () => {
+    const stub = stubSubmit();
+    await expect(
+      promoteWindow(
+        fenceDb({ schedule: scheduleRow(), authorityThrows: new Error("connection reset") }),
+        { DB: fenceDb({}) } as never,
+        scheduleRow(),
+        "2026-09-12T10:01",
+        SAGA_DEFINITIONS,
+        stub.submit,
+      ),
+    ).rejects.toThrow("connection reset");
+    expect(stub.calls()).toBe(0);
   });
 });

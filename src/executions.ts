@@ -177,7 +177,7 @@ export async function submit(env: Bindings, caller: Principal, key: string, saga
   if (row.saga_id !== saga.id || row.input_json !== inputJson) {
     throw new Fault(409, "IDEMPOTENCY_CONFLICT", "This key already identifies different input.");
   }
-  // Snapshot backfill: rows inserted before migration 0007 (or by an old
+  // Snapshot backfill: rows inserted before migration 0012 (or by an old
   // insert path) carry NULL; the submit path stamps the effective policy so
   // detail always exposes what admission applied.
   try {

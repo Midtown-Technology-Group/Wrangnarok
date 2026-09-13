@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0
+﻿// SPDX-License-Identifier: AGPL-3.0
 // Swarm watchdog: detects dead supervision zones and reports fleet health.
 // Usage: node scripts/swarm-watchdog.mjs [--json]
 // Must run under a shell where gh, git, ssh resolve (Windows: any shell with PATH).
