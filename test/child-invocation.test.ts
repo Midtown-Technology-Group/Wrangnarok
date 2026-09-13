@@ -861,9 +861,9 @@ describe("RUN-02 child helpers (pure, no bindings)", () => {
       )
       .run();
     // The parent-visible await crosses the boundary and surfaces CHILD_FAILED.
-    await expect(
-      awaitChildResult(childEnv, { sleep: async () => {} }, receipt),
-    ).rejects.toMatchObject({ code: "CHILD_FAILED" });
+    await expect(awaitChildResult(childEnv, { sleep: async () => {} }, receipt)).rejects.toMatchObject({
+      code: "CHILD_FAILED",
+    });
   });
 
   it("resolves children by UUID or exact name and derives stable keys", async () => {
