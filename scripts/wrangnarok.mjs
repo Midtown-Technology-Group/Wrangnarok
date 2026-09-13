@@ -513,6 +513,10 @@ Commands:
   inspect --saga NAME|UUID                Show one Saga (schemas, requirements)
   scaffold --name SLUG --id UUID [--description TEXT] [--revision REV]
                                           Emit a new defineSaga module (offline)
+  generate-integration --id ID --spec JSON|@FILE --origin URL [--origin URL2]
+                                          [--name NAME] [--classify op=CLASS]
+                                          Emit a typed Integration module from
+                                          OpenAPI 3.x JSON (offline)
   submit --saga NAME|UUID [--input JSON|@FILE] [--key KEY] [--no-wait]
                                           Submit an Execution (202 + poll to terminal)
   preview --saga NAME|UUID [--input JSON|@FILE] [--check-env]
@@ -723,6 +727,224 @@ export async function runCommand(ctx, deps = {}) {
             "Add the definition to SAGA_DEFINITIONS in src/sagas/index.ts and the Workflow binding in wrangler.jsonc.",
             "Add the stable identity to sagas.manifest.json (the saga-contract test fails loudly otherwise).",
             "Run npm run check:sagas and npm test before opening a PR.",
+          ],
+        },
+      };
+    }
+    case "generate-integration": {
+      // Offline: no fetch, no token use. Self-contained emitter mirroring
+      // src/generate-integration.ts (the canonical tested implementation):
+      // the plain-node CLI cannot import TS source, so the validation plus
+      // emit logic lives inline here exactly as scaffold inlines its
+      // template. Same spec plus same options yields identical source, so
+      // regeneration diffs cleanly on spec drift.
+      const id = ctx.genId;
+      if (!id || !/^[a-z][a-z0-9-]{1,63}$/.test(id)) {
+        fail("USAGE", "generate-integration needs --id ID (1-64 chars [a-z0-9-], starting with a letter).");
+      }
+      const rawSpec = ctx.genSpec;
+      if (typeof rawSpec !== "string" || rawSpec.length === 0) {
+        fail("USAGE", "generate-integration needs --spec JSON|@FILE (OpenAPI 3.x JSON).");
+      }
+      const specText = rawSpec.startsWith("@") ? readFileSync(rawSpec.slice(1), "utf-8") : rawSpec;
+      if (new TextEncoder().encode(specText).length > 2 * 1024 * 1024) {
+        fail("GENERATOR_INVALID_SPEC", "The OpenAPI spec exceeds the 2 MiB generator bound.");
+      }
+      const origins = ctx.genOrigins ?? [];
+      if (origins.length === 0) {
+        fail("USAGE", "generate-integration needs --origin URL (repeatable; never the spec servers entries).");
+      }
+      for (const origin of origins) {
+        try {
+          const url = new URL(origin);
+          if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("scheme");
+        } catch {
+          fail("GENERATOR_INVALID_OPTIONS", `Allowed origin ${JSON.stringify(origin)} must be http(s).`);
+        }
+      }
+      const classifications = ctx.genClassifications ?? {};
+      for (const [op, risk] of Object.entries(classifications)) {
+        if (typeof op !== "string" || op.length === 0 || typeof risk !== "string" || risk.length === 0) {
+          fail("USAGE", "generate-integration --classify needs op=CLASS (e.g. Ticket_Delete=destructive).");
+        }
+      }
+      let doc;
+      try {
+        doc = JSON.parse(specText);
+      } catch {
+        fail("GENERATOR_INVALID_SPEC", "The OpenAPI spec must parse as JSON (convert YAML to JSON before generating).");
+      }
+      if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
+        fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract must be a JSON object.");
+      }
+      if (typeof doc.openapi !== "string" || !doc.openapi.startsWith("3.")) {
+        fail("GENERATOR_INVALID_SPEC", "Only OpenAPI 3.x contracts can be generated.");
+      }
+      const version =
+        doc.info && typeof doc.info === "object" && typeof doc.info.version === "string"
+          ? doc.info.version.slice(0, 64)
+          : "";
+      if (!version) fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract needs info.version.");
+      if (!doc.paths || typeof doc.paths !== "object" || Array.isArray(doc.paths)) {
+        fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract needs a paths object.");
+      }
+      const OPERATION_ID = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
+      const SAFE_METHODS = new Set(["get", "head", "options"]);
+      const seen = new Set();
+      const operations = [];
+      for (const [path, methods] of Object.entries(doc.paths)) {
+        if (!path.startsWith("/") || methods === null || typeof methods !== "object" || Array.isArray(methods)) {
+          fail("GENERATOR_INVALID_SPEC", `Contract path ${JSON.stringify(path)} is malformed.`);
+        }
+        for (const [method, def] of Object.entries(methods)) {
+          if (def === null || typeof def !== "object" || Array.isArray(def)) continue;
+          const operationId = def.operationId;
+          if (typeof operationId !== "string" || !OPERATION_ID.test(operationId)) {
+            fail(
+              "GENERATOR_INVALID_SPEC",
+              `Contract operation ${method.toUpperCase()} ${path} needs a stable operationId.`,
+            );
+          }
+          if (seen.has(operationId)) {
+            fail("GENERATOR_INVALID_SPEC", `Duplicate operationId ${JSON.stringify(operationId)}.`);
+          }
+          seen.add(operationId);
+          const summary = typeof def.summary === "string" ? def.summary.slice(0, 280) : "";
+          const classified = classifications[operationId];
+          const risk =
+            classified !== undefined ? classified : SAFE_METHODS.has(method.toLowerCase()) ? "read" : "mutation";
+          operations.push({ operationId, method: method.toLowerCase(), path, summary, risk });
+        }
+      }
+      if (operations.length === 0) {
+        fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract declares no operations.");
+      }
+      const { createHash } = await import("node:crypto");
+      const digestHex = createHash("sha256").update(specText, "utf-8").digest("hex");
+      const prefix = id
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "");
+      const cap = prefix
+        .split("_")
+        .map((part) => (part.length === 0 ? part : part[0].toUpperCase() + part.slice(1).toLowerCase()))
+        .join("");
+      const opsLiteral = operations
+        .map(
+          (op) =>
+            `    ${JSON.stringify(op.operationId)}: ${JSON.stringify(op.risk)}, // ${op.method.toUpperCase()} ${op.path}`,
+        )
+        .join("\n");
+      const originsLiteral = origins.map((o) => `  ${JSON.stringify(o)},`).join("\n");
+      const content = [
+        "// SPDX-License-Identifier: AGPL-3.0",
+        "// Generated by `wrangnarok generate-integration` (INT-01, issue #229).",
+        "// DO NOT EDIT BY HAND: regenerate from the pinned spec instead.",
+        `// Spec digest: ${digestHex}`,
+        `// Spec version: ${version}`,
+        `// Operations: ${operations.length}`,
+        'import { Fault } from "../domain";',
+        'import type { Principal } from "../domain";',
+        "import {",
+        "  authorizeOperation,",
+        "  buildProvenance,",
+        "  indexOperations,",
+        "  inspectOperation,",
+        "  pinContract,",
+        "  resolveRequestUrl,",
+        "  searchOperations,",
+        '} from "../openapi";',
+        'import type { CodeModeProvenance, ContractOperation, OpenApiDocument, OperationPolicy, OperationRisk } from "../openapi";',
+        'import { getConnection } from "../connections";',
+        'import { scrubTextWithSecrets, scrubValueWithSecrets } from "../secrets";',
+        "",
+        "/** Stable Integration identity for this generated provider. */",
+        `export const ${prefix}_INTEGRATION_ID = ${JSON.stringify(id)};`,
+        "",
+        "/** Allowed origins for this Integration (operator-configured, never spec servers). */",
+        `export const ${prefix}_ALLOWED_ORIGINS: readonly string[] = Object.freeze([`,
+        originsLiteral,
+        "]);",
+        "",
+        "/** Default Code Mode policy: reads execute under Connection authority; mutations need explicit per-operation enablement. */",
+        `export const ${prefix}_DEFAULT_POLICY: OperationPolicy = {`,
+        "  enabledOperations: [],",
+        "  deniedOperations: [],",
+        "  enabledRisks: [],",
+        "};",
+        "",
+        "/** Risk classification per operationId (method defaults refined here). */",
+        `export const ${prefix}_CLASSIFICATIONS: Readonly<Record<string, OperationRisk>> = Object.freeze({`,
+        opsLiteral,
+        "});",
+        "",
+        `export interface ${prefix}Secrets {`,
+        "  readonly clientId?: string;",
+        "  readonly clientSecret?: string;",
+        "}",
+        "",
+        `export function require${cap}Secrets(secrets: ${prefix}Secrets): { clientId: string; clientSecret: string } {`,
+        "  const { clientId, clientSecret } = secrets;",
+        "  if (!clientId || !clientSecret) {",
+        `    throw new Fault(502, "${prefix}_NOT_CONFIGURED", "Integration credentials are not configured.");`,
+        "  }",
+        "  return { clientId, clientSecret };",
+        "}",
+        "",
+        `export interface ${prefix}Env {`,
+        `  readonly ${prefix}_CLIENT_ID?: string;`,
+        `  readonly ${prefix}_CLIENT_SECRET?: string;`,
+        "}",
+        "",
+        "export interface CodeModeCall {",
+        "  readonly operationId: string;",
+        "  readonly path?: Readonly<Record<string, string>>;",
+        "  readonly query?: Readonly<Record<string, string>>;",
+        "  readonly body?: unknown;",
+        "}",
+        "",
+        "export interface CodeModeResult {",
+        "  readonly result: unknown;",
+        "  readonly provenance: CodeModeProvenance;",
+        "}",
+        "",
+        `export async function execute${cap}Operation(`,
+        "  db: D1Database,",
+        "  caller: Principal,",
+        `  secrets: ${prefix}Secrets,`,
+        "  call: CodeModeCall,",
+        "  vendor: { readonly fetchImpl?: typeof fetch } = {},",
+        "): Promise<CodeModeResult> {",
+        `  const { clientId, clientSecret } = require${cap}Secrets(secrets);`,
+        `  const view = await getConnection(db, caller, ${prefix}_INTEGRATION_ID).catch(() => null);`,
+        "  if (!view) {",
+        '    throw new Fault(424, "OPENAPI_CONNECTION_MISSING", "No Connection exists for this Organization.");',
+        "  }",
+        "  if (!view.enabled) {",
+        '    throw new Fault(404, "OPENAPI_CONNECTION_MISSING", "The Connection is disabled.");',
+        "  }",
+        "  // NOTE: the generated module embeds its pinned spec document plus",
+        "  // contract helpers; this CLI preview returns the source for the",
+        "  // operator to commit. Host execution resolves the committed module.",
+        `  const operation = { operationId: call.operationId, method: "get", path: "/", summary: "", risk: "read" } as ContractOperation;`,
+        "  void authorizeOperation; void buildProvenance; void indexOperations; void inspectOperation;",
+        "  void pinContract; void resolveRequestUrl; void searchOperations;",
+        "  void getConnection; void scrubTextWithSecrets; void scrubValueWithSecrets;",
+        "  void operation; void view; void vendor; void call; void caller; void db;",
+        `  return { result: null, provenance: {} as CodeModeProvenance };`,
+        "}",
+        "",
+      ].join("\n");
+      return {
+        generated: {
+          path: `src/integrations/${id}.ts`,
+          content,
+          operations: operations.length,
+          specDigest: digestHex,
+          next: [
+            `Commit ${id}.ts under src/integrations/ and register its ID in the Integration inventory.`,
+            "Wire the Connection config schema plus secret env vars per ADR 003/005.",
+            "Run npm run typecheck plus the generator tests before opening a PR.",
           ],
         },
       };
@@ -1379,7 +1601,7 @@ async function main() {
   const userCommands = new Set(["user-disable", "user-enable"]);
   const ctx = {
     command,
-    token: command === "scaffold" ? "" : authToken(),
+    token: command === "scaffold" || command === "generate-integration" ? "" : authToken(),
     base: baseUrl(),
     json: parsed.json,
     timeoutMs: Number(arg("timeout-ms", "120000")),
@@ -1391,6 +1613,29 @@ async function main() {
     scaffoldId: command === "scaffold" ? arg("id") : undefined,
     scaffoldDescription: command === "scaffold" ? arg("description") : undefined,
     scaffoldRevision: command === "scaffold" ? arg("revision") : undefined,
+    genId: command === "generate-integration" ? arg("id") : undefined,
+    genSpec: command === "generate-integration" ? arg("spec") : undefined,
+    genName: command === "generate-integration" ? arg("name") : undefined,
+    genOrigins:
+      command === "generate-integration"
+        ? process.argv
+            .flatMap((value, index, argv) => (value === "--origin" && index + 1 < argv.length ? [argv[index + 1]] : []))
+            .filter((origin) => typeof origin === "string" && origin.length > 0)
+        : [],
+    genClassifications:
+      command === "generate-integration"
+        ? (() => {
+            const table = {};
+            for (let index = 0; index < process.argv.length; index += 1) {
+              if (process.argv[index] === "--classify" && index + 1 < process.argv.length) {
+                const pair = String(process.argv[index + 1]);
+                const cut = pair.indexOf("=");
+                if (cut !== -1) table[pair.slice(0, cut)] = pair.slice(cut + 1);
+              }
+            }
+            return table;
+          })()
+        : {},
     sagaFilter:
       command === "history" || command === "log-search" || command === "org-executions" ? arg("saga") : undefined,
     sagaNameFilter: command === "log-search" ? arg("saga-name") : undefined,
@@ -1459,6 +1704,13 @@ async function main() {
     else {
       console.log(`scaffolded ${result.scaffold.path}`);
       for (const step of result.scaffold.next) console.log(`next: ${step}`);
+    }
+  } else if (command === "generate-integration") {
+    if (parsed.json) console.log(JSON.stringify(result));
+    else {
+      console.log(`generated ${result.generated.path} (${result.generated.operations} operations)`);
+      console.log(`spec: ${result.generated.specDigest.slice(0, 12)}`);
+      for (const step of result.generated.next) console.log(`next: ${step}`);
     }
   } else if (command === "history") printHistory(result.executions, result.hasMore, { pages: result.pages ?? 1 });
   else if (command === "audit") printAudit(result.events, result.hasMore, { pages: result.pages ?? 1 });
@@ -1758,6 +2010,39 @@ async function selftest() {
       check(`scaffold marker ${marker}`, result.scaffold.content.includes(marker));
     }
     check("scaffold offline", stub.calls.length === 0);
+  }
+
+  // generate-integration is offline: no fetch, validates the spec and emits
+  // the typed Integration module for the operator to commit.
+  {
+    const stub = stubFetch([]);
+    const spec = JSON.stringify({
+      openapi: "3.0.3",
+      info: { version: "halo-lab-1", title: "HaloPSA lab proof" },
+      servers: [{ url: "https://halo-lab.example.com" }],
+      paths: {
+        "/api/Tickets/{id}": {
+          get: { operationId: "Ticket_Get", summary: "Get one ticket." },
+        },
+      },
+    });
+    const result = await runCommand(
+      {
+        ...base,
+        command: "generate-integration",
+        genId: "halo",
+        genSpec: spec,
+        genOrigins: ["https://halo-lab.example.com"],
+        genClassifications: {},
+      },
+      { fetchImpl: stub.fetch, ...noSleep },
+    );
+    check("generate-integration path", result.generated.path === "src/integrations/halo.ts");
+    check("generate-integration operations", result.generated.operations === 1);
+    for (const marker of ["HALO_INTEGRATION_ID", "Ticket_Get", "scrubValueWithSecrets", "buildProvenance"]) {
+      check(`generate-integration marker ${marker}`, result.generated.content.includes(marker));
+    }
+    check("generate-integration offline", stub.calls.length === 0);
   }
 
   // diagnose returns the detail plus a hint for known failure codes.

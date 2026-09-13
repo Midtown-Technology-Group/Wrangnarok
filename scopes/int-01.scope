@@ -1,0 +1,15 @@
+# INT-01 lane scope (issue #229): Integration/SDK generator.
+# Pure emitter (OpenAPI 3.x JSON to typed Integration module) plus the
+# offline CLI wrapper. No fetch, no D1, no secrets in output.
+src/generate-integration.ts
+src/openapi.ts
+src/integrations/halo.ts
+src/integrations/index.ts
+scripts/wrangnarok.mjs
+test/generate-integration.test.ts
+test/sdk.test.ts
+docs/architecture/022-code-mode.md
+docs/upstream-parity.md
+docs/upstream-spec.md
+scopes/int-01.scope
+package.json
