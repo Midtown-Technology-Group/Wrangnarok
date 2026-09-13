@@ -954,21 +954,12 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       )
         throw new Fault(415, "JSON_REQUIRED", "Unencoded JSON is required.");
       const body: unknown = await boundedJson(request.body);
-      const { saga, input } = parseSubmission(body);
-      // AUTH-02 (ADR 018): direct Saga execution needs the saga execute
-      // grant. Org/instance admins bypass via `can`; everyone else denies by
-      // absence with 403 GRANT_REQUIRED.
-      await requireGrant(
-        env.DB,
-        ctx,
-        { orgId: caller.orgId, resourceKind: "saga", resourceId: saga.id.toLowerCase(), action: "execute" },
-        "Executing this Saga requires an execute grant.",
-      );
+      // RUN-03 (ADR 023): caller-chosen sync on the async route is a named
+      // rejection, never a silent poll. Eligible Sagas use the provider
+      // route; everything else polls the receipt. Checked on the raw body
+      // BEFORE parseSubmission, which rejects extra keys.
       if (body !== null && typeof body === "object" && !Array.isArray(body)) {
         const record = body as Record<string, unknown>;
-        // RUN-03 (ADR 023): caller-chosen sync on the async route is a named
-        // rejection, never a silent poll. Eligible Sagas use the provider
-        // route; everything else polls the receipt.
         if (record.sync === true) {
           throw new Fault(
             400,
@@ -984,6 +975,16 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           );
         }
       }
+      const { saga, input } = parseSubmission(body);
+      // AUTH-02 (ADR 018): direct Saga execution needs the saga execute
+      // grant. Org/instance admins bypass via `can`; everyone else denies by
+      // absence with 403 GRANT_REQUIRED.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "saga", resourceId: saga.id.toLowerCase(), action: "execute" },
+        "Executing this Saga requires an execute grant.",
+      );
       const accepted = await submit(env, caller, key, saga, input);
       // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
       return json(accepted, accepted.replayed ? 200 : 202, { Location: accepted.statusUrl });
@@ -1002,15 +1003,6 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       )
         throw new Fault(415, "JSON_REQUIRED", "Unencoded JSON is required.");
       const { saga, input, rejected } = parseProviderSubmission(await boundedJson(request.body), resolveSubmissionSaga);
-      // AUTH-02 (ADR 018): provider execution is Saga execution under
-      // another route. Require the saga execute grant exactly as the direct
-      // submit path does; enrollment or eligibility alone must not authorize.
-      await requireGrant(
-        env.DB,
-        ctx,
-        { orgId: caller.orgId, resourceKind: "saga", resourceId: saga.id.toLowerCase(), action: "execute" },
-        "Executing this provider requires an execute grant on its Saga.",
-      );
       if (rejected.sync === true) {
         throw new Fault(
           400,
@@ -1025,6 +1017,17 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           "No-persistence execution is not supported; provider calls persist their receipt.",
         );
       }
+      // AUTH-02 (ADR 018): provider execution is Saga execution under
+      // another route. Require the saga execute grant exactly as the direct
+      // submit path does; enrollment or eligibility alone must not authorize.
+      // Mode-shape rejections above stay first so malformed requests keep
+      // their named codes.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "saga", resourceId: saga.id.toLowerCase(), action: "execute" },
+        "Executing this provider requires an execute grant on its Saga.",
+      );
       if (!isProviderEligible(saga.id)) {
         throw new Fault(
           501,
