@@ -173,13 +173,12 @@ import { join } from "node:path";
 // main measures 561822 bytes (~548.7 KiB) locally (CI number governs).
 // Hand-written feature code, no new dependencies (package.json
 // unchanged versus main); deliberate feature headroom only.
-// 2026-09-13 (RUN-02 re-merge over TRG-01 main, issue #136): 585 KiB
-// provisional. The union of the RUN-02 child-lineage surface with the
-// TRG-01 schedules main remeasures below (CI number governs); shrink this
-// raise if the combined bundle lands lower. Hand-written feature code, no
-// new dependencies (package.json unchanged versus main); deliberate
-// feature headroom only.
-const BUDGET_BYTES = 585 * 1024;
+// 2026-09-13 (RUN-02 re-merge over TRG-01 main, issue #136): stays at
+// 575 KiB. The union of the RUN-02 child-lineage surface with the TRG-01
+// schedules main measures 583169 bytes (~569.5 KiB) locally (CI number
+// governs), inside the existing TRG-01 headroom. Hand-written feature code,
+// no new dependencies (package.json unchanged versus main); no raise needed.
+const BUDGET_BYTES = 575 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");
