@@ -89,6 +89,62 @@ const echo = await ctx.integrations.echo.echo({ message: "hello" });
 
 Do not require Saga authors to manipulate Connection records, tokens, D1 rows, or Cloudflare bindings directly.
 
+### Integration runtime surface is a capability boundary
+
+Workspace, Saga, and agent code should consume an Integration as a **capability**, not as a credential bundle or a requirement to understand the provider's transport/authentication details.
+
+The preferred authoring model is:
+
+```text
+Saga / Agent / authored app
+        |
+        v
+Wrangnarok Integration capability
+        |
+        +--> Connection resolution
+        +--> secret resolution
+        +--> authorization / policy
+        +--> request shaping / retries / pagination
+        |
+        v
+provider API
+```
+
+The caller should receive the minimum callable surface needed to perform the operation and should not receive raw bearer tokens, OAuth refresh tokens, API keys, D1 secret rows, or deployment-global secret bindings merely because an Integration needs them internally.
+
+This principle applies whether the Integration is currently implemented in-process or as a separate Worker.
+
+When an Integration is implemented as a distinct Worker/service, **Cloudflare Service Bindings are the preferred native transport** between Wrangnarok runtime code and that Integration. Service Bindings let the caller hold a typed callable reference to the Integration Worker without exposing a public HTTP endpoint, DNS name, API key, or the Integration's own secret bindings to the caller.
+
+Representative shape:
+
+```text
+Saga Worker
+   |
+   +--> HALO service binding
+   |       |
+   |       +--> Halo Connection + credential resolution
+   |       +--> Halo API
+   |
+   +--> GRAPH service binding
+           |
+           +--> Graph Connection + credential resolution
+           +--> Microsoft Graph
+```
+
+From authored code, that may eventually feel binding-like:
+
+```ts
+await ctx.integrations.halo.getTicket(ticketId);
+await ctx.integrations.graph.createUser(input);
+```
+
+The SDK contract remains a Wrangnarok capability contract, not a promise that every Integration is permanently implemented as its own Worker or that authors receive raw Cloudflare `env.*` bindings. This keeps authored automation portable across future runtime layouts.
+
+Third-party providers do not need to expose native Cloudflare bindings for Wrangnarok to offer this model. Wrangnarok may adapt an ordinary HTTP/API provider behind an Integration capability and use Service Bindings only for the internal runtime boundary where that separation is useful.
+
+This capability rule also applies to agent execution. ADR 022's OpenAPI Code Mode path may expose broad provider operations dynamically, but generated/model-driven code receives a mediated Integration request capability, not credentials or unrestricted network authority. Curated Integration Actions and Sagas remain the higher-level semantic surface for repeated business operations.
+
 ### Secret boundary
 
 Cloudflare Worker secrets and Secrets Store are suitable for deployment/account-level secrets, but they are not by themselves a scalable per-Organization Connection store: Worker secrets are deployment bindings, while Secrets Store is account-level and currently limited in count.
@@ -115,6 +171,9 @@ Token refresh must not be implemented independently in every Saga.
 - Integration code remains portable and Git-versioned.
 - Connection state remains Organization/environment-specific.
 - A Saga cannot accidentally carry credentials in source.
+- Authored runtime code consumes Integration capabilities rather than provider credentials or Connection internals.
+- A separate Integration Worker may expose a typed internal API through a Service Binding without requiring a public endpoint.
+- The authored SDK is not coupled to Service Bindings; Wrangnarok may change Integration process/Worker boundaries without rewriting user Sagas.
 - MVP tenant resolution is stricter than upstream Bifrost's global fallback behavior.
 - Secret storage becomes an explicit security design task rather than an accidental D1 schema detail.
 - The MVP slice can implement the Integration abstraction without blocking on OAuth/secret storage.
@@ -134,6 +193,7 @@ These remain specification fodder for later phases.
 Per issue #75 (lanes A: PRs #80, #83, #85, #88), extended by CON-01 (issue #146):
 
 - Integration registry: `src/integrations/index.ts` (`defineIntegration` validates stable UUID id, slug name, 1–280 char description, explicit `secretFields` list; definitions frozen via `Object.freeze`; `INTEGRATION_DEFINITIONS` canonical order; `integrationById`/`integrationByName` lookup).
+- Runtime capability boundary: the existing `ctx.integrations.<integration>.<action>()` shape is the public authoring contract. In-process Action execution remains valid. If an Integration is later split into a dedicated Worker for authority, scaling, or lifecycle reasons, prefer a typed Service Binding behind the same Wrangnarok SDK surface; do not expose the Integration Worker's raw secret bindings or require authored Sagas to depend on Cloudflare-specific `env.*` names.
 - Non-secret config schema (CON-01): each definition declares `configSchema` (typed non-secret fields with required/defaults/bounds, always including `endpoint`), `requiredSecrets` (provider-global credential names, each mapped to a deployment env var in `secretEnvVars`), and `health` (test hint + remediation copy). `validateConnectionConfig` applies defaults and rejects unknown keys, missing required fields, overlong values, and credential-shaped input with per-field 400 details. Credential-shaped names can never enter the non-secret schema.
 - Endpoint safe-URL policy (issue #236): every `endpoint` value — explicit or defaulted — must parse with `new URL` and satisfy the per-Integration policy before it can persist (create/update) or be used (vendor Action, management probe). Echo is loopback-only over plain http (the local fixture); ninjaone requires https under `.ninjarmm.com` or the never-routable `.invalid` test seam. Malformed, credential-bearing, non-web-scheme, and internal-address targets fail closed with per-field 400 details at write time; rows that predate the policy fail closed as `INVALID_CONNECTION` at use time without any outbound fetch.
 - Connection entity: typed `Connection` in `src/integrations/index.ts` (stable IDs, non-secret endpoint, optional display label, enabled flag, managed_by marker; secret material referenced transiently at execution time, never stored there), returned by `resolveConnection` in `src/executions.ts`.
