@@ -1782,8 +1782,9 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     if (url.pathname === "/api/ops/scheduled-tasks" && request.method === "GET") {
       // Upstream scheduler_diagnostics.py maps to the durable endpoint
-      // inventory (the trigger surface that actually exists); cadence stays
-      // honestly null until TRG-01 recurring schedules land.
+      // inventory plus the TRG-01 schedule inventory (the trigger surfaces
+      // that actually exist); schedule rows report their cron/timezone or
+      // one-off cadence.
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
       return json(await opsScheduledTasks(env.DB, caller));
     }
