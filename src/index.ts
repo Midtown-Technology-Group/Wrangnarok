@@ -2140,12 +2140,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     if (appGrants?.[1] && request.method === "POST") {
       requireJson(request);
+      await requireAppVisible(env.DB, ctx, caller, parseAppId(appGrants[1]), "write", "Managing App grants requires a write grant.");
       const created = await createAppGrant(env.DB, caller, parseAppId(appGrants[1]), await boundedJson(request.body));
       return json({ grant: created }, 201);
     }
     const appGrantRevoke = /^\/api\/apps\/([0-9a-f-]{36})\/grants\/([^/]+)\/revoke$/.exec(url.pathname);
     if (appGrantRevoke?.[1] && appGrantRevoke[2] && request.method === "POST") {
       rejectQuery(url);
+      await requireAppVisible(env.DB, ctx, caller, parseAppId(appGrantRevoke[1]), "write", "Revoking App grants requires a write grant.");
       return json({
         grant: await revokeAppGrant(env.DB, caller, parseAppId(appGrantRevoke[1]), appGrantRevoke[2]),
       });
@@ -2157,6 +2159,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     if (appTables?.[1] && request.method === "POST") {
       requireJson(request);
+      await requireAppVisible(env.DB, ctx, caller, parseAppId(appTables[1]), "write", "Declaring App tables requires a write grant.");
       const app = await loadRuntimeApp(env.DB, caller, parseAppId(appTables[1]));
       return json({ table: await declareAppTable(env.DB, caller, app, await boundedJson(request.body)) }, 201);
     }

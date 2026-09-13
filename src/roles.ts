@@ -177,18 +177,23 @@ export function parseGrantTriple(kind: unknown, resourceId: unknown, action: unk
   if (typeof resourceId !== "string" || resourceId.length === 0 || resourceId.length > 320) {
     throw new Fault(400, "INVALID_GRANT", "Resource ID must be 1 to 320 characters, or the * wildcard.");
   }
-  if (resourceId !== WILDCARD) {
-    if (resourceKind === "saga" && !UUID.test(resourceId.toLowerCase())) {
+  let canonicalId = resourceId;
+  if (canonicalId !== WILDCARD) {
+    if (resourceKind === "saga" && !UUID.test(canonicalId.toLowerCase())) {
       throw new Fault(400, "INVALID_GRANT", "Saga grants name a stable Saga UUID or *.");
     }
-    if (resourceKind === "form" && !/^[a-z0-9][a-z0-9-]{0,63}$/.test(resourceId)) {
+    if (resourceKind === "form" && !/^[a-z0-9][a-z0-9-]{0,63}$/.test(canonicalId)) {
       throw new Fault(400, "INVALID_GRANT", "Form grants name a Form name or *.");
     }
-    if (resourceKind === "app" && !UUID.test(resourceId.toLowerCase())) {
+    if (resourceKind === "app" && !UUID.test(canonicalId.toLowerCase())) {
       throw new Fault(400, "INVALID_GRANT", "App grants name an App UUID or *.");
     }
+    // Canonicalize UUID resource IDs to lowercase: execution and App routes
+    // match canonical lowercase IDs, so an accepted uppercase UUID would
+    // persist yet never match during `can` and deny every request.
+    if (resourceKind === "saga" || resourceKind === "app") canonicalId = canonicalId.toLowerCase();
   }
-  return { orgId: "", resourceKind, resourceId, action: action as ResourceAction };
+  return { orgId: "", resourceKind, resourceId: canonicalId, action: action as ResourceAction };
 }
 
 /** Validate a rule subject: one user (`user:<id>`), one membership kind
@@ -421,7 +426,14 @@ export async function addGrant(
     if (isMissingTable(error)) throw fail503();
     throw new Fault(409, "GRANT_EXISTS", "This grant already exists on this role.");
   }
-  return { id: grantId, roleId: id, ...triple, createdAt: stamp };
+  return {
+    id: grantId,
+    roleId: id,
+    resourceKind: triple.resourceKind,
+    resourceId: triple.resourceId,
+    action: triple.action,
+    createdAt: stamp,
+  };
 }
 
 export async function listGrants(db: D1Database, orgId: string, roleId: string): Promise<GrantRow[]> {
@@ -471,11 +483,15 @@ export async function assignRole(
   const role = await getRole(db, orgId, rid);
   if (!role) throw new Fault(404, "ROLE_NOT_FOUND", "Role not found.");
   try {
-    const identity = await db
-      .prepare("SELECT user_id FROM users WHERE user_id=?")
-      .bind(user)
+    // Org-scoped membership check: the assignee must hold an org_memberships
+    // row for THIS org, not merely exist in the global users table. A global
+    // lookup would let an admin probe foreign-tenant identities and would
+    // create dormant authority effective the moment the user joins this org.
+    const member = await db
+      .prepare("SELECT user_id FROM org_memberships WHERE org_id=? AND user_id=?")
+      .bind(orgId, user)
       .first<{ user_id: string }>();
-    if (!identity) throw new Fault(404, "USER_NOT_FOUND", "Invite this user as a member first.");
+    if (!member) throw new Fault(404, "USER_NOT_FOUND", "Invite this user as a member first.");
     const stamp = now();
     const existing = await db
       .prepare("SELECT status FROM role_assignments WHERE role_id=? AND org_id=? AND user_id=?")
