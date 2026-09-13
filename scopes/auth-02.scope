@@ -3,6 +3,7 @@ src/roles.ts
 src/auth.ts
 src/apps.ts
 src/index.ts
+src/orgs.ts
 src/sdk.ts
 migrations/0013_resource_roles.sql
 migrations/0005_forms.sql
@@ -10,6 +11,7 @@ migrations/0006_apps.sql
 test/resource-roles.test.ts
 test/resource-roles-unit.test.ts
 test/org-lifecycle.test.ts
+test/form-lifecycle.test.ts
 test/sdk.test.ts
 docs/architecture/018-resource-roles.md
 scripts/check-bundle-budget.mjs
