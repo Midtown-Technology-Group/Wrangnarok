@@ -515,29 +515,17 @@ async function assertScheduleAuthority(db: D1Database, env: AdminEnv, schedule: 
   // Instance-admin recovery parity: resolveCaller lets the env-held admin list
   // through without membership rows, so the tick does the same.
   if (instanceAdmins(env).has(principal.userId)) return principal;
+  // One missing-table fence for all three reads: a store predating migration
+  // 0007 fails loud (503) instead of dispatching unchecked.
   let org: { status?: string } | null;
+  let user: { status?: string } | null;
+  let membership: { status?: string } | null;
   try {
     org = await db.prepare("SELECT * FROM organizations WHERE id=?").bind(schedule.org_id).first<{ status?: string }>();
-  } catch (error) {
-    if (isMissingTable(error)) throw storeNotMigrated();
-    throw error;
-  }
-  if (!org) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
-  if ((org.status ?? "active") === "disabled") throw new Fault(403, "ORG_DISABLED", "This Organization is disabled.");
-  let user: { status?: string } | null;
-  try {
     user = await db
       .prepare("SELECT * FROM users WHERE user_id=?")
       .bind(schedule.run_as_user_id)
       .first<{ status?: string }>();
-  } catch (error) {
-    if (isMissingTable(error)) throw storeNotMigrated();
-    throw error;
-  }
-  if (!user) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
-  if ((user.status ?? "active") !== "active") throw new Fault(403, "USER_DISABLED", "This user is disabled.");
-  let membership: { status?: string } | null;
-  try {
     membership = await db
       .prepare("SELECT * FROM org_memberships WHERE org_id=? AND user_id=?")
       .bind(schedule.org_id, schedule.run_as_user_id)
@@ -546,6 +534,10 @@ async function assertScheduleAuthority(db: D1Database, env: AdminEnv, schedule: 
     if (isMissingTable(error)) throw storeNotMigrated();
     throw error;
   }
+  if (!org) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
+  if ((org.status ?? "active") === "disabled") throw new Fault(403, "ORG_DISABLED", "This Organization is disabled.");
+  if (!user) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
+  if ((user.status ?? "active") !== "active") throw new Fault(403, "USER_DISABLED", "This user is disabled.");
   if (!membership) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
   if (membership.status === "revoked") throw new Fault(403, "MEMBERSHIP_REVOKED", "Membership is revoked.");
   // Suspended, invited, and unknown statuses all read as not-active here: the
