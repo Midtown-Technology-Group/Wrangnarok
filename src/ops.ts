@@ -592,11 +592,11 @@ export interface OpsMetrics {
 }
 
 /** One scheduled-task row: upstream `scheduler_diagnostics.py` inspects
- * APScheduler jobs; Wrangnarok has no scheduler process in this slice
- * (TRG-01 owns recurring schedules), so the answer is the durable trigger
- * surface that actually exists — Cron-capable endpoints are reported from
- * D1, and the cadence field stays honestly null until TRG-01 schedules
- * land. A missing scheduler is stated, never emulated with a fake ticker. */
+ * APScheduler jobs; Wrangnarok reports the durable trigger surface that
+ * actually exists — endpoints (`kind: "endpoint"`, cadence honestly null)
+ * plus TRG-01 schedules (`kind: "scheduler"`, cadence is the cron plus
+ * timezone or the one-off due instant). A missing schedule table degrades
+ * to the endpoint-only view, never a fake ticker. */
 export interface OpsScheduledTask {
   readonly id: string;
   readonly name: string;
