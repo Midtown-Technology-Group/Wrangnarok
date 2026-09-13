@@ -1,6 +1,0 @@
-CREATE TABLE executions_new (id TEXT PRIMARY KEY, saga_id TEXT NOT NULL, saga_name TEXT NOT NULL, saga_revision TEXT NOT NULL, org_id TEXT NOT NULL, user_id TEXT NOT NULL, input_json TEXT NOT NULL CHECK(length(input_json) <= 4096), dispatched INTEGER NOT NULL DEFAULT 0 CHECK(dispatched IN (0, 1)), status TEXT NOT NULL DEFAULT 'Pending' CHECK(status IN ('Pending','Running','Succeeded','Failed','TimedOut','Cancelling','Cancelled','Scheduled')), schedule_id TEXT, due_at TEXT, created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, result_json TEXT CHECK(result_json IS NULL OR length(result_json) <= 4096), error_json TEXT);
-INSERT INTO executions_new (id, saga_id, saga_name, saga_revision, org_id, user_id, input_json, dispatched, status, schedule_id, due_at, created_at, started_at, completed_at, result_json, error_json) SELECT id, saga_id, saga_name, saga_revision, org_id, user_id, input_json, dispatched, status, NULL, NULL, created_at, started_at, completed_at, result_json, error_json FROM executions;
-DROP TABLE executions;
-ALTER TABLE executions_new RENAME TO executions;
-CREATE INDEX executions_history ON executions(org_id, user_id, created_at DESC, id DESC);
-CREATE INDEX executions_schedule_due ON executions(schedule_id, due_at);
