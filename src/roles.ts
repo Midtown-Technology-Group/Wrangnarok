@@ -25,7 +25,7 @@ export type AssignmentStatus = "active" | "revoked";
  * Apps never grants any action. */
 const ACTIONS: Readonly<Record<ResourceKind, readonly ResourceAction[]>> = {
   saga: ["execute"],
-  form: ["read", "submit"],
+  form: ["read", "submit", "write"],
   app: ["read", "write", "serve"],
 };
 const KINDS: readonly string[] = ["saga", "form", "app"];

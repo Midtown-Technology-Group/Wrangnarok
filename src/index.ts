@@ -987,6 +987,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       ) {
         throw new Fault(400, "INVALID_FORM", "Form sagaId must be a known Saga UUID.");
       }
+      // AUTH-02: Form authoring needs the form write grant. Creation names
+      // its own form, so gate on the kind-wide wildcard target.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "form", resourceId: "*", action: "write" },
+        "Creating Forms requires a form write grant.",
+      );
       const saved = await saveForm(env.DB, caller, created);
       return json({ form: serializeForm(saved) }, 201);
     }
@@ -1024,6 +1032,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       }
       const existing = await loadForm(env.DB, caller.orgId, name);
       if (!existing) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      // AUTH-02: Form authoring needs the form write grant on the target.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "write" },
+        "Editing this Form requires a write grant.",
+      );
       const patch = body as Record<string, unknown>;
       if (
         typeof patch.sagaId !== "string" ||
@@ -1039,6 +1054,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const name = formDetail[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      // AUTH-02: Form deletion needs the form write grant on the target.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "write" },
+        "Deleting this Form requires a write grant.",
+      );
       await deleteForm(env.DB, caller, name);
       return json({ deleted: name });
     }
@@ -2445,6 +2467,15 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         ...((await boundedJson(request.body)) as Record<string, unknown>),
         sagaId: tool.sagaId,
       });
+      // AUTH-02: tool execution is Saga execution under another name.
+      // Enrollment alone must not authorize it: require the saga execute
+      // grant exactly as the direct submit path does.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "saga", resourceId: saga.id.toLowerCase(), action: "execute" },
+        "Executing this tool requires an execute grant on its Saga.",
+      );
       const accepted = await submit(env, caller, key, saga, input);
       await recordAudit(
         env.DB,
@@ -2646,6 +2677,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         const args = input as Record<string, unknown>;
         const key = parseCallerKey(typeof args.idempotencyKey === "string" ? (args.idempotencyKey as string) : null);
         const { saga, input: parsed } = parseSubmission({ input: args.input ?? {}, sagaId: resolved.sagaId });
+        // AUTH-02: same execute-grant gate as the REST tool path above.
+        await requireGrant(
+          env.DB,
+          ctx,
+          { orgId: caller.orgId, resourceKind: "saga", resourceId: saga.id.toLowerCase(), action: "execute" },
+          "Executing this tool requires an execute grant on its Saga.",
+        );
         const accepted = await submit(env, caller, key, saga, parsed);
         await recordAudit(
           env.DB,
