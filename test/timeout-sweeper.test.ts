@@ -44,15 +44,16 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await reset();
 });
-it("declares exactly the TRG-01 Cron trigger that promotes due schedules", () => {
-  // Tripwire (updated by TRG-01, issue #137, ADR 012 accepted): one Cron
-  // trigger owns the schedule tick. The sweeper investigation below still
-  // holds — the tick promotes due schedule rows only, and no background job
-  // ever writes TimedOut. If a second trigger appears, it needs an ADR per
-  // AGENTS.md constraint 7; do not delete this, re-run the investigation.
-  // wrangler.jsonc carries // comments, so match the triggers block textually
-  // instead of JSON-parsing it.
-  expect(wranglerConfig).toMatch(/"triggers":\s*\{\s*"crons":\s*\["\* \* \* \* \*"\]/);
+it("permits only the TRG-01 promotion tick as a Cron trigger", () => {
+  // Tripwire (updated TRG-01, issue #137, ADR 012): the minute Cron tick is
+  // earned for due-schedule promotion only. The tick promotes due rows
+  // through the submit protocol — it never sweeps Pending, never writes
+  // TimedOut, and never resurrects cancelled windows. Any second schedule
+  // or non-promotion Cron use needs its own ADR per AGENTS.md constraint 7.
+  const crons = [...wranglerConfig.matchAll(/"crons"\s*:\s*\[([^\]]*)\]/g)].flatMap((match) =>
+    [...(match[1] ?? "").matchAll(/"([^"]+)"/g)].map((entry) => entry[1]),
+  );
+  expect(crons).toEqual(["* * * * *"]);
 });
 it("leaves a stuck Running execution alone until its owner cancels it", async () => {
   const id = await executionId(principal, key);

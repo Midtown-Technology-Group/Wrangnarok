@@ -1,446 +1,368 @@
 // SPDX-License-Identifier: AGPL-3.0
-// TRG-01 pure schedule contracts (issue #137): cron validation, timezone
-// labels, window math, key derivation, and the tick scan/promotion skeleton
-// over a stub promoter. No runtime binding: runs in plain Vitest.
-import { describe, expect, it } from "vitest";
-import {
-  advanceRecurring,
-  createSchedule,
-  cronMatches,
-  deleteSchedule,
-  firstWindow,
-  listSchedules,
-  loadSchedule,
-  nextWindow,
-  parseCronExpression,
-  parseScheduleBody,
-  parseTimezone,
-  previewWindows,
-  runTick,
-  scheduleKey,
-  setScheduleStatus,
-  windowOf,
-  type ScheduleRow,
-} from "../src/schedules";
-import { echoSaga, helloSaga } from "../src/domain";
-import type { Principal } from "../src/domain";
+// TRG-01 (issue #137, ADR 012): schedule parsers and due-time math, pure
+// plus workerd-backed CRUD. Every gate runs in real workerd with real D1;
+// only outbound vendor HTTP is mocked (hello Saga needs no vendor fetch).
+import { env } from "cloudflare:workers";
+import { reset } from "cloudflare:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import worker from "../src/index";
+import type { Bindings } from "../src/bindings";
+import { helloSaga } from "../src/domain";
+import { currentWindow, nextCronDue, parseCron, parseScheduleTimezone, scheduleWindowKey } from "../src/schedules";
+import { createSdkClient, SdkError } from "../src/sdk";
+import migration1 from "../migrations/0001_initial.sql?raw";
+import migration2 from "../migrations/0002_cancelling.sql?raw";
+import migration7 from "../migrations/0007_org_membership.sql?raw";
+import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
+import migration16 from "../migrations/0016_schedules.sql?raw";
+import seed from "../scripts/seed-local.sql?raw";
 
-function faultCode(fn: () => unknown): string {
-  try {
-    fn();
-  } catch (error) {
-    return (error as { code?: string }).code ?? "NO_CODE";
-  }
-  throw new Error("expected a Fault");
+const bindings = env as unknown as Bindings;
+const TOKEN = "a".repeat(64);
+const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+
+function authed(path: string, method: string, body?: unknown): Request {
+  return new Request(`http://local.test${path}`, {
+    method,
+    headers: { ...auth },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
 }
 
-function row(overrides: Partial<ScheduleRow> = {}): ScheduleRow {
-  return {
-    id: "11111111-1111-4111-8111-111111111111",
-    org_id: "00000000-0000-4000-8000-000000000001",
-    user_id: "00000000-0000-4000-8000-000000000002",
-    saga_id: echoSaga.id,
-    input_json: JSON.stringify({ message: "hi" }),
-    kind: "once",
-    status: "active",
-    cron_expr: null,
-    timezone: "UTC",
-    run_at: "2026-09-12T00:00:00.000Z",
-    next_due_at: "2026-09-12T00:00:00.000Z",
-    overlap: "allow",
-    last_execution_id: null,
-    last_skipped_window: null,
-    created_at: "2026-09-11T00:00:00.000Z",
-    updated_at: "2026-09-11T00:00:00.000Z",
-    ...overrides,
-  };
-}
+beforeEach(async () => {
+  await bindings.DB.exec(migration1);
+  await bindings.DB.exec(migration2);
+  await bindings.DB.exec(migration7);
+  await bindings.DB.exec(migration8);
+  await bindings.DB.exec(migration16);
+  await bindings.DB.exec(seed);
+});
+afterEach(async () => {
+  await reset();
+});
 
-describe("cron validation", () => {
-  it("accepts Cloudflare-shaped expressions and normalizes whitespace", () => {
-    expect(parseCronExpression("* * * * *")).toBe("* * * * *");
-    expect(parseCronExpression("  */15  9-17  *  *  MON-FRI ")).toBe("*/15 9-17 * * MON-FRI");
-    expect(parseCronExpression("0 0 1 JAN SUN")).toBe("0 0 1 JAN SUN");
-    expect(parseCronExpression("0,30 8,18 1,15 1,6 0,6")).toBe("0,30 8,18 1,15 1,6 0,6");
+describe("TRG-01 cron and timezone parsing (pure)", () => {
+  it("accepts standard 5-field cron and rejects malformed cadence", () => {
+    expect(parseCron("* * * * *")).toBe("* * * * *");
+    expect(parseCron("0 9 * * 1-5")).toBe("0 9 * * 1-5");
+    expect(parseCron("*/15 8-18 * * *")).toBe("*/15 8-18 * * *");
+    expect(() => parseCron("* * * *")).toThrow(/5-field/);
+    expect(() => parseCron("* * * * * *")).toThrow(/5-field/);
+    expect(() => parseCron("61 * * * *")).toThrow(/out of range/);
+    expect(() => parseCron("0 25 * * *")).toThrow(/out of range/);
+    expect(() => parseCron("0 0 0 * *")).toThrow(/out of range/);
+    expect(() => parseCron("0 0 * 13 *")).toThrow(/out of range/);
+    expect(() => parseCron("0 0 * * 8")).toThrow(/out of range/);
+    expect(() => parseCron("nope * * * *")).toThrow(/5-field/);
+    expect(() => parseCron("")).toThrow(/Cron must be/);
+    expect(() => parseCron("*".repeat(65))).toThrow(/at most 64/);
+    expect(() => parseCron(null)).toThrow(/Cron must be/);
   });
-  it("refuses seconds, years, L/W/#, free text, and out-of-range fields", () => {
-    for (const bad of [
-      "* * * *",
-      "* * * * * *",
-      "*/0 * * * *",
-      "61 * * * *",
-      "* 24 * * *",
-      "* * 0 * *",
-      "* * * 13 *",
-      "* * * * 7",
-      "L * * * *",
-      "* * W * *",
-      "* * * * #",
-      "every minute please",
-      "* * * * MON-",
-      "* * * *, *",
-      "",
-    ]) {
-      expect(
-        faultCode(() => parseCronExpression(bad)),
-        bad,
-      ).toBe("INVALID_CRON");
-    }
+  it("defaults timezones to UTC and fails closed on unknown zones", () => {
+    expect(parseScheduleTimezone(undefined)).toBe("UTC");
+    expect(parseScheduleTimezone("")).toBe("UTC");
+    expect(parseScheduleTimezone("UTC")).toBe("UTC");
+    expect(parseScheduleTimezone("America/New_York")).toBe("America/New_York");
+    expect(() => parseScheduleTimezone("Mars/Olympus")).toThrow(/IANA timezone/);
+    expect(() => parseScheduleTimezone(42)).toThrow(/IANA timezone/);
+  });
+  it("computes the next due instant after the cursor", () => {
+    const from = new Date("2026-09-12T10:00:30.000Z");
+    expect(nextCronDue("* * * * *", "UTC", from)).toBe("2026-09-12T10:01:00.000Z");
+    expect(nextCronDue("0 9 * * *", "UTC", new Date("2026-09-12T10:00:00.000Z"))).toBe("2026-09-13T09:00:00.000Z");
+    expect(nextCronDue("0 9 * * *", "UTC", new Date("2026-09-12T08:00:00.000Z"))).toBe("2026-09-12T09:00:00.000Z");
+  });
+  it("derives deterministic schedule-window keys in the sch- namespace", async () => {
+    const first = await scheduleWindowKey("schedule-id-1", "2026-09-12T10:01");
+    const second = await scheduleWindowKey("schedule-id-1", "2026-09-12T10:01");
+    expect(first).toBe(second);
+    expect(first.startsWith("sch-")).toBe(true);
+    expect(await scheduleWindowKey("schedule-id-1", "2026-09-12T10:02")).not.toBe(first);
+    expect(await scheduleWindowKey("schedule-id-2", "2026-09-12T10:01")).not.toBe(first);
+    await expect(scheduleWindowKey("schedule-id-1", "evil window!")).rejects.toThrow(/safe delivery/);
+  });
+  it("formats minute windows in UTC", () => {
+    expect(currentWindow(new Date("2026-09-12T10:01:45.000Z"))).toBe("2026-09-12T10:01");
   });
 });
 
-describe("timezone labels", () => {
-  it("defaults to UTC and accepts IANA names plus fixed offsets", () => {
-    expect(parseTimezone(undefined)).toBe("UTC");
-    expect(parseTimezone("UTC")).toBe("UTC");
-    expect(parseTimezone("America/New_York")).toBe("America/New_York");
-    expect(parseTimezone("+02:00")).toBe("+02:00");
-    expect(faultCode(() => parseTimezone("Mars/Olympus"))).toBe("INVALID_TIMEZONE");
-    expect(faultCode(() => parseTimezone(7))).toBe("INVALID_TIMEZONE");
+describe("TRG-01 schedule CRUD (workerd)", () => {
+  it("rejects malformed schedule route identifiers", async () => {
+    expect((await worker.fetch(authed("/api/schedules/UPPER", "GET"), bindings)).status).toBe(404);
   });
-});
-
-describe("windows and keys", () => {
-  it("labels one-off windows by runAt and aligns recurring windows to the minute", () => {
-    expect(windowOf("once", new Date(), "2026-09-12T00:00:00.000Z")).toBe("2026-09-12T00:00:00.000Z");
-    expect(windowOf("recurring", new Date("2026-09-12T03:04:05.678Z"))).toBe("2026-09-12T03:04:00Z");
-    expect(firstWindow(new Date("2026-09-12T03:04:05.000Z")).toISOString()).toBe("2026-09-12T03:05:00.000Z");
-  });
-  it("derives parseKey-compatible submit keys", () => {
-    const key = scheduleKey("11111111-1111-4111-8111-111111111111", "recurring", "2026-09-12T03:04:00Z");
-    expect(key).toMatch(/^[a-zA-Z0-9._:-]{16,128}$/);
-    expect(key).toContain("recur");
-    expect(scheduleKey("11111111-1111-4111-8111-111111111111", "once", "2026-09-12T00:00:00.000Z")).toContain("once");
-  });
-  it("matches cron fields in UTC and advances to the next window", () => {
-    expect(cronMatches("* * * * *", new Date("2026-09-12T03:04:00Z"))).toBe(true);
-    expect(cronMatches("5 3 * * *", new Date("2026-09-12T03:05:00Z"))).toBe(true);
-    expect(cronMatches("5 3 * * *", new Date("2026-09-12T03:06:00Z"))).toBe(false);
-    expect(cronMatches("0 9 * * MON", new Date("2026-09-14T09:00:00Z"))).toBe(true);
-    expect(nextWindow("* * * * *", new Date("2026-09-12T03:04:00Z")).toISOString()).toBe("2026-09-12T03:05:00.000Z");
-    expect(nextWindow("0 0 1 * *", new Date("2026-09-12T00:00:00Z")).toISOString()).toBe("2026-10-01T00:00:00.000Z");
-    expect(faultCode(() => nextWindow("0 0 30 2 *", new Date("2026-09-12T00:00:00Z")))).toBe("SCHEDULE_UNMATCHABLE");
-  });
-  it("previews bounded window lists", () => {
-    expect(previewWindows("* * * * *", new Date("2026-09-12T03:04:00Z"), 3)).toEqual([
-      "2026-09-12T03:05:00Z",
-      "2026-09-12T03:06:00Z",
-      "2026-09-12T03:07:00Z",
-    ]);
-    expect(faultCode(() => previewWindows("* * * * *", new Date(), 0))).toBe("INVALID_PREVIEW");
-    expect(faultCode(() => previewWindows("* * * * *", new Date(), 21))).toBe("INVALID_PREVIEW");
-  });
-});
-
-describe("schedule bodies", () => {
-  const sagas = [
-    { id: echoSaga.id, name: "echo", revision: "echo-v1", description: "echo", parse: (v: unknown) => v },
-    { id: helloSaga.id, name: "hello", revision: "hello-v1", description: "hello", parse: (v: unknown) => v },
-  ];
-  it("accepts one-off and recurring shapes, refuses cross-fields and extras", () => {
-    const once = parseScheduleBody(
-      { sagaId: echoSaga.id, input: { message: "hi" }, kind: "once", runAt: "2099-01-01T00:00:00.000Z" },
-      sagas,
-    );
-    expect(once.create.kind).toBe("once");
-    const recur = parseScheduleBody(
-      { sagaId: echoSaga.id, input: { message: "hi" }, kind: "recurring", cron: "* * * * *" },
-      sagas,
-    );
-    expect(recur.create.kind).toBe("recurring");
-    const bodyCode = (body: unknown): string => faultCode(() => parseScheduleBody(body, sagas));
-    expect(
-      bodyCode({ sagaId: echoSaga.id, input: {}, kind: "once", runAt: "2099-01-01T00:00:00.000Z", cron: "* * * * *" }),
-    ).toBe("INVALID_SCHEDULE");
-    expect(
-      bodyCode({
-        sagaId: echoSaga.id,
-        input: {},
+  it("creates, lists, previews, disables, and deletes schedules as an operator", async () => {
+    const created = await worker.fetch(
+      authed("/api/schedules", "POST", {
+        name: "morning-digest",
+        sagaId: helloSaga.id,
         kind: "recurring",
         cron: "* * * * *",
-        runAt: "2099-01-01T00:00:00.000Z",
+        timezone: "UTC",
+        input: { name: "sched" },
       }),
-    ).toBe("INVALID_SCHEDULE");
-    expect(bodyCode({ sagaId: echoSaga.id, input: {}, kind: "recurring", cron: "* * * * *", bogus: 1 })).toBe(
-      "INVALID_SCHEDULE",
+      bindings,
     );
-    expect(bodyCode({ sagaId: echoSaga.id, input: {}, kind: "recurring", cron: "nope" })).toBe("INVALID_CRON");
-    expect(bodyCode({ sagaId: echoSaga.id, input: {}, kind: "once", runAt: "2000-01-01T00:00:00.000Z" })).toBe(
-      "INVALID_RUN_AT",
-    );
-    expect(bodyCode({ sagaId: "not-a-uuid", input: {}, kind: "once", runAt: "2099-01-01T00:00:00.000Z" })).toBe(
-      "INVALID_SAGA_ID",
-    );
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as { schedule: { name: string; nextDueAt: string; enabled: boolean } };
+    expect(createdBody.schedule.name).toBe("morning-digest");
+    expect(createdBody.schedule.enabled).toBe(true);
+    expect(Date.parse(createdBody.schedule.nextDueAt)).toBeGreaterThan(Date.now() - 60_000);
+    // Same-org duplicate names answer 409, never a second row.
     expect(
-      bodyCode({
-        sagaId: "395e15f0-3627-41f6-8922-008ce37e3b00",
-        input: {},
-        kind: "once",
-        runAt: "2099-01-01T00:00:00.000Z",
-      }),
-    ).toBe("UNKNOWN_SAGA");
-    expect(bodyCode(null)).toBe("INVALID_SCHEDULE");
-    expect(bodyCode({ sagaId: echoSaga.id, input: {}, kind: "sometimes", runAt: "2099-01-01T00:00:00.000Z" })).toBe(
-      "INVALID_SCHEDULE",
-    );
+      (
+        await worker.fetch(
+          authed("/api/schedules", "POST", {
+            name: "morning-digest",
+            sagaId: helloSaga.id,
+            kind: "recurring",
+            cron: "* * * * *",
+            input: { name: "sched" },
+          }),
+          bindings,
+        )
+      ).status,
+    ).toBe(409);
+    // Unknown Sagas and malformed cron fail closed; identity smuggling rejects.
     expect(
-      bodyCode({ sagaId: echoSaga.id, input: {}, kind: "recurring", cron: "* * * * *", overlap: "sometimes" }),
-    ).toBe("INVALID_OVERLAP");
+      (
+        await worker.fetch(
+          authed("/api/schedules", "POST", {
+            name: "bad-saga",
+            sagaId: "395e15f0-3627-41f6-8922-008ce37e3b00",
+            kind: "recurring",
+            cron: "* * * * *",
+          }),
+          bindings,
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await worker.fetch(
+          authed("/api/schedules", "POST", { name: "bad-cron", sagaId: helloSaga.id, kind: "recurring", cron: "nope" }),
+          bindings,
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await worker.fetch(
+          authed("/api/schedules", "POST", {
+            name: "smuggle",
+            sagaId: helloSaga.id,
+            kind: "recurring",
+            cron: "* * * * *",
+            runAs: "someone-else",
+          }),
+          bindings,
+        )
+      ).status,
+    ).toBe(400);
+    // Inventory lists the row; detail previews it.
+    const listed = (await (await worker.fetch(authed("/api/schedules", "GET"), bindings)).json()) as {
+      schedules: { name: string }[];
+    };
+    expect(listed.schedules.map((entry) => entry.name)).toContain("morning-digest");
+    const detail = (await (await worker.fetch(authed("/api/schedules/morning-digest", "GET"), bindings)).json()) as {
+      schedule: { sagaId: string };
+    };
+    expect(detail.schedule.sagaId).toBe(helloSaga.id);
+    // Unknown names 404, never a leak.
+    expect((await worker.fetch(authed("/api/schedules/no-such-schedule", "GET"), bindings)).status).toBe(404);
+    expect((await worker.fetch(authed("/api/schedules/no-such-schedule", "DELETE"), bindings)).status).toBe(404);
+    expect((await worker.fetch(authed("/api/schedules/no-such-schedule/enable", "POST"), bindings)).status).toBe(404);
+    expect((await worker.fetch(authed("/api/schedules/no-such-schedule/disable", "POST"), bindings)).status).toBe(404);
+    expect(
+      (
+        await worker.fetch(
+          authed("/api/schedules/no-such-schedule/deliveries?window=2026-09-12T10:01", "GET"),
+          bindings,
+        )
+      ).status,
+    ).toBe(404);
+    // Unknown delivery windows 404, never an invented mapping.
+    expect(
+      (await worker.fetch(authed("/api/schedules/morning-digest/deliveries?window=2099-01-01T00:00", "GET"), bindings))
+        .status,
+    ).toBe(404);
+    // Query strings outside the allowlist stay denied.
+    expect(
+      (await worker.fetch(authed("/api/schedules/morning-digest/deliveries?window=x&extra=1", "GET"), bindings)).status,
+    ).toBe(400);
+    // Disable fences promotion; re-enable resumes.
+    expect((await worker.fetch(authed("/api/schedules/morning-digest/disable", "POST"), bindings)).status).toBe(200);
+    const disabled = (await (await worker.fetch(authed("/api/schedules/morning-digest", "GET"), bindings)).json()) as {
+      schedule: { enabled: boolean };
+    };
+    expect(disabled.schedule.enabled).toBe(false);
+    expect((await worker.fetch(authed("/api/schedules/morning-digest/enable", "POST"), bindings)).status).toBe(200);
+    // Delete removes the row; a second delete is gone, not resurrected.
+    expect((await worker.fetch(authed("/api/schedules/morning-digest", "DELETE"), bindings)).status).toBe(200);
+    expect((await worker.fetch(authed("/api/schedules/morning-digest", "GET"), bindings)).status).toBe(404);
   });
-});
-
-describe("tick skeleton over a stub promoter", () => {
-  function memoryDb(schedules: ScheduleRow[]): D1Database {
-    const updates: { sql: string; binds: unknown[] }[] = [];
-    const stmt = (sql: string) => ({
-      bind: (...binds: unknown[]) => ({
-        first: async () => null,
-        all: async () => ({ results: schedules }),
-        run: async () => {
-          updates.push({ sql, binds });
-          return {};
-        },
+  it("deletes a schedule after its first delivery without FK failure", async () => {
+    // Regression (#137 reopen): schedule_deliveries references schedules(id)
+    // with no ON DELETE action, so deleting a delivered schedule must clear
+    // its delivery rows in the same delete. ExecutionHistory provenance
+    // survives on the executions rows (keyed by Execution ID).
+    const runAt = new Date(Date.now() - 30_000).toISOString();
+    expect(
+      (
+        await worker.fetch(
+          authed("/api/schedules", "POST", {
+            name: "delivered-then-deleted",
+            sagaId: helloSaga.id,
+            kind: "one-off",
+            runAt,
+            input: { name: "sched" },
+          }),
+          bindings,
+        )
+      ).status,
+    ).toBe(201);
+    const tick = worker as unknown as { scheduled: (event: unknown, env: Bindings) => Promise<void> };
+    await tick.scheduled({ cron: "* * * * *" }, bindings);
+    const delivered = await bindings.DB.prepare(
+      "SELECT COUNT(*) AS n FROM schedule_deliveries WHERE schedule_id=(SELECT id FROM schedules WHERE org_id=? AND name=?)",
+    )
+      .bind("00000000-0000-4000-8000-000000000001", "delivered-then-deleted")
+      .first<{ n: number }>();
+    expect(delivered?.n).toBe(1);
+    expect((await worker.fetch(authed("/api/schedules/delivered-then-deleted", "DELETE"), bindings)).status).toBe(200);
+    const remaining = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM schedule_deliveries").first<{
+      n: number;
+    }>();
+    expect(remaining?.n).toBe(0);
+    const executions = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM executions").first<{ n: number }>();
+    expect(executions?.n).toBeGreaterThan(0);
+  }, 25000);
+  it("creates one-off schedules with durable due-time", async () => {
+    const runAt = new Date(Date.now() + 60_000).toISOString();
+    const created = await worker.fetch(
+      authed("/api/schedules", "POST", {
+        name: "one-shot",
+        sagaId: helloSaga.id,
+        kind: "one-off",
+        runAt,
+        input: { name: "sched" },
       }),
+      bindings,
+    );
+    expect(created.status).toBe(201);
+    const body = (await created.json()) as { schedule: { runAt: string; nextDueAt: string; kind: string } };
+    expect(body.schedule.kind).toBe("one-off");
+    expect(body.schedule.runAt).toBe(runAt);
+    expect(body.schedule.nextDueAt).toBe(runAt);
+    // One-off rows require a real timestamp.
+    expect(
+      (
+        await worker.fetch(
+          authed("/api/schedules", "POST", { name: "no-time", sagaId: helloSaga.id, kind: "one-off" }),
+          bindings,
+        )
+      ).status,
+    ).toBe(400);
+  });
+  it("gates writes to Organization admins; ordinary members read only", async () => {
+    const memberId = "00000000-0000-4000-8000-000000000099";
+    const stamp = new Date().toISOString();
+    await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?)")
+      .bind(memberId, stamp)
+      .run();
+    await bindings.DB.prepare(
+      "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,'member','active','ordinary',?,?)",
+    )
+      .bind("00000000-0000-4000-8000-000000000001", memberId, stamp, stamp)
+      .run();
+    const memberBindings = {
+      ...bindings,
+      LAB_USER_ID: memberId,
+      LAB_FIXTURE_USER_ID: "00000000-0000-4000-8000-000000000002",
+    };
+    expect(
+      (
+        await worker.fetch(
+          authed("/api/schedules", "POST", {
+            name: "member-try",
+            sagaId: helloSaga.id,
+            kind: "recurring",
+            cron: "* * * * *",
+          }),
+          memberBindings,
+        )
+      ).status,
+    ).toBe(403);
+    // Reads stay open to same-org members.
+    expect((await worker.fetch(authed("/api/schedules", "GET"), memberBindings)).status).toBe(200);
+  });
+  it("falls back to the saga id when the catalog drops a scheduled saga", async () => {
+    const now = new Date().toISOString();
+    await bindings.DB.prepare(
+      "INSERT INTO schedules(id,org_id,name,saga_id,kind,cron,timezone,enabled,input_json,run_as_user_id,next_due_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        "55555555-5555-4555-8555-555555555555",
+        "00000000-0000-4000-8000-000000000001",
+        "orphan-row",
+        "00000000-0000-4000-8000-000000000099",
+        "recurring",
+        "* * * * *",
+        "UTC",
+        1,
+        "{}",
+        "00000000-0000-4000-8000-000000000002",
+        now,
+        now,
+        now,
+      )
+      .run();
+    const listed = (await (await worker.fetch(authed("/api/schedules", "GET"), bindings)).json()) as {
+      schedules: { name: string; sagaName: string }[];
+    };
+    expect(listed.schedules.find((entry) => entry.name === "orphan-row")?.sagaName).toBe(
+      "00000000-0000-4000-8000-000000000099",
+    );
+  });
+  it("drives schedules through the typed SDK client", async () => {
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) =>
+      worker.fetch(new Request(url, { ...(init ?? {}), headers: { ...auth, ...(init?.headers ?? {}) } }), {
+        ...bindings,
+      })) as typeof fetch;
+    const client = createSdkClient({ base: "http://local.test", token: TOKEN, fetchImpl });
+    // Malformed names fail before any fetch.
+    await expect(client.getSchedule("UPPER")).rejects.toBeInstanceOf(SdkError);
+    const created = await client.createSchedule({
+      name: "sdk-roundtrip",
+      sagaId: helloSaga.id,
+      kind: "one-off",
+      runAt: new Date(Date.now() + 3_600_000).toISOString(),
+      input: { name: "sched" },
     });
-    return { prepare: stmt } as unknown as D1Database;
-  }
-  it("promotes due rows, skips loudly, and retires one-offs", async () => {
-    const due = row({
-      id: "aaaaaaaa-1111-4111-8111-111111111111",
-      kind: "once",
-      next_due_at: "2026-09-11T00:00:00.000Z",
-    });
-    const recur = row({
-      id: "bbbbbbbb-2222-4222-8222-222222222222",
+    expect(created.name).toBe("sdk-roundtrip");
+    expect(created.kind).toBe("one-off");
+    const recurring = await client.createSchedule({
+      name: "sdk-recur",
+      sagaId: helloSaga.id,
       kind: "recurring",
-      cron_expr: "* * * * *",
-      run_at: null,
-      next_due_at: "2026-09-11T00:00:00.000Z",
+      cron: "0 9 * * 1-5",
+      timezone: "America/New_York",
+      input: { name: "sched" },
+      enabled: false,
     });
-    const skip = row({
-      id: "cccccccc-3333-4333-8333-333333333333",
-      kind: "once",
-      next_due_at: "2026-09-11T00:00:00.000Z",
+    expect(recurring.cron).toBe("0 9 * * 1-5");
+    expect(recurring.timezone).toBe("America/New_York");
+    expect(recurring.enabled).toBe(false);
+    expect(await client.listSchedules()).toHaveLength(2);
+    expect((await client.getSchedule("sdk-roundtrip")).id).toBe(created.id);
+    const disabled = await client.setScheduleEnabled("sdk-roundtrip", false);
+    expect(disabled.enabled).toBe(false);
+    expect((await client.setScheduleEnabled("sdk-roundtrip", true)).enabled).toBe(true);
+    // No deliveries yet: the visibility read 404s instead of inventing one.
+    await expect(client.getScheduleDelivery("sdk-roundtrip", "2026-09-12T10:01")).rejects.toMatchObject({
+      code: "NOT_FOUND",
     });
-    const db = memoryDb([due, recur, skip]);
-    const calls: string[] = [];
-    const result = await runTick(
-      db,
-      async ({ schedule, window, key }) => {
-        calls.push(`${schedule.id}:${window}:${key}`);
-        if (schedule.id.startsWith("cccc"))
-          return { executionId: "", replayed: false, skipped: true, skipReason: "test" };
-        return { executionId: `exec-${schedule.id}`, replayed: false, skipped: false };
-      },
-      new Date("2026-09-12T00:00:00.000Z"),
-    );
-    expect(result.scanned).toBe(3);
-    expect(result.promoted).toBe(2);
-    expect(result.skipped).toBe(1);
-    expect(result.receipts).toHaveLength(2);
-    expect(calls).toHaveLength(3);
-    expect(calls[0]).toContain("once");
-  });
-  it("respects the admission bound", async () => {
-    const many = Array.from({ length: 30 }, (_, i) =>
-      row({ id: `0000000${i % 10}-1111-4111-8111-11111111111${i % 10}`, next_due_at: "2026-09-11T00:00:00.000Z" }),
-    );
-    const db = memoryDb(many);
-    let count = 0;
-    const result = await runTick(
-      db,
-      async ({ schedule }) => {
-        count += 1;
-        return { executionId: `exec-${schedule.id}`, replayed: false, skipped: false };
-      },
-      new Date("2026-09-12T00:00:00.000Z"),
-    );
-    expect(count).toBeLessThanOrEqual(25);
-    expect(result.promoted).toBeLessThanOrEqual(25);
-  });
-});
-
-describe("parser and persistence branch edges", () => {
-  it("refuses malformed cron ranges, values, and non-string expressions", () => {
-    // Bare slash with no range side: `range` is empty, not "*".
-    expect(faultCode(() => parseCronExpression("/2 * * * *"))).toBe("INVALID_CRON");
-    // Out-of-range range bound.
-    expect(faultCode(() => parseCronExpression("70-80 * * * *"))).toBe("INVALID_CRON");
-    // Inverted range.
-    expect(faultCode(() => parseCronExpression("30-10 * * * *"))).toBe("INVALID_CRON");
-    // Non-string expression.
-    expect(faultCode(() => parseCronExpression(42))).toBe("INVALID_CRON");
-    // Field too long.
-    expect(faultCode(() => parseCronExpression(`${"1".repeat(65)} * * * *`))).toBe("INVALID_CRON");
-  });
-  it("refuses malformed runAt, overlap, and timezone values", () => {
-    const sagas = [
-      { id: echoSaga.id, name: "echo", revision: "echo-v1", description: "echo", parse: (v: unknown) => v },
-    ];
-    const bodyCode = (body: unknown): string => faultCode(() => parseScheduleBody(body, sagas));
-    // Non-string runAt.
-    expect(bodyCode({ sagaId: echoSaga.id, input: {}, kind: "once", runAt: 123 })).toBe("INVALID_RUN_AT");
-    // Unparseable runAt.
-    expect(bodyCode({ sagaId: echoSaga.id, input: {}, kind: "once", runAt: "not-a-date" })).toBe("INVALID_RUN_AT");
-    // Past runAt.
-    expect(bodyCode({ sagaId: echoSaga.id, input: {}, kind: "once", runAt: "2000-01-01T00:00:00.000Z" })).toBe(
-      "INVALID_RUN_AT",
-    );
-    // `skip` overlap is accepted and carried.
-    const skipped = parseScheduleBody(
-      { sagaId: echoSaga.id, input: {}, kind: "once", runAt: "2099-01-01T00:00:00.000Z", overlap: "skip" },
-      sagas,
-    );
-    expect(skipped.create.overlap).toBe("skip");
-    // Empty timezone string.
-    expect(
-      bodyCode({ sagaId: echoSaga.id, input: {}, kind: "once", runAt: "2099-01-01T00:00:00.000Z", timezone: "" }),
-    ).toBe("INVALID_TIMEZONE");
-    // Array body.
-    expect(bodyCode([])).toBe("INVALID_SCHEDULE");
-    // Non-Fault parse throw becomes INVALID_INPUT.
-    const throwing = [
-      {
-        id: echoSaga.id,
-        name: "echo",
-        revision: "echo-v1",
-        description: "echo",
-        parse: () => {
-          throw new Error("boom");
-        },
-      },
-    ];
-    expect(
-      faultCode(() =>
-        parseScheduleBody(
-          { sagaId: echoSaga.id, input: {}, kind: "once", runAt: "2099-01-01T00:00:00.000Z" },
-          throwing,
-        ),
-      ),
-    ).toBe("INVALID_INPUT");
-    // Missing runAt inside windowOf for one-off.
-    expect(faultCode(() => windowOf("once", new Date()))).toBe("INTERNAL_ERROR");
-  });
-  it("matches comma lists, ranges, steps, and names in cronMatches", () => {
-    // Undefined field short-circuit is internal; exercise list/range/step paths.
-    expect(cronMatches("0,30 * * * *", new Date("2026-09-12T03:30:00Z"))).toBe(true);
-    expect(cronMatches("0,30 * * * *", new Date("2026-09-12T03:15:00Z"))).toBe(false);
-    expect(cronMatches("10-20 * * * *", new Date("2026-09-12T03:15:00Z"))).toBe(true);
-    expect(cronMatches("*/15 * * * *", new Date("2026-09-12T03:30:00Z"))).toBe(true);
-    expect(cronMatches("*/15 * * * *", new Date("2026-09-12T03:31:00Z"))).toBe(false);
-    expect(cronMatches("* * * JAN *", new Date("2026-01-12T03:00:00Z"))).toBe(true);
-    expect(cronMatches("0 0 * * MON-FRI", new Date("2026-09-14T00:00:00Z"))).toBe(true);
-    expect(cronMatches("0 0 * * MON-FRI", new Date("2026-09-13T00:00:00Z"))).toBe(false);
-    // Malformed step is skipped, not fatal.
-    expect(cronMatches("*/0 * * * *", new Date("2026-09-12T03:00:00Z"))).toBe(false);
-  });
-
-  // Small in-memory D1 stub keyed by SQL prefix.
-  function stubDb(handlers: { count?: number; schedule?: ScheduleRow | null; listed?: ScheduleRow[] }): D1Database {
-    const stmt = (sql: string) => ({
-      bind: () => ({
-        first: async () => {
-          if (sql.startsWith("SELECT COUNT")) return { n: handlers.count ?? 0 };
-          if (sql.startsWith("SELECT * FROM schedules WHERE id=")) return handlers.schedule ?? null;
-          return null;
-        },
-        all: async () => ({ results: handlers.listed ?? [] }),
-        run: async () => ({}),
-      }),
-    });
-    return {
-      prepare: stmt,
-      batch: async () => [],
-    } as unknown as D1Database;
-  }
-  const caller: Principal = {
-    orgId: "00000000-0000-4000-8000-000000000001",
-    userId: "00000000-0000-4000-8000-000000000002",
-  };
-  const sagaRef = {
-    id: echoSaga.id,
-    name: "echo",
-    revision: "echo-v1",
-    description: "echo",
-    parse: (v: unknown) => v,
-  };
-
-  it("refuses creation past the per-org limit", async () => {
-    const db = stubDb({ count: 100 });
-    await expect(
-      createSchedule(
-        db,
-        caller,
-        sagaRef,
-        {},
-        { sagaId: echoSaga.id, input: {}, kind: "once", runAt: "2099-01-01T00:00:00.000Z" },
-      ),
-    ).rejects.toMatchObject({ code: "SCHEDULE_LIMIT" });
-  });
-  it("loads null for malformed ids and lists with or without deleted rows", async () => {
-    const db = stubDb({});
-    expect(await loadSchedule(db, caller.orgId, "not-a-uuid")).toBeNull();
-    const listed: ScheduleRow[] = [row({}), row({ id: "22222222-2222-4222-8222-222222222222", status: "deleted" })];
-    const dbList = stubDb({ listed });
-    expect(await listSchedules(dbList, caller.orgId)).toHaveLength(2);
-    expect(await listSchedules(dbList, caller.orgId, true)).toHaveLength(2);
-  });
-  it("returns the same summary when the status already matches", async () => {
-    const active = row({ status: "active" });
-    const db = stubDb({ schedule: active });
-    const summary = await setScheduleStatus(db, caller.orgId, active.id, false);
-    expect(summary.status).toBe("active");
-    const disabled = row({ status: "disabled" });
-    const dbDisabled = stubDb({ schedule: disabled });
-    const summaryDisabled = await setScheduleStatus(dbDisabled, caller.orgId, disabled.id, true);
-    expect(summaryDisabled.status).toBe("disabled");
-  });
-  it("re-enables a recurring schedule by advancing its window", async () => {
-    const disabled = row({ status: "disabled", kind: "recurring", cron_expr: "* * * * *" });
-    const updates: string[] = [];
-    const stmt = (sql: string) => ({
-      bind: () => ({
-        first: async () => (sql.startsWith("SELECT * FROM schedules WHERE id=") ? disabled : null),
-        all: async () => ({ results: [] }),
-        run: async () => {
-          updates.push(sql);
-          return {};
-        },
-      }),
-    });
-    const db = { prepare: stmt, batch: async () => [] } as unknown as D1Database;
-    const summary = await setScheduleStatus(db, caller.orgId, disabled.id, false);
-    // The stub reloads the pre-update row; what matters is the status UPDATE
-    // plus the recurring advance UPDATE both ran.
-    expect(summary.status).toBe("disabled");
-    expect(updates.some((sql) => sql.startsWith("UPDATE schedules SET status="))).toBe(true);
-    expect(updates.some((sql) => sql.startsWith("UPDATE schedules SET next_due_at="))).toBe(true);
-  });
-  it("rejects status changes and deletes for missing rows", async () => {
-    const db = stubDb({ schedule: null });
-    await expect(
-      setScheduleStatus(db, caller.orgId, "11111111-1111-4111-8111-111111111111", true),
-    ).rejects.toMatchObject({
-      code: "SCHEDULE_NOT_FOUND",
-    });
-    await expect(deleteSchedule(db, caller.orgId, "11111111-1111-4111-8111-111111111111")).rejects.toMatchObject({
-      code: "SCHEDULE_NOT_FOUND",
-    });
-    const deleted = row({ status: "deleted" });
-    const dbDeleted = stubDb({ schedule: deleted });
-    await expect(setScheduleStatus(dbDeleted, caller.orgId, deleted.id, true)).rejects.toMatchObject({
-      code: "SCHEDULE_NOT_FOUND",
-    });
-    await expect(deleteSchedule(dbDeleted, caller.orgId, deleted.id)).rejects.toMatchObject({
-      code: "SCHEDULE_NOT_FOUND",
-    });
-  });
-  it("advanceRecurring ignores one-off rows and disables unmatchable crons", async () => {
-    const once = row({ kind: "once" });
-    const dbOnce = stubDb({});
-    await advanceRecurring(dbOnce, once, new Date());
-    const broken = row({ kind: "recurring", cron_expr: "0 0 30 2 *" });
-    const dbBroken = stubDb({});
-    await advanceRecurring(dbBroken, broken, new Date("2026-09-12T00:00:00Z"));
-  });
+    await client.deleteSchedule("sdk-roundtrip");
+    await client.deleteSchedule("sdk-recur");
+    expect(await client.listSchedules()).toHaveLength(0);
+  }, 25000);
 });

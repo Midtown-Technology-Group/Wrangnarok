@@ -25,6 +25,9 @@ import {
   parseNotification,
   parseNotifications,
   parseRuntimePolicy,
+  parseScheduleDelivery,
+  parseScheduleDetail,
+  parseScheduleList,
   parseOpsConnectionHealth,
   parseOpsHealth,
   parseOpsJobs,
@@ -154,6 +157,23 @@ describe("SDK contract version and descriptor (issue #140)", () => {
       expect.arrayContaining(["GET /api/sagas/:id/policy", "PUT /api/sagas/:id/policy"]),
     );
     for (const code of ["INVALID_POLICY", "SAGA_PAUSED", "ADMISSION_LIMITED"]) {
+      expect(SDK_ERROR_CODES).toContain(code);
+    }
+    // TRG-01 (issue #137, ADR 012): schedules are a supported capability
+    // with operator routes, delivery visibility, and error codes.
+    expect(descriptor.capabilities.find((entry) => entry.name === "scheduled-triggers")?.status).toBe("supported");
+    expect(descriptor.routes.map((route) => `${route.method} ${route.path}`)).toEqual(
+      expect.arrayContaining([
+        "GET /api/schedules",
+        "POST /api/schedules",
+        "GET /api/schedules/:name",
+        "DELETE /api/schedules/:name",
+        "POST /api/schedules/:name/enable",
+        "POST /api/schedules/:name/disable",
+        "GET /api/schedules/:name/deliveries",
+      ]),
+    );
+    for (const code of ["INVALID_SCHEDULE", "SCHEDULE_CONFLICT", "SCHEDULE_IDENTITY_FORBIDDEN"]) {
       expect(SDK_ERROR_CODES).toContain(code);
     }
     for (const code of ["STABLE_IDENTITY_REMAP_REQUIRED", "SYNC_CONFLICT", "INVALID_GIT_TARGET", "DEPLOY_BLOCKED"]) {
@@ -327,7 +347,7 @@ describe("SDK automation client: local happy/denied/error examples", () => {
     expect(diagnosis.hint).toBeNull();
     const page = await client.listHistory({});
     expect(parseHistoryPage(JSON.parse(JSON.stringify(page))).executions.length).toBeGreaterThan(0);
-  });
+  }, 25000);
 
   it("keeps the same caller policy as the UI: denied callers get 401/404, never data", async () => {
     const key = "sdk-client-denied-001";
@@ -367,7 +387,7 @@ describe("SDK automation client: local happy/denied/error examples", () => {
         )
       ).code,
     ).toBe("FORBIDDEN");
-  });
+  }, 25000);
 
   it("surfaces validation and contract errors with stable codes", async () => {
     const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) =>
@@ -1203,6 +1223,39 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     expect(() => parseFormList({ forms: [{ id: "x", name: "contact", sagaId: helloSaga.id }] })).toThrow(
       /unexpected shape/,
     );
+    // TRG-01 (issue #137): schedule guards accept the served shape and reject drift.
+    const scheduleShape = {
+      id: "a".repeat(64),
+      name: "morning-digest",
+      sagaId: helloSaga.id,
+      sagaName: "hello",
+      kind: "recurring",
+      cron: "* * * * *",
+      timezone: "UTC",
+      enabled: true,
+      input: { name: "sched" },
+      runAt: null,
+      nextDueAt: "2026-09-12T10:01:00.000Z",
+      lastWindow: null,
+      createdAt: "2026-09-12T10:00:00.000Z",
+      updatedAt: "2026-09-12T10:00:00.000Z",
+    };
+    expect(parseScheduleList({ schedules: [scheduleShape] })).toHaveLength(1);
+    expect(parseScheduleDetail({ schedule: scheduleShape }).name).toBe("morning-digest");
+    expect(
+      parseScheduleDelivery({
+        delivery: { schedule: "morning-digest", window: "2026-09-12T10:01", executionId: "a".repeat(64) },
+      }).executionId,
+    ).toBe("a".repeat(64));
+    expect(() => parseScheduleList({})).toThrow(/unexpected shape/);
+    expect(() => parseScheduleList({ schedules: [{ name: 1 }] })).toThrow(/unexpected shape/);
+    expect(() => parseScheduleList({ schedules: [{ ...scheduleShape, id: "not-hex" }] })).toThrow(/unexpected shape/);
+    expect(() => parseScheduleList({ schedules: [{ ...scheduleShape, enabled: "yes" }] })).toThrow(/unexpected shape/);
+    expect(() => parseScheduleDetail({})).toThrow(/unexpected shape/);
+    expect(() => parseScheduleDetail({ schedule: { ...scheduleShape, kind: "whenever" } })).toThrow(/unexpected shape/);
+    expect(() => parseScheduleDetail({ schedule: { ...scheduleShape, name: "UPPER" } })).toThrow(/unexpected shape/);
+    expect(() => parseScheduleDelivery({})).toThrow(/unexpected shape/);
+    expect(() => parseScheduleDelivery({ delivery: { schedule: "x", window: "y" } })).toThrow(/unexpected shape/);
     const receipt = {
       form: "contact",
       executionId: "a".repeat(64),

@@ -8,13 +8,13 @@ Status vocabulary: **Implemented** (shipped locally), **Partial** (materially na
 
 Upstream tests are evidence of intended assertions, not passing-test claims. Upstream sources were inspected, not executed; no upstream production instance was used.
 
-Total: 47 capability rows — 1 Implemented, 1 Complete (pending review), 22 Partial, 21 Missing, 2 Gated.
+Total: 47 capability rows — 3 Implemented, 1 Complete (pending review), 26 Partial, 16 Missing, 1 Gated.
 
 | ID | Title | Phase | Status | Depends | Existing issue |
 | --- | --- | --- | --- | --- | --- |
 | RUN-01 | Persist and enforce per-Saga runtime policy without changing source identity | 2 | Partial | AUTH-02 | new |
 | RUN-02 | Invoke child Sagas with explicit context, completion and failure semantics | 2 | Missing | AUTH-02, RUN-01 | new |
-| TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented (#137) | AUTH-02, RUN-01 | #137 |
+| TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented | AUTH-02, RUN-01 | #137 |
 | TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01 | #138 |
 | TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Missing | TRG-01, TRG-02, AUTH-02 | new |
 | DEV-01 | Provide a complete typed TypeScript author and automation SDK | 1+4 | Partial | — | new |
@@ -58,7 +58,7 @@ Total: 47 capability rows — 1 Implemented, 1 Complete (pending review), 22 Par
 | OPS-03 | Export and restore operational data with explicit encrypted-backup boundaries | 5 | Missing | SOL-03, TABLE-02, FILE-02, CON-02, SEC-01 | new |
 | OPS-04 | Report scoped usage, model costs and automation ROI | 4+6 | Missing | AUTH-02, AI-01, OPS-01 | new |
 | UX-01 | Provide configurable branding, user profiles and discoverable platform administration | 4 | Partial | AUTH-01, FILE-01 | new |
-| LIMITS-01 | Prove the Cloudflare feasibility envelope and keep parity exceptions explicit | Continuous | Gated | — | new |
+| LIMITS-01 | Prove the Cloudflare feasibility envelope and keep parity exceptions explicit | Continuous | Partial | — | #177 |
 
 ## RUN-01: Persist and enforce per-Saga runtime policy without changing source identity
 
@@ -109,37 +109,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## TRG-01: Run one-off and recurring schedules with durable due-time and cancellation semantics
 
-Phase 2; **Implemented** (issue #137, ADR 012 schedule half Accepted 2026-09-11); existing issue: #137
+Phase 2; **Implemented**; existing issue: #137
 
-Local status: the Worker ships a `scheduled()` Cron tick (`* * * * *`) plus
-durable `Scheduled` intent rows (migration 0016b), the `schedules` policy
-table (migration 0016), `src/schedules.ts` (cron validation, IANA timezone
-labels, UTC window math, server-derived window keys, preview, bounded
-scan/admission), seven schedule routes, and 23 schedule tests (10 pure, 7
-lifecycle, 6 tick semantics over real D1 plus the real promoter).
-
-Acceptance (all met):
-
-- ADR 012 identity/due-time design Accepted before implementation. Cadence,
-  timezone, enablement, input, overlap, and run-as live as environment state
-  on the schedules table; cron is validated to Cloudflare shapes
-  (`INVALID_CRON`); DST/missed-tick behavior is documented in ADR 012
-  (UTC ticks, labels never shift windows, overdue rows promote late, backlog
-  drains 25 per tick, queue backup stays `Pending`).
-- An authorized operator can create/preview/disable recurring schedules and
-  schedule/cancel one future Execution. Due rows survive restart (plain D1
-  durability, re-read plus promote) and promote exactly once under racing
-  ticks (conditional `Scheduled -> Pending` claim, gated-claim race test).
-- Duplicate-window dedup is tested separately from cross-window overlap
-  (replay vs `overlap: allow` side-by-side vs `overlap: skip` hold-and-resume);
-  overdue promotion, disabled/deleted schedules, revocation (per-window
-  membership re-check), and cancellation before dispatch (receipt answers,
-  tick never resurrects) are covered. Queue backup is asserted as `Pending`
-  with `dispatchConfirmed: false`, never failure.
-- The local Cron handler runs against real D1 with a real promoter and a
-  `createBatch` dispatch double (native control, not data); scan is bounded
-  to 50 schedules and admission to 25 promotions per tick. Cron is justified
-  here; no other broker was added.
+Local status: Schedules ship as persisted environment state (migration 0016, `src/schedules.ts`, ADR 012 accepted): one org-scoped row binds a name to a stable Saga UUID plus cadence, timezone, enablement, input, and run-as policy. A minute Cloudflare Cron Trigger (the only Cron trigger; `test/timeout-sweeper.test.ts` tripwire pins it) promotes due rows through the standard submit protocol with deterministic `sch-` schedule-window keys. Operator create/preview/disable/delete ride the AUTH-01 membership gate (writes admin-only); run-as always resolves to the creating caller, never caller-supplied identity. Delivery visibility maps windows to Executions. `Scheduled` stays a non-status by design: promotion writes Pending rows, never a new Execution state.
 
 Depends: AUTH-02, RUN-01
 
@@ -161,7 +133,7 @@ Upstream evidence (paths relative to upstream repo root):
   - `api/tests/e2e/api/test_form_scheduled_execution.py`
   - `api/tests/e2e/api/test_cancel_scheduled_execution.py`
 
-Related Wrangnarok issues: #76 (webhook half), #137 (schedule half, implemented)
+Related Wrangnarok issues: #76
 
 ## TRG-02: Expose authenticated webhook and custom HTTP execution endpoints
 
@@ -1307,9 +1279,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## LIMITS-01: Prove the Cloudflare feasibility envelope and keep parity exceptions explicit
 
-Phase Continuous; **Gated**; existing issue: new
+Phase Continuous; **Partial**; existing issue: #177
 
-Local status: The first useful MVP is Free-tier-constrained. No evidence proves all upstream features, arbitrary Python workloads or full tenant scale can fit Cloudflare Free.
+Local status: The dated capability-versus-limit matrix ships as `docs/feasibility-envelope.md` (2026-09-12): Worker CPU/memory/bundle/egress, Workflows instances/steps/history, D1 reads/writes/storage/transaction limits, R2 size/signing, Access users, and model/vector/build costs each carry a free / paid-adaptation / redesign / unresolved classification with the binding limit named. Measured local usage (smoke budgets, usage blocks, bundle size) stays explicitly separated from provider meters; what still requires an authorized dev measurement is listed, not assumed. Remaining: deployed D1-meta/Workers-analytics metering and multi-org load fixtures before any production accuracy claim.
 
 Depends: none
 
