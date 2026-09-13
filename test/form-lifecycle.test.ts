@@ -292,7 +292,11 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     // Foreign user cannot use another session's handle.
     const foreignBody = { handle: started.handle, values: {} };
     const foreign = await call("/api/forms/contact/submit", "POST", foreignBody, ORG, OTHER_USER, "form-02-bogus-003");
-    expect(foreign.status).toBe(422);
+    // AUTH-02 union (issue #143): the submit-grant gate runs before handle
+    // validation, so a grantless caller answers 403 GRANT_REQUIRED instead
+    // of 422 — authorization first, never a handle-validity oracle.
+    expect(foreign.status).toBe(403);
+    expect(await foreign.json()).toMatchObject({ error: { code: "GRANT_REQUIRED" } });
     // First use wins; the replay answers stale and dispatches nothing.
     // (Values stay hello-compatible so the first submit reaches dispatch.)
     await createForm("greet", [{ name: "name", type: "text", required: true }]);

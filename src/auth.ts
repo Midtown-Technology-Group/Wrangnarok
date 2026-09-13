@@ -3,6 +3,7 @@ import { Fault, hash, UUID } from "./domain";
 import type { Principal } from "./domain";
 import { credentialClassFor, verifyAccess, type AccessEnv, type CredentialClass } from "./access";
 import { ensureLabFixture } from "./orgs";
+import { ensureRoleTables } from "./roles";
 export interface LabAuth {
   LAB_ENABLED?: string;
   LAB_TOKEN?: string;
@@ -49,6 +50,9 @@ export async function authenticate(request: Request, env: LabAuth & AccessEnv): 
   if (env.DB && fixtureUser && principal.userId === fixtureUser) {
     try {
       await ensureLabFixture(env.DB, principal.orgId, principal.userId);
+      // AUTH-02 (ADR 018): same standing bootstrap as the org tables — the
+      // migration-0013 tables may not exist on hand-built databases.
+      await ensureRoleTables(env.DB);
     } catch {
       // Pre-migration databases (no users table): leave auth working, the
       // membership gate answers 503 with ORG_STORE_NOT_MIGRATED.

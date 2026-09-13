@@ -973,6 +973,14 @@ export async function deleteOrg(db: D1Database, orgId: string, stores?: OrgDelet
   await optionalExec(db, "DELETE FROM app_deployments WHERE app_id IN (SELECT id FROM apps WHERE org_id=?)", id);
   await optionalExec(db, "DELETE FROM app_revisions WHERE app_id IN (SELECT id FROM apps WHERE org_id=?)", id);
   await optionalExec(db, "DELETE FROM apps WHERE org_id=?", id);
+  // AUTH-02 authorization rows: org-scoped policy rules, assignments, and
+  // roles, plus the grants hung off those roles. Without these the
+  // restrictive 0013 foreign keys block the organizations delete, and with
+  // them no dangling authority survives the org.
+  await optionalExec(db, "DELETE FROM policy_rules WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM role_assignments WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM role_grants WHERE role_id IN (SELECT id FROM resource_roles WHERE org_id=?)", id);
+  await optionalExec(db, "DELETE FROM resource_roles WHERE org_id=?", id);
   await db.batch([db.prepare("DELETE FROM organizations WHERE id=?").bind(id)]);
   return {
     orgId: id,
