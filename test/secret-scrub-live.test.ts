@@ -31,14 +31,14 @@ const auth = (key: string) => ({
   "Idempotency-Key": key,
 });
 function submitRequest(sagaId: string, input: unknown, key: string) {
-  return new Request("http://local.test/api/executions", {
+  return new Request("https://local.test/api/executions", {
     method: "POST",
     headers: auth(key),
     body: JSON.stringify({ sagaId, input }),
   });
 }
 function getRequest(path: string, key: string) {
-  return new Request(`http://local.test${path}`, { method: "GET", headers: auth(key) });
+  return new Request(`https://local.test${path}`, { method: "GET", headers: auth(key) });
 }
 
 function dumpD1(): Promise<string> {
@@ -233,7 +233,7 @@ it("keeps cancellation and timeout terminals free of secret substrings", async (
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   const cancelled = await worker.fetch(
-    new Request(`http://local.test/api/executions/${id}/cancel`, {
+    new Request(`https://local.test/api/executions/${id}/cancel`, {
       method: "POST",
       headers: { Authorization: `Bearer ${"a".repeat(64)}` },
     }),

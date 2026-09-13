@@ -13,7 +13,7 @@ const key = "ninjaone-test-001";
 const SECRET_SENTINEL = "test-client-secret-sentinel";
 const TOKEN_SENTINEL = "test-access-token-sentinel";
 function request(path: string, method = "GET", body: unknown = {}) {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers: { Authorization: `Bearer ${"a".repeat(64)}`, "Content-Type": "application/json", "Idempotency-Key": key },
     ...(method === "POST" ? { body: JSON.stringify({ sagaId: ninjaSaga.id, input: body }) } : {}),
@@ -168,7 +168,7 @@ it("surfaces a throttled token request as NINJA_RATE_LIMITED without calling org
 });
 it("rejects non-empty input and unknown sagas", async () => {
   expect((await worker.fetch(request("/api/executions", "POST", { message: "x" }), bindings)).status).toBe(400);
-  const unknown = new Request("http://local.test/api/executions", {
+  const unknown = new Request("https://local.test/api/executions", {
     method: "POST",
     headers: { Authorization: `Bearer ${"a".repeat(64)}`, "Content-Type": "application/json", "Idempotency-Key": key },
     body: JSON.stringify({ sagaId: "00000000-0000-0000-0000-000000000000", input: {} }),

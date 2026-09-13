@@ -30,7 +30,7 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
 
 function call(path: string, method = "GET", body?: unknown, orgId = ORG, userId = OWNER, key?: string) {
   return worker.fetch(
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       method,
       headers: headers(key ? { "Idempotency-Key": key } : {}),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -453,7 +453,7 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     expect(slot.status).toBe(200);
     const { entries } = (await slot.json()) as { entries: { token: string }[] };
     const put = await worker.fetch(
-      new Request(`http://local.test/api/files/content?token=${entries[0]!.token}`, {
+      new Request(`https://local.test/api/files/content?token=${entries[0]!.token}`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
         body: bytes as Uint8Array<ArrayBuffer>,
@@ -655,7 +655,7 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     expect(slot.status).toBe(200);
     const { entries } = (await slot.json()) as { entries: { token: string }[] };
     const put = await worker.fetch(
-      new Request(`http://local.test/api/files/content?token=${entries[0]!.token}`, {
+      new Request(`https://local.test/api/files/content?token=${entries[0]!.token}`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
         body: bytes as Uint8Array<ArrayBuffer>,
@@ -689,7 +689,7 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     });
     const { entries: pendingEntries } = (await pendingSlot.json()) as { entries: { token: string }[] };
     const pendingPut = await worker.fetch(
-      new Request(`http://local.test/api/files/content?token=${pendingEntries[0]!.token}`, {
+      new Request(`https://local.test/api/files/content?token=${pendingEntries[0]!.token}`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
         body: bytes as Uint8Array<ArrayBuffer>,

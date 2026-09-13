@@ -91,7 +91,7 @@ describe("CON-02 SDK config client over the live Worker", () => {
 
   it("lists, sets, updates, and deletes config through the typed client", async () => {
     const client = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: TOKEN,
       fetchImpl: authedFetch as typeof fetch,
       pollMs: 0,
@@ -110,7 +110,7 @@ describe("CON-02 SDK config client over the live Worker", () => {
 
   it("masks secrets through the typed client and rejects bad refs", async () => {
     const client = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: TOKEN,
       fetchImpl: authedFetch as typeof fetch,
       pollMs: 0,
@@ -128,7 +128,7 @@ describe("CON-02 SDK config client over the live Worker", () => {
 
   it("denies anonymous config reads with UNAUTHORIZED", async () => {
     const anon = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "wrong-token",
       fetchImpl: (async (url: string | URL | Request, init?: RequestInit) =>
         worker.fetch(new Request(url, init ?? {}), { ...bindings })) as typeof fetch,

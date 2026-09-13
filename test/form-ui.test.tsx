@@ -63,7 +63,7 @@ describe("FORM-02 client over the live Worker", () => {
     // onto the local test origin before proxying into worker.fetch (a bare
     // relative URL is not a valid Request input). Request inputs pass
     // through so method/body survive.
-    const target = url instanceof Request ? url : new URL(String(url), "http://local.test").toString();
+    const target = url instanceof Request ? url : new URL(String(url), "https://local.test").toString();
     return worker.fetch(
       new Request(target, { ...(init ?? {}), headers: authHeaders(init?.headers as Record<string, string>) }),
       { ...bindings, LAB_ORG_ID: ORG, LAB_USER_ID: OWNER },

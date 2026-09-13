@@ -37,7 +37,7 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
 
 function call(path: string, method = "GET", body?: unknown, extraHeaders: Record<string, string> = {}) {
   return worker.fetch(
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       method,
       headers: headers(extraHeaders),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -54,7 +54,7 @@ function rawCall(
   extraHeaders: Record<string, string> = {},
 ) {
   return worker.fetch(
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       method,
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": contentType, ...extraHeaders },
       body: rawBody,
@@ -573,7 +573,7 @@ describe("route guards fail closed", () => {
     const appId = await createApp("stranger-arms", "stranger-arms");
     const strangerCall = (path: string, method = "GET", body?: unknown) =>
       worker.fetch(
-        new Request(`http://local.test${path}`, {
+        new Request(`https://local.test${path}`, {
           method,
           headers: headers(),
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),

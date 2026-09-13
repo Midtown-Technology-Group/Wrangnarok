@@ -81,7 +81,7 @@ function fakeSmokeWorkflow(onTerminate: () => Promise<void>): Bindings["SMOKE_WO
 }
 
 function submitRequest(key: string) {
-  return new Request("http://local.test/api/executions", {
+  return new Request("https://local.test/api/executions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${TOKEN}`,
@@ -93,7 +93,7 @@ function submitRequest(key: string) {
 }
 
 function cancelRequest(id: string) {
-  return new Request(`http://local.test/api/executions/${id}/cancel`, {
+  return new Request(`https://local.test/api/executions/${id}/cancel`, {
     method: "POST",
     headers: { Authorization: `Bearer ${TOKEN}` },
   });

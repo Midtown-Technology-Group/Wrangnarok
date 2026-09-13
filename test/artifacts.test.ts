@@ -39,7 +39,7 @@ function call(
   const requestHeaders: Record<string, string> = headers(init.headers);
   if (init.contentType !== undefined) requestHeaders["Content-Type"] = init.contentType;
   return worker.fetch(
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       method,
       headers: requestHeaders,
       ...(init.body === undefined ? {} : { body: init.body }),

@@ -48,7 +48,7 @@ const ORG = "00000000-0000-4000-8000-000000000001";
 const LAB = { Authorization: `Bearer ${"a".repeat(64)}`, "Content-Type": "application/json" };
 
 function authed(path: string, method: string, body?: unknown, query = ""): Request {
-  return new Request(`http://local.test${path}${query}`, {
+  return new Request(`https://local.test${path}${query}`, {
     method,
     headers: { ...LAB },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -468,7 +468,7 @@ it("accepts Bearer api-key transport alongside X-Endpoint-Key", async () => {
 
   // Bearer transport (no X-Endpoint-Key) verifies the same credential.
   const viaBearer = await worker.fetch(
-    new Request("http://local.test/api/endpoints/bearer-key", {
+    new Request("https://local.test/api/endpoints/bearer-key", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -483,7 +483,7 @@ it("accepts Bearer api-key transport alongside X-Endpoint-Key", async () => {
 
   // Non-Bearer Authorization values fall through to unauthorized, not a crash.
   const basic = await worker.fetch(
-    new Request("http://local.test/api/endpoints/bearer-key", {
+    new Request("https://local.test/api/endpoints/bearer-key", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Basic abc", "X-Endpoint-Event-Id": "b-002" },
       body: JSON.stringify({ input: { name: "Ada" } }),
@@ -523,7 +523,7 @@ it("answers route-level fallbacks: bad bodies, bad names, cross-kind, and unknow
   const unknownPatchBody = await worker.fetch(authed("/api/endpoints/missing", "PATCH", {}), bindings);
   expect(unknownPatchBody.status).toBe(404);
   const patchNonObject = await worker.fetch(
-    new Request("http://local.test/api/endpoints/route-key", {
+    new Request("https://local.test/api/endpoints/route-key", {
       method: "PATCH",
       headers: { ...LAB },
       body: JSON.stringify(["x"]),
@@ -549,7 +549,7 @@ it("answers route-level fallbacks: bad bodies, bad names, cross-kind, and unknow
     bindings,
   );
   const crossKind = await worker.fetch(
-    new Request("http://local.test/api/endpoints/route-hook", {
+    new Request("https://local.test/api/endpoints/route-hook", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Endpoint-Key": apiKey, "X-Endpoint-Event-Id": "evt-cross" },
       body: JSON.stringify({ input: { name: "Ada" } }),
@@ -560,7 +560,7 @@ it("answers route-level fallbacks: bad bodies, bad names, cross-kind, and unknow
   // Cross-kind the other way: a hooks delivery against an api-key-only
   // name has no webhook candidates, so it answers 404.
   const crossHook = await worker.fetch(
-    new Request("http://local.test/hooks/route-key", {
+    new Request("https://local.test/hooks/route-key", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Endpoint-Event-Id": "evt-cross" },
       body: JSON.stringify({ input: { name: "Ada" } }),
@@ -570,7 +570,7 @@ it("answers route-level fallbacks: bad bodies, bad names, cross-kind, and unknow
   expect(crossHook.status).toBe(404);
   // Unknown public names answer 404 on both receivers.
   const unknownApi = await worker.fetch(
-    new Request("http://local.test/api/endpoints/nope", {
+    new Request("https://local.test/api/endpoints/nope", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Endpoint-Key": apiKey, "X-Endpoint-Event-Id": "e1" },
       body: JSON.stringify({ input: { name: "Ada" } }),
@@ -579,7 +579,7 @@ it("answers route-level fallbacks: bad bodies, bad names, cross-kind, and unknow
   );
   expect(unknownApi.status).toBe(404);
   const unknownHook = await worker.fetch(
-    new Request("http://local.test/hooks/nope", {
+    new Request("https://local.test/hooks/nope", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Endpoint-Event-Id": "e1" },
       body: JSON.stringify({ input: { name: "Ada" } }),
@@ -615,7 +615,7 @@ it("answers route-level fallbacks: bad bodies, bad names, cross-kind, and unknow
     (b) => b.toString(16).padStart(2, "0"),
   ).join("");
   const off = await worker.fetch(
-    new Request("http://local.test/hooks/route-off", {
+    new Request("https://local.test/hooks/route-off", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

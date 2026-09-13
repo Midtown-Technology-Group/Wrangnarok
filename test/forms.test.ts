@@ -19,7 +19,7 @@ const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
 const key = "form-01-hello-001";
 function authed(path: string, method = "GET", body?: unknown, idempotencyKey = key): Request {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${"a".repeat(64)}`,
@@ -240,7 +240,7 @@ it("bounds handle-bound submissions and answers 404 for unknown forms", async ()
   expect(await tooLong.json()).toMatchObject({
     error: { code: "FORM_VALIDATION_FAILED", details: [{ field: "name", code: "TOO_LONG" }] },
   });
-  const encoded = new Request(`http://local.test/api/forms/hello-greeting/submit`, {
+  const encoded = new Request(`https://local.test/api/forms/hello-greeting/submit`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${"a".repeat(64)}`,

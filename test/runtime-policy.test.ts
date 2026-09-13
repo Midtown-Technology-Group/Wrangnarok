@@ -39,20 +39,20 @@ const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "0000
 const TOKEN = "a".repeat(64);
 const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
 function submitRequest(key: string, sagaId: string = echoSaga.id, input: unknown = { message: "hello" }) {
-  return new Request("http://local.test/api/executions", {
+  return new Request("https://local.test/api/executions", {
     method: "POST",
     headers: { ...auth, "Idempotency-Key": key },
     body: JSON.stringify({ sagaId, input }),
   });
 }
 function detailRequest(id: string) {
-  return new Request(`http://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } });
+  return new Request(`https://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } });
 }
 function policyGet(sagaId: string) {
-  return new Request(`http://local.test/api/sagas/${sagaId}/policy`, { method: "GET", headers: { ...auth } });
+  return new Request(`https://local.test/api/sagas/${sagaId}/policy`, { method: "GET", headers: { ...auth } });
 }
 function policyPut(sagaId: string, body: unknown, headers: Record<string, string> = auth) {
-  return new Request(`http://local.test/api/sagas/${sagaId}/policy`, {
+  return new Request(`https://local.test/api/sagas/${sagaId}/policy`, {
     method: "PUT",
     headers,
     body: JSON.stringify(body),
@@ -298,7 +298,7 @@ describe("RUN-01 enforcement matrix (workerd)", () => {
     const conflict = await worker.fetch(submitRequest(firstKey, echoSaga.id, { message: "other" }), bindings);
     expect(conflict.status).toBe(409);
     const cancelled = await worker.fetch(
-      new Request(`http://local.test/api/executions/${firstId}/cancel`, { method: "POST", headers: { ...auth } }),
+      new Request(`https://local.test/api/executions/${firstId}/cancel`, { method: "POST", headers: { ...auth } }),
       bindings,
     );
     expect(cancelled.status).toBe(200);
@@ -307,7 +307,7 @@ describe("RUN-01 enforcement matrix (workerd)", () => {
     expect(
       (
         await worker.fetch(
-          new Request(`http://local.test/api/executions/${firstId}/cancel`, { method: "POST", headers: { ...auth } }),
+          new Request(`https://local.test/api/executions/${firstId}/cancel`, { method: "POST", headers: { ...auth } }),
           bindings,
         )
       ).status,
@@ -326,7 +326,7 @@ describe("RUN-01 enforcement matrix (workerd)", () => {
     expect(
       (
         await worker.fetch(
-          new Request(`http://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } }),
+          new Request(`https://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } }),
           bindings,
         )
       ).status,
@@ -374,7 +374,7 @@ describe("RUN-01 enforcement matrix (workerd)", () => {
     expect(stuck.status).toBe("Running");
     expect(stuck.operations).toContainEqual(expect.objectContaining({ name: "echo-http-v1", status: "Running" }));
     const cancelled = await worker.fetch(
-      new Request(`http://local.test/api/executions/${stuckId}/cancel`, { method: "POST", headers: { ...auth } }),
+      new Request(`https://local.test/api/executions/${stuckId}/cancel`, { method: "POST", headers: { ...auth } }),
       bindings,
     );
     expect(cancelled.status).toBe(200);

@@ -14,7 +14,7 @@ const bindings = env as unknown as Bindings;
 const TOKEN = "a".repeat(64);
 
 function authed(path: string): Request {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     headers: { Authorization: `Bearer ${TOKEN}` },
   });
 }
@@ -63,7 +63,7 @@ it("wraps the Static Assets pass-through with the UI-surface baseline", async ()
     ...bindings,
     ASSETS: { fetch: async () => asset } as unknown as Fetcher,
   };
-  const response = await worker.fetch(new Request("http://local.test/"), withAssets);
+  const response = await worker.fetch(new Request("https://local.test/"), withAssets);
   expect(response.status).toBe(200);
   expectBaseline(response, ASSET_CSP);
   // Caller-owned content type survives the wrap.

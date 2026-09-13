@@ -27,7 +27,7 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
 }
 
 function call(path: string, method = "GET", body?: unknown, key?: string) {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers: headers(key ? { "Idempotency-Key": key } : {}),
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -166,7 +166,7 @@ describe("tool enrollment (TOOL-01 opt-in)", () => {
   });
 
   it("denies unauthenticated discovery and rejects query strings", async () => {
-    expect((await worker.fetch(new Request("http://local.test/api/tools"), bindings)).status).toBe(401);
+    expect((await worker.fetch(new Request("https://local.test/api/tools"), bindings)).status).toBe(401);
     expect((await worker.fetch(call("/api/tools?scope=all"), bindings)).status).toBe(400);
   });
 
@@ -181,7 +181,7 @@ describe("tool enrollment (TOOL-01 opt-in)", () => {
       expect(denied.status).toBe(400);
     }
     const nonObject = await worker.fetch(
-      new Request("http://local.test/api/tools", {
+      new Request("https://local.test/api/tools", {
         method: "POST",
         headers: headers(),
         body: JSON.stringify([1, 2]),

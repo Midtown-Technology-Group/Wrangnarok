@@ -91,7 +91,7 @@ it("carries no secret-like material through echo API surfaces", async () => {
   const id = await executionId(principal, key);
   await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
   const accepted = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: { ...auth },
       body: JSON.stringify({ sagaId: echoSaga.id, input: { message } }),
@@ -101,7 +101,7 @@ it("carries no secret-like material through echo API surfaces", async () => {
   expect(accepted.status).toBe(202);
   await instance.waitForStatus("complete");
   const detail = await worker.fetch(
-    new Request(`http://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } }),
+    new Request(`https://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } }),
     bindings,
   );
   expect(detail.status).toBe(200);
@@ -109,15 +109,15 @@ it("carries no secret-like material through echo API surfaces", async () => {
   expect(detailBody).toMatchObject({ status: "Succeeded", result: { message } });
 
   const sagas = await worker.fetch(
-    new Request("http://local.test/api/sagas", { method: "GET", headers: { ...auth } }),
+    new Request("https://local.test/api/sagas", { method: "GET", headers: { ...auth } }),
     bindings,
   );
   const history = await worker.fetch(
-    new Request("http://local.test/api/executions", { method: "GET", headers: { ...auth } }),
+    new Request("https://local.test/api/executions", { method: "GET", headers: { ...auth } }),
     bindings,
   );
   const reread = await worker.fetch(
-    new Request(`http://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } }),
+    new Request(`https://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } }),
     bindings,
   );
   for (const text of [await sagas.text(), await history.text(), await reread.text()]) {

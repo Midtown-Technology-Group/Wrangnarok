@@ -21,7 +21,7 @@ const TOKEN = "a".repeat(64);
 const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
 
 function authed(path: string, method: string, body?: unknown): Request {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers: { ...auth },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),

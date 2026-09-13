@@ -42,7 +42,7 @@ const ORG = "00000000-0000-4000-8000-000000000001";
 /** Minimal real MCP client: JSON-RPC 2.0 over POST /api/mcp. */
 async function mcp(method: string, params: unknown, id: string | number | null = 1, token: string = TOKEN) {
   const response = await worker.fetch(
-    new Request("http://local.test/api/mcp", {
+    new Request("https://local.test/api/mcp", {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
@@ -57,7 +57,7 @@ async function mcp(method: string, params: unknown, id: string | number | null =
 
 async function enrollHello(): Promise<string> {
   const response = await worker.fetch(
-    new Request("http://local.test/api/tools", {
+    new Request("https://local.test/api/tools", {
       method: "POST",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({ sagaId: helloSaga.id }),
@@ -182,7 +182,7 @@ describe("MCP gateway over the local Worker (real client)", () => {
     expect((unknown.body.result as { error: { code: string } }).error.code).toBe("TOOL_NOT_FOUND");
     // Disabled: revoke then call.
     await worker.fetch(
-      new Request(`http://local.test/api/tools/${name}/disable`, {
+      new Request(`https://local.test/api/tools/${name}/disable`, {
         method: "POST",
         headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
         body: JSON.stringify({}),
@@ -206,7 +206,7 @@ describe("MCP gateway over the local Worker (real client)", () => {
 
   it("rejects malformed envelopes and unknown methods with envelope faults", async () => {
     const response = await worker.fetch(
-      new Request("http://local.test/api/mcp", {
+      new Request("https://local.test/api/mcp", {
         method: "POST",
         headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/delete" }),
@@ -269,22 +269,22 @@ describe("MCP gateway over the local Worker (real client)", () => {
   it("covers openapi route guards: unknown integration, bad bodies, and query keys", async () => {
     const auth = { Authorization: `Bearer ${TOKEN}` };
     const unknownSearch = await worker.fetch(
-      new Request("http://local.test/api/openapi/search?integration=nope&q=x", { headers: auth }),
+      new Request("https://local.test/api/openapi/search?integration=nope&q=x", { headers: auth }),
       bindings,
     );
     expect(unknownSearch.status).toBe(404);
     const badKeys = await worker.fetch(
-      new Request("http://local.test/api/openapi/search?integration=halo&bogus=1", { headers: auth }),
+      new Request("https://local.test/api/openapi/search?integration=halo&bogus=1", { headers: auth }),
       bindings,
     );
     expect(badKeys.status).toBe(400);
     const unknownOp = await worker.fetch(
-      new Request("http://local.test/api/openapi/operations/Nope_Missing", { headers: auth }),
+      new Request("https://local.test/api/openapi/operations/Nope_Missing", { headers: auth }),
       bindings,
     );
     expect(unknownOp.status).toBe(404);
     const unknownExec = await worker.fetch(
-      new Request("http://local.test/api/openapi/execute", {
+      new Request("https://local.test/api/openapi/execute", {
         method: "POST",
         headers: { ...auth, "Content-Type": "application/json" },
         body: JSON.stringify({ integration: "nope", operationId: "Ticket_Get" }),
@@ -293,7 +293,7 @@ describe("MCP gateway over the local Worker (real client)", () => {
     );
     expect(unknownExec.status).toBe(404);
     const noOpExec = await worker.fetch(
-      new Request("http://local.test/api/openapi/execute", {
+      new Request("https://local.test/api/openapi/execute", {
         method: "POST",
         headers: { ...auth, "Content-Type": "application/json" },
         body: JSON.stringify({ integration: "halo" }),
@@ -302,7 +302,7 @@ describe("MCP gateway over the local Worker (real client)", () => {
     );
     expect(noOpExec.status).toBe(400);
     const queryInspect = await worker.fetch(
-      new Request("http://local.test/api/openapi/operations/Ticket_Get?x=1", { headers: auth }),
+      new Request("https://local.test/api/openapi/operations/Ticket_Get?x=1", { headers: auth }),
       bindings,
     );
     expect(queryInspect.status).toBe(400);

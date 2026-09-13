@@ -28,7 +28,7 @@ const TOKEN = "a".repeat(64);
 const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
 
 function authed(path: string, method: string, body?: unknown): Request {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers: { ...auth },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -204,7 +204,7 @@ describe("TRG-01 promotion semantics (workerd)", () => {
     const promoted = first.promoted.find((entry) => entry.scheduleName === "cancel-probe");
     expect(promoted).toBeDefined();
     const cancelled = await worker.fetch(
-      new Request(`http://local.test/api/executions/${promoted?.executionId}/cancel`, {
+      new Request(`https://local.test/api/executions/${promoted?.executionId}/cancel`, {
         method: "POST",
         headers: { ...auth },
       }),

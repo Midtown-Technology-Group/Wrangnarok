@@ -43,7 +43,7 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
 
 function call(path: string, method = "GET", body?: unknown, orgId = ORG, extraHeaders: Record<string, string> = {}) {
   return worker.fetch(
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       method,
       headers: headers(extraHeaders),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),

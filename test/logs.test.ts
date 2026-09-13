@@ -40,11 +40,11 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
 }
 
 function tailRequest(id: string, query = "") {
-  return new Request(`http://local.test/api/executions/${id}/logs${query}`, { headers: authHeaders() });
+  return new Request(`https://local.test/api/executions/${id}/logs${query}`, { headers: authHeaders() });
 }
 
 function searchRequest(query = "") {
-  return new Request(`http://local.test/api/logs${query}`, { headers: authHeaders() });
+  return new Request(`https://local.test/api/logs${query}`, { headers: authHeaders() });
 }
 
 async function insertExecution(
@@ -104,7 +104,7 @@ describe("OBS-02 hello pilot emission (issue #153)", () => {
     const id = await executionId(principal, key);
     await using instance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, id);
     const accepted = await worker.fetch(
-      new Request("http://local.test/api/executions", {
+      new Request("https://local.test/api/executions", {
         method: "POST",
         headers: authHeaders({ "Idempotency-Key": key }),
         body: JSON.stringify({ sagaId: helloSaga.id, input: { name: "Ada" } }),
@@ -271,9 +271,9 @@ describe("OBS-02 authorization (issue #153)", () => {
     const id = "9".repeat(64);
     await insertExecution(id);
     await appendAuthorLog(bindings.DB, id, { level: "INFO", message: "owner row" });
-    const anon = await worker.fetch(new Request(`http://local.test/api/executions/${id}/logs`), bindings);
+    const anon = await worker.fetch(new Request(`https://local.test/api/executions/${id}/logs`), bindings);
     expect(anon.status).toBe(401);
-    const anonSearch = await worker.fetch(new Request("http://local.test/api/logs"), bindings);
+    const anonSearch = await worker.fetch(new Request("https://local.test/api/logs"), bindings);
     expect(anonSearch.status).toBe(401);
     // Foreign owner with a valid token shape: 404, never rows.
     const foreign = { ...bindings, LAB_USER_ID: "00000000-0000-4000-8000-000000000003" };
@@ -323,7 +323,7 @@ describe("OBS-02 SEC-01 redaction (issue #153)", () => {
     const id = await executionId(principal, key);
     await using instance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, id);
     const accepted = await worker.fetch(
-      new Request("http://local.test/api/executions", {
+      new Request("https://local.test/api/executions", {
         method: "POST",
         headers: authHeaders({ "Idempotency-Key": key }),
         body: JSON.stringify({ sagaId: helloSaga.id, input: { name: `Ada ${SECRET} leak` } }),
@@ -424,7 +424,7 @@ describe("OBS-02 SDK log client (issue #153)", () => {
     await insertExecution(id);
     await appendAuthorLog(bindings.DB, id, { level: "INFO", message: "client-info" });
     await appendAuthorLog(bindings.DB, id, { level: "PROGRESS", message: "client-progress" });
-    const client = createSdkClient({ base: "http://local.test", token: TOKEN, fetchImpl: authedFetch() });
+    const client = createSdkClient({ base: "https://local.test", token: TOKEN, fetchImpl: authedFetch() });
     const tail = await client.tailLogs(id, { level: "INFO", limit: 10 });
     expect(tail.logs.map((entry) => entry.message)).toEqual(["client-info"]);
     const resumed = await client.tailLogs(id, { cursor: tail.nextCursor ?? undefined });

@@ -519,7 +519,7 @@ it("allows local/loose execution with no installs and denies it once installs ex
 });
 
 function submitRequest(sagaId: string, body: unknown, key: string) {
-  return new Request("http://local.test/api/executions", {
+  return new Request("https://local.test/api/executions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${"a".repeat(64)}`,

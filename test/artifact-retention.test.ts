@@ -33,7 +33,7 @@ function call(
   // first use); ordinary calls act as USER unless overridden.
   const userId = init.userId ?? USER;
   return worker.fetch(
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       method,
       headers: requestHeaders,
       ...(init.body === undefined ? {} : { body: init.body }),
@@ -185,7 +185,7 @@ it("recovers from interrupted cleanup: a failed row stays active for the next ru
   const third = await uploadArtifact("three.md", "three");
   await backdate(third, "2020-01-03T00:00:00.000Z");
   const noBucket = await worker.fetch(
-    new Request(`http://local.test/api/artifacts/${third}`, { method: "DELETE", headers: headers() }),
+    new Request(`https://local.test/api/artifacts/${third}`, { method: "DELETE", headers: headers() }),
     { ...bindings, ARTIFACTS: undefined, LAB_ORG_ID: ORG, LAB_USER_ID: USER },
   );
   expect(noBucket.status).toBe(503);
@@ -194,7 +194,7 @@ it("recovers from interrupted cleanup: a failed row stays active for the next ru
 
 it("cleans up failed writes: an R2 failure leaves no orphan metadata", async () => {
   const response = await worker.fetch(
-    new Request(`http://local.test/api/artifacts?name=orphan.md&mime=text%2Fplain`, {
+    new Request(`https://local.test/api/artifacts?name=orphan.md&mime=text%2Fplain`, {
       method: "PUT",
       headers: { ...headers(), "Content-Type": "application/octet-stream" },
       body: new TextEncoder().encode("doomed").slice().buffer as ArrayBuffer,

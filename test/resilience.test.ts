@@ -14,18 +14,18 @@ const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
 const auth = { Authorization: `Bearer ${"a".repeat(64)}`, "Content-Type": "application/json" };
 function submitRequest(key: string, message = "hello") {
-  return new Request("http://local.test/api/executions", {
+  return new Request("https://local.test/api/executions", {
     method: "POST",
     headers: { ...auth, "Idempotency-Key": key },
     body: JSON.stringify({ sagaId: echoSaga.id, input: { message } }),
   });
 }
 function detailRequest(id: string) {
-  return new Request(`http://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } });
+  return new Request(`https://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } });
 }
 function cancelRequest(id: string, override: Partial<Bindings> = {}) {
   return {
-    request: new Request(`http://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } }),
+    request: new Request(`https://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } }),
     override,
   };
 }
@@ -218,7 +218,7 @@ it("cancels a Pending system.smoke execution and never dispatches it", async () 
   // The durable receipt stays Cancelled: retrying the same key must not
   // resurrect a Workflow instance for it.
   const replay = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: { ...auth, "Idempotency-Key": key },
       body: JSON.stringify({ sagaId: smokeSaga.id, input: {} }),

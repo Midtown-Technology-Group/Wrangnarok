@@ -42,7 +42,7 @@ const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "0000
 const auth = { Authorization: `Bearer ${"a".repeat(64)}`, "Content-Type": "application/json" };
 
 function submitRequest(key: string, sagaId: string, body: unknown) {
-  return new Request("http://local.test/api/executions", {
+  return new Request("https://local.test/api/executions", {
     method: "POST",
     headers: { ...auth, "Idempotency-Key": key },
     body: JSON.stringify({ sagaId, input: body }),
@@ -50,11 +50,11 @@ function submitRequest(key: string, sagaId: string, body: unknown) {
 }
 
 function detailRequest(id: string) {
-  return new Request(`http://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } });
+  return new Request(`https://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } });
 }
 
 function cancelRequest(id: string) {
-  return new Request(`http://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } });
+  return new Request(`https://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } });
 }
 
 async function detail(id: string) {

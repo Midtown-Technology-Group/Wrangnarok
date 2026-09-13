@@ -39,7 +39,7 @@ function authed(path: string, method: string, body?: unknown, orgId?: string) {
     ...(body === undefined ? {} : { "Content-Type": "application/json" }),
     ...(orgId === undefined ? {} : { "X-Organization-Id": orgId }),
   };
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -67,7 +67,7 @@ async function call(
 async function submitSaga(userId: string, orgId: string, sagaId: string, input: unknown, key: string) {
   const b = { ...bindings, LAB_USER_ID: userId, LAB_FIXTURE_USER_ID: USER_ADMIN, ADMIN_USER_IDS: USER_ADMIN };
   const res = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${TOKEN}`,
@@ -285,7 +285,7 @@ it("delegates through authorized forms without a separate direct-workflow grant"
   // submit presents it back with the values. The delegation assertion is
   // unchanged: the form submit grant authorizes dispatch, no Saga grant.
   const started = await worker.fetch(
-    new Request(`http://local.test/api/forms/${FORM_NAME}/startup`, {
+    new Request(`https://local.test/api/forms/${FORM_NAME}/startup`, {
       method: "POST",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -295,7 +295,7 @@ it("delegates through authorized forms without a separate direct-workflow grant"
   expect(started.status).toBe(201);
   const { handle } = (await started.json()) as { handle: string };
   const accepted = await worker.fetch(
-    new Request(`http://local.test/api/forms/${FORM_NAME}/submit`, {
+    new Request(`https://local.test/api/forms/${FORM_NAME}/submit`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${TOKEN}`,
@@ -480,7 +480,7 @@ it("exercises the owner/admin/provider-admin/external matrices", async () => {
     ADMIN_USER_IDS: `${USER_ADMIN},${PROVIDER}`,
   };
   const providerRes = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${TOKEN}`,
