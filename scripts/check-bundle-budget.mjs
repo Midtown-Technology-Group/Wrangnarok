@@ -60,6 +60,12 @@ import { join } from "node:path";
 // with the same deliberate feature headroom, not dependency bloat:
 // package.json is unchanged versus main. Combined measures ~357 KiB locally
 // (CI number governs).
+// 2026-09-11 (AUTH-02, issue #143): resource-role control plane (src/roles.ts:
+// 4-table CRUD plus per-request grant evaluation, grant enforcement on direct
+// submits plus form/app routes, 15 role/policy admin routes, SDK error codes;
+// no new dependencies) stacked on the CON-02 surface and measured 368916
+// bytes solo. Combined with FILE-02/OPS-01 above: remeasured after merge;
+// the union with the OBS-02/OPS-02 surfaces below governs the budget.
 // 2026-09-11 (OPS-01, issue #172): 380 KiB. The audit/notifications slice
 // (src/ops.ts: audit + notification domain, keyset pagination, reconcile;
 // 4 read routes plus audit emission on 5 app routes and the cancel route;
@@ -121,6 +127,12 @@ import { join } from "node:path";
 // a shrink pass (direct header construction instead of Response re-wrapping):
 // 55 bytes over the 445 KiB budget. Hand-written security-boundary code,
 // package.json unchanged versus main; deliberate feature headroom only.
+// 2026-09-12 (AUTH-02 merge over sec/response main, issue #143): 485 KiB.
+// The union of the AUTH-02 resource-role control plane (src/roles.ts, 15
+// role/policy admin routes, grant enforcement) with the OBS-02/OPS-02/RUN-01
+// surfaces plus the sec endpoint safe-URL policy and response baseline
+// measures 490817 bytes. Hand-written feature code, no new dependencies
+// (package.json unchanged versus main); deliberate feature headroom only.
 // 2026-09-12 (TOOL-01 stacked over sec/response main, issue #170): 490 KiB.
 // The opt-in tool registry (4 routes + D1 tool_enrollments + SDK entries),
 // the inbound MCP gateway (JSON-RPC tools/list, tools/call, tools/search,
@@ -129,6 +141,12 @@ import { join } from "node:path";
 // and provenance) stack on the 450 KiB surface above. Hand-written feature
 // code, no new dependencies (package.json unchanged versus main);
 // deliberate feature headroom only.
+// 2026-09-12 (AUTH-02 rebase over TOOL-01 main, issue #143): 525 KiB.
+// The union of the AUTH-02 resource-role control plane with the TOOL-01
+// tool registry plus inbound MCP gateway plus HaloPSA Code Mode host,
+// stacked on the sec endpoint safe-URL policy and response baseline,
+// measures 530653 bytes. Hand-written feature code, no new dependencies
+// (package.json unchanged versus main); deliberate feature headroom only.
 // 2026-09-12 (FORM-02 stacked over TOOL-01 main, issue #155): 555 KiB. The
 // dynamic-forms surface (8 routes plus the forms domain: 17 field types,
 // startup handles, Table and static providers, delegated submit, scheduled
@@ -137,15 +155,22 @@ import { join } from "node:path";
 // deliberate feature headroom, not dependency bloat: package.json is
 // unchanged versus main. Combined measures 545802 bytes locally (CI number
 // governs); shrink the raise if it lands lower.
-// 2026-09-12 (TRG-01 stacked over FORM-02 main, issue #137): 575 KiB. The
-// schedules surface (6 routes plus the schedules domain: cron/timezone
-// parsers, next-due math, deterministic window keys, bounded tick
-// promotion, delivery visibility; plus the minute Cron trigger, SDK
-// schedule types/guards/client, and ops scheduler inventory) stacks on the
-// 555 KiB surface above and measures ~567 KiB combined. Same deliberate
-// feature headroom as the earlier raises, not dependency bloat:
-// package.json is unchanged versus main.
-const BUDGET_BYTES = 575 * 1024;
+// 2026-09-12 (AUTH-02 rebase over TRG-01 main, issue #143): 590 KiB.
+// The union of the AUTH-02 resource-role control plane (grant gates on
+// form read/submit plus the FORM-02 startup-handle delegation test) with
+// the TRG-01 schedules surface stacked on FORM-02 plus the sec endpoint
+// safe-URL policy and response baseline measures locally below; the CI
+// number governs. Hand-written feature code, no new dependencies
+// (package.json unchanged versus main); deliberate feature headroom only.
+// 2026-09-13 (AUTH-02 P1 review fixes fast-follow, issue #143): 600 KiB.
+// The eight thread fixes (App-write grant gates on three mutation routes,
+// org-scoped assignees, policy-rule uniqueness, UUID canonicalization, org
+// auth cleanup on delete, tool execute grants on both call paths, form
+// write authority on three routes) measure 609741 bytes in CI against the
+// 590 KiB line: ~5.5 KiB of hand-written authorization-boundary code, no
+// new dependencies (package.json unchanged versus main); deliberate
+// feature headroom only.
+const BUDGET_BYTES = 600 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");

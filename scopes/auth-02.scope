@@ -4,7 +4,7 @@ src/auth.ts
 src/apps.ts
 src/index.ts
 src/sdk.ts
-migrations/0009_resource_roles.sql
+migrations/0013_resource_roles.sql
 migrations/0005_forms.sql
 migrations/0006_apps.sql
 test/resource-roles.test.ts

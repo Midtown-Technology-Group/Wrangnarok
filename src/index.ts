@@ -9,6 +9,7 @@ import {
   jobDetail,
   listApps,
   listJobs,
+  loadApp,
   parseAppBody,
   parseAppId,
   parseSwapBody,
@@ -267,6 +268,28 @@ import {
   TABLE_NAME,
   updateRow,
 } from "./tables";
+import {
+  assignRole,
+  createPolicyRule,
+  createRole,
+  deletePolicyRule,
+  deleteRole,
+  listAssignments,
+  listGrants,
+  listPolicyRules,
+  listRoles,
+  parseRoleId,
+  parseRuleId,
+  policyConsumers,
+  removeGrant,
+  requireGrant,
+  revokeAll,
+  revokeAssignment,
+  roleConsumers,
+  addGrant as addRoleGrant,
+  type ResourceAction,
+  type ResourceKind,
+} from "./roles";
 import { SAGA_CATALOG, SAGA_DEFINITIONS } from "./sagas";
 import { describeContract, SDK_DOC_PATH, SDK_VERSION } from "./sdk";
 import {
@@ -712,7 +735,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // The org history list is the only other route that takes query strings,
     // with the same allowlisted keys as the owner listing.
     const isOrgPath =
-      url.pathname === "/api/orgs" || url.pathname.startsWith("/api/orgs/") || url.pathname.startsWith("/api/users/");
+      url.pathname === "/api/orgs" ||
+      url.pathname.startsWith("/api/orgs/") ||
+      url.pathname.startsWith("/api/users/") ||
+      url.pathname === "/api/policy-rules" ||
+      url.pathname.startsWith("/api/policy-rules/");
     const isOrgHistory = /^\/api\/orgs\/[0-9a-fA-F-]{36}\/executions$/.test(url.pathname) && request.method === "GET";
     // Query strings are deny-by-default: only the history list routes, the
     // table query/count routes, the file structural list and byte routes,
@@ -753,6 +780,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       request.method === "DELETE" && /^\/api\/apps\/[0-9a-f-]{36}\/runtime\/files\/.+$/.test(url.pathname);
     const fileList = url.pathname === "/api/files" && request.method === "GET";
     const fileBytes = url.pathname === "/api/files/content" && (request.method === "GET" || request.method === "PUT");
+    // AUTH-02 (ADR 018): the policy-consumer inspection route takes exactly
+    // resourceKind/resourceId/action (parsed by parseTripleQuery at the
+    // route); every other query shape on admin routes stays rejected.
+    const isPolicyConsumers =
+      /^\/api\/orgs\/[0-9a-fA-F-]{36}\/policy-consumers$/.test(url.pathname) && request.method === "GET";
     // TOOL-01 Code Mode search (issue #170): ?integration= + ?q= through the
     // route's own allowlisted parser below.
     const openapiSearch = request.method === "GET" && url.pathname === "/api/openapi/search";
@@ -772,6 +804,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       !appRuntimeFileDelete &&
       !fileList &&
       !fileBytes &&
+      !isPolicyConsumers &&
       !openapiSearch &&
       !scheduleDeliveriesRead
     )
@@ -919,6 +952,15 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       )
         throw new Fault(415, "JSON_REQUIRED", "Unencoded JSON is required.");
       const { saga, input } = parseSubmission(await boundedJson(request.body));
+      // AUTH-02 (ADR 018): direct Saga execution needs the saga execute
+      // grant. Org/instance admins bypass via `can`; everyone else denies by
+      // absence with 403 GRANT_REQUIRED.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "saga", resourceId: saga.id.toLowerCase(), action: "execute" },
+        "Executing this Saga requires an execute grant.",
+      );
       const accepted = await submit(env, caller, key, saga, input);
       // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
       return json(accepted, accepted.replayed ? 200 : 202, { Location: accepted.statusUrl });
@@ -945,6 +987,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       ) {
         throw new Fault(400, "INVALID_FORM", "Form sagaId must be a known Saga UUID.");
       }
+      // AUTH-02: Form authoring needs the form write grant. Creation names
+      // its own form, so gate on the kind-wide wildcard target.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "form", resourceId: "*", action: "write" },
+        "Creating Forms requires a form write grant.",
+      );
       const saved = await saveForm(env.DB, caller, created);
       return json({ form: serializeForm(saved) }, 201);
     }
@@ -958,6 +1008,15 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
       const def = await loadForm(env.DB, caller.orgId, name);
       if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      // AUTH-02 (ADR 018): reading a Form declaration needs the form read
+      // grant. Listings and hidden references never bypass: unknown or
+      // foreign names already 404'd above, before grant evaluation.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "read" },
+        "Reading this Form requires a read grant.",
+      );
       return json({ form: serializeForm(def) });
     }
     if (formDetail?.[1] && request.method === "PUT") {
@@ -973,6 +1032,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       }
       const existing = await loadForm(env.DB, caller.orgId, name);
       if (!existing) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      // AUTH-02: Form authoring needs the form write grant on the target.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "write" },
+        "Editing this Form requires a write grant.",
+      );
       const patch = body as Record<string, unknown>;
       if (
         typeof patch.sagaId !== "string" ||
@@ -988,6 +1054,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const name = formDetail[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      // AUTH-02: Form deletion needs the form write grant on the target.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "write" },
+        "Deleting this Form requires a write grant.",
+      );
       await deleteForm(env.DB, caller, name);
       return json({ deleted: name });
     }
@@ -1051,6 +1124,15 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       requireJson(request);
       const def = await loadForm(env.DB, caller.orgId, name);
       if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      // AUTH-02 (ADR 018): the authorized Form IS the delegation — submit
+      // needs the form submit grant, never a separate saga execute grant on
+      // the bound Saga. Requiring both would make delegation meaningless.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "submit" },
+        "Submitting this Form requires a submit grant.",
+      );
       const body: unknown = await boundedJson(request.body);
       if (body === null || typeof body !== "object" || Array.isArray(body)) {
         throw new Fault(422, "FORM_VALIDATION_FAILED", "The form submission must be a JSON object.", [
@@ -1478,6 +1560,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     if (url.pathname === "/api/apps" && request.method === "POST") {
       requireJson(request);
+      // AUTH-02 (ADR 018): creating an app needs the kind-wide app write
+      // grant. Listing apps stays open metadata; creation does not.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "app", resourceId: "*", action: "write" },
+        "Creating an App requires a write grant.",
+      );
       const { name, slug } = parseAppBody(await boundedJson(request.body));
       try {
         const app = await createApp(env.DB, caller, name, slug);
@@ -1511,12 +1601,20 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     if (appBuilds?.[1] && (request.method === "GET" || request.method === "POST")) {
       const id = parseAppId(appBuilds[1]);
       rejectQuery(url);
-      if (request.method === "GET") return json({ jobs: await listJobs(env.DB, caller, id) });
+      // AUTH-02 (ADR 018): foreign-Organization ids 404 at loadApp below;
+      // known apps need the app write grant for builds (read for job list).
+      // Reading the build list is part of inspecting the app: read suffices.
+      // Starting a build mutates: write required.
       // OPS-01: the validated build runs inside startBuild; on success the
       // route records app.build.start/app.build.complete audit events and
       // emits a terminal personal notification linked to the job (the one
       // long-running operation this product has). A denied or
       // unvalidatable build records the failure audit and emits nothing.
+      if (request.method === "GET") {
+        await requireAppVisible(env.DB, ctx, caller, id, "read", "Reading App builds requires a read grant.");
+        return json({ jobs: await listJobs(env.DB, caller, id) });
+      }
+      await requireAppVisible(env.DB, ctx, caller, id, "write", "Building this App requires a write grant.");
       try {
         const job = await startBuild(env.DB, caller, id);
         await recordAudit(
@@ -1589,16 +1687,21 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     const appJob = /^\/api\/apps\/([0-9a-f-]{36})\/builds\/([0-9a-f-]{36})$/.exec(url.pathname);
     if (appJob?.[1] && appJob[2] && request.method === "GET") {
+      const id = parseAppId(appJob[1]);
+      await requireAppVisible(env.DB, ctx, caller, id, "read", "Reading App builds requires a read grant.");
       return json({ job: await jobDetail(env.DB, caller, parseAppId(appJob[1]), appJob[2]) });
     }
     const appValidate = /^\/api\/apps\/([0-9a-f-]{36})\/validate$/.exec(url.pathname);
     if (appValidate?.[1] && request.method === "POST") {
+      const id = parseAppId(appValidate[1]);
+      await requireAppVisible(env.DB, ctx, caller, id, "write", "Validating this App requires a write grant.");
       return json({ revision: await validateApp(env.DB, caller, parseAppId(appValidate[1])) });
     }
     const appSource = /^\/api\/apps\/([0-9a-f-]{36})\/source$/.exec(url.pathname);
     if (appSource?.[1] && request.method === "PUT") {
       requireJson(request);
       const id = parseAppId(appSource[1]);
+      await requireAppVisible(env.DB, ctx, caller, id, "write", "Editing this App requires a write grant.");
       try {
         const revision = await editAppSource(env.DB, caller, id, await boundedJson(request.body));
         await recordAudit(
@@ -1630,8 +1733,19 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     if (appSwap?.[1] && request.method === "POST") {
       requireJson(request);
       const id = parseAppId(appSwap[1]);
+      await requireAppVisible(env.DB, ctx, caller, id, "write", "Swapping this App requires a write grant.");
+      const otherAppId = parseSwapBody(await boundedJson(request.body));
+      // Both peers mutate: resolve the peer with hidden-reference discipline
+      // (foreign/unknown -> 404) then require its write grant before swapping.
+      await requireAppVisible(
+        env.DB,
+        ctx,
+        caller,
+        otherAppId,
+        "write",
+        "Swapping the other App requires a write grant.",
+      );
       try {
-        const otherAppId = parseSwapBody(await boundedJson(request.body));
         const swapped = await swapSlugs(env.DB, caller, id, otherAppId);
         await recordAudit(
           env.DB,
@@ -1660,6 +1774,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     const appAsset = /^\/api\/apps\/([0-9a-f-]{36})\/assets\/(.+)$/.exec(url.pathname);
     if (appAsset?.[1] && appAsset[2] && request.method === "GET") {
+      const id = parseAppId(appAsset[1]);
+      // AUTH-02 (ADR 018): serving the active deployment is its own scoped
+      // delegation — serve, not write and not any Saga grant.
+      await requireAppVisible(env.DB, ctx, caller, id, "serve", "Serving this App requires a serve grant.");
       const served = await serveAsset(env.DB, caller, parseAppId(appAsset[1]), appAsset[2]);
       return apiBytes(served.content, 200, {
         "Content-Type": "text/plain; charset=utf-8",
@@ -1670,10 +1788,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     const appOne = /^\/api\/apps\/([0-9a-f-]{36})$/.exec(url.pathname);
     if (appOne?.[1] && request.method === "GET") {
+      const id = parseAppId(appOne[1]);
+      await requireAppVisible(env.DB, ctx, caller, id, "read", "Reading this App requires a read grant.");
       return json({ app: await appDetail(env.DB, caller, parseAppId(appOne[1])) });
     }
     if (appOne?.[1] && request.method === "DELETE") {
       const id = parseAppId(appOne[1]);
+      await requireAppVisible(env.DB, ctx, caller, id, "write", "Deleting this App requires a write grant.");
       try {
         await deleteApp(env.DB, caller, id);
         await recordAudit(
@@ -2041,12 +2162,28 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     if (appGrants?.[1] && request.method === "POST") {
       requireJson(request);
+      await requireAppVisible(
+        env.DB,
+        ctx,
+        caller,
+        parseAppId(appGrants[1]),
+        "write",
+        "Managing App grants requires a write grant.",
+      );
       const created = await createAppGrant(env.DB, caller, parseAppId(appGrants[1]), await boundedJson(request.body));
       return json({ grant: created }, 201);
     }
     const appGrantRevoke = /^\/api\/apps\/([0-9a-f-]{36})\/grants\/([^/]+)\/revoke$/.exec(url.pathname);
     if (appGrantRevoke?.[1] && appGrantRevoke[2] && request.method === "POST") {
       rejectQuery(url);
+      await requireAppVisible(
+        env.DB,
+        ctx,
+        caller,
+        parseAppId(appGrantRevoke[1]),
+        "write",
+        "Revoking App grants requires a write grant.",
+      );
       return json({
         grant: await revokeAppGrant(env.DB, caller, parseAppId(appGrantRevoke[1]), appGrantRevoke[2]),
       });
@@ -2058,6 +2195,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     if (appTables?.[1] && request.method === "POST") {
       requireJson(request);
+      await requireAppVisible(
+        env.DB,
+        ctx,
+        caller,
+        parseAppId(appTables[1]),
+        "write",
+        "Declaring App tables requires a write grant.",
+      );
       const app = await loadRuntimeApp(env.DB, caller, parseAppId(appTables[1]));
       return json({ table: await declareAppTable(env.DB, caller, app, await boundedJson(request.body)) }, 201);
     }
@@ -2343,6 +2488,15 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         ...((await boundedJson(request.body)) as Record<string, unknown>),
         sagaId: tool.sagaId,
       });
+      // AUTH-02: tool execution is Saga execution under another name.
+      // Enrollment alone must not authorize it: require the saga execute
+      // grant exactly as the direct submit path does.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "saga", resourceId: saga.id.toLowerCase(), action: "execute" },
+        "Executing this tool requires an execute grant on its Saga.",
+      );
       const accepted = await submit(env, caller, key, saga, input);
       await recordAudit(
         env.DB,
@@ -2544,6 +2698,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         const args = input as Record<string, unknown>;
         const key = parseCallerKey(typeof args.idempotencyKey === "string" ? (args.idempotencyKey as string) : null);
         const { saga, input: parsed } = parseSubmission({ input: args.input ?? {}, sagaId: resolved.sagaId });
+        // AUTH-02: same execute-grant gate as the REST tool path above.
+        await requireGrant(
+          env.DB,
+          ctx,
+          { orgId: caller.orgId, resourceKind: "saga", resourceId: saga.id.toLowerCase(), action: "execute" },
+          "Executing this tool requires an execute grant on its Saga.",
+        );
         const accepted = await submit(env, caller, key, saga, parsed);
         await recordAudit(
           env.DB,
@@ -2923,6 +3084,144 @@ function parseMemberUpdate(value: unknown): MemberUpdate {
   return update;
 }
 
+/** AUTH-02 body parsers (ADR 018): unknown keys are rejected here so the
+ * domain functions only see known fields. Grant/rule triples re-validate in
+ * roles.ts (fail closed twice: route shape, then domain semantics). */
+function parseRoleBody(value: unknown): { name: string; description: string } {
+  if (!object(value) || typeof value.name !== "string") {
+    throw new Fault(400, "INVALID_ROLE", "Provide a role name of 1 to 64 characters.");
+  }
+  for (const key of Object.keys(value)) {
+    if (!["name", "description"].includes(key)) {
+      throw new Fault(400, "UNSUPPORTED_FIELD", `Field ${key} cannot be set here.`);
+    }
+  }
+  const description = value.description === undefined ? "" : value.description;
+  if (typeof description !== "string" || description.length > 256) {
+    throw new Fault(400, "INVALID_ROLE", "Role description must be at most 256 characters.");
+  }
+  return { name: value.name, description };
+}
+
+function parseGrantBody(value: unknown): { resourceKind: ResourceKind; resourceId: string; action: ResourceAction } {
+  if (!object(value)) throw new Fault(400, "INVALID_GRANT", "Provide resourceKind, resourceId, and action.");
+  for (const key of Object.keys(value)) {
+    if (!["resourceKind", "resourceId", "action"].includes(key)) {
+      throw new Fault(400, "UNSUPPORTED_FIELD", `Field ${key} cannot be set here.`);
+    }
+  }
+  if (
+    typeof value.resourceKind !== "string" ||
+    typeof value.resourceId !== "string" ||
+    typeof value.action !== "string"
+  ) {
+    throw new Fault(400, "INVALID_GRANT", "Provide resourceKind, resourceId, and action.");
+  }
+  return {
+    resourceKind: value.resourceKind as ResourceKind,
+    resourceId: value.resourceId,
+    action: value.action as ResourceAction,
+  };
+}
+
+function parseRuleBody(value: unknown): {
+  resourceKind: ResourceKind;
+  resourceId: string;
+  action: ResourceAction;
+  subjectType: string;
+  subjectRef: string;
+} {
+  if (!object(value)) throw new Fault(400, "INVALID_RULE", "Provide resourceKind, resourceId, action, and subject.");
+  for (const key of Object.keys(value)) {
+    if (!["resourceKind", "resourceId", "action", "subjectType", "subjectRef"].includes(key)) {
+      throw new Fault(400, "UNSUPPORTED_FIELD", `Field ${key} cannot be set here.`);
+    }
+  }
+  if (
+    typeof value.resourceKind !== "string" ||
+    typeof value.resourceId !== "string" ||
+    typeof value.action !== "string" ||
+    (value.subjectType !== undefined && typeof value.subjectType !== "string") ||
+    (value.subjectRef !== undefined && typeof value.subjectRef !== "string")
+  ) {
+    throw new Fault(400, "INVALID_RULE", "Provide resourceKind, resourceId, action, and subject.");
+  }
+  return {
+    resourceKind: value.resourceKind as ResourceKind,
+    resourceId: value.resourceId,
+    action: value.action as ResourceAction,
+    subjectType: (value.subjectType ?? "user") as string,
+    subjectRef: (value.subjectRef ?? "") as string,
+  };
+}
+
+function parseAssignmentBody(value: unknown): { userId: string } {
+  if (!object(value) || typeof value.userId !== "string") {
+    throw new Fault(400, "INVALID_USER_ID", "Provide a userId string to assign.");
+  }
+  for (const key of Object.keys(value)) {
+    if (!["userId"].includes(key)) throw new Fault(400, "UNSUPPORTED_FIELD", `Field ${key} cannot be set here.`);
+  }
+  return { userId: value.userId };
+}
+
+function parseRevokeBody(value: unknown): { userId?: string; roleId?: string } {
+  if (!object(value)) throw new Fault(400, "INVALID_REVOCATION", "Revoke by user or by role.");
+  for (const key of Object.keys(value)) {
+    if (!["userId", "roleId"].includes(key)) {
+      throw new Fault(400, "UNSUPPORTED_FIELD", `Field ${key} cannot be set here.`);
+    }
+  }
+  if (typeof value.userId === "string" && typeof value.roleId === "string") {
+    throw new Fault(400, "INVALID_REVOCATION", "Revoke by user or by role, not both.");
+  }
+  if (typeof value.userId === "string") return { userId: value.userId };
+  if (typeof value.roleId === "string") return { roleId: value.roleId };
+  throw new Fault(400, "INVALID_REVOCATION", "Revoke by user or by role.");
+}
+
+/** Query parser for GET .../policy-consumers: exactly resourceKind,
+ * resourceId, and action, nothing else (deny-by-default query posture). */
+function parseTripleQuery(params: URLSearchParams): {
+  resourceKind: ResourceKind;
+  resourceId: string;
+  action: ResourceAction;
+} {
+  for (const key of params.keys()) {
+    if (!["resourceKind", "resourceId", "action"].includes(key)) {
+      throw new Fault(400, "UNSUPPORTED_QUERY", "Only resourceKind, resourceId, and action are supported here.");
+    }
+  }
+  const kind = params.get("resourceKind");
+  const id = params.get("resourceId");
+  const action = params.get("action");
+  if (kind === null || id === null || action === null) {
+    throw new Fault(400, "INVALID_GRANT", "Provide resourceKind, resourceId, and action.");
+  }
+  return { resourceKind: kind as ResourceKind, resourceId: id, action: action as ResourceAction };
+}
+
+/** AUTH-02 (ADR 018): hidden-reference discipline for Apps. A foreign or
+ * unknown App id answers 404 (same shape as loadForm: resolve-then-null),
+ * never a grant-shaped 403 that would confirm existence. Only a visible app
+ * reaches grant evaluation. */
+async function requireAppVisible(
+  db: D1Database,
+  ctx: CallerCtx,
+  caller: Principal,
+  id: string,
+  action: ResourceAction,
+  message: string,
+): Promise<void> {
+  if (!(await loadApp(db, caller, id))) throw new Fault(404, "APP_NOT_FOUND", "App not found.");
+  await requireGrant(
+    db,
+    ctx,
+    { orgId: caller.orgId, resourceKind: "app", resourceId: id.toLowerCase(), action },
+    message,
+  );
+}
+
 /** AUTH-01 admin router: Organizations, members, users, and the org admin
  * history surface. Returns null when the path is not an org route. Query
  * strings stay deny-by-default: only the org history list takes them, with
@@ -2995,6 +3294,152 @@ async function routeOrgs(request: Request, env: Bindings, ctx: CallerCtx, url: U
     const orgId = parseOrgId(orgHistory[1]);
     await requireManageOrg(env.DB, ctx, orgId);
     return json(await listOrgHistory(env.DB, orgId, parseHistoryQuery(url.searchParams)));
+  }
+  // AUTH-02 role/policy administration (ADR 018): org admins own their
+  // Organization's roles, grants, assignments, bulk revocation, and
+  // Organization policy rules. Non-admin members reach no admin route.
+  const roles = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/roles$/.exec(pathname);
+  if (roles?.[1]) {
+    const orgId = parseOrgId(roles[1]);
+    await requireManageOrg(env.DB, ctx, orgId);
+    if (request.method === "GET") return json({ roles: await listRoles(env.DB, orgId) });
+    if (request.method === "POST") {
+      requireJson(request);
+      const body = parseRoleBody(await boundedJson(request.body));
+      return json(await createRole(env.DB, orgId, body.name, body.description), 201);
+    }
+  }
+  const roleOne = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/roles\/([0-9a-fA-F-]{36})$/.exec(pathname);
+  if (roleOne?.[1] && roleOne[2] && request.method === "DELETE") {
+    const orgId = parseOrgId(roleOne[1]);
+    await requireManageOrg(env.DB, ctx, orgId);
+    return json(await deleteRole(env.DB, orgId, parseRoleId(roleOne[2])));
+  }
+  const consumers = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/roles\/([0-9a-fA-F-]{36})\/consumers$/.exec(pathname);
+  if (consumers?.[1] && consumers[2] && request.method === "GET") {
+    const orgId = parseOrgId(consumers[1]);
+    await requireManageOrg(env.DB, ctx, orgId);
+    return json(await roleConsumers(env.DB, orgId, parseRoleId(consumers[2])));
+  }
+  const grants = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/roles\/([0-9a-fA-F-]{36})\/grants$/.exec(pathname);
+  if (grants?.[1] && grants[2]) {
+    const orgId = parseOrgId(grants[1]);
+    await requireManageOrg(env.DB, ctx, orgId);
+    if (request.method === "GET") return json({ grants: await listGrants(env.DB, orgId, parseRoleId(grants[2])) });
+    if (request.method === "POST") {
+      requireJson(request);
+      const body = parseGrantBody(await boundedJson(request.body));
+      return json(
+        await addRoleGrant(env.DB, orgId, parseRoleId(grants[2]), body.resourceKind, body.resourceId, body.action),
+        201,
+      );
+    }
+  }
+  const grantOne = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/roles\/([0-9a-fA-F-]{36})\/grants\/([0-9a-fA-F-]{36})$/.exec(
+    pathname,
+  );
+  if (grantOne?.[1] && grantOne[2] && grantOne[3] && request.method === "DELETE") {
+    const orgId = parseOrgId(grantOne[1]);
+    await requireManageOrg(env.DB, ctx, orgId);
+    await removeGrant(env.DB, orgId, parseRoleId(grantOne[2]), grantOne[3]);
+    return json({ deleted: true });
+  }
+  const assignments = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/roles\/([0-9a-fA-F-]{36})\/assignments$/.exec(pathname);
+  if (assignments?.[1] && assignments[2]) {
+    const orgId = parseOrgId(assignments[1]);
+    await requireManageOrg(env.DB, ctx, orgId);
+    if (request.method === "GET") {
+      return json({ assignments: await listAssignments(env.DB, orgId, parseRoleId(assignments[2])) });
+    }
+    if (request.method === "POST") {
+      requireJson(request);
+      const body = parseAssignmentBody(await boundedJson(request.body));
+      return json(await assignRole(env.DB, orgId, parseRoleId(assignments[2]), body.userId), 201);
+    }
+  }
+  const assignmentOne = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/roles\/([0-9a-fA-F-]{36})\/assignments\/(.+)$/.exec(
+    pathname,
+  );
+  if (assignmentOne?.[1] && assignmentOne[2] && assignmentOne[3] && request.method === "DELETE") {
+    const orgId = parseOrgId(assignmentOne[1]);
+    await requireManageOrg(env.DB, ctx, orgId);
+    return json(
+      await revokeAssignment(
+        env.DB,
+        orgId,
+        parseRoleId(assignmentOne[2]),
+        parseUserId(decodeURIComponent(assignmentOne[3])),
+      ),
+    );
+  }
+  const revokeBulk = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/assignments\/revoke$/.exec(pathname);
+  if (revokeBulk?.[1] && request.method === "POST") {
+    const orgId = parseOrgId(revokeBulk[1]);
+    await requireManageOrg(env.DB, ctx, orgId);
+    requireJson(request);
+    return json(await revokeAll(env.DB, orgId, parseRevokeBody(await boundedJson(request.body))));
+  }
+  const orgRules = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/policy-rules$/.exec(pathname);
+  if (orgRules?.[1]) {
+    const orgId = parseOrgId(orgRules[1]);
+    await requireManageOrg(env.DB, ctx, orgId);
+    if (request.method === "GET") return json({ rules: await listPolicyRules(env.DB, orgId) });
+    if (request.method === "POST") {
+      requireJson(request);
+      const body = parseRuleBody(await boundedJson(request.body));
+      return json(
+        await createPolicyRule(
+          env.DB,
+          orgId,
+          body.resourceKind,
+          body.resourceId,
+          body.action,
+          body.subjectType,
+          body.subjectRef,
+        ),
+        201,
+      );
+    }
+  }
+  const orgRuleOne = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/policy-rules\/([0-9a-fA-F-]{36})$/.exec(pathname);
+  if (orgRuleOne?.[1] && orgRuleOne[2] && request.method === "DELETE") {
+    const orgId = parseOrgId(orgRuleOne[1]);
+    await requireManageOrg(env.DB, ctx, orgId);
+    await deletePolicyRule(env.DB, orgId, parseRuleId(orgRuleOne[2]));
+    return json({ deleted: true });
+  }
+  const policyConsumersRoute = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/policy-consumers$/.exec(pathname);
+  if (policyConsumersRoute?.[1] && request.method === "GET") {
+    const orgId = parseOrgId(policyConsumersRoute[1]);
+    await requireManageOrg(env.DB, ctx, orgId);
+    const triple = parseTripleQuery(url.searchParams);
+    return json(await policyConsumers(env.DB, orgId, triple.resourceKind, triple.resourceId, triple.action));
+  }
+  // Global policy rules (ADR 018): instance admins only. Globals apply across
+  // Organizations; org admins never write them.
+  if (pathname === "/api/policy-rules" && (request.method === "GET" || request.method === "POST")) {
+    requireInstanceAdmin(ctx);
+    if (request.method === "GET") return json({ rules: await listPolicyRules(env.DB, null) });
+    requireJson(request);
+    const body = parseRuleBody(await boundedJson(request.body));
+    return json(
+      await createPolicyRule(
+        env.DB,
+        null,
+        body.resourceKind,
+        body.resourceId,
+        body.action,
+        body.subjectType,
+        body.subjectRef,
+      ),
+      201,
+    );
+  }
+  const globalRuleOne = /^\/api\/policy-rules\/([0-9a-fA-F-]{36})$/.exec(pathname);
+  if (globalRuleOne?.[1] && request.method === "DELETE") {
+    requireInstanceAdmin(ctx);
+    await deletePolicyRule(env.DB, null, parseRuleId(globalRuleOne[1]));
+    return json({ deleted: true });
   }
   const user = /^\/api\/users\/(.+?)\/(disable|enable)$/.exec(pathname);
   if (user?.[1] && user[2] && request.method === "POST") {
