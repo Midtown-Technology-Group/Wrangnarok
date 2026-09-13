@@ -93,6 +93,13 @@ await client.listHistory({ status: "Failed,TimedOut", limit: 20 });
 await client.cancelExecution(done.executionId);
 await client.diagnoseExecution(done.executionId); // detail + hint for known codes
 
+// Runtime policy (RUN-01, issue #135): operator inspect/change independent
+// of Saga source; applied snapshots ride Execution detail. Writes need an
+// Organization admin (or instance admin); ordinary members read only.
+await client.getSagaPolicy("hello");
+await client.updateSagaPolicy("hello", { admission: { enabled: false } });
+// CLI: saga-policy --saga hello | saga-policy-set --saga hello --policy '{"admission":{"enabled":false}}'
+
 // Author logs (OBS-02): scoped tail plus operator search. Polling views over
 // durable D1 rows; reconnect by refetching from nextCursor (replays dedupe
 // by seq). DEBUG rows stay hidden unless level asks for them.

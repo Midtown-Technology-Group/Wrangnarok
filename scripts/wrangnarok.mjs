@@ -183,6 +183,22 @@ function readInput() {
   }
 }
 
+/** RUN-01 --policy parsing: inline JSON or @FILE; the server merges the
+ * partial body over the current row and rejects unknown keys. */
+function readPolicyBody(raw) {
+  if (typeof raw !== "string") fail("USAGE", "--policy must be JSON (or @path to a JSON file).");
+  const text = raw.startsWith("@") ? readFileSync(raw.slice(1), "utf-8") : raw;
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return fail("USAGE", "--policy must be a JSON object (or @path to one).");
+    }
+    return parsed;
+  } catch {
+    return fail("USAGE", "--policy must be JSON (or @path to a JSON file).");
+  }
+}
+
 async function pollDetail(ctx, executionId, { wait, timeoutMs, pollMs, sleep }) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -1303,6 +1319,27 @@ export async function runCommand(ctx, deps = {}) {
         "config delete",
       );
     }
+    case "saga-policy": {
+      if (!ctx.policySaga) fail("USAGE", "saga-policy needs --saga NAME|UUID.");
+      const sagaId = await resolveSagaId(full, ctx.policySaga);
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/sagas/${sagaId}/policy`, { headers: full.headers }),
+        "saga policy",
+      );
+    }
+    case "saga-policy-set": {
+      if (!ctx.policySaga) fail("USAGE", "saga-policy-set needs --saga NAME|UUID.");
+      if (ctx.policyBody === undefined) fail("USAGE", "saga-policy-set needs --policy JSON|@FILE.");
+      const sagaId = await resolveSagaId(full, ctx.policySaga);
+      return readJson(
+        await fetchImpl(`${ctx.base}/api/sagas/${sagaId}/policy`, {
+          method: "PUT",
+          headers: full.headers,
+          body: JSON.stringify(readPolicyBody(ctx.policyBody)),
+        }),
+        "saga policy update",
+      );
+    }
     default:
       fail("USAGE", `unknown command ${JSON.stringify(ctx.command ?? "")}. See --help.`);
       return undefined;
@@ -1746,6 +1783,80 @@ async function selftest() {
     const result = await runCommand({ ...base, command: "contract" }, { fetchImpl: stub.fetch, ...noSleep });
     check("contract version", result.version === "1");
     check("contract url", stub.calls[0].url === "http://local.test/api/sdk");
+  }
+
+  // RUN-01 saga-policy reads the effective policy (name resolves via catalog).
+  {
+    const stub = stubFetch([
+      jsonResponse({
+        sagas: [
+          {
+            id: "395e15f0-3627-41f6-8922-008ce37e3b35",
+            name: "hello",
+            revision: "hello-v1",
+            description: "hi",
+            requiredIntegrations: [],
+          },
+        ],
+      }),
+      jsonResponse({ policy: { sagaId: "395e15f0-3627-41f6-8922-008ce37e3b35", version: 1 } }),
+    ]);
+    const result = await runCommand(
+      { ...base, command: "saga-policy", policySaga: "hello" },
+      { fetchImpl: stub.fetch, ...noSleep },
+    );
+    check("saga-policy version", result.policy.version === 1);
+    check(
+      "saga-policy url",
+      stub.calls[1].url === "http://local.test/api/sagas/395e15f0-3627-41f6-8922-008ce37e3b35/policy",
+    );
+  }
+
+  // RUN-01 saga-policy-set PUTs a merged partial body (admin-gated server-side).
+  {
+    const stub = stubFetch([
+      jsonResponse({
+        sagas: [{ id: "395e15f0-3627-41f6-8922-008ce37e3b35", name: "hello", revision: "hello-v1" }],
+      }),
+      jsonResponse({ policy: { sagaId: "395e15f0-3627-41f6-8922-008ce37e3b35", version: 2 } }),
+    ]);
+    const result = await runCommand(
+      {
+        ...base,
+        command: "saga-policy-set",
+        policySaga: "hello",
+        policyBody: '{"admission":{"enabled":false}}',
+      },
+      { fetchImpl: stub.fetch, ...noSleep },
+    );
+    check("saga-policy-set version", result.policy.version === 2);
+    check("saga-policy-set method", stub.calls[1].init.method === "PUT");
+    check("saga-policy-set body", stub.calls[1].init.body === '{"admission":{"enabled":false}}');
+  }
+
+  // RUN-01 saga-policy-set rejects non-object bodies before any fetch.
+  {
+    const stub = stubFetch([
+      jsonResponse({
+        sagas: [{ id: "395e15f0-3627-41f6-8922-008ce37e3b35", name: "hello", revision: "hello-v1" }],
+      }),
+    ]);
+    let error = null;
+    const exit = process.exit;
+    process.exit = (code) => {
+      throw new Error(`exit:${code}`);
+    };
+    try {
+      await runCommand(
+        { ...base, command: "saga-policy-set", policySaga: "hello", policyBody: "[1,2]" },
+        { fetchImpl: stub.fetch, ...noSleep },
+      );
+    } catch (e) {
+      error = e;
+    } finally {
+      process.exit = exit;
+    }
+    check("saga-policy-set shape gate", /exit:2/.test(String(error)) && stub.calls.length === 1);
   }
 
   // logs tails one Execution with level/limit filters; --follow polls from

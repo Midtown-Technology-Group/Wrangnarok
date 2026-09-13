@@ -18,6 +18,7 @@ context, and typed errors. Wrangnarok maps them as follows:
 | Upstream (`api/bifrost/*`) | Wrangnarok TypeScript | Status | Notes |
 | --- | --- | --- | --- |
 | `workflows` (list, metadata) | `listSagas` / `inspectSaga` in `src/sdk.ts` over `GET /api/sagas` | Supported | Git-owned static Catalog (ADR 002), not a runtime registry. |
+| `workflows` runtime policy (timeouts, retries, pause/admission) | `getSagaPolicy` / `updateSagaPolicy` in `src/sdk.ts` over `GET/PUT /api/sagas/:id/policy`; CLI `saga-policy` / `saga-policy-set` | Supported | Persisted per-Saga runtime policy (RUN-01, issue #135, ADR 018): operator inspect/change independent of source, applied snapshots on Execution detail. Writes are Organization-admin (or instance admin); ordinary members read only. |
 | `executions` (list) | `listHistory` / `getExecution` over `GET /api/executions[/:id]` | Supported | Summaries only on list; input/result only on detail. Cursor pagination. |
 | `workflows.execute` + WebSocket tail | `submitExecution` over `POST /api/executions` + terminal poll; author logs via `tailLogs`/`searchLogs` over `GET /api/executions/:id/logs` and `GET /api/logs` | Partial | Submit returns 202 + `statusUrl`; the client polls to terminal. Author logs are durable D1 rows with cursor-poll reconnect (no WebSocket/log stream; live-push needs an earned ADR). |
 | `workflows` cancel | `cancelExecution` over `POST /api/executions/:id/cancel` | Supported | Owner-only, exact 64-hex ID; same caller policy as the UI. |
