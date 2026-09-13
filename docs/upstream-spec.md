@@ -218,6 +218,16 @@ Dashboard (`client/src/pages/Dashboard.tsx`, ~4KB): headline stat cards plus an 
 
 **Wrangnarök implication (CONSOLE-01):** History and ExecutionDetail adapt to our History cursor API, detail routes, and owner-only cancel semantics; polling stops at terminal/unmount with stale responses discarded. Dashboard adapts the product shape only — a summary over the real org-scoped list APIs this Worker serves (sagas, history page one, connections/integrations, artifacts page one, file locations) with honestly-scoped sample counts — because the metrics/timeseries/agents/ROI backends do not exist here. No new /api/* routes and no invented metrics endpoint to feed the console; the console owner records that boundary so feature lanes stop shipping one-off screens.
 
+### 21. SDK generation: OpenAPI spec to typed Integration module (INT-01, issue #229, Sep 2026)
+
+All pins at vendor/upstream commit `0598020e` (2026-09-04); the `3543c7e` baseline was not available in the local vendor checkout, so these observations carry the historical pin like findings 16–18.
+
+Upstream generates Python SDK modules from OpenAPI specs with integration-aware authentication (`api/src/services/sdk_generator.py`, 595 lines). Four auth types — bearer, api_key, basic, oauth — with credentials fetched from the Bifrost integration at runtime, never embedded in generated code. Specs load from URL (with host validation in `_allowed_hosts`/`_validate_spec_url`) or inline content, pass through `sanitize_spec`, and render through a Jinja2 template with `autoescape=False` flagged intentional (generated Python source, not HTML: `sdk_generator.py:597-646`).
+
+The template (`api/src/services/templates/sdk.py.j2`, 236 lines) pins three behaviors worth naming: a `DotDict` dict subclass for dot-notation access to response keys (`sdk.py.j2:23-44`), retry with exponential backoff for `{429, 500, 502, 503, 504}` honoring `Retry-After` (base 1.0s, cap 60.0s: `sdk.py.j2:99-150`), and credential binding through `await integrations.get(name)` with per-auth-type header injection (`sdk.py.j2:218-249`). The generation endpoint is platform-admin-only (`POST /{integration_id}/generate-sdk`, `api/src/routers/integrations.py:2055-2100`); output lands in the workspace `modules/` folder and imports as `from modules import example_api`.
+
+**Wrangnarök implication (INT-01, first slice PR #318):** Adapt, not import — the local emitter is a pure TypeScript function (`src/generate-integration.ts`) producing committed source through the offline `wrangnarok generate-integration` CLI, with Connection credential binding (ADR 003), execution-scoped scrubbing (ADR 005/SEC-01), operator allowlist, closed risk classifications, and deterministic output. Deliberate gaps in the first slice, recorded here so they are not mistaken for parity: no retry/backoff policy in the generated client yet, no dot-notation response access, and no `modules/` runtime-import equivalent (committed source instead). Regeneration is idempotent with explicit `--force`; spec drift produces a diff, not silent overwrite.
+
 ## Candidate product invariants
 
 These are stronger than implementation preferences and should guide design reviews:
