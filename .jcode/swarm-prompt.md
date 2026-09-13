@@ -16,7 +16,8 @@ You are responsible for your assigned parity issue AND for shepherding its PR fr
 - Red CI: fix forward on your branch (never force-push), re-run the FULL gate locally, push.
 - CONFLICTING: merge origin/main, resolve keeping your slice's code, re-run the FULL gate, push.
 - Open review threads BLOCK merging (conversation resolution is required on `main`). Address every thread on your PR: fix the code where the reviewer is right (bot reviewers included — coderabbitai and the codex connector have found genuine P1s), reply where they are wrong, then resolve the thread. Never resolve a thread without either a code fix or a written rebuttal.
-- Merge queue: once checks are green and threads are resolved, queue the PR (`gh pr merge <number>` with no strategy flag — the queue owns the strategy). Watch it until it shows MERGED.
+- Merge queue: once checks are green and threads are resolved, check dependency readiness BEFORE queueing: read your owned parity issue's declared `Depends:` line (docs/upstream-parity.md plus the issue body). If any dependency is still open, report BLOCKED and do not queue or merge unless the steward records an explicit waiver. The merge queue has no dependency awareness, so this check is yours. Then queue the PR (`gh pr merge <number>` with no strategy flag — the queue owns the strategy). Watch it until it shows MERGED. Never enable auto-merge on a PR whose dependencies are unmet.
+- Issue currency: before queueing, re-read your assigned issue for new external updates (strategy-watch, steward, or reviewer comments posted after your last read). If the issue gained new requirements or a coordination brake, address them first. Issues evolve while lanes run; a green PR against a stale reading of its issue is still blocked.
 
 ## Heartbeat
 
