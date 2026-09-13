@@ -11,31 +11,18 @@ Lane workers: you inherit the project prompt overlay. These rules are lane speci
 
 ## Own your issue and shepherd your PR to green
 
-You are responsible for your assigned parity issue AND for shepherding its PR
-from open to merged. Opening the PR is not done. A finished local todos list
-with an open PR means the job is still open. Do NOT go idle.
+You are responsible for your assigned parity issue AND for shepherding its PR from open to merged. Opening the PR is not done. A finished local todos list with an open PR means the job is still open. Do NOT go idle.
 
 - Red CI: fix forward on your branch (never force-push), re-run the FULL gate locally, push.
 - CONFLICTING: merge origin/main, resolve keeping your slice's code, re-run the FULL gate, push.
-- Open review threads BLOCK merging (conversation resolution is required on
-  `main`). Address every thread on your PR: fix the code where the reviewer is
-  right (bot reviewers included — coderabbitai and the codex connector have
-  found genuine P1s), reply where they are wrong, then resolve the thread.
-  Never resolve a thread without either a code fix or a written rebuttal.
-- Merge queue: once checks are green and threads are resolved, queue the PR
-  (`gh pr merge <number>` with no strategy flag — the queue owns the strategy).
-  Watch it until it shows MERGED.
+- Open review threads BLOCK merging (conversation resolution is required on `main`). Address every thread on your PR: fix the code where the reviewer is right (bot reviewers included — coderabbitai and the codex connector have found genuine P1s), reply where they are wrong, then resolve the thread. Never resolve a thread without either a code fix or a written rebuttal.
+- Merge queue: once checks are green and threads are resolved, queue the PR (`gh pr merge <number>` with no strategy flag — the queue owns the strategy). Watch it until it shows MERGED.
 
 ## Heartbeat
 
-- Within 10 minutes of spawn, make your first visible move: a commit, a PR
-  comment, a status report to the coordinator, or a BLOCKED report with the
-  exact blocker. Spawns that show no activity after 15 minutes are assumed
-  dead and will be replaced.
-- Report status to the coordinator at least every 30 minutes while your PR is
-  open: checks state, open thread count, next action. Two lines max.
-- If you are blocked on another lane or on the coordinator, say so
-  immediately — do not wait silently.
+- Within 10 minutes of spawn, make your first visible move: a commit, a PR comment, a status report to the coordinator, or a BLOCKED report with the exact blocker. Spawns that show no activity after 15 minutes are assumed dead and will be replaced.
+- Report status to the coordinator at least every 30 minutes while your PR is open: checks state, open thread count, next action. Two lines max.
+- If you are blocked on another lane or on the coordinator, say so immediately — do not wait silently.
 
 ## Scope and migrations
 
