@@ -472,6 +472,13 @@ export function parseSubmission(value: unknown): { saga: SagaDef; input: unknown
   if (!saga) throw new Fault(400, "UNKNOWN_SAGA", "Provide a built-in Saga ID and its input only.");
   return { saga, input: saga.parse(value.input) };
 }
+/** Resolve one stable Saga UUID to its submission definition without parsing
+ * input (RUN-03 provider route): lets the provider parser validate the body
+ * shape first, then parse input against the resolved Saga. Unknown IDs return
+ * undefined so the provider parser answers UNKNOWN_SAGA. */
+export function resolveSubmissionSaga(sagaId: string): SagaDef | undefined {
+  return catalog.find((entry) => entry.id === sagaId);
+}
 /** Internal key shape: 16-128 safe characters. Used by executionId and by
  * endpoint-derived keys. Callers go through parseCallerKey instead, which
  * additionally reserves the `wep-` endpoint namespace. */

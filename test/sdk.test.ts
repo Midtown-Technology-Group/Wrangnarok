@@ -74,6 +74,22 @@ describe("SDK contract version and descriptor (issue #140)", () => {
     expect(descriptor.routes.map((route) => `${route.method} ${route.path}`)).toEqual(
       expect.arrayContaining(["GET /api/sdk", "GET /api/sagas", "POST /api/executions", "POST /api/dev/preview"]),
     );
+    // RUN-03 (ADR 023): bounded inline providers are a supported capability
+    // with the provider route and the named sync/transient/provider codes.
+    expect(descriptor.capabilities.find((entry) => entry.name === "sync-providers")?.status).toBe("supported");
+    expect(descriptor.routes.map((route) => `${route.method} ${route.path}`)).toEqual(
+      expect.arrayContaining(["POST /api/executions/provider"]),
+    );
+    for (const code of [
+      "SYNC_NOT_SUPPORTED",
+      "TRANSIENT_NOT_SUPPORTED",
+      "PROVIDER_NOT_SUPPORTED",
+      "PROVIDER_TIMEOUT",
+      "PROVIDER_IN_FLIGHT",
+      "PROVIDER_OUTPUT_TOO_LARGE",
+    ]) {
+      expect(SDK_ERROR_CODES).toContain(code);
+    }
     // DEV-02 (issue #141): local preview is a supported capability; the OPS-01
     // routes and error codes stay in the contract list.
     expect(descriptor.capabilities.find((entry) => entry.name === "local-preview")?.status).toBe("supported");
@@ -195,9 +211,9 @@ describe("SDK contract version and descriptor (issue #140)", () => {
     await bindings.DB.exec(migration1);
     await bindings.DB.exec(migration2);
     await bindings.DB.exec(seed);
-    const denied = await worker.fetch(new Request("http://local.test/api/sdk"), bindings);
+    const denied = await worker.fetch(new Request("https://local.test/api/sdk"), bindings);
     expect(denied.status).toBe(401);
-    const ok = await worker.fetch(new Request("http://local.test/api/sdk", { headers: authHeaders() }), bindings);
+    const ok = await worker.fetch(new Request("https://local.test/api/sdk", { headers: authHeaders() }), bindings);
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual(describeContract());
   });
@@ -208,10 +224,10 @@ describe("SDK contract version and descriptor (issue #140)", () => {
     await bindings.DB.exec(seed);
     // Force representative failures through the real routes and assert each
     // served code is in the contract list.
-    const unauth = await worker.fetch(new Request("http://local.test/api/sagas"), bindings);
+    const unauth = await worker.fetch(new Request("https://local.test/api/sagas"), bindings);
     expect(SDK_ERROR_CODES).toContain(((await unauth.json()) as { error: { code: string } }).error.code);
     const badJson = await worker.fetch(
-      new Request("http://local.test/api/executions", {
+      new Request("https://local.test/api/executions", {
         method: "POST",
         headers: authHeaders({ "Idempotency-Key": "sdk-drift-test-0001" }),
         body: "{not json",
@@ -220,7 +236,7 @@ describe("SDK contract version and descriptor (issue #140)", () => {
     );
     expect(SDK_ERROR_CODES).toContain(((await badJson.json()) as { error: { code: string } }).error.code);
     const badInput = await worker.fetch(
-      new Request("http://local.test/api/executions", {
+      new Request("https://local.test/api/executions", {
         method: "POST",
         headers: authHeaders({ "Idempotency-Key": "sdk-drift-test-0002" }),
         body: JSON.stringify({ sagaId: helloSaga.id, input: { name: "" } }),
@@ -229,7 +245,7 @@ describe("SDK contract version and descriptor (issue #140)", () => {
     );
     expect(SDK_ERROR_CODES).toContain(((await badInput.json()) as { error: { code: string } }).error.code);
     const notFound = await worker.fetch(
-      new Request(`http://local.test/api/executions/${"f".repeat(64)}`, { headers: authHeaders() }),
+      new Request(`https://local.test/api/executions/${"f".repeat(64)}`, { headers: authHeaders() }),
       bindings,
     );
     expect(SDK_ERROR_CODES).toContain(((await notFound.json()) as { error: { code: string } }).error.code);
@@ -294,7 +310,7 @@ describe("SDK offline authoring helpers", () => {
 
   it("surfaces SDK error codes for unknown refs without network", async () => {
     const client = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: (async () => {
         throw new Error("offline");
@@ -333,7 +349,7 @@ describe("SDK automation client: local happy/denied/error examples", () => {
           ...bindings,
         },
       )) as typeof fetch;
-    const client = createSdkClient({ base: "http://local.test", token: TOKEN, fetchImpl, pollMs: 0 });
+    const client = createSdkClient({ base: "https://local.test", token: TOKEN, fetchImpl, pollMs: 0 });
     const sagas = await client.listSagas();
     expect(parseSagaCatalog({ sagas })).toHaveLength(SAGA_CATALOG.length);
     const hello = await client.inspectSaga("hello");
@@ -365,13 +381,13 @@ describe("SDK automation client: local happy/denied/error examples", () => {
           ...bindings,
         },
       )) as typeof fetch;
-    const client = createSdkClient({ base: "http://local.test", token: TOKEN, fetchImpl: authed, pollMs: 0 });
+    const client = createSdkClient({ base: "https://local.test", token: TOKEN, fetchImpl: authed, pollMs: 0 });
     await client.submitExecution({ saga: "hello", input: { name: "Bo" }, key, wait: false });
     await instance.waitForStatus("complete");
     // No token: 401 UNAUTHORIZED.
     const anonFetch = (async (url: string | URL | Request, init?: RequestInit) =>
       worker.fetch(new Request(url, init ?? {}), { ...bindings })) as typeof fetch;
-    const anon = createSdkClient({ base: "http://local.test", token: "wrong-token", fetchImpl: anonFetch });
+    const anon = createSdkClient({ base: "https://local.test", token: "wrong-token", fetchImpl: anonFetch });
     await expect(anon.getExecution(id)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
     // Foreign owner with a valid token shape: 404 EXECUTION_NOT_FOUND, never a leak.
     const foreignFetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -381,7 +397,7 @@ describe("SDK automation client: local happy/denied/error examples", () => {
         LAB_USER_ID: "00000000-0000-4000-8000-000000000003",
       });
     }) as typeof fetch;
-    const foreign = createSdkClient({ base: "http://local.test", token: TOKEN, fetchImpl: foreignFetch });
+    const foreign = createSdkClient({ base: "https://local.test", token: TOKEN, fetchImpl: foreignFetch });
     await expect(foreign.getExecution(id)).rejects.toMatchObject({ code: "EXECUTION_NOT_FOUND" });
     const error = await foreign.getExecution(id).catch((failure: unknown) => failure);
     expect(error).toBeInstanceOf(SdkError);
@@ -402,7 +418,7 @@ describe("SDK automation client: local happy/denied/error examples", () => {
           ...bindings,
         },
       )) as typeof fetch;
-    const client = createSdkClient({ base: "http://local.test", token: TOKEN, fetchImpl, pollMs: 0 });
+    const client = createSdkClient({ base: "https://local.test", token: TOKEN, fetchImpl, pollMs: 0 });
     await expect(client.inspectSaga("no-such-saga")).rejects.toMatchObject({ code: "SDK_SAGA_NOT_FOUND" });
     await expect(client.getExecution("abc")).rejects.toMatchObject({ code: "SDK_INVALID_REF" });
     await expect(
@@ -490,14 +506,19 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
 
   it("rejects bad client options before any fetch", () => {
     expect(() => createSdkClient({ base: "not-a-url", token: "tok" })).toThrow(/http\(s\)/);
-    expect(() => createSdkClient({ base: "http://local.test", token: "" })).toThrow(/bearer token/);
-    expect(() => createSdkClient({ base: "http://local.test///", token: "tok" })).not.toThrow();
+    expect(() => createSdkClient({ base: "https://local.test", token: "" })).toThrow(/bearer token/);
+    expect(() => createSdkClient({ base: "https://local.test///", token: "tok" })).not.toThrow();
+    // Credential-bearing requests must not ride cleartext: non-loopback
+    // http bases reject at construction, before any fetch.
+    expect(() => createSdkClient({ base: "http://example.test", token: "tok" })).toThrow(/https/);
+    // Loopback http stays allowed for local development.
+    expect(() => createSdkClient({ base: "http://127.0.0.1:8788", token: "tok" })).not.toThrow();
   });
 
   it("forwards Access credentials and resolves sagas by UUID without listing", async () => {
     const { calls, fetchImpl } = stub([json(detail({ status: "Running" }))]);
     const client = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       access: { clientId: "id", clientSecret: "secret" },
       fetchImpl,
@@ -506,9 +527,9 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     expect(seen.status).toBe("Running");
     const headers = calls[0]?.init.headers as Record<string, string>;
     expect(headers["CF-Access-Client-Id"]).toBe("id");
-    const uuidClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+    const uuidClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl });
     const listed = stub([json(catalog)]);
-    const byUuid = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: listed.fetchImpl });
+    const byUuid = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: listed.fetchImpl });
     expect((await byUuid.inspectSaga(helloSaga.id)).name).toBe("hello");
     expect(uuidClient).toBeDefined();
   });
@@ -527,7 +548,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       ],
     };
     const { fetchImpl } = stub([json(dupes), json(dupes)]);
-    const client = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+    const client = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl });
     await expect(client.inspectSaga("dup")).rejects.toMatchObject({ code: "SDK_SAGA_AMBIGUOUS" });
     expect(() =>
       inspectSaga(
@@ -552,19 +573,19 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       json(catalog),
       json({ executionId: id, replayed: true, statusUrl: `/api/executions/${id}` }, 202),
     ]);
-    const client = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+    const client = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl });
     const receipt = await client.submitExecution({ saga: "hello", wait: false });
     expect(receipt).toMatchObject({ executionId: id, replayed: true });
     const sentHeaders = calls[1]?.init.headers as Record<string, string> | undefined;
     expect(typeof sentHeaders?.["Idempotency-Key"]).toBe("string");
     expect((sentHeaders?.["Idempotency-Key"] ?? "").length).toBeGreaterThan(16);
-    const badKey = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+    const badKey = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl });
     await expect(badKey.submitExecution({ saga: helloSaga.id, key: "short" })).rejects.toMatchObject({
       code: "SDK_INVALID_REF",
     });
     const noId = stub([json({ replayed: false }, 202)]);
     await expect(
-      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: noId.fetchImpl }).submitExecution({
+      createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: noId.fetchImpl }).submitExecution({
         saga: helloSaga.id,
         key: "sdk-branch-test-0001",
         wait: false,
@@ -572,7 +593,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     ).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
     const html = stub([json(catalog), new Response("nope", { status: 202 })]);
     await expect(
-      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: html.fetchImpl }).submitExecution({
+      createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: html.fetchImpl }).submitExecution({
         saga: "hello",
         key: "sdk-branch-test-0002",
         wait: false,
@@ -580,7 +601,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     ).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
     const denied = stub([json({ error: { code: "INVALID_INPUT", message: "bad" } }, 400)]);
     await expect(
-      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: denied.fetchImpl }).submitExecution({
+      createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: denied.fetchImpl }).submitExecution({
         saga: helloSaga.id,
         key: "sdk-branch-test-0003",
         wait: false,
@@ -588,7 +609,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     ).rejects.toMatchObject({ code: "INVALID_INPUT" });
     const bare = stub([new Response(JSON.stringify({ nope: true }), { status: 400 })]);
     await expect(
-      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: bare.fetchImpl }).submitExecution({
+      createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: bare.fetchImpl }).submitExecution({
         saga: helloSaga.id,
         key: "sdk-branch-test-0004",
         wait: false,
@@ -603,7 +624,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       json(detail({ executionId: id, status: "Running" })),
     ]);
     const slow = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: running.fetchImpl,
       timeoutMs: 0,
@@ -615,7 +636,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     });
     const down = stub([new Error("boom")]);
     await expect(
-      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: down.fetchImpl }).listSagas(),
+      createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: down.fetchImpl }).listSagas(),
     ).rejects.toMatchObject({ code: "SDK_CLIENT_NETWORK" });
   });
 
@@ -632,18 +653,18 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       },
     };
     const got = stub([json(catalog), json(served)]);
-    const reader = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: got.fetchImpl });
+    const reader = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: got.fetchImpl });
     expect(await reader.getSagaPolicy("hello")).toMatchObject({ sagaId: helloSaga.id, version: 2 });
-    expect(got.calls[1]?.url).toBe(`http://local.test/api/sagas/${helloSaga.id}/policy`);
+    expect(got.calls[1]?.url).toBe(`https://local.test/api/sagas/${helloSaga.id}/policy`);
     const put = stub([json(served)]);
-    const writer = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: put.fetchImpl });
+    const writer = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: put.fetchImpl });
     expect(await writer.updateSagaPolicy(helloSaga.id, { admission: { maxConcurrent: 3 } })).toMatchObject({
       admission: { maxConcurrent: 3 },
     });
     expect(put.calls[0]?.init.method).toBe("PUT");
     expect(String(put.calls[0]?.init.body)).toContain("maxConcurrent");
     const fallback = stub([json(catalog), json(served)]);
-    const fallbackClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: fallback.fetchImpl });
+    const fallbackClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: fallback.fetchImpl });
     expect(await fallbackClient.updateSagaPolicy("hello", undefined)).toMatchObject({ version: 2 });
     expect(String(fallback.calls[1]?.init.body)).toBe("{}");
   });
@@ -651,20 +672,20 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
   it("cancels with exact IDs and guards the cancel shape", async () => {
     const id = "c".repeat(64);
     const { calls, fetchImpl } = stub([json({ executionId: id, status: "Cancelled", cancelled: true })]);
-    const client = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+    const client = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl });
     expect(await client.cancelExecution(id)).toMatchObject({ status: "Cancelled", cancelled: true });
-    expect(calls[0]?.url).toBe(`http://local.test/api/executions/${id}/cancel`);
+    expect(calls[0]?.url).toBe(`https://local.test/api/executions/${id}/cancel`);
     await expect(client.cancelExecution("abc")).rejects.toMatchObject({ code: "SDK_INVALID_REF" });
     const malformed = stub([json({ nope: true })]);
     await expect(
-      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: malformed.fetchImpl }).cancelExecution(id),
+      createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: malformed.fetchImpl }).cancelExecution(id),
     ).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
   });
 
   it("lists audit events and the notifications inbox through the typed client", async () => {
     const audit = { events: [], hasMore: false, nextCursor: null };
     const { calls, fetchImpl } = stub([json(audit)]);
-    const client = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+    const client = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl });
     const seen = await client.listAuditEvents({ action: "app.", outcome: "success", limit: 5 });
     expect(seen.events).toEqual([]);
     const url = calls[0]?.url ?? "";
@@ -672,9 +693,9 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     expect(url).toContain("action=app.");
     expect(url).toContain("outcome=success");
     const inbox = stub([json({ notifications: [] })]);
-    const inboxClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: inbox.fetchImpl });
+    const inboxClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: inbox.fetchImpl });
     expect(await inboxClient.listNotifications(5)).toEqual([]);
-    expect(inbox.calls[0]?.url).toBe("http://local.test/api/notifications?limit=5");
+    expect(inbox.calls[0]?.url).toBe("https://local.test/api/notifications?limit=5");
     const noteId = "11111111-1111-4111-8111-111111111111";
     const one = stub([
       json({
@@ -695,17 +716,17 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
         },
       }),
     ]);
-    const oneClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: one.fetchImpl });
+    const oneClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: one.fetchImpl });
     expect((await oneClient.getNotification(noteId)).id).toBe(noteId);
     const gone = stub([json({ dismissed: true })]);
-    const goneClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: gone.fetchImpl });
+    const goneClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: gone.fetchImpl });
     await goneClient.dismissNotification(noteId);
     expect(gone.calls[0]?.init.method).toBe("DELETE");
     await expect(client.getNotification("abc")).rejects.toMatchObject({ code: "SDK_INVALID_REF" });
     await expect(client.dismissNotification("abc")).rejects.toMatchObject({ code: "SDK_INVALID_REF" });
     const malformed = stub([json({ nope: true })]);
     await expect(
-      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: malformed.fetchImpl }).listAuditEvents(),
+      createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: malformed.fetchImpl }).listAuditEvents(),
     ).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
   });
 
@@ -725,17 +746,17 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       json({ version: { sdkVersion: "1", sagaCatalog: { count: 5, revision: "r" }, migrationsApplied: [] } }),
     ]);
     const versionClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: versionStub.fetchImpl,
     });
     expect((await versionClient.getOpsVersion()).sdkVersion).toBe("1");
-    expect(versionStub.calls[0]?.url).toBe("http://local.test/api/ops/version");
+    expect(versionStub.calls[0]?.url).toBe("https://local.test/api/ops/version");
     const healthStub = stub([
       json({ status: "ok", database: "ok", worker: "ok", checkedAt: "2026-09-12T00:00:00.000Z" }),
     ]);
     const healthClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: healthStub.fetchImpl,
     });
@@ -744,16 +765,16 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       json({ metrics: { generatedAt: "2026-09-12T00:00:00.000Z", executions: counters, recentFailures: [] } }),
     ]);
     const metricsClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: metricsStub.fetchImpl,
     });
     expect((await metricsClient.getOpsMetrics(5)).executions.failed).toBe(1);
-    expect(metricsStub.calls[0]?.url).toBe("http://local.test/api/ops/metrics?recent=5");
+    expect(metricsStub.calls[0]?.url).toBe("https://local.test/api/ops/metrics?recent=5");
     await expect(metricsClient.getOpsMetrics(99)).rejects.toMatchObject({ code: "SDK_INVALID_REF" });
     const tasksStub = stub([json({ tasks: [] })]);
     const tasksClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: tasksStub.fetchImpl,
     });
@@ -767,18 +788,18 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
         },
       }),
     ]);
-    const jobsClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: jobsStub.fetchImpl });
+    const jobsClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: jobsStub.fetchImpl });
     expect((await jobsClient.getOpsJobs()).appBuilds.succeeded).toBe(0);
     const preflightStub = stub([json({ checkedAt: "2026-09-12T00:00:00.000Z", integrations: [] })]);
     const preflightClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: preflightStub.fetchImpl,
     });
     expect((await preflightClient.getOpsPreflight()).integrations).toEqual([]);
     const connsStub = stub([json({ connections: [] })]);
     const connsClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: connsStub.fetchImpl,
     });
@@ -789,7 +810,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     };
     const inspectStub = stub([json(repairBody)]);
     const inspectClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: inspectStub.fetchImpl,
     });
@@ -798,7 +819,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     expect(JSON.parse(String(inspectStub.calls[0]?.init.body)).dryRun).toBe(true);
     const executeStub = stub([json({ repair: { ...repairBody.repair, dryRun: false } })]);
     const executeClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: executeStub.fetchImpl,
     });
@@ -808,14 +829,14 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     // Malformed diagnostics payloads fail as SDK_CLIENT_MISMATCH.
     const malformedVersion = stub([json({ nope: true })]);
     const malformedVersionClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: malformedVersion.fetchImpl,
     });
     await expect(malformedVersionClient.getOpsVersion()).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
     const malformedMetrics = stub([json({ nope: true })]);
     const malformedMetricsClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: malformedMetrics.fetchImpl,
     });
@@ -828,7 +849,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       hasMore: false,
     };
     const { calls, fetchImpl } = stub([json(catalog), json(page)]);
-    const client = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+    const client = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl });
     const seen = await client.listHistory({
       status: "Failed,TimedOut",
       saga: "hello",
@@ -843,7 +864,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     expect(url).toContain("endDate=2026-09-10");
     const unknown = stub([json(catalog)]);
     await expect(
-      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: unknown.fetchImpl }).listHistory({
+      createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: unknown.fetchImpl }).listHistory({
         saga: "missing",
       }),
     ).rejects.toMatchObject({ code: "SDK_SAGA_NOT_FOUND" });
@@ -861,14 +882,14 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       },
     };
     const { calls, fetchImpl } = stub([json(catalog), json(seen)]);
-    const client = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+    const client = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl });
     const previewed = await client.previewSaga({ saga: "hello", input: { name: "Ada" } });
     expect(previewed.persisted).toBe(false);
     expect(previewed.dispatched).toBe(false);
-    expect(calls[1]?.url).toBe("http://local.test/api/dev/preview");
+    expect(calls[1]?.url).toBe("https://local.test/api/dev/preview");
     const malformed = stub([json(catalog), json({ preview: { nope: true } })]);
     await expect(
-      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: malformed.fetchImpl }).previewSaga({
+      createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: malformed.fetchImpl }).previewSaga({
         saga: helloSaga.id,
       }),
     ).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
@@ -893,23 +914,23 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     ];
     for (const code of codes) {
       const { fetchImpl } = stub([json(detail({ error: { code, message: code } }))]);
-      const client = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+      const client = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl });
       const diagnosis = await client.diagnoseExecution("a".repeat(64));
       expect(typeof diagnosis.hint).toBe("string");
     }
     const { fetchImpl } = stub([json(detail({ error: { code: "SOME_OTHER_CODE", message: "x" } }))]);
-    const client = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+    const client = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl });
     expect((await client.diagnoseExecution("a".repeat(64))).hint).toBeNull();
   });
 
   it("rejects contract skew and malformed descriptors", async () => {
     const skewed = stub([json({ contract: "wrangnarok.sdk", version: "999" })]);
     await expect(
-      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: skewed.fetchImpl }).getContract(),
+      createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: skewed.fetchImpl }).getContract(),
     ).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
     const html = stub([new Response("nope", { status: 200 })]);
     await expect(
-      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: html.fetchImpl }).getContract(),
+      createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: html.fetchImpl }).getContract(),
     ).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
   });
 
@@ -1409,7 +1430,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       json({ form: "contact", options: {}, errors: {} }),
       json(receipt),
     ]);
-    const client = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl });
+    const client = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl });
     expect(await client.listForms()).toHaveLength(1);
     expect((await client.getForm("contact")).name).toBe("contact");
     const fields = [{ name: "name", type: "text", required: true }];
@@ -1426,16 +1447,16 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     });
     const malformed = stub([json({ nope: true })]);
     await expect(
-      createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: malformed.fetchImpl }).listForms(),
+      createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: malformed.fetchImpl }).listForms(),
     ).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
   });
 
   it("covers client optional branches: history, config, forms, submit, readJson", async () => {
     // listHistory with no query sends a bare URL (empty suffix branch).
     const bare = stub([json({ executions: [], hasMore: false, nextCursor: null })]);
-    const bareClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: bare.fetchImpl });
+    const bareClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: bare.fetchImpl });
     expect((await bareClient.listHistory()).executions).toEqual([]);
-    expect(bare.calls[0]?.url).toBe("http://local.test/api/executions");
+    expect(bare.calls[0]?.url).toBe("https://local.test/api/executions");
     // listHistory with a cursor appends the cursor param.
     const paged = stub([
       json(catalog),
@@ -1445,17 +1466,17 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
         nextCursor: null,
       }),
     ]);
-    const pagedClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: paged.fetchImpl });
+    const pagedClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: paged.fetchImpl });
     await pagedClient.listHistory({ saga: "hello", cursor: "abc" });
     expect(paged.calls[1]?.url).toContain("cursor=abc");
     // listNotifications with and without a limit (suffix branches).
     const noLimit = stub([json({ notifications: [] })]);
-    const noLimitClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: noLimit.fetchImpl });
+    const noLimitClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: noLimit.fetchImpl });
     expect(await noLimitClient.listNotifications()).toEqual([]);
-    expect(noLimit.calls[0]?.url).toBe("http://local.test/api/notifications");
+    expect(noLimit.calls[0]?.url).toBe("https://local.test/api/notifications");
     const withLimit = stub([json({ notifications: [] })]);
     const withLimitClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: withLimit.fetchImpl,
     });
@@ -1475,12 +1496,12 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       },
     };
     const setBare = stub([json(entry)]);
-    const setBareClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: setBare.fetchImpl });
+    const setBareClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: setBare.fetchImpl });
     await setBareClient.setConfig({ key: "k", type: "int" });
     expect(JSON.parse(String(setBare.calls[0]?.init.body))).toEqual({ key: "k", type: "int" });
     // updateConfig with a full patch sends every key; bad ids fail offline.
     const setFull = stub([json(entry)]);
-    const setFullClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: setFull.fetchImpl });
+    const setFullClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: setFull.fetchImpl });
     await setFullClient.updateConfig({
       id: "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
       key: "k",
@@ -1508,7 +1529,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       json(detailAll),
       json({ form: "contact", handle: "a".repeat(64), expiresAt: "t", snapshot: {}, options: {} }),
     ]);
-    const formClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: formStub.fetchImpl });
+    const formClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: formStub.fetchImpl });
     const fullFields = [{ name: "name", type: "text", required: true }];
     await formClient.createForm({
       name: "contact",
@@ -1535,7 +1556,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       json({ form: "contact", executionId: receiptId, replayed: false, statusUrl: `/api/executions/${receiptId}` }),
     ]);
     const receiptClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: receiptStub.fetchImpl,
     });
@@ -1555,13 +1576,13 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     // message; a non-Error throw becomes SDK_CLIENT_NETWORK.
     const failedBare = stub([json({ nope: true }, 422)]);
     const failedClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: failedBare.fetchImpl,
     });
     await expect(failedClient.getForm("contact")).rejects.toMatchObject({ code: "SDK_CLIENT_MISMATCH" });
     const boom = stub([new Error("down")]);
-    const boomClient = createSdkClient({ base: "http://local.test", token: "tok", fetchImpl: boom.fetchImpl });
+    const boomClient = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: boom.fetchImpl });
     await expect(boomClient.listForms()).rejects.toMatchObject({ code: "SDK_CLIENT_NETWORK" });
     // previewSaga without input sends {} (default-arg branch).
     const previewStub = stub([
@@ -1578,7 +1599,7 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       }),
     ]);
     const previewClient = createSdkClient({
-      base: "http://local.test",
+      base: "https://local.test",
       token: "tok",
       fetchImpl: previewStub.fetchImpl,
     });

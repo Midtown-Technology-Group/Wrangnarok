@@ -113,6 +113,7 @@ import {
   parseNinjaOrgsInput,
   parseSmokeInput,
   parseSubmission,
+  resolveSubmissionSaga,
   smokeSaga,
   UUID,
 } from "./domain";
@@ -295,6 +296,7 @@ import {
 } from "./roles";
 import { SAGA_CATALOG, SAGA_DEFINITIONS } from "./sagas";
 import { describeContract, SDK_DOC_PATH, SDK_VERSION } from "./sdk";
+import { isProviderEligible, parseProviderSubmission, providerSummary, runProvider } from "./sync";
 import {
   cancelExecution,
   listHistory,
@@ -961,7 +963,29 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         request.headers.has("Content-Encoding")
       )
         throw new Fault(415, "JSON_REQUIRED", "Unencoded JSON is required.");
-      const { saga, input } = parseSubmission(await boundedJson(request.body));
+      const body: unknown = await boundedJson(request.body);
+      // RUN-03 (ADR 023): caller-chosen sync on the async route is a named
+      // rejection, never a silent poll. Eligible Sagas use the provider
+      // route; everything else polls the receipt. Checked on the raw body
+      // BEFORE parseSubmission, which rejects extra keys.
+      if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+        const record = body as Record<string, unknown>;
+        if (record.sync === true) {
+          throw new Fault(
+            400,
+            "SYNC_NOT_SUPPORTED",
+            "Inline results ride POST /api/executions/provider for eligible Sagas; this route returns receipts only.",
+          );
+        }
+        if (record.transient === true) {
+          throw new Fault(
+            501,
+            "TRANSIENT_NOT_SUPPORTED",
+            "No-persistence execution is not supported; provider calls persist their receipt.",
+          );
+        }
+      }
+      const { saga, input } = parseSubmission(body);
       // AUTH-02 (ADR 018): direct Saga execution needs the saga execute
       // grant. Org/instance admins bypass via `can`; everyone else denies by
       // absence with 403 GRANT_REQUIRED.
@@ -974,6 +998,55 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const accepted = await submit(env, caller, key, saga, input);
       // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
       return json(accepted, accepted.replayed ? 200 : 202, { Location: accepted.statusUrl });
+    }
+    if (url.pathname === "/api/executions/provider" && request.method === "POST") {
+      // RUN-03 (ADR 023): bounded inline data-provider execution. Same
+      // admission (install gate, idempotency, policy snapshot) as async
+      // submit, then the read-only Integration Action runs inside the
+      // request deadline and checkpoints terminal state directly. No
+      // Workflow binding, no queue wait. Query strings stay denied by the
+      // global gate above like every other non-allowlisted route.
+      const key = parseCallerKey(request.headers.get("Idempotency-Key"));
+      if (
+        request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() !== "application/json" ||
+        request.headers.has("Content-Encoding")
+      )
+        throw new Fault(415, "JSON_REQUIRED", "Unencoded JSON is required.");
+      const { saga, input, rejected } = parseProviderSubmission(await boundedJson(request.body), resolveSubmissionSaga);
+      if (rejected.sync === true) {
+        throw new Fault(
+          400,
+          "SYNC_NOT_SUPPORTED",
+          "Sync is chosen by route: this provider route already returns inline results.",
+        );
+      }
+      if (rejected.transient === true) {
+        throw new Fault(
+          501,
+          "TRANSIENT_NOT_SUPPORTED",
+          "No-persistence execution is not supported; provider calls persist their receipt.",
+        );
+      }
+      // AUTH-02 (ADR 018): provider execution is Saga execution under
+      // another route. Require the saga execute grant exactly as the direct
+      // submit path does; enrollment or eligibility alone must not authorize.
+      // Mode-shape rejections above stay first so malformed requests keep
+      // their named codes.
+      await requireGrant(
+        env.DB,
+        ctx,
+        { orgId: caller.orgId, resourceKind: "saga", resourceId: saga.id.toLowerCase(), action: "execute" },
+        "Executing this provider requires an execute grant on its Saga.",
+      );
+      if (!isProviderEligible(saga.id)) {
+        throw new Fault(
+          501,
+          "PROVIDER_NOT_SUPPORTED",
+          "This Saga runs through the async Execution path only; submit to POST /api/executions and poll the receipt.",
+        );
+      }
+      const outcome = await runProvider(env, caller, key, saga, input);
+      return json(providerSummary(outcome), 200, { Location: outcome.statusUrl });
     }
     const formList = url.pathname === "/api/forms";
     if (formList && request.method === "GET") {

@@ -16,6 +16,7 @@ import {
   smokeSaga,
 } from "./domain";
 import type { ExecutionStatus, HistoryQuery, Principal, SafeError, SagaDef, SagaRuntimePolicy } from "./domain";
+import { executionId as hashExecutionId } from "./domain";
 import type { Connection } from "./integrations";
 import { buildOrgCtx } from "./saga";
 import type { OrgCtx } from "./saga";
@@ -119,6 +120,12 @@ export async function storeSagaPolicy(
 }
 export function policySnapshot(policy: SagaRuntimePolicy): string {
   return JSON.stringify({ version: POLICY_VERSION, policy });
+}
+/** Provider-path Execution identity (RUN-03, ADR 023): the same deterministic
+ * SHA-256 over (org, user, key) as async submit, so a key submitted to either
+ * route converges on one receipt instead of forking two Executions. */
+export function executionIdForProvider(caller: Principal, key: string): Promise<string> {
+  return hashExecutionId(caller, key);
 }
 export async function visibleExecution(db: D1Database, id: string, caller: Principal): Promise<ExecutionRow> {
   const row = await db

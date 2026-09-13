@@ -27,7 +27,7 @@ Total: 47 capability rows — 3 Implemented, 1 Complete (pending review), 26 Par
 | CON-02 | Expose scoped configuration and secret-reference APIs to authors and operators | 3 | Implemented | AUTH-02, SEC-01, CON-01 | #147 |
 | SEC-02 | Support genuinely per-Organization credentials behind the accepted secret-storage tripwire | 3 | Gated | SEC-01, CON-01 | new |
 | OAUTH-01 | Complete OAuth authorization, centralized refresh and credential health lifecycle | 3 | Partial | CON-01, SEC-02, AUTH-03 | new |
-| RUN-03 | Define and deliver bounded synchronous and data-provider execution | 2+4 | Missing | AUTH-02, RUN-01 | new |
+| RUN-03 | Define and deliver bounded synchronous and data-provider execution | 2+4 | Partial | AUTH-02, RUN-01 | new |
 | RUN-04 | Do not confirm cancellation when native Workflow termination is ambiguous | 2 | Partial | — | new |
 | OBS-01 | Complete the execution UI and CLI: results, failures, live status and history traversal | 2 | Partial | RUN-04 | new |
 | OBS-02 | Persist and stream authorized author logs and progress with reconnect recovery | 4 | Partial | SEC-01, AUTH-02, OBS-01 | #153 |
@@ -447,9 +447,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## RUN-03: Define and deliver bounded synchronous and data-provider execution
 
-Phase 2+4; **Missing**; existing issue: new
+Phase 2+4; **Partial** (RUN-03 lane, issue #150; ADR 023); existing issue: new
 
-Local status: Local submission is async-only. Current upstream has sync, transient and data-provider modes, contrary to our older spec.
+Local status: Async receipts are unchanged (`POST /api/executions` returns 202/200 with no inline result). Bounded inline providers ride `POST /api/executions/provider` for the closed allowlist (`ninjaone-orgs`, plus the `echo` fixture as the local harness proof): same admission (install gate, deterministic idempotency, policy snapshot, 409 conflict/cancelled fences), then the read-only Integration Action runs inside a 5000ms request deadline and checkpoints terminal state directly with no Workflow binding. The durable receipt persists in both modes. Caller-chosen `sync`/`transient` flags stay named exceptions (`SYNC_NOT_SUPPORTED`/`TRANSIENT_NOT_SUPPORTED`); async-only Sagas answer `PROVIDER_NOT_SUPPORTED` with the async path; inline `code` has no route. Upstream `transient` no-persistence, caller-chosen sync on the async route, endpoint persisted `execution_mode`, provider caching, and inline `code` stay explicit non-adoptions (ADR 023).
 
 Depends: AUTH-02, RUN-01
 

@@ -31,7 +31,8 @@ keys.
 | --- | --- | --- |
 | `GET` | `/api/sdk` | Versioned contract descriptor (`describeContract`) |
 | `GET` | `/api/sagas` | Saga discovery catalog (read-only metadata) |
-| `POST` | `/api/executions` | Submit (`Idempotency-Key` required; 202 + `Location`, replay 200 + `replayed:true`) |
+| `POST` | `/api/executions` | Submit (`Idempotency-Key` required; 202 + `Location`, replay 200 + `replayed:true`); `sync:true`/`transient:true` flags stay named rejections |
+| `POST` | `/api/executions/provider` | Bounded inline provider (RUN-03, ADR 023): eligible read-only Sagas return the result inline with the durable receipt; async-only Sagas answer 501 |
 | `POST` | `/api/dev/preview` | No-registration local preview (authoritative parse; no D1 writes, no dispatch; opt-in `checkEnvironment` read-only Connection check) |
 | `GET` | `/api/executions` | History summaries (`status` single or comma-separated, `sagaId`, `sagaName`, `startDate`, `endDate`, `limit`, `cursor`) |
 | `GET` | `/api/executions/:id` | Detail with Operations, input/result, safe error, `runtimeStatus` |
@@ -86,6 +87,11 @@ const hello = await client.inspectSaga("hello");
 
 // Invoke and wait for terminal status.
 const done = await client.submitExecution({ saga: "hello", input: { name: "Ada" } });
+
+// Bounded inline provider (RUN-03, ADR 023): eligible read-only Sagas return
+// the result inline with the durable receipt; async-only Sagas answer
+// PROVIDER_NOT_SUPPORTED with the async path.
+const census = await client.runProvider({ saga: "ninjaone-orgs", input: {} });
 
 // Status, history, cancel, diagnosis.
 await client.getExecution(done.executionId);
@@ -143,7 +149,9 @@ Offline helpers (no network): `scaffoldSaga` (emit a `defineSaga` module),
 `parseFormDetail`, `parseFormStartup`, `parseFormProviders`,
 `parseFormSubmit`, `parseScheduleList`, `parseScheduleDetail`,
 `parseScheduleDelivery`) fail loud with
-`SDK_CLIENT_MISMATCH` instead of trusting the wire.
+`SDK_CLIENT_MISMATCH` instead of trusting the wire. Provider outcomes ride
+`parseProviderOutcome` over `POST /api/executions/provider` with the same
+receipt fields plus the inline `dispatch` marker.
 
 ## CLI (`scripts/wrangnarok.mjs`: thin fetch calls, no Saga logic)
 

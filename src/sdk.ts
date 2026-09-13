@@ -75,6 +75,13 @@ export const SDK_ERROR_CODES = [
   "INVALID_POLICY",
   "SAGA_PAUSED",
   "ADMISSION_LIMITED",
+  "SYNC_NOT_SUPPORTED",
+  "TRANSIENT_NOT_SUPPORTED",
+  "PROVIDER_NOT_SUPPORTED",
+  "PROVIDER_MISCONFIGURED",
+  "PROVIDER_TIMEOUT",
+  "PROVIDER_IN_FLIGHT",
+  "PROVIDER_OUTPUT_TOO_LARGE",
   "FORM_VALIDATION_FAILED",
   "INVALID_FORM",
   "FORM_NOT_FOUND",
@@ -1768,6 +1775,43 @@ export interface SdkSubmitOptions {
   readonly wait?: boolean;
 }
 
+export interface SdkProviderOutcome {
+  readonly executionId: string;
+  readonly sagaId: string;
+  readonly sagaName: string;
+  readonly status: string;
+  readonly result: unknown;
+  readonly durationMs: number;
+  readonly dispatch: { readonly inline: true; readonly workflow: false };
+  readonly statusUrl: string;
+}
+
+export interface SdkProviderOptions {
+  readonly saga: string;
+  readonly input?: unknown;
+  readonly key?: string;
+}
+
+/** Guard a POST /api/executions/provider payload. Throws SDK_CLIENT_MISMATCH. */
+export function parseProviderOutcome(value: unknown): SdkProviderOutcome {
+  if (
+    !isRecord(value) ||
+    typeof value.executionId !== "string" ||
+    typeof value.sagaId !== "string" ||
+    typeof value.sagaName !== "string" ||
+    typeof value.status !== "string" ||
+    typeof value.durationMs !== "number" ||
+    !isRecord(value.dispatch) ||
+    value.dispatch.inline !== true ||
+    value.dispatch.workflow !== false ||
+    typeof value.statusUrl !== "string" ||
+    !("result" in value)
+  ) {
+    throw new SdkError("SDK_CLIENT_MISMATCH", "The provider outcome has an unexpected shape.");
+  }
+  return value as unknown as SdkProviderOutcome;
+}
+
 export interface SdkHistoryQuery {
   /** One status or a comma-separated set (mirrors the server + upstream
    * multi-status filter). Unknown values fail server-side with INVALID_STATUS. */
@@ -1858,6 +1902,10 @@ export interface SdkClient {
    * static Catalog with no D1 writes and no Workflow dispatch. */
   previewSaga(options: SdkPreviewOptions): Promise<SdkPreview>;
   submitExecution(options: SdkSubmitOptions): Promise<SdkSubmitReceipt | SdkExecutionDetail>;
+  /** RUN-03 inline provider (POST /api/executions/provider): bounded
+   * read-only Sagas return their result inline with the durable receipt.
+   * Async-only Sagas answer PROVIDER_NOT_SUPPORTED with the async path. */
+  runProvider(options: SdkProviderOptions): Promise<SdkProviderOutcome>;
   getExecution(id: string): Promise<SdkExecutionDetail>;
   cancelExecution(id: string): Promise<SdkCancelReceipt>;
   listHistory(query?: SdkHistoryQuery): Promise<SdkHistoryPage>;
@@ -1945,6 +1993,18 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
   if (!/^https?:\/\//.test(base)) {
     throw new SdkError("SDK_INVALID_REF", "The SDK base must be an http(s) URL.");
   }
+  // Credential-bearing requests (Bearer plus optional Cloudflare Access)
+  // must not ride cleartext to non-loopback hosts: require HTTPS except for
+  // explicit loopback development hosts, and strip Access credentials on any
+  // HTTP exception below.
+  const baseUrl = new URL(base);
+  // Loopback hosts only (localhost/127.0.0.1/::1) for local dev: every
+  // other http base rejects, including RFC 2606 .test names, so no
+  // credential-bearing request ever rides cleartext off-machine.
+  const loopback = baseUrl.hostname === "localhost" || baseUrl.hostname === "127.0.0.1" || baseUrl.hostname === "::1";
+  if (baseUrl.protocol !== "https:" && !loopback) {
+    throw new SdkError("SDK_INVALID_REF", "The SDK base must be https, except loopback development hosts.");
+  }
   if (!options.token) throw new SdkError("UNAUTHORIZED", "The SDK needs a bearer token.");
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 120000;
@@ -1955,7 +2015,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     "Content-Type": "application/json",
     Accept: "application/json",
   };
-  if (options.access) {
+  if (options.access && baseUrl.protocol === "https:") {
     headers["CF-Access-Client-Id"] = options.access.clientId;
     headers["CF-Access-Client-Secret"] = options.access.clientSecret;
   }
@@ -2097,6 +2157,23 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
         };
       }
       return pollDetail(data.executionId, true);
+    },
+    async runProvider(options: SdkProviderOptions): Promise<SdkProviderOutcome> {
+      const key = options.key ?? randomKey();
+      if (!IDEMPOTENCY_KEY_RE.test(key)) {
+        throw new SdkError("SDK_INVALID_REF", "Idempotency-Key must be 16-128 chars [A-Za-z0-9._:-].");
+      }
+      const sagaId = await resolveSagaId(options.saga);
+      const response = await guard(
+        () =>
+          fetchImpl(`${base}/api/executions/provider`, {
+            method: "POST",
+            headers: { ...headers, "Idempotency-Key": key },
+            body: JSON.stringify({ sagaId, input: options.input ?? {} }),
+          }),
+        "provider execution",
+      );
+      return parseProviderOutcome(await readJson(response, "provider execution"));
     },
     async getExecution(id: string): Promise<SdkExecutionDetail> {
       checkExecutionId(id);
@@ -2527,6 +2604,12 @@ export function describeContract(): SdkContractDescriptor {
           "No-registration local preview: authoritative parse, no D1 writes, no dispatch. Opt-in read-only environment check.",
       },
       { method: "POST", path: "/api/executions", description: "Submit an Execution (Idempotency-Key required)." },
+      {
+        method: "POST",
+        path: "/api/executions/provider",
+        description:
+          "Bounded inline data-provider execution for eligible read-only Sagas (Idempotency-Key required; RUN-03).",
+      },
       {
         method: "GET",
         path: "/api/executions",
@@ -3116,6 +3199,12 @@ export function describeContract(): SdkContractDescriptor {
         detail: "Offline validateAgainstSchema plus server parse; the server remains authoritative.",
       },
       { name: "execute-status-cancel", status: "supported", detail: "Submit, poll, detail, history, and cancel." },
+      {
+        name: "sync-providers",
+        status: "supported",
+        detail:
+          "Bounded inline data-provider execution (RUN-03, ADR 023): eligible read-only Sagas return inline results with the durable receipt; async-only Sagas answer PROVIDER_NOT_SUPPORTED; sync/transient flags stay named exceptions.",
+      },
       {
         name: "schedule-triggers",
         status: "supported",
