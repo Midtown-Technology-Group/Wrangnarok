@@ -128,7 +128,15 @@ import { join } from "node:path";
 // deliberate feature headroom, not dependency bloat: package.json is
 // unchanged versus main. Combined measures 545802 bytes locally (CI number
 // governs); shrink the raise if it lands lower.
-const BUDGET_BYTES = 555 * 1024;
+// 2026-09-12 (TRG-01 stacked over FORM-02 main, issue #137): 575 KiB. The
+// schedules surface (6 routes plus the schedules domain: cron/timezone
+// parsers, next-due math, deterministic window keys, bounded tick
+// promotion, delivery visibility; plus the minute Cron trigger, SDK
+// schedule types/guards/client, and ops scheduler inventory) stacks on the
+// 555 KiB surface above and measures ~567 KiB combined. Same deliberate
+// feature headroom as the earlier raises, not dependency bloat:
+// package.json is unchanged versus main.
+const BUDGET_BYTES = 575 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");

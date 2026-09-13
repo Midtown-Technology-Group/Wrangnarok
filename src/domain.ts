@@ -440,13 +440,18 @@ export function parseKey(key: string | null): string {
 }
 /** Caller-supplied keys (the Idempotency-Key header on submit routes).
  * TRG-02 (issue #138, ADR 018): keys starting with `wep-` are reserved for
- * endpoint-derived delivery keys (endpointIdempotencyKey). A caller that
- * squats the namespace could replay against or collide with an endpoint
- * Execution, so caller keys fail closed here. */
+ * endpoint-derived delivery keys (endpointIdempotencyKey). TRG-01 (issue
+ * #137, ADR 012): keys starting with `sch-` are reserved for
+ * schedule-window delivery keys (scheduleWindowKey). A caller that
+ * squats either namespace could replay against or collide with a
+ * Trigger-owned Execution, so caller keys fail closed here. */
 export function parseCallerKey(key: string | null): string {
   const parsed = parseKeyShape(key);
   if (parsed.startsWith("wep-")) {
     throw new Fault(400, "INVALID_IDEMPOTENCY_KEY", "Keys starting with wep- are reserved for endpoint deliveries.");
+  }
+  if (parsed.startsWith("sch-")) {
+    throw new Fault(400, "INVALID_IDEMPOTENCY_KEY", "Keys starting with sch- are reserved for schedule deliveries.");
   }
   return parsed;
 }

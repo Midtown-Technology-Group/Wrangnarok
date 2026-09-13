@@ -48,6 +48,13 @@ accept a query string, and only each route's allowlisted keys.
 | `POST` | `/api/config` | Set a non-secret value or provision a secret reference (upsert by key) |
 | `PUT` | `/api/config/:id` | Update one row; omitted secret values preserve the reference |
 | `DELETE` | `/api/config/:id` | Delete one row (managed rows refuse with `MANAGED_RESOURCE`) |
+| `GET` | `/api/schedules` | Org-scoped schedule summaries (TRG-01 inventory) |
+| `POST` | `/api/schedules` | Create a schedule binding cadence/timezone/input/run-as to one Saga (TRG-01; 409 on duplicate name) |
+| `GET` | `/api/schedules/:name` | Schedule detail with next due instant and last promoted window (TRG-01) |
+| `DELETE` | `/api/schedules/:name` | Delete a schedule; promoted Executions keep history (TRG-01) |
+| `POST` | `/api/schedules/:name/enable` | Re-enable a schedule for promotion (TRG-01) |
+| `POST` | `/api/schedules/:name/disable` | Disable a schedule; in-flight Executions run to terminal (TRG-01) |
+| `GET` | `/api/schedules/:name/deliveries?window=` | Window-to-Execution delivery mapping (TRG-01) |
 
 Errors share one envelope: `{ error: { code, message } }`. Switch on
 `code`; the message is never the contract. The full list is
@@ -99,6 +106,17 @@ await client.submitForm({ form: "contact", handle, values: { name: "Ada" } });
 
 // Contract drift check.
 await client.getContract(); // throws SDK_CLIENT_MISMATCH on version skew
+
+// Schedules (TRG-01, issue #137): one-off and recurring schedules as
+// persisted environment state. Cadence, timezone, enablement, input, and
+// run-as live on the schedule row (run-as is the creating caller); the
+// minute Cron tick promotes due rows through the submit protocol.
+await client.listSchedules();
+await client.getSchedule("morning-digest");
+await client.createSchedule({ name: "morning-digest", sagaId: hello.id, kind: "recurring", cron: "0 9 * * 1-5" });
+await client.setScheduleEnabled("morning-digest", false);
+await client.getScheduleDelivery("morning-digest", "2026-09-12T09:00");
+await client.deleteSchedule("morning-digest");
 ```
 
 Offline helpers (no network): `scaffoldSaga` (emit a `defineSaga` module),
@@ -106,7 +124,8 @@ Offline helpers (no network): `scaffoldSaga` (emit a `defineSaga` module),
 `localCatalog`, `describeContract`. Wire guards (`parseSagaCatalog`,
 `parseExecutionDetail`, `parseHistoryPage`, `parseFormList`,
 `parseFormDetail`, `parseFormStartup`, `parseFormProviders`,
-`parseFormSubmit`) fail loud with
+`parseFormSubmit`, `parseScheduleList`, `parseScheduleDetail`,
+`parseScheduleDelivery`) fail loud with
 `SDK_CLIENT_MISMATCH` instead of trusting the wire.
 
 ## CLI (`scripts/wrangnarok.mjs`: thin fetch calls, no Saga logic)
