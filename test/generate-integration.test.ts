@@ -86,4 +86,40 @@ describe("INT-01 generator (issue #229)", () => {
       expect.objectContaining({ code: "GENERATOR_INVALID_SPEC" }),
     );
   });
+
+  it("validates origins and contract defects per branch", () => {
+    // Bad origin URL and non-http(s) scheme.
+    expect(() => generateIntegrationModule(haloShaped(), { ...opts(), allowedOrigins: ["::bad::"] }, DIGEST)).toThrow(
+      expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }),
+    );
+    expect(() =>
+      generateIntegrationModule(haloShaped(), { ...opts(), allowedOrigins: ["ftp://x.example"] }, DIGEST),
+    ).toThrow(expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }));
+    // Duplicate operationIds and missing operations surface as spec defects.
+    const dupe = JSON.parse(haloShaped());
+    dupe.paths["/api/Dupe"] = { get: { operationId: "Ticket_Get", summary: "Dupe." } };
+    expect(() => generateIntegrationModule(JSON.stringify(dupe), opts(), DIGEST)).toThrow(
+      expect.objectContaining({ code: "GENERATOR_INVALID_SPEC" }),
+    );
+    const empty = JSON.stringify({ openapi: "3.0.0", info: { version: "v1" }, paths: {} });
+    expect(() => generateIntegrationModule(empty, opts(), DIGEST)).toThrow(
+      expect.objectContaining({ code: "GENERATOR_INVALID_SPEC" }),
+    );
+  });
+
+  it("honors custom name, description, prefix, and classifications", () => {
+    const out = generateIntegrationModule(
+      haloShaped(),
+      {
+        ...opts(),
+        name: "halo-custom",
+        description: "Custom desc.",
+        secretEnvPrefix: "HALO_X",
+        classifications: { Ticket_Get: "mutation" } as const,
+      },
+      DIGEST,
+    );
+    expect(out.source).toContain(`"Ticket_Get": "mutation"`);
+    expect(out.operationCount).toBe(3);
+  });
 });
