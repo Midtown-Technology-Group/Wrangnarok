@@ -10,7 +10,7 @@
 // doubles for the runtime.
 import { env } from "cloudflare:workers";
 import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import {
@@ -429,18 +429,49 @@ describe("RUN-02 nested invocation (issue #136)", () => {
   });
 
   it("fans out parent cancellation to a reserved child without resurrecting it", async () => {
-    // The hello child settles instantly, so a live Running child cannot be
-    // arranged through the real parent: cancel right after submit while the
-    // parent is still Pending/Running, then prove the fan-out marked the
-    // reserved child (Cancelled when still active, untouched when already
-    // terminal) and never resurrected anything.
-    const parentKey = "run02-cancel-fanout-001";
-    const parentId = await executionId(principal, parentKey);
-    await using _parent = await introspectWorkflowInstance(bindings.HELLO_PARENT_WORKFLOW, parentId);
-    void _parent;
-    expect((await worker.fetch(submitRequest(parentKey, helloParentSaga.id, { name: "Ada" }), bindings)).status).toBe(
-      202,
-    );
+    // Deterministic parent-cancel route coverage: seed an undispatched
+    // Pending parent with an undispatched Pending child. The parent cancel
+    // takes the vacuous-stop branch (no native instance, never dispatched),
+    // the fan-out runs, the child confirms Cancelled through the same
+    // branch, and the parent confirms. The row-count assertion pins the
+    // fan-out path: with zero children this test fails instead of passing
+    // vacuously, and without the fan-out call the child would stay Pending.
+    const parentId = "e5".repeat(32);
+    await bindings.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        parentId,
+        helloParentSaga.id,
+        helloParentSaga.name,
+        helloParentSaga.revision,
+        principal.orgId,
+        principal.userId,
+        JSON.stringify({ name: "Ada" }),
+        0,
+        "Pending",
+        new Date().toISOString(),
+      )
+      .run();
+    const childId = "f6".repeat(32);
+    await bindings.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,parent_execution_id,parent_step,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        childId,
+        helloSaga.id,
+        helloSaga.name,
+        helloSaga.revision,
+        principal.orgId,
+        principal.userId,
+        JSON.stringify({ name: "Ada" }),
+        parentId,
+        "child-dispatch-invoke-v1",
+        0,
+        "Pending",
+        new Date().toISOString(),
+      )
+      .run();
     const cancelled = await worker.fetch(cancelRequest(parentId), bindings);
     expect(cancelled.status).toBe(200);
     expect(await cancelled.json()).toMatchObject({ executionId: parentId, status: "Cancelled", cancelled: true });
@@ -448,13 +479,10 @@ describe("RUN-02 nested invocation (issue #136)", () => {
     const kids = await bindings.DB.prepare("SELECT id,status FROM executions WHERE parent_execution_id=?")
       .bind(parentId)
       .all<{ id: string; status: string }>();
-    // Either the child never dispatched (no kids yet) or the fan-out reached
-    // it before it settled: in both cases nothing active remains and the
-    // parent lineage is intact.
-    for (const kid of kids.results) {
-      expect(["Cancelled", "Succeeded"]).toContain(kid.status);
-      expect((await detail(kid.id)).parentExecutionId).toBe(parentId);
-    }
+    // Non-vacuous: exactly our seeded child, now Cancelled, with lineage.
+    expect(kids.results).toHaveLength(1);
+    expect(kids.results[0]).toMatchObject({ id: childId, status: "Cancelled" });
+    expect((await detail(childId)).parentExecutionId).toBe(parentId);
   }, 25000);
 
   it("leaves an ambiguous child active and the parent confirmation intact", async () => {
@@ -593,18 +621,27 @@ describe("RUN-02 nested invocation (issue #136)", () => {
       parentSagaId: helloParentSaga.id,
     };
     let sleeps = 0;
-    const failure = await awaitChildResult(
-      childEnv,
-      {
-        sleep: async () => {
-          sleeps += 1;
+    // Deterministic deadline: freeze the clock so the 1ms budget expires
+    // before the first D1 read returns, never depending on two Date.now()
+    // calls landing in different milliseconds.
+    const now = vi.spyOn(Date, "now");
+    try {
+      now.mockReturnValueOnce(1_000).mockReturnValue(1_002);
+      const failure = await awaitChildResult(
+        childEnv,
+        {
+          sleep: async () => {
+            sleeps += 1;
+          },
         },
-      },
-      { executionId: childId, sagaId: helloSaga.id, replayed: false, statusUrl: `/api/executions/${childId}` },
-      { awaitTimeoutMs: 1 },
-    ).catch((error: unknown) => error);
-    expect(failure).toMatchObject({ code: "CHILD_AWAIT_TIMEOUT" });
-    expect(sleeps).toBe(0);
+        { executionId: childId, sagaId: helloSaga.id, replayed: false, statusUrl: `/api/executions/${childId}` },
+        { awaitTimeoutMs: 1 },
+      ).catch((error: unknown) => error);
+      expect(failure).toMatchObject({ code: "CHILD_AWAIT_TIMEOUT" });
+      expect(sleeps).toBe(0);
+    } finally {
+      now.mockRestore();
+    }
     // The child keeps running: the timeout stopped the wait, not the work.
     const row = await bindings.DB.prepare("SELECT status FROM executions WHERE id=?")
       .bind(childId)
@@ -769,6 +806,64 @@ describe("RUN-02 child helpers (pure, no bindings)", () => {
       .first<{ status: string; error_json: string }>();
     expect(generic?.status).toBe("Failed");
     expect(JSON.parse(generic?.error_json as string)).toMatchObject({ code: "EXECUTION_FAILED" });
+  });
+
+  it("fails the parent through the dispatch-await boundary when a dispatched child fails", async () => {
+    // Crosses invoke -> awaitResult: reserve and dispatch a real child row,
+    // drive it to Failed at the row level, then prove the parent-visible
+    // await surfaces CHILD_FAILED (not invented success, not a silent pass).
+    const parentId = "d4".repeat(32);
+    await bindings.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        parentId,
+        helloParentSaga.id,
+        helloParentSaga.name,
+        helloParentSaga.revision,
+        principal.orgId,
+        principal.userId,
+        JSON.stringify({ name: "Ada" }),
+        1,
+        "Running",
+        new Date().toISOString(),
+      )
+      .run();
+    const org: OrgCtx = {
+      orgId: principal.orgId,
+      userId: principal.userId,
+      executionId: parentId,
+      sagaId: helloParentSaga.id,
+      sagaRevision: helloParentSaga.revision,
+      attemptToken: `${parentId}:0`,
+    };
+    const live = {
+      ...bindings,
+      HELLO_WORKFLOW: { createBatch: async () => {} } as unknown as Bindings["HELLO_WORKFLOW"],
+    };
+    const childEnv: ChildEnv = {
+      env: live,
+      catalog: { sagas: [{ ...helloSaga, parse: (v: unknown) => v }] },
+      parentOrg: org,
+      parentExecutionId: parentId,
+      parentSagaId: helloParentSaga.id,
+    };
+    // invoke reserves AND dispatches (stubbed native): a real receipt.
+    const receipt = await invokeChild(childEnv, "child-dispatch-invoke-v1", helloSaga.id, { name: "Ada" });
+    expect(receipt.executionId).toMatch(/^[a-f0-9]{64}$/);
+    expect(receipt.sagaId).toBe(helloSaga.id);
+    // Drive the dispatched child to Failed at the row level.
+    await bindings.DB.prepare("UPDATE executions SET status='Failed',completed_at=?,error_json=? WHERE id=?")
+      .bind(
+        new Date().toISOString(),
+        JSON.stringify({ code: "EXECUTION_FAILED", message: "child blew up" }),
+        receipt.executionId,
+      )
+      .run();
+    // The parent-visible await crosses the boundary and surfaces CHILD_FAILED.
+    await expect(
+      awaitChildResult(childEnv, { sleep: async () => {} }, receipt),
+    ).rejects.toMatchObject({ code: "CHILD_FAILED" });
   });
 
   it("resolves children by UUID or exact name and derives stable keys", async () => {

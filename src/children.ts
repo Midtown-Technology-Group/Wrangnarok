@@ -191,8 +191,13 @@ export async function invokeChild(
   if (child.id === childEnv.parentSagaId) {
     throw new Fault(400, "CHILD_SELF_INVOKE", "A Saga cannot invoke itself as a child.");
   }
+  // Parse child input through the Saga's own parser BEFORE reservation and
+  // dispatch: invalid input fails here with the parser's Fault(400) instead
+  // of reserving and dispatching a row the child later rejects. Only
+  // serialization failures map to CHILD_INPUT_NOT_SERIALIZABLE.
+  const parsedInput = child.parse(input);
   try {
-    assertJsonSerializable(input, "child input");
+    assertJsonSerializable(parsedInput, "child input");
   } catch {
     throw new Fault(400, "CHILD_INPUT_NOT_SERIALIZABLE", "The child input must be plain JSON.");
   }
@@ -213,7 +218,7 @@ export async function invokeChild(
   // rejected here exactly as a top-level submit would reject it, so the same
   // Saga cannot run or be denied depending only on the invocation path.
   await requireActiveInstall(childEnv.env.DB, child.id, child.revision, caller.orgId);
-  const inputJson = JSON.stringify(input);
+  const inputJson = JSON.stringify(parsedInput);
   const dispatchKey = childDispatchKey(childEnv.parentExecutionId, stepName, child.id, key);
   const id = await childExecutionId(caller, childEnv.parentExecutionId, stepName, child.id, key);
   await childEnv.env.DB.prepare(
