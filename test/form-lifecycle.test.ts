@@ -240,11 +240,34 @@ describe("FORM-02 startup: bounded handles, prefill opt-in, provider projection"
     const providers = await call("/api/forms/team-pick/providers");
     expect(providers.status).toBe(200);
     expect(await providers.json()).toMatchObject({ options: { team: ["blue", "red"] }, errors: {} });
-    // A caller denied the table sees an empty list plus an error, never rows.
-    const denied = await call("/api/forms/team-pick/providers", "GET", undefined, ORG, OTHER_USER);
-    expect(await denied.json()).toMatchObject({ options: { team: [] }, errors: { team: expect.any(String) } });
+    // FORM-02 authorization (#155): a grantless caller never reaches
+    // provider resolution — 403 GRANT_REQUIRED before any Table read.
+    // (The Table-gate empty-list path below still applies to callers who
+    // hold a form grant but are denied the underlying Table.)
+    const grantless = await call("/api/forms/team-pick/providers", "GET", undefined, ORG, OTHER_USER);
+    expect(grantless.status).toBe(403);
+    expect(await grantless.json()).toMatchObject({ error: { code: "GRANT_REQUIRED" } });
     // Foreign orgs see 404, never the provider shape.
     expect((await call("/api/forms/team-pick/providers", "GET", undefined, OTHER_ORG)).status).toBe(404);
+  });
+  it("denies startup and provider lifecycle routes by grant absence", async () => {
+    // FORM-02 authorization (#155): the lifecycle routes mint capabilities
+    // and read provider state, so an ordinary member with zero form grants
+    // answers 403 before any handle is minted or provider resolved.
+    await createForm("gated", [{ name: "name", type: "text", required: true }]);
+    const started = await call("/api/forms/gated/startup", "POST", {}, ORG, OTHER_USER);
+    expect(started.status).toBe(403);
+    expect(await started.json()).toMatchObject({ error: { code: "GRANT_REQUIRED" } });
+    const listed = await call("/api/forms/gated/providers", "GET", undefined, ORG, OTHER_USER);
+    expect(listed.status).toBe(403);
+    expect(await listed.json()).toMatchObject({ error: { code: "GRANT_REQUIRED" } });
+    // No startup row was created for the denied caller (the table itself
+    // may not exist yet — the grant gate runs before any session write).
+    const rows = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM form_startups WHERE user_id=?")
+      .bind(OTHER_USER.toLowerCase())
+      .first<{ n: number }>()
+      .catch(() => ({ n: 0 }));
+    expect(rows?.n).toBe(0);
   });
 });
 
@@ -279,6 +302,56 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
       result: { greeting: "Hello, Ada!", name: "Ada" },
     });
     expect(fetch).not.toHaveBeenCalled();
+  });
+  it("recovers the same handle after a dispatch-uncertain 503 instead of burning it", async () => {
+    // FORM-02 recovery (#155): submit answers 503 DISPATCH_UNCONFIRMED when
+    // Workflow creation/dispatch confirmation fails, and tells the caller to
+    // retry the same request + key. The handle must survive that 503 so the
+    // retry reaches the idempotent recovery path — not STALE_FORM_HANDLE.
+    await createForm("greet", [{ name: "name", type: "text", required: true }]);
+    const started = await startup("greet");
+    const key = "form-02-recover-001";
+    const body = { handle: started.handle, values: { name: "Ada" } };
+    const failing = {
+      ...bindings,
+      HELLO_WORKFLOW: {
+        createBatch: async () => {
+          throw new Error("control plane down");
+        },
+      },
+    } as unknown as Bindings;
+    const failCall = (
+      path: string,
+      method = "GET",
+      payload?: unknown,
+      orgId = ORG,
+      userId = OWNER,
+      idemKey?: string,
+    ) =>
+      worker.fetch(
+        new Request(`https://local.test${path}`, {
+          method,
+          headers: headers(idemKey ? { "Idempotency-Key": idemKey } : {}),
+          ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+        }),
+        { ...failing, LAB_ORG_ID: orgId, LAB_USER_ID: userId },
+      );
+    const first = await failCall("/api/forms/greet/submit", "POST", body, ORG, OWNER, key);
+    expect(first.status).toBe(503);
+    expect(await first.json()).toMatchObject({ error: { code: "DISPATCH_UNCONFIRMED" } });
+    // Same body + handle + key retries through the live bindings: the
+    // durable row admits (200 replayed:true) instead of answering stale —
+    // the handle survived the 503 and the canonical idempotent recovery
+    // path ran.
+    const id = await executionId({ orgId: ORG, userId: OWNER }, key);
+    const retry = await call("/api/forms/greet/submit", "POST", body, ORG, OWNER, key);
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ form: "greet", executionId: id, replayed: true });
+    // The handle is now spent: a further same-key use replays canonically
+    // (200 + same execution id), never a second dispatch.
+    const spent = await call("/api/forms/greet/submit", "POST", body, ORG, OWNER, key);
+    expect(spent.status).toBe(200);
+    expect(await spent.json()).toMatchObject({ executionId: id, replayed: true });
   });
   it("rejects unknown, foreign, reused, and payload-mismatched handles without dispatching", async () => {
     await createForm();
@@ -554,6 +627,40 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     const corruptRes = await call("/api/forms/greet/submit", "POST", corruptBody, ORG, OWNER, "form-02-edge-003");
     expect(corruptRes.status).toBe(422);
     expect(await corruptRes.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+  });
+  it("invalidates handles when the form is deleted and recreated under the same name", async () => {
+    // FORM-02 identity (#155): the handle binds to the definition id, not
+    // just the name. Recreate keeps the name but mints a new id, so the
+    // old session must answer stale and dispatch nothing.
+    await createForm("rekey", [{ name: "name", type: "text", required: true }]);
+    const old = await startup("rekey");
+    expect((await call("/api/forms/rekey", "DELETE")).status).toBe(200);
+    await createForm("rekey", [{ name: "name", type: "text", required: true }]);
+    const replay = await call(
+      "/api/forms/rekey/submit",
+      "POST",
+      { handle: old.handle, values: { name: "Ada" } },
+      ORG,
+      OWNER,
+      "form-02-rekey-001",
+    );
+    expect(replay.status).toBe(422);
+    expect(await replay.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+    const executions = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM executions WHERE org_id=?")
+      .bind(ORG)
+      .first<{ n: number }>();
+    expect(executions?.n).toBe(0);
+    // A handle minted after the recreate works normally.
+    const fresh = await startup("rekey");
+    const ok = await call(
+      "/api/forms/rekey/submit",
+      "POST",
+      { handle: fresh.handle, values: { name: "Ada" } },
+      ORG,
+      OWNER,
+      "form-02-rekey-002",
+    );
+    expect(ok.status).toBe(202);
   });
   it("replays scheduled submits canonically and rejects malformed designer writes", async () => {
     await createForm("greet", [{ name: "name", type: "text", required: true }]);

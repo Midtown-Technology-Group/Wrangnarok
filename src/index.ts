@@ -274,6 +274,7 @@ import {
 } from "./tables";
 import {
   assignRole,
+  can,
   createPolicyRule,
   createRole,
   deletePolicyRule,
@@ -627,6 +628,33 @@ async function checkFormFiles(
         { field: field.name, code: "FILE_TYPE_REJECTED", message: "The referenced file type is not accepted." },
       ]);
     }
+  }
+}
+
+/** FORM-02 recovery fence (#155): after dispatch succeeds but the
+ * handle-consume loses a race (used_at set by a concurrent submit of the
+ * same or a different key), decide whether the caller owns the admission.
+ * The deterministic execution id for (org, user, key) plus the exact
+ * persisted input must match THIS submission — only then is the lost race
+ * harmless (the caller's own work admitted; answer the success). Any
+ * mismatch means a foreign submission consumed the handle first: the
+ * caller's handle is spent, answer stale, never a replay of foreign work. */
+async function verifyOwnAdmission(
+  db: D1Database,
+  caller: Principal,
+  key: string,
+  saga: { id: string },
+  input: unknown,
+): Promise<void> {
+  const id = await executionId(caller, key);
+  const expectedInput = JSON.stringify(input);
+  const row = await db
+    .prepare("SELECT saga_id,input_json FROM executions WHERE id=? AND org_id=? AND user_id=?")
+    .bind(id, caller.orgId, caller.userId)
+    .first<{ saga_id: string; input_json: string }>()
+    .catch(() => null);
+  if (!row || row.saga_id !== saga.id || row.input_json !== expectedInput) {
+    throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
   }
 }
 
@@ -1159,6 +1187,15 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       requireJson(request);
       const def = await loadForm(env.DB, caller.orgId, name);
       if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      // FORM-02 authorization (#155): startup mints a capability and reads
+      // provider-derived state, so it needs a form read-or-submit grant —
+      // never a separate saga execute grant (delegation), never nothing.
+      if (
+        !(await can(env.DB, ctx, { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "read" })) &&
+        !(await can(env.DB, ctx, { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "submit" }))
+      ) {
+        throw new Fault(403, "GRANT_REQUIRED", "Starting this Form requires a read or submit grant.");
+      }
       const started = await startFormSession(env.DB, caller, def, await boundedJson(request.body), readProviderTable);
       return json(
         {
@@ -1182,6 +1219,16 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
       const def = await loadForm(env.DB, caller.orgId, name);
       if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      // FORM-02 authorization (#155): provider resolution reads
+      // Table-backed state through the declaration, so it needs the same
+      // form read-or-submit grant as startup — never a separate saga
+      // execute grant, never nothing.
+      if (
+        !(await can(env.DB, ctx, { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "read" })) &&
+        !(await can(env.DB, ctx, { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "submit" }))
+      ) {
+        throw new Fault(403, "GRANT_REQUIRED", "Reading this Form's providers requires a read or submit grant.");
+      }
       const resolved = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
       return json({ form: name, options: resolved.options, errors: resolved.errors });
     }
@@ -1232,9 +1279,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const scheduleAt = parseScheduleAt(record.scheduleAt);
       // Peek the session without consuming: validation, provider refresh,
       // and the file check all run first so a submission that fails them
-      // leaves the handle live for a corrected retry. Only validated
-      // submissions reach the consume-then-dispatch fence below.
-      const session = await peekStartupHandle(env.DB, caller, name, handle);
+      // leaves the handle live for a corrected retry. The handle binds to
+      // the current definition id, so delete/recreate under the same name
+      // invalidates sessions minted against the old form.
+      const session = await peekStartupHandle(env.DB, caller, name, handle, def.id);
       const fresh = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
       const values = record.values === undefined ? {} : record.values;
       // Order matters: form-gate validation + defaults merge first, then
@@ -1244,14 +1292,26 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const merged = validateAndMerge(def, values, { allowedOptions: fresh.options, values: session.snapshot });
       await checkFormFiles(env.DB, caller, def, merged);
       const { saga, input } = parseSubmission({ sagaId: def.sagaId, input: merged });
-      // Consume only after every validation gate passes (form gate, file
-      // check, Saga parse), immediately before dispatch: failed validation
-      // leaves the handle live for retry, while the single-use fence wins
-      // the row for exactly one submit so a concurrent duplicate racing
-      // past validation answers stale instead of dispatching twice.
-      await consumeStartupHandle(env.DB, caller, name, handle);
+      // FORM-02 recovery (#155): consume AFTER durable admission, not
+      // before. The old consume-then-dispatch order burned the one-time
+      // handle when submit answered 503 DISPATCH_UNCONFIRMED, making the
+      // documented same-request retry impossible (STALE_FORM_HANDLE instead
+      // of the idempotent recovery path). The flow below:
+      // 1. peek the fence (unused + live + same form id),
+      // 2. dispatch (or durable schedule insert) first,
+      // 3. consume only on success, tolerating a lost consume race only
+      //    when the Execution row proves OUR submission admitted (same
+      //    deterministic execution id + same input). A lost race over a
+      //    foreign admission still answers stale, never a replay of ours.
       if (scheduleAt !== null) {
         const scheduled = await scheduleFormExecution(env.DB, caller, key, name, saga, input, scheduleAt);
+        if (!scheduled.replayed) {
+          await consumeStartupHandle(env.DB, caller, name, handle, def.id).catch(async (error) => {
+            if (!(error instanceof Fault) || error.code !== "STALE_FORM_HANDLE") throw error;
+            const scheduledInput = { ...(input as Record<string, unknown>), __form: name, __scheduleAt: scheduleAt };
+            await verifyOwnAdmission(env.DB, caller, key, saga, scheduledInput);
+          });
+        }
         return json({ form: name, ...scheduled }, scheduled.replayed ? 200 : 202, {
           Location: scheduled.statusUrl,
         });
@@ -1263,6 +1323,12 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       void _internalForm;
       void _internalAt;
       const accepted = await submit(env, caller, key, saga, sagaInput);
+      if (!accepted.replayed) {
+        await consumeStartupHandle(env.DB, caller, name, handle, def.id).catch(async (error) => {
+          if (!(error instanceof Fault) || error.code !== "STALE_FORM_HANDLE") throw error;
+          await verifyOwnAdmission(env.DB, caller, key, saga, sagaInput);
+        });
+      }
       // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
       return json({ form: name, ...accepted }, accepted.replayed ? 200 : 202, { Location: accepted.statusUrl });
     }

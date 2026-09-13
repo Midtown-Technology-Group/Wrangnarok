@@ -1334,12 +1334,14 @@ export async function startFormSession(
  * answer 422 STALE_FORM_HANDLE. Returns the persisted snapshot (prefill
  * plus resolved provider options) for the submit merge. The route peeks
  * first so failed validation leaves the handle live for a corrected
- * retry, and consumes only after every validation gate passes. */
+ * retry, dispatches, then consumes on success so a 503
+ * DISPATCH_UNCONFIRMED retry can still reach idempotent recovery. */
 export async function peekStartupHandle(
   db: D1Database,
   caller: Principal,
   formName: string,
   handle: string,
+  expectedFormId?: string,
 ): Promise<{ snapshot: Record<string, unknown>; options: Record<string, readonly string[]>; handleHash: string }> {
   parseStartupHandle(handle);
   await ensureStartupTable(db);
@@ -1356,6 +1358,10 @@ export async function peekStartupHandle(
     row.org_id !== caller.orgId ||
     row.user_id !== caller.userId ||
     row.form_name !== formName ||
+    // FORM-02 identity (#155): the persisted form_id must match the current
+    // definition, so delete/recreate under the same name invalidates old
+    // handles. Skipped only when the caller has no definition loaded.
+    (expectedFormId !== undefined && row.form_id !== expectedFormId) ||
     row.used_at !== null ||
     Date.parse(row.expires_at) <= Date.now()
   ) {
@@ -1376,14 +1382,17 @@ export async function peekStartupHandle(
  * contract), then win the single-use fence. Unknown, expired, foreign,
  * already-used, form-mismatched, or corrupt handles answer 422
  * STALE_FORM_HANDLE and dispatch nothing. Returns the persisted snapshot
- * (prefill + resolved provider options) for the submit merge. */
+ * (prefill + resolved provider options) for the submit merge. Called after
+ * durable admission (not before dispatch): a lost consume race is
+ * tolerated only when the caller owns the admitted row. */
 export async function consumeStartupHandle(
   db: D1Database,
   caller: Principal,
   formName: string,
   handle: string,
+  expectedFormId?: string,
 ): Promise<{ snapshot: Record<string, unknown>; options: Record<string, readonly string[]> }> {
-  const { snapshot, options, handleHash } = await peekStartupHandle(db, caller, formName, handle);
+  const { snapshot, options, handleHash } = await peekStartupHandle(db, caller, formName, handle, expectedFormId);
   // The conditional UPDATE is the single-use fence: exactly one consumer
   // wins the row; a lost race (changes === 0) answers stale rather than
   // dispatching twice.
