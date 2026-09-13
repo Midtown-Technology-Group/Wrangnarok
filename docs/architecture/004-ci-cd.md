@@ -42,6 +42,16 @@ branches to be up to date. The native queue tests each queued PR against
 predicted main, so merging PR1 never invalidates PR2 behind it. What merges
 is exactly what was tested — no check-then-merge race.
 
+Recorded repository settings (repo ruleset `main`, verified 2026-09-13):
+
+- `Require merge queue` enabled on `main` via the `merge_queue` ruleset rule.
+- Queue merge method: `MERGE` (merge commits). Allowed merge methods on the
+  rule also list squash and rebase, but the queue itself merges with MERGE.
+- Queue limits: max 3 entries to build, max 3 to merge, min 1 to merge with
+  a 5-minute minimum wait. Grouping strategy `ALLGREEN`.
+- Required status check: `Validate`. Conversation resolution required before
+  merge. Stale reviews dismissed on push.
+
 Rationale: under the old strict-plus-serial setup, every merge invalidated
 each queued PR behind it, costing the tail PR one full update + CI cycle per
 PR ahead of it. Speculative batching removes that serial tax without
