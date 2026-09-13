@@ -23,6 +23,7 @@ export interface Bindings extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials
   DIGEST_WORKFLOW: Workflow<ExecutionParams>;
   SMOKE_WORKFLOW: Workflow<ExecutionParams>;
   HELLO_WORKFLOW: Workflow<ExecutionParams>;
+  HELLO_PARENT_WORKFLOW: Workflow<ExecutionParams>;
   ASSETS?: Fetcher;
   /** TRG-02 (issue #138, ADR 018): JSON object mapping endpoint ID to its
    * raw webhook HMAC secret. Populated from the deployment secret store in

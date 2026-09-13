@@ -207,6 +207,17 @@ export function ExecutionDetailView(props: { initial?: Detail }): React.JSX.Elem
             </dd>
             <dt>Dispatch</dt>
             <dd className="muted">{data.dispatchConfirmed ? "confirmed" : "unconfirmed (Pending receipt only)"}</dd>
+            <dt>Lineage</dt>
+            <dd className="muted" data-testid="detail-lineage">
+              {data.parentExecutionId ? (
+                <>
+                  child of <code className="mono mono--wrap">{data.parentExecutionId}</code>
+                  {data.parentStep ? ` via ${data.parentStep}` : ""}
+                </>
+              ) : (
+                "top-level (no parent)"
+              )}
+            </dd>
             <dt>Runtime policy</dt>
             <dd className="muted" data-testid="detail-policy">
               {data.policy
@@ -275,6 +286,26 @@ export function ExecutionDetailView(props: { initial?: Detail }): React.JSX.Elem
                       {boundedJsonPreview(op.error).text}
                     </pre>
                   ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+          <h2>Child Executions</h2>
+          {(data.children ?? []).length === 0 ? (
+            <p className="empty-state">No child Executions dispatched.</p>
+          ) : (
+            <ul aria-label="Child Executions" className="ops-list">
+              {(data.children ?? []).map((kid) => (
+                <li key={kid.executionId} data-testid="child-row" className="op-row op-row--detail">
+                  <div className="op-head">
+                    <Link to={`/executions/${kid.executionId}`} className="mono mono--wrap">
+                      {kid.executionId}
+                    </Link>
+                    <StatusBadge status={kid.status} />
+                  </div>
+                  <div className="muted muted--small">
+                    {kid.sagaName} · created {kid.createdAt}
+                  </div>
                 </li>
               ))}
             </ul>

@@ -73,6 +73,13 @@ import { join } from "node:path";
 // same deliberate feature headroom, not dependency bloat: package.json is
 // unchanged. Remeasure after merge; shrink the raise if the combined bundle
 // lands lower.
+// 2026-09-11 (RUN-02 stacked over merged main, issue #136): 410 KiB. Merged
+// main itself measures ~401 KiB (over the 380 KiB OPS-01 budget before any
+// lane code lands); the RUN-02 surface (src/children.ts: dispatch/await/
+// fan-out, lineage reads on detail plus cancel, hello-parent Saga plus
+// Workflow, SDK lineage shape) adds ~434 bytes of hand-written feature code
+// with no new dependencies. Same deliberate feature headroom as the earlier
+// raises: package.json is unchanged versus main.
 // 2026-09-11 (TRG-01 over OPS-01, issue #137): schedule surface
 // (src/schedules.ts: cron validation, IANA timezone labels, UTC window math,
 // server-derived window keys, preview, bounded scan/admission; 7 schedule
@@ -100,6 +107,11 @@ import { join } from "node:path";
 // ~413 KiB combined over the OBS-02 baseline (~397 KiB). Hand-written
 // feature code, no new dependencies (package.json unchanged versus main);
 // deliberate feature headroom only.
+// 2026-09-12 (RUN-02 re-merge over OPS-02 main, issue #136): 435 KiB. The
+// union of the RUN-02 child-lineage surface with the newer OPS-02 main
+// measures 440753 bytes (~430.4 KiB) locally (CI number governs).
+// Hand-written feature code, no new dependencies (package.json unchanged
+// versus main); deliberate feature headroom only.
 // 2026-09-12 (RUN-01 stacked over OPS-02, issue #135): 435 KiB. Persisted
 // per-Saga runtime policy (2 routes, D1 table, per-Execution snapshot,
 // policy-gated submit plus snapshot-resolved retries/deadlines) stacks on
@@ -111,6 +123,11 @@ import { join } from "node:path";
 // 446392 bytes: 952 bytes over the 435 KiB budget. Hand-written feature code,
 // no new dependencies (package.json unchanged versus main); deliberate
 // feature headroom only.
+// 2026-09-12 (RUN-02 re-merge over AUTH-01/RUN-01 main, issue #136): 455 KiB.
+// The union of the RUN-02 child-lineage surface with the newer main measures
+// 462412 bytes (~451.6 KiB) locally (CI number governs). Hand-written feature
+// code, no new dependencies (package.json unchanged versus main); deliberate
+// feature headroom only.
 // 2026-09-12 (sec-endpoint, issue #236): 445 KiB. The endpoint safe-URL policy
 // (src/integrations/index.ts: URL parse plus per-Integration transport/host
 // policy at persist time, assertSafeEndpoint guards in the echo/ninjaone
@@ -118,6 +135,11 @@ import { join } from "node:path";
 // (short messages, no dead helpers): 900 bytes over the 440 KiB budget.
 // Hand-written security-boundary code, no new dependencies (package.json
 // unchanged versus main); deliberate feature headroom only.
+// 2026-09-12 (RUN-02 re-merge over sec-hardening main, issue #136): 460 KiB.
+// The union of the RUN-02 child-lineage surface with the sec-hardened main
+// measures 469406 bytes (~458.4 KiB) locally (CI number governs).
+// Hand-written feature code, no new dependencies (package.json unchanged
+// versus main); deliberate feature headroom only.
 // 2026-09-12 (sec/response-hardening, issues #237 #238 #239): 450 KiB. The
 // response baseline (src/index.ts: inline security headers on the JSON
 // helper, Static Assets pass-through, and all raw file/artifact byte
@@ -127,6 +149,11 @@ import { join } from "node:path";
 // a shrink pass (direct header construction instead of Response re-wrapping):
 // 55 bytes over the 445 KiB budget. Hand-written security-boundary code,
 // package.json unchanged versus main; deliberate feature headroom only.
+// 2026-09-12 (RUN-02 re-merge over sec/response main, issue #136): 465 KiB.
+// The union of the RUN-02 child-lineage surface with the sec/response main
+// measures 471755 bytes (~460.7 KiB) locally (CI number governs).
+// Hand-written feature code, no new dependencies (package.json unchanged
+// versus main); deliberate feature headroom only.
 // 2026-09-12 (AUTH-02 merge over sec/response main, issue #143): 485 KiB.
 // The union of the AUTH-02 resource-role control plane (src/roles.ts, 15
 // role/policy admin routes, grant enforcement) with the OBS-02/OPS-02/RUN-01
@@ -141,6 +168,11 @@ import { join } from "node:path";
 // and provenance) stack on the 450 KiB surface above. Hand-written feature
 // code, no new dependencies (package.json unchanged versus main);
 // deliberate feature headroom only.
+// 2026-09-12 (RUN-02 re-merge over TOOL-01 main, issue #136): 505 KiB. The
+// union of the RUN-02 child-lineage surface with the TOOL-01 gateway main
+// measures 511591 bytes (~499.6 KiB) locally (CI number governs).
+// Hand-written feature code, no new dependencies (package.json unchanged
+// versus main); deliberate feature headroom only.
 // 2026-09-12 (AUTH-02 rebase over TOOL-01 main, issue #143): 525 KiB.
 // The union of the AUTH-02 resource-role control plane with the TOOL-01
 // tool registry plus inbound MCP gateway plus HaloPSA Code Mode host,
@@ -155,6 +187,24 @@ import { join } from "node:path";
 // deliberate feature headroom, not dependency bloat: package.json is
 // unchanged versus main. Combined measures 545802 bytes locally (CI number
 // governs); shrink the raise if it lands lower.
+// 2026-09-12 (TRG-01 stacked over FORM-02 main, issue #137): 575 KiB. The
+// schedules surface (6 routes plus the schedules domain: cron/timezone
+// parsers, next-due math, deterministic window keys, bounded tick
+// promotion, delivery visibility; plus the minute Cron trigger, SDK
+// schedule types/guards/client, and ops scheduler inventory) stacks on the
+// 555 KiB surface above and measures ~567 KiB combined. Same deliberate
+// feature headroom as the earlier raises, not dependency bloat:
+// package.json is unchanged versus main.
+// 2026-09-12 (RUN-02 re-merge over FORM-02 main, issue #136): 560 KiB. The
+// union of the RUN-02 child-lineage surface with the FORM-02 dynamic-forms
+// main measures 561822 bytes (~548.7 KiB) locally (CI number governs).
+// Hand-written feature code, no new dependencies (package.json
+// unchanged versus main); deliberate feature headroom only.
+// 2026-09-13 (RUN-02 re-merge over TRG-01 main, issue #136): stays at
+// 575 KiB. The union of the RUN-02 child-lineage surface with the TRG-01
+// schedules main measures 583169 bytes (~569.5 KiB) locally (CI number
+// governs), inside the existing TRG-01 headroom. Hand-written feature code,
+// no new dependencies (package.json unchanged versus main); no raise needed.
 // 2026-09-12 (AUTH-02 rebase over TRG-01 main, issue #143): 590 KiB.
 // The union of the AUTH-02 resource-role control plane (grant gates on
 // form read/submit plus the FORM-02 startup-handle delegation test) with
@@ -170,7 +220,13 @@ import { join } from "node:path";
 // 590 KiB line: ~5.5 KiB of hand-written authorization-boundary code, no
 // new dependencies (package.json unchanged versus main); deliberate
 // feature headroom only.
-const BUDGET_BYTES = 600 * 1024;
+// 2026-09-13 (RUN-02 over AUTH-02 main, issue #136): 615 KiB. The union of
+// the RUN-02 child-lineage surface (src/children.ts: dispatch/await/fan-out
+// with P1 fixes, lineage reads, hello-parent Saga plus Workflow, SDK
+// lineage shape) with the AUTH-02 main measures 626761 bytes locally (CI
+// number governs). Hand-written feature code, no new dependencies
+// (package.json unchanged versus main); deliberate feature headroom only.
+const BUDGET_BYTES = 615 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");

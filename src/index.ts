@@ -18,6 +18,7 @@ import {
   swapSlugs,
   validateApp,
 } from "./apps";
+import { cancelDirectChildren, isMissingLineageColumn } from "./children";
 import {
   artifactDetail,
   ARTIFACT_FORMAT_STATUS,
@@ -98,12 +99,14 @@ import {
   echoSaga,
   executionId,
   Fault,
+  helloParentSaga,
   helloSaga,
   ninjaSaga,
   object,
   parseCallerKey,
   parseDigestInput,
   parseHelloInput,
+  parseHelloParentInput,
   parseHistoryQuery,
   parseInput,
   parseKey,
@@ -307,7 +310,14 @@ import {
 import { listExecutionLogs, parseLogSearchQuery, parseLogTailQuery, searchExecutionLogs } from "./logs";
 import { deploymentSecretsFromEnv, scrubValueWithDeploymentSecrets } from "./secrets";
 import { logRequest } from "./usage";
-export { EchoWorkflow, HelloWorkflow, NinjaEchoDigestWorkflow, NinjaOrgsWorkflow, SmokeWorkflow } from "./sagas";
+export {
+  EchoWorkflow,
+  HelloParentWorkflow,
+  HelloWorkflow,
+  NinjaEchoDigestWorkflow,
+  NinjaOrgsWorkflow,
+  SmokeWorkflow,
+} from "./sagas";
 
 /** Baseline defense headers for every user-facing response (issue #237).
  * JSON API responses already carried no-store + nosniff; this extends the same
@@ -1210,6 +1220,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         [digestSaga.id, parseDigestInput],
         [smokeSaga.id, parseSmokeInput],
         [helloSaga.id, parseHelloInput],
+        [helloParentSaga.id, parseHelloParentInput],
       ]);
       const { meta, parsed, requiredIntegrations } = previewLocal(SAGA_CATALOG, parsers, record.sagaId, record.input);
       const withEnv = record.checkEnvironment === true;
@@ -1289,6 +1300,17 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         terminateOutcome === "already-settled" ||
         (terminateOutcome === "not-found" && priorStatus === "Pending" && priorDispatched === 0)
       ) {
+        // Best-effort child fan-out (RUN-02, ADR 018): still-active direct
+        // children get the same mark-terminate-classify treatment. Ambiguous
+        // children stay active and inspectable; parent confirmation never
+        // depends on child outcomes. Fan-out failures (enumeration or per-child
+        // D1 writes) must not strand a confirmed parent in Cancelling, so the
+        // fan-out is isolated: on failure the parent still confirms.
+        try {
+          await cancelDirectChildren(env, caller, row.id);
+        } catch {
+          // Best-effort only: fall through to parent confirmation.
+        }
         await cancelExecution(env.DB, row.id);
         // OPS-01 audit: owner cancellation confirmed (best-effort; a failed
         // insert never fails the cancel itself).
@@ -1366,6 +1388,24 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           result_json: string | null;
           error_json: string | null;
         }>();
+      // RUN-02 lineage (ADR 018): direct children of this Execution, newest
+      // first. The child's own detail carries its parentExecutionId; this
+      // list makes the parent side inspectable without a history scan.
+      // Pre-lineage stores (before migration 0015) degrade to an empty list:
+      // the route 500s otherwise for fixtures that only applied 0001+0002.
+      let children: { id: string; saga_id: string; saga_name: string; status: string; created_at: string }[];
+      try {
+        children = (
+          await env.DB.prepare(
+            "SELECT id,saga_id,saga_name,status,created_at FROM executions WHERE parent_execution_id=? AND org_id=? AND user_id=? ORDER BY created_at DESC,id DESC",
+          )
+            .bind(row.id, caller.orgId, caller.userId)
+            .all<{ id: string; saga_id: string; saga_name: string; status: string; created_at: string }>()
+        ).results;
+      } catch (error) {
+        if (!isMissingLineageColumn(error)) throw error;
+        children = [];
+      }
       let runtimeStatus: string | null = null;
       try {
         const binding = workflowForSaga(env, row.saga_id);
@@ -1378,6 +1418,15 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           {
             ...summary(row),
             runtimeStatus,
+            parentExecutionId: row.parent_execution_id,
+            parentStep: row.parent_step,
+            children: children.map((kid) => ({
+              executionId: kid.id,
+              sagaId: kid.saga_id,
+              sagaName: kid.saga_name,
+              status: kid.status,
+              createdAt: kid.created_at,
+            })),
             // RUN-01 (ADR 018): the applied policy snapshot rides detail so
             // operators can inspect what this Execution ran under, even after
             // later policy edits. Old rows (NULL) report the code default.

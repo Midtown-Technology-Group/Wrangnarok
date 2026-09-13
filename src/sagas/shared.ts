@@ -9,11 +9,25 @@ import { EXECUTION_ID } from "../domain";
 import type { ExecutionParams, SagaRuntimePolicy } from "../domain";
 import { assertJsonSerializable, bindSagaStep } from "../saga";
 import type { SagaDefinition, SagaEventContext } from "../saga";
+import { bindSagaChildren } from "../children";
+import type { ChildCatalog } from "../children";
+import { SAGA_DEFINITIONS } from "./definitions";
 import { bindSagaConfig } from "../config";
 import { clearExecutionSecrets, registerExecutionSecrets, scrubExecutionText, scrubExecutionValue } from "../secrets";
 import { echo } from "../integrations/echo";
 import { listOrganizations } from "../integrations/ninjaone";
 import { parseStoredPolicy } from "../executions";
+
+/** Read the parent caller identity from its immutable D1 Execution row.
+ * Lazy (first child invoke/await only): context construction itself never
+ * touches D1, so unknown rows still fail in prepareExecution as before. */
+async function readParentOrg(env: Bindings, id: string): Promise<{ orgId: string; userId: string }> {
+  const row = await env.DB.prepare("SELECT org_id,user_id FROM executions WHERE id=?")
+    .bind(id)
+    .first<{ org_id: string; user_id: string }>();
+  if (!row) throw new NonRetryableError("Unknown Saga revision.");
+  return { orgId: row.org_id, userId: row.user_id };
+}
 
 /** Read the Execution's own Organization from the immutable D1 row. Never
  * Workflow params, never caller input: the row is the authority. */
@@ -39,6 +53,37 @@ export async function executeSaga<TOutput>(
   // carries one Execution's secrets into the next.
   registerExecutionSecrets(id, [env.NINJA_CLIENT_ID, env.NINJA_CLIENT_SECRET]);
   try {
+    const sagaStep = bindSagaStep(step);
+    const catalog: ChildCatalog = { sagas: SAGA_DEFINITIONS };
+    // The child handle resolves the parent OrgCtx lazily from the immutable
+    // parent D1 row (never from caller input) on first invoke/await, so
+    // constructing the context never touches D1: prepareExecution inside
+    // run() stays the first read (unknown rows fail there as before).
+    let parentOrg: { orgId: string; userId: string } | null = null;
+    const childEnv = (caller: { orgId: string; userId: string }) => ({
+      env,
+      catalog,
+      parentOrg: {
+        orgId: caller.orgId,
+        userId: caller.userId,
+        executionId: id,
+        sagaId: def.id,
+        sagaRevision: def.revision,
+        attemptToken: `${id}:0`,
+      },
+      parentExecutionId: id,
+      parentSagaId: def.id,
+    });
+    const lazyChildren = {
+      invoke: async (...args: Parameters<ReturnType<typeof bindSagaChildren>["invoke"]>) => {
+        parentOrg ??= await readParentOrg(env, id);
+        return bindSagaChildren(childEnv(parentOrg), sagaStep).invoke(...args);
+      },
+      awaitResult: async <T>(...args: Parameters<ReturnType<typeof bindSagaChildren>["awaitResult"]>) => {
+        parentOrg ??= await readParentOrg(env, id);
+        return bindSagaChildren(childEnv(parentOrg), sagaStep).awaitResult<T>(args[0], args[1]);
+      },
+    };
     // ctx.config resolves against the Execution's own Organization only: the
     // org comes from the immutable D1 Execution row (never Workflow params,
     // never caller input), read lazily inside step.do() so the handle itself
@@ -81,6 +126,7 @@ export async function executeSaga<TOutput>(
       integrations: { echo: { echo }, ninjaone: { listOrganizations } },
       db: env.DB,
       secrets: { clientId: env.NINJA_CLIENT_ID, clientSecret: env.NINJA_CLIENT_SECRET },
+      children: lazyChildren,
       config: lazyConfig,
     };
     const output = await def.run(ctx, bindSagaStep(step, policy));

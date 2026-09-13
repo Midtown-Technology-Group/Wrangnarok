@@ -11,6 +11,7 @@ import {
   digestSaga,
   ECHO_INTEGRATION_ID,
   echoSaga,
+  helloParentSaga,
   helloSaga,
   NINJA_INTEGRATION_ID,
   ninjaSaga,
@@ -245,7 +246,7 @@ it("never adopts loose rows or rows managed by another bundle", async () => {
 it("keeps the installer catalog in agreement with the static Saga definitions", () => {
   // The installer must accept pins for every Saga the code catalog defines
   // (same stable IDs and revisions the Saga definitions are built from).
-  for (const saga of [echoSaga, ninjaSaga, digestSaga, smokeSaga, helloSaga]) {
+  for (const saga of [echoSaga, ninjaSaga, digestSaga, smokeSaga, helloSaga, helloParentSaga]) {
     const parsed = parseBundleManifest({
       manifestVersion: 1,
       bundle: { id: BUNDLE_ID, name: "catalog-probe", version: "1.0.0" },

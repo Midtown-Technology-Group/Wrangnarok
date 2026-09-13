@@ -73,6 +73,11 @@ describe("MVP slice contracts", () => {
     expect(stepRetryLimit("persist-success-v1")).toBe(STEP_RETRY_CEILING);
     expect(stepRetryLimit("persist-failure-v1")).toBe(STEP_RETRY_CEILING);
     expect(stepRetryLimit("timeout-mark-v1")).toBe(STEP_RETRY_CEILING);
+    // RUN-02 (ADR 018): child-dispatch Operations converge on one
+    // deterministic child row, so they retry like checkpoints. Poll/await
+    // reads stay at 0.
+    expect(stepRetryLimit("child-dispatch-invoke-v1")).toBe(STEP_RETRY_CEILING);
+    expect(stepRetryLimit("child-await-invoke-v1")).toBe(0);
     expect(STEP_RETRY_CEILING).toBe(2);
     expect(stepRetryLimit("some-future-mutation-v1")).toBe(0);
   });

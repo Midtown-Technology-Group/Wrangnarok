@@ -93,6 +93,11 @@
       "name": "wrangnarok-hello-v1",
       "class_name": "HelloWorkflow",
     },
+    {
+      "binding": "HELLO_PARENT_WORKFLOW",
+      "name": "wrangnarok-hello-parent-v1",
+      "class_name": "HelloParentWorkflow",
+    },
   ],
   // ADR 004 environments: dev is the first deployment target and smoke-test
   // environment with its own mutable resources. Production is intentionally
@@ -169,6 +174,11 @@
           "name": "wrangnarok-hello-v1-dev",
           "class_name": "HelloWorkflow",
         },
+        {
+          "binding": "HELLO_PARENT_WORKFLOW",
+          "name": "wrangnarok-hello-parent-v1-dev",
+          "class_name": "HelloParentWorkflow",
+        },
       ],
     },
     // PR preview environment (ADR 004): one shared disposable Worker on
@@ -236,6 +246,11 @@
           "binding": "HELLO_WORKFLOW",
           "name": "wrangnarok-hello-v1-preview",
           "class_name": "HelloWorkflow",
+        },
+        {
+          "binding": "HELLO_PARENT_WORKFLOW",
+          "name": "wrangnarok-hello-parent-v1-preview",
+          "class_name": "HelloParentWorkflow",
         },
       ],
     },

@@ -885,6 +885,11 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
       "SAGA_PAUSED",
       "ADMISSION_LIMITED",
       "DISPATCH_UNCONFIRMED",
+      "CHILD_SAGA_NOT_FOUND",
+      "CHILD_FAILED",
+      "CHILD_AWAIT_TIMEOUT",
+      "CHILD_DISPATCH_UNCONFIRMED",
+      "CHILD_RESULT_CORRUPT",
     ];
     for (const code of codes) {
       const { fetchImpl } = stub([json(detail({ error: { code, message: code } }))]);
@@ -924,6 +929,26 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     expect(() => parseExecutionDetail(null)).toThrow(/unexpected shape/);
     expect(() => parseExecutionDetail({ ...detail(), operations: [{ name: 1 }] })).toThrow(/unexpected shape/);
     expect(() => parseExecutionDetail({ ...detail(), operations: "x" })).toThrow(/unexpected shape/);
+    // RUN-02 lineage wire guards (issue #136): parent refs and child lists.
+    expect(() => parseExecutionDetail({ ...detail(), parentExecutionId: 7 })).toThrow(/unexpected shape/);
+    expect(() => parseExecutionDetail({ ...detail(), parentStep: 7 })).toThrow(/unexpected shape/);
+    expect(() => parseExecutionDetail({ ...detail(), children: [{ executionId: 1 }] })).toThrow(/unexpected shape/);
+    expect(() => parseExecutionDetail({ ...detail(), children: "x" })).toThrow(/unexpected shape/);
+    const child = {
+      executionId: "b".repeat(64),
+      sagaId: helloSaga.id,
+      sagaName: "hello",
+      status: "Succeeded",
+      createdAt: "2026-09-11T00:00:00.000Z",
+    };
+    expect(parseExecutionDetail({ ...detail(), parentExecutionId: "a".repeat(64), children: [child] })).toMatchObject({
+      parentExecutionId: "a".repeat(64),
+      children: [child],
+    });
+    // Absent lineage keys default: legacy rows read as top-level with no kids.
+    const legacy = detail();
+    delete (legacy as Record<string, unknown>).parentExecutionId;
+    expect(parseExecutionDetail(legacy)).toMatchObject({ parentExecutionId: null, parentStep: null, children: [] });
     expect(() => parseExecutionDetail({ ...detail(), policy: undefined })).toThrow(/unexpected shape/);
     expect(() => parseRuntimePolicy({ policy: { nope: true } })).toThrow(/unexpected shape/);
     expect(

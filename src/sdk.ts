@@ -97,6 +97,18 @@ export const SDK_ERROR_CODES = [
   "NINJA_INTEGRATION_FAILED",
   "SMOKE_WRITE_UNVERIFIED",
   "SMOKE_READ_UNVERIFIED",
+  "CHILD_SAGA_NOT_FOUND",
+  "CHILD_PARENT_INVALID",
+  "CHILD_SELF_INVOKE",
+  "CHILD_INPUT_NOT_SERIALIZABLE",
+  "CHILD_KEY_INVALID",
+  "CHILD_DISPATCH_CONFLICT",
+  "CHILD_DISPATCH_UNCONFIRMED",
+  "CHILD_RECEIPT_INVALID",
+  "CHILD_AWAIT_INVALID",
+  "CHILD_AWAIT_TIMEOUT",
+  "CHILD_RESULT_CORRUPT",
+  "CHILD_FAILED",
   "SCHEDULE_NOT_FOUND",
   "INVALID_SCHEDULE",
   "INVALID_CRON",
@@ -377,6 +389,9 @@ export interface SdkExecutionSummary {
 
 export interface SdkExecutionDetail extends SdkExecutionSummary {
   readonly runtimeStatus: string | null;
+  readonly parentExecutionId: string | null;
+  readonly parentStep: string | null;
+  readonly children: readonly SdkExecutionChild[];
   readonly policy: SdkRuntimePolicySnapshot;
   readonly input: unknown;
   readonly result: unknown;
@@ -605,6 +620,9 @@ function isOperation(value: unknown): value is SdkOperation {
 export function parseExecutionDetail(value: unknown): SdkExecutionDetail {
   if (!isRecord(value)) throw new SdkError("SDK_CLIENT_MISMATCH", "The Execution detail has an unexpected shape.");
   const operations = value.operations;
+  const children = value.children;
+  const parentExecutionId = value.parentExecutionId;
+  const parentStep = value.parentStep;
   if (
     typeof value.executionId !== "string" ||
     typeof value.sagaId !== "string" ||
@@ -618,6 +636,9 @@ export function parseExecutionDetail(value: unknown): SdkExecutionDetail {
     (value.startedAt !== null && typeof value.startedAt !== "string") ||
     (value.completedAt !== null && typeof value.completedAt !== "string") ||
     (value.runtimeStatus !== null && typeof value.runtimeStatus !== "string") ||
+    (parentExecutionId !== null && parentExecutionId !== undefined && typeof parentExecutionId !== "string") ||
+    (parentStep !== null && parentStep !== undefined && typeof parentStep !== "string") ||
+    (children !== undefined && (!Array.isArray(children) || !children.every(isChild))) ||
     !isRecord(value.policy) ||
     !("input" in value) ||
     !("result" in value) ||
@@ -627,7 +648,12 @@ export function parseExecutionDetail(value: unknown): SdkExecutionDetail {
   ) {
     throw new SdkError("SDK_CLIENT_MISMATCH", "The Execution detail has an unexpected shape.");
   }
-  return value as unknown as SdkExecutionDetail;
+  return {
+    ...(value as unknown as SdkExecutionDetail),
+    parentExecutionId: (parentExecutionId ?? null) as string | null,
+    parentStep: (parentStep ?? null) as string | null,
+    children: ((children ?? []) as readonly SdkExecutionChild[]).slice(),
+  };
 }
 
 /** Guard a GET /api/executions payload. Throws SDK_CLIENT_MISMATCH. */
@@ -654,6 +680,25 @@ export function parseHistoryPage(value: unknown): SdkHistoryPage {
     hasMore: value.hasMore,
     nextCursor: (nextCursor ?? null) as string | null,
   };
+}
+
+export interface SdkExecutionChild {
+  readonly executionId: string;
+  readonly sagaId: string;
+  readonly sagaName: string;
+  readonly status: string;
+  readonly createdAt: string;
+}
+
+function isChild(value: unknown): value is SdkExecutionChild {
+  return (
+    isRecord(value) &&
+    typeof value.executionId === "string" &&
+    typeof value.sagaId === "string" &&
+    typeof value.sagaName === "string" &&
+    typeof value.status === "string" &&
+    typeof value.createdAt === "string"
+  );
 }
 
 /** Guard a GET /api/executions/:id/logs or GET /api/logs payload. Throws SDK_CLIENT_MISMATCH. */
@@ -1759,6 +1804,8 @@ export interface SdkDiagnosis {
   readonly executionId: string;
   readonly status: string;
   readonly sagaName: string;
+  readonly parentExecutionId: string | null;
+  readonly children: readonly SdkExecutionChild[];
   readonly operations: readonly SdkOperation[];
   readonly result: unknown;
   readonly error: unknown;
@@ -1769,6 +1816,16 @@ export interface SdkDiagnosis {
 function hintFor(code: unknown): string | null {
   if (!isRecord(code)) return null;
   switch (code.code) {
+    case "CHILD_SAGA_NOT_FOUND":
+      return "No Saga matches that child reference; use a stable UUID or exact catalog name.";
+    case "CHILD_FAILED":
+      return "The child Execution ended without success; inspect the child Execution for its safe error.";
+    case "CHILD_AWAIT_TIMEOUT":
+      return "The child did not settle in time; it keeps running and stays inspectable via its statusUrl.";
+    case "CHILD_DISPATCH_UNCONFIRMED":
+      return "Child dispatch may have started. Retry the parent under the same key.";
+    case "CHILD_RESULT_CORRUPT":
+      return "The child row carries no JSON-serializable result; inspect it directly, never assume success.";
     case "INTEGRATION_REQUIREMENT_UNSATISFIED":
       return "This Saga requires an Integration Connection that is not configured for this Organization.";
     case "ECHO_VENDOR_TIMEOUT":
@@ -2101,6 +2158,8 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
         executionId: detail.executionId,
         status: detail.status,
         sagaName: detail.sagaName,
+        parentExecutionId: detail.parentExecutionId,
+        children: detail.children,
         operations: detail.operations,
         result: detail.result,
         error: detail.error,

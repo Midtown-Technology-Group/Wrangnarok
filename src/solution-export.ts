@@ -42,6 +42,7 @@ import {
   Fault,
   hash,
   helloSaga,
+  helloParentSaga,
   ninjaSaga,
   NINJA_INTEGRATION_ID,
   object,
@@ -141,6 +142,7 @@ const CODE_SAGAS: readonly CodeSagaPin[] = Object.freeze([
   { ...digestSaga, requiredIntegrations: Object.freeze([NINJA_INTEGRATION_ID, ECHO_INTEGRATION_ID]) },
   { ...smokeSaga, requiredIntegrations: Object.freeze([]) },
   { ...helloSaga, requiredIntegrations: Object.freeze([]) },
+  { ...helloParentSaga, requiredIntegrations: Object.freeze([]) },
 ]);
 
 /** Node-safe static catalogs: no Workflows runtime import, so plain-node

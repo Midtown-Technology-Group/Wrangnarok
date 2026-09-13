@@ -39,6 +39,9 @@ function detailFixture(overrides: Partial<ExecutionDetail> = {}): ExecutionDetai
     startedAt: "2026-09-10T08:00:01.000Z",
     completedAt: "2026-09-10T08:00:02.000Z",
     runtimeStatus: "complete",
+    parentExecutionId: null,
+    parentStep: null,
+    children: [],
     policy: {
       sagaId: echoSaga.id,
       version: 1,
@@ -123,6 +126,33 @@ describe("execution detail rendering", () => {
     );
     expect(html).toContain("detail-runtime");
     expect(html).toContain("unavailable (native history expired or not yet dispatched)");
+  });
+
+  it("renders child lineage and the child list", () => {
+    const childId = "b".repeat(64);
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <ExecutionDetailView
+          initial={detailFixture({
+            parentExecutionId: "c".repeat(64),
+            parentStep: "child-dispatch-invoke-v1",
+            children: [
+              {
+                executionId: childId,
+                sagaId: echoSaga.id,
+                sagaName: "echo",
+                status: "Succeeded",
+                createdAt: "2026-09-10T08:00:03.000Z",
+              },
+            ],
+          })}
+        />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("detail-lineage");
+    expect(html).toContain("child-dispatch-invoke-v1");
+    expect(html).toContain("child-row");
+    expect(html).toContain(childId);
   });
 
   it("renders the applied runtime-policy snapshot", () => {
