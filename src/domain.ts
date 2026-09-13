@@ -213,7 +213,8 @@ export function checkpointRetryLimit(policy: SagaRuntimePolicy): number {
 }
 export const EXECUTION_ID = /^[a-f0-9]{64}$/;
 export const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-export type ExecutionStatus = "Pending" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelling" | "Cancelled";
+export type ExecutionStatus =
+  "Pending" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelling" | "Cancelled" | "Scheduled";
 // Retry policy table (upstream finding 14, issue #16): vendor/Integration
 // steps never auto-retry (0) unless destination-side idempotency is proven and
 // an explicit policy exists; only idempotent D1 checkpoint steps may retry, up
@@ -241,6 +242,11 @@ export function stepRetryLimit(stepName: string): number {
 // cancellation is never flipped to Failed afterward. Terminal states have
 // no outgoing transitions. Unit-tested as pure TypeScript.
 const EXECUTION_TRANSITIONS: Record<ExecutionStatus, readonly ExecutionStatus[]> = {
+  // TRG-01 (issue #137): Scheduled is the durable pre-publish row the tick
+  // promotes. It advances only to Pending (tick claim) or Cancelling (owner
+  // schedule-cancel); the tick claim then flows through submit() into the
+  // normal Pending lifecycle. No other entry into Scheduled exists.
+  Scheduled: ["Pending", "Cancelling"],
   Pending: ["Running", "Failed", "Cancelling"],
   Running: ["Succeeded", "Failed", "TimedOut", "Cancelling"],
   Cancelling: ["Cancelled"],
@@ -565,6 +571,7 @@ const HISTORY_STATUSES: readonly string[] = [
   "TimedOut",
   "Cancelling",
   "Cancelled",
+  "Scheduled",
 ];
 export interface HistoryCursor {
   readonly createdAt: string;
