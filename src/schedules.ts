@@ -27,6 +27,8 @@ import { BODY_LIMIT, Fault, hash, parseKey, UUID } from "./domain";
 import type { Principal, SagaDef } from "./domain";
 import type { Bindings } from "./bindings";
 import { submit } from "./executions";
+import { instanceAdmins } from "./orgs";
+import type { AdminEnv } from "./orgs";
 
 export const SCHEDULE_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const SAFE_WINDOW_CHAR = /^[a-zA-Z0-9._:-]+$/;
@@ -493,11 +495,85 @@ export interface PromotionResult {
   readonly statusUrl: string;
 }
 
+function isMissingTable(error: unknown): boolean {
+  return error instanceof Error && /no such table/i.test(error.message);
+}
+
+function storeNotMigrated(): Fault {
+  return new Fault(503, "ORG_STORE_NOT_MIGRATED", "Organization storage is not migrated: apply migration 0007.");
+}
+
+/** Revalidate the persisted run-as authority immediately before dispatch.
+ * Same lifecycle semantics as the request path (orgs.resolveCaller): unknown
+ * orgs answer as not-found, disabled orgs/users and non-active memberships
+ * fail closed — but with two tick-specific differences. There is no verified
+ * identity present, so an `invited` membership is never activated here: the
+ * tick only dispatches for already-active authority. And a store that predates
+ * migration 0007 fails loud (503) instead of dispatching unchecked. */
+async function assertScheduleAuthority(db: D1Database, env: AdminEnv, schedule: ScheduleRow): Promise<Principal> {
+  const principal: Principal = { orgId: schedule.org_id, userId: schedule.run_as_user_id };
+  // Instance-admin recovery parity: resolveCaller lets the env-held admin list
+  // through without membership rows, so the tick does the same.
+  if (instanceAdmins(env).has(principal.userId)) return principal;
+  // One missing-table fence for all three reads: a store predating migration
+  // 0007 fails loud (503) instead of dispatching unchecked.
+  let org: { status?: string } | null;
+  let user: { status?: string } | null;
+  let membership: { status?: string } | null;
+  try {
+    org = await db.prepare("SELECT * FROM organizations WHERE id=?").bind(schedule.org_id).first<{ status?: string }>();
+    user = await db
+      .prepare("SELECT * FROM users WHERE user_id=?")
+      .bind(schedule.run_as_user_id)
+      .first<{ status?: string }>();
+    membership = await db
+      .prepare("SELECT * FROM org_memberships WHERE org_id=? AND user_id=?")
+      .bind(schedule.org_id, schedule.run_as_user_id)
+      .first<{ status?: string }>();
+  } catch (error) {
+    if (isMissingTable(error)) throw storeNotMigrated();
+    throw error;
+  }
+  if (!org) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
+  if ((org.status ?? "active") === "disabled") throw new Fault(403, "ORG_DISABLED", "This Organization is disabled.");
+  if (!user) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
+  if ((user.status ?? "active") !== "active") throw new Fault(403, "USER_DISABLED", "This user is disabled.");
+  if (!membership) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
+  if (membership.status === "revoked") throw new Fault(403, "MEMBERSHIP_REVOKED", "Membership is revoked.");
+  // Suspended, invited, and unknown statuses all read as not-active here: the
+  // tick never activates membership, it only dispatches for active authority.
+  if (membership.status !== "active") throw new Fault(403, "MEMBERSHIP_SUSPENDED", "Membership is not active.");
+  return principal;
+}
+
+/** Tick skip codes: per-schedule fences that report a skip and let the next
+ * tick retry (or stay refused for cancelled/unauthorized windows), never a
+ * tick failure. Store-missing (ORG_STORE_NOT_MIGRATED) is deliberately absent:
+ * a config error fails the tick loud like the request path does. */
+const TICK_SKIP_CODES: ReadonlySet<string> = new Set([
+  "EXECUTION_CANCELLED",
+  "SAGA_PAUSED",
+  "ADMISSION_LIMITED",
+  "SCHEDULE_GONE",
+  "SCHEDULE_DISABLED",
+  "ORG_NOT_FOUND",
+  "ORG_DISABLED",
+  "USER_DISABLED",
+  "MEMBERSHIP_SUSPENDED",
+  "MEMBERSHIP_REVOKED",
+]);
+
 /** Promote one due window through the submit protocol. Single-winner
  * discipline comes free: the deterministic key plus retained-ID dedup make
  * racing ticks converge; the delivery row records the winner for replay
  * visibility. A cancelled window stays 409 and needs no fresh key here —
- * the tick reports it as skipped, never resurrected. */
+ * the tick reports it as skipped, never resurrected.
+ *
+ * Pre-dispatch fence (issue #137): the caller-held row may be stale — a tick
+ * that selected this row can lose a race with an operator disable/delete, and
+ * the persisted run-as owner may have been revoked since creation. The row is
+ * re-read and the run-as authority revalidated immediately before submit, so
+ * a lost race reports a skip instead of dispatching stale authority. */
 export async function promoteWindow(
   db: D1Database,
   env: Bindings,
@@ -506,30 +582,44 @@ export async function promoteWindow(
   sagas: readonly SagaDef[],
   submitFn: typeof submit,
 ): Promise<PromotionResult> {
-  const saga = sagas.find((entry) => entry.id === schedule.saga_id);
+  // Pre-dispatch fence: never trust the caller-held row. Re-read by id so a
+  // disable/delete that landed after the tick scan wins the race here.
+  let fresh: ScheduleRow | null;
+  try {
+    fresh = await db.prepare("SELECT * FROM schedules WHERE id=?").bind(schedule.id).first<ScheduleRow>();
+  } catch {
+    fresh = null;
+  }
+  if (!fresh) throw new Fault(409, "SCHEDULE_GONE", "This schedule was deleted before dispatch.");
+  if (fresh.enabled !== 1) throw new Fault(409, "SCHEDULE_DISABLED", "This schedule was disabled before dispatch.");
+  // Run-as revalidation: the persisted owner IDs are not continuing
+  // authorization. Mirror the request-path lifecycle semantics
+  // (orgs.resolveCaller) without its invited-activation write — an unattended
+  // tick never activates membership, it only dispatches for active authority.
+  const principal = await assertScheduleAuthority(db, env, fresh);
+  const saga = sagas.find((entry) => entry.id === fresh.saga_id);
   if (!saga) throw new Fault(500, "SCHEDULE_MISCONFIGURED", "This schedule is not configured correctly.");
-  const principal: Principal = { orgId: schedule.org_id, userId: schedule.run_as_user_id };
-  const key = await scheduleWindowKey(schedule.id, window);
+  const key = await scheduleWindowKey(fresh.id, window);
   parseKey(key);
-  const input = JSON.parse(schedule.input_json) as unknown;
+  const input = JSON.parse(fresh.input_json) as unknown;
   const accepted = await submitFn(env, principal, key, saga, input);
   try {
     await db
       .prepare(
         "INSERT INTO schedule_deliveries(schedule_id,window,input_json,execution_id,created_at) VALUES (?,?,?,?,?) ON CONFLICT(schedule_id,window) DO NOTHING",
       )
-      .bind(schedule.id, window, schedule.input_json, accepted.executionId, new Date().toISOString())
+      .bind(fresh.id, window, fresh.input_json, accepted.executionId, new Date().toISOString())
       .run();
   } catch {
     // Old DB without the table: the Execution row itself stays the receipt.
   }
   await db
     .prepare("UPDATE schedules SET last_window=?,updated_at=? WHERE id=?")
-    .bind(window, new Date().toISOString(), schedule.id)
+    .bind(window, new Date().toISOString(), fresh.id)
     .run();
   return {
-    scheduleId: schedule.id,
-    scheduleName: schedule.name,
+    scheduleId: fresh.id,
+    scheduleName: fresh.name,
     window,
     executionId: accepted.executionId,
     replayed: accepted.replayed,
@@ -545,7 +635,9 @@ export interface TickReport {
 /** Cron tick: scan enabled due rows (bounded), promote each exactly once.
  * One-off rows promote once then disable themselves; recurring rows advance
  * next_due_at past the promoted window. Overdue rows promote (never silently
- * skipped); future rows wait. Disabled or deleted rows never appear. */
+ * skipped); future rows wait. Disabled or deleted rows never appear — and a
+ * row disabled, deleted, or de-authorized after the scan still loses at the
+ * pre-dispatch fence inside promoteWindow (skip, zero dispatch). */
 export async function promoteDueSchedules(
   db: D1Database,
   env: Bindings,
@@ -580,14 +672,12 @@ export async function promoteDueSchedules(
     try {
       promoted.push(await promoteWindow(db, env, schedule, window, sagas, submitFn));
     } catch (error) {
-      // Owner-cancel-wins and admission fences surface as skips, never as
-      // tick failures: the next tick retries a live window, while a
-      // cancelled window stays refused until the operator renames the key
-      // surface (new schedule or re-enable after cancel clears).
-      if (
-        error instanceof Fault &&
-        (error.code === "EXECUTION_CANCELLED" || error.code === "SAGA_PAUSED" || error.code === "ADMISSION_LIMITED")
-      ) {
+      // Owner-cancel-wins, admission, liveness, and authority fences surface
+      // as skips, never as tick failures: the next tick retries a live
+      // window, while a cancelled or unauthorized window stays refused until
+      // the operator renames the key surface (new schedule or re-enable
+      // after cancel clears) or restores the run-as authority.
+      if (error instanceof Fault && TICK_SKIP_CODES.has(error.code)) {
         skipped.push(schedule.name);
         continue;
       }

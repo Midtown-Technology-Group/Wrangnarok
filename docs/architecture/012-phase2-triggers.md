@@ -159,6 +159,17 @@ The schedule direction above ships as:
 - SDK: `scheduled-triggers` capability, schedule types/guards/client, and
   contract routes; `SCHEDULE_CONFLICT`, `SCHEDULE_IDENTITY_FORBIDDEN`,
   `SCHEDULE_MISCONFIGURED` join the error registry.
+- Pre-dispatch fence (issue #137 follow-through): `promoteWindow` never
+  trusts the tick-scanned row. It re-reads the row by id immediately before
+  submit — a disable/delete that landed after the scan wins the race
+  (`SCHEDULE_DISABLED`/`SCHEDULE_GONE` skips, zero dispatch) — and
+  revalidates the persisted run-as owner through the same lifecycle
+  semantics as the request path (`resolveCaller`: disabled org/user and
+  non-active membership fail closed with the same codes). Two
+  tick-specific differences: an unattended tick never activates an
+  `invited` membership (only already-active authority dispatches), and a
+  store predating migration 0007 fails loud (503) instead of dispatching
+  unchecked. All fence faults join the tick skip set, never tick failures.
 
 ## Open questions (options, not decisions)
 
