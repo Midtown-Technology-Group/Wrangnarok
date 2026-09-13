@@ -43,7 +43,7 @@ Total: 47 capability rows — 3 Implemented, 1 Complete (pending review), 26 Par
 | SOL-01 | Close the existing bundle reconciliation and activation contract gaps | 5 | Partial | — | new |
 | SOL-02 | Install and manage complete reusable Solutions across Organizations | 5 | Partial | SOL-01, AUTH-02, CON-02, TABLE-02, FORM-02, APP-01, AI-02, TRG-03 | new |
 | SOL-03 | Export, capture and import portable Solution source without tenant state | 5 | Partial | SOL-01, MIG-01, SEC-01 | #163 |
-| MIG-01 | Deliver the existing workspace-to-bundle bridge without false compatibility claims | 5 | Missing | — | #116 |
+| MIG-01 | Deliver the existing workspace-to-bundle bridge without false compatibility claims | 5 | Partial | — | #116 |
 | MIG-02 | Verify and close out the existing TypeScript migration pilot | 1 | Partial | — | #119 |
 | AI-01 | Configure AI provider Connections, model profiles and capability assignments | 6 | Missing | SEC-01, CON-01, AUTH-02 | new |
 | AI-02 | Run user-managed agents with scoped tools, delegation and bounded autonomy | 6 | Missing | AI-01, TOOL-01, RUN-02, AUTH-02 | new |
@@ -907,9 +907,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## MIG-01: Deliver the existing workspace-to-bundle bridge without false compatibility claims
 
-Phase 5; **Missing**; existing issue: #116
+Phase 5; **Partial**; existing issue: #116
 
-Local status: Reuse #116. A field mapping/converter is smaller than native execution of legacy workspace Python or full Solution lifecycle.
+Local status: `src/migration.ts` (367 lines) plus `test/migration-bridge.test.ts` (6 tests, green): documented field mapping (`WORKSPACE_TO_BUNDLE_MAPPING`), converter producing valid manifests via the real installer validator, explicit source identity through the operator saga map, environment exclusion (no scope pinning, no credential values), actionable gap results (UNSUPPORTED_FORMS/TABLES, unmapped integrations, malformed input fail-closed). Legacy decorator IDs resolve through the operator-provided saga map, distinct from current upstream registered/installed identity.
 
 Depends: none
 
