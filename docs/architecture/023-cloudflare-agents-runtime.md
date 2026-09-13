@@ -21,7 +21,7 @@ The current architecture already defines several agent-facing pieces:
 
 What is not yet decided is the runtime substrate for a persistent Wrangnarok Agent itself.
 
-Cloudflare's Agents SDK is designed for persistent stateful agents on Workers. Agent instances are backed by Durable Objects, can retain private SQL-backed state, can maintain durable identity across requests, can schedule work, can participate in long-lived conversations, and can invoke tools and model providers without requiring Wrangnarok to rebuild those lifecycle primitives from scratch.
+Cloudflare's Agents SDK is designed for persistent stateful agents on Workers. Agent instances are backed by Durable Objects, can retain private SQL-backed state, can maintain durable identity across requests, and can schedule work and participate in long-lived conversations without requiring Wrangnarok to rebuild those lifecycle primitives from scratch. Model selection stays with AI-01 and tool execution stays behind the ADR-022 capability boundary; the SDK provides the Durable Object-backed runtime support only.
 
 Wrangnarok's deployment model is normally single-organization / self-hosted per enterprise, MSP, or end customer. Workspace code and platform agents are therefore trusted operator-owned code within that instance. The purpose of this ADR is not hostile multi-tenant sandboxing; it is to select a durable, Cloudflare-native agent runtime that composes cleanly with the rest of the platform.
 
@@ -115,7 +115,7 @@ Workflow   -> Saga execution state
 Agent DO   -> agent-local state and coordination
 ```
 
-An Agent should reference shared records by stable identifiers rather than silently copying durable business truth into private agent-local storage.
+An Agent should reference shared records by stable identifiers rather than silently copying durable business truth into private agent-local storage. Canonical conversation history lives with AI-03 (durable chat owns the conversation lifecycle); Agent-local conversational state is derived context and cache for the Agent's own coordination, not a second canonical history.
 
 ### Agent tools use the existing Wrangnarok capability boundary
 
