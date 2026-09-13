@@ -212,6 +212,14 @@ import { join } from "node:path";
 // safe-URL policy and response baseline measures locally below; the CI
 // number governs. Hand-written feature code, no new dependencies
 // (package.json unchanged versus main); deliberate feature headroom only.
+// 2026-09-13 (AUTH-02 P1 review fixes fast-follow, issue #143): 600 KiB.
+// The eight thread fixes (App-write grant gates on three mutation routes,
+// org-scoped assignees, policy-rule uniqueness, UUID canonicalization, org
+// auth cleanup on delete, tool execute grants on both call paths, form
+// write authority on three routes) measure 609741 bytes in CI against the
+// 590 KiB line: ~5.5 KiB of hand-written authorization-boundary code, no
+// new dependencies (package.json unchanged versus main); deliberate
+// feature headroom only.
 // 2026-09-13 (RUN-02 over AUTH-02 main, issue #136): 615 KiB. The union of
 // the RUN-02 child-lineage surface (src/children.ts: dispatch/await/fan-out
 // with P1 fixes, lineage reads, hello-parent Saga plus Workflow, SDK
