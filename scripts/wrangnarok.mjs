@@ -763,9 +763,23 @@ export async function runCommand(ctx, deps = {}) {
         }
       }
       const classifications = ctx.genClassifications ?? {};
+      const RISKS = ["read", "mutation", "destructive", "credential", "billing", "security", "tenant-admin"];
       for (const [op, risk] of Object.entries(classifications)) {
-        if (typeof op !== "string" || op.length === 0 || typeof risk !== "string" || risk.length === 0) {
-          fail("USAGE", "generate-integration --classify needs op=CLASS (e.g. Ticket_Delete=destructive).");
+        if (typeof op !== "string" || op.length === 0 || typeof risk !== "string" || !RISKS.includes(risk)) {
+          fail(
+            "USAGE",
+            `generate-integration --classify needs op=CLASS with CLASS one of ${RISKS.join(", ")} (e.g. Ticket_Delete=destructive).`,
+          );
+        }
+      }
+      for (const origin of origins) {
+        const url = new URL(origin);
+        const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+        if (url.protocol !== "https:" && !loopback) {
+          fail(
+            "GENERATOR_INVALID_OPTIONS",
+            `Allowed origin ${JSON.stringify(origin)} must be https (credentials ride the Authorization header).`,
+          );
         }
       }
       let doc;

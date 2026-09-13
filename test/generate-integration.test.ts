@@ -122,4 +122,29 @@ describe("INT-01 generator (issue #229)", () => {
     expect(out.source).toContain(`"Ticket_Get": "mutation"`);
     expect(out.operationCount).toBe(3);
   });
+
+  it("rejects classification typos, bad prefixes, http origins, and line breaks", () => {
+    // Classification outside the closed risk set.
+    expect(() =>
+      generateIntegrationModule(haloShaped(), { ...opts(), classifications: { Ticket_Get: "typo" } }, DIGEST),
+    ).toThrow(expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }));
+    // secretEnvPrefix must be a valid identifier fragment.
+    expect(() =>
+      generateIntegrationModule(haloShaped(), { ...opts(), secretEnvPrefix: "HALO-CLIENT" }, DIGEST),
+    ).toThrow(expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }));
+    // Credential-bearing origins must be https (loopback http allowed).
+    expect(() =>
+      generateIntegrationModule(haloShaped(), { ...opts(), allowedOrigins: ["http://halo.example.com"] }, DIGEST),
+    ).toThrow(expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }));
+    expect(() =>
+      generateIntegrationModule(haloShaped(), { ...opts(), allowedOrigins: ["http://127.0.0.1:8788/echo"] }, DIGEST),
+    ).not.toThrow();
+    // Version line breaks collapse to spaces: the header stays one line.
+    const evil = JSON.parse(haloShaped());
+    evil.info.version = "1.0\ninjected: true";
+    const out = generateIntegrationModule(JSON.stringify(evil), opts(), DIGEST);
+    expect(out.source).toContain("// Spec version: 1.0 injected: true");
+    // The embedded spec makes the module self-contained.
+    expect(out.source).toContain("const __GENERATED_SPEC__: OpenApiDocument = {");
+  });
 });
