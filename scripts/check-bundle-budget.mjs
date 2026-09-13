@@ -212,7 +212,13 @@ import { join } from "node:path";
 // safe-URL policy and response baseline measures locally below; the CI
 // number governs. Hand-written feature code, no new dependencies
 // (package.json unchanged versus main); deliberate feature headroom only.
-const BUDGET_BYTES = 590 * 1024;
+// 2026-09-13 (RUN-02 over AUTH-02 main, issue #136): 615 KiB. The union of
+// the RUN-02 child-lineage surface (src/children.ts: dispatch/await/fan-out
+// with P1 fixes, lineage reads, hello-parent Saga plus Workflow, SDK
+// lineage shape) with the AUTH-02 main measures 626761 bytes locally (CI
+// number governs). Hand-written feature code, no new dependencies
+// (package.json unchanged versus main); deliberate feature headroom only.
+const BUDGET_BYTES = 615 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");
