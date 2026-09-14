@@ -232,7 +232,13 @@ import { join } from "node:path";
 // child-lineage main measures 640832 bytes in CI against the 615 KiB line.
 // Hand-written feature code, no new dependencies (package.json unchanged
 // versus main); deliberate feature headroom only.
-const BUDGET_BYTES = 630 * 1024;
+// 2026-09-14 (FORM-02 PR 320 review, issue #155): 635 KiB. The durable
+// handle-to-key binding (claimed_key column, binding proof in
+// verifyOwnAdmission, consume-on-replay, key-aware peek) measures 647520
+// bytes in CI against the 630 KiB line. Hand-written security-fix code, no
+// new dependencies (package.json unchanged versus main); deliberate
+// feature headroom only.
+const BUDGET_BYTES = 635 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");
