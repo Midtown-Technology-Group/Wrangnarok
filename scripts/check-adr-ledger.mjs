@@ -4,6 +4,7 @@ import path from "node:path";
 const root = process.cwd();
 const architectureDir = path.join(root, "docs", "architecture");
 const ledgerPath = path.join(root, "docs", "adr-ledger.md");
+const sentinel = "000-steward-checklist.md";
 
 const entries = await readdir(architectureDir, { withFileTypes: true });
 const markdownFiles = entries
@@ -11,7 +12,11 @@ const markdownFiles = entries
   .map((entry) => entry.name)
   .sort();
 
-const numbered = markdownFiles.filter((name) => /^\d{3}-.+\.md$/.test(name));
+if (!markdownFiles.includes(sentinel)) {
+  throw new Error(`missing ADR governance sentinel: docs/architecture/${sentinel}`);
+}
+
+const numbered = markdownFiles.filter((name) => /^\d{3}-.+\.md$/.test(name) && name !== sentinel);
 const errors = [];
 const byNumber = new Map();
 const ledger = await readFile(ledgerPath, "utf8");
@@ -34,7 +39,8 @@ for (const name of numbered) {
   }
 
   const canonicalPath = `docs/architecture/${name}`;
-  const reservation = new RegExp(`^\\| ${number} \\| \\`${canonicalPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\` \\|$`, "m");
+  const escapedPath = canonicalPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const reservation = new RegExp(`^\\| ${number} \\| \\`${escapedPath}\\` \\|$`, "m");
   if (!reservation.test(ledger)) {
     errors.push(`ADR ${number} (${canonicalPath}) is not reserved exactly once in docs/adr-ledger.md`);
   }
@@ -52,12 +58,18 @@ const ledgerRows = [...ledger.matchAll(/^\| (\d{3}) \| `docs\/architecture\/([^`
 const ledgerNumbers = new Set();
 for (const match of ledgerRows) {
   const [, number, name] = match;
+  if (number === "000") {
+    errors.push("ADR 000 is reserved for the steward sentinel and must not appear in the ADR reservation table");
+  }
   if (ledgerNumbers.has(number)) {
     errors.push(`duplicate reservation for ADR ${number} in docs/adr-ledger.md`);
   }
   ledgerNumbers.add(number);
-  if (!byNumber.has(number)) {
+  const actual = byNumber.get(number);
+  if (!actual) {
     errors.push(`ledger reserves ADR ${number} for ${name}, but no numbered architecture file exists`);
+  } else if (actual !== name) {
+    errors.push(`ledger/file mismatch for ADR ${number}: ledger=${name}, file=${actual}`);
   }
 }
 
@@ -71,4 +83,4 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log(`ADR ledger valid: ${numbered.length} numbered ADRs, all unique and reserved.`);
+console.log(`ADR ledger valid: ${numbered.length} numbered ADRs, all unique and reserved; ${sentinel} is the control sentinel.`);
