@@ -31,6 +31,7 @@ import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
 import migration9 from "../migrations/0009_tables.sql?raw";
 import migration10 from "../migrations/0010_solutions_activation.sql?raw";
 import migration11 from "../migrations/0011_connection_admin.sql?raw";
+import migration13 from "../migrations/0013_resource_roles.sql?raw";
 import migration18 from "../migrations/0018_ops.sql?raw";
 import migration19 from "../migrations/0019_files.sql?raw";
 import migration20 from "../migrations/0020_artifacts.sql?raw";
@@ -53,7 +54,7 @@ function authed(path: string, method: string, body?: unknown, orgId?: string) {
     ...(body === undefined ? {} : { "Content-Type": "application/json" }),
     ...(orgId === undefined ? {} : { "X-Organization-Id": orgId }),
   };
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -121,6 +122,7 @@ beforeEach(async () => {
   await bindings.DB.exec(migration9);
   await bindings.DB.exec(migration10);
   await bindings.DB.exec(migration11);
+  await bindings.DB.exec(migration13);
   await bindings.DB.exec(migration18);
   await bindings.DB.exec(migration19);
   await bindings.DB.exec(migration20);
@@ -180,8 +182,24 @@ it("runs the multi-org allowed/denied matrix for ordinary/admin/external users",
   expect(await call("/api/orgs", "GET", USER_STRANGER)).toMatchObject({ status: 200, body: { orgs: [] } });
   // Ordinary member reads catalog and submits in their own org…
   expect(await call("/api/sagas", "GET", USER_ORDINARY, undefined, orgB)).toMatchObject({ status: 200 });
+  // AUTH-02 (ADR 018): deny by absence — the ordinary submit needs a grant.
+  // The admin creates a wildcard execute role first (role control plane).
+  const matrixRole = await call(`/api/orgs/${orgB}/roles`, "POST", USER_ADMIN, { name: "matrix-runners" });
+  expect(matrixRole.status).toBe(201);
+  expect(
+    await call(`/api/orgs/${orgB}/roles/${matrixRole.body.id as string}/grants`, "POST", USER_ADMIN, {
+      resourceKind: "saga",
+      resourceId: "*",
+      action: "execute",
+    }),
+  ).toMatchObject({ status: 201 });
+  expect(
+    await call(`/api/orgs/${orgB}/roles/${matrixRole.body.id as string}/assignments`, "POST", USER_ADMIN, {
+      userId: USER_ORDINARY,
+    }),
+  ).toMatchObject({ status: 201 });
   const submit = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${TOKEN}`,
@@ -585,7 +603,7 @@ it("removes owned resources and R2 bytes with the org, blocks managed rows", asy
     .bind(orgN, "uploads", "ghost.txt", 1, 3, "text/plain", "b".repeat(64), "ready", stamp, stamp)
     .run();
   const storeless = await worker.fetch(
-    new Request(`http://local.test/api/orgs/${orgN}`, {
+    new Request(`https://local.test/api/orgs/${orgN}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${TOKEN}` },
     }),
@@ -602,8 +620,23 @@ it("removes owned resources and R2 bytes with the org, blocks managed rows", asy
 
 it("keeps in-flight jobs visible to org admins after a member is revoked", async () => {
   const orgB = await seedSecondOrg();
+  // AUTH-02 (ADR 018): the ordinary submit needs an execute grant first.
+  const inflightRole = await call(`/api/orgs/${orgB}/roles`, "POST", USER_ADMIN, { name: "inflight-runners" });
+  expect(inflightRole.status).toBe(201);
+  expect(
+    await call(`/api/orgs/${orgB}/roles/${inflightRole.body.id as string}/grants`, "POST", USER_ADMIN, {
+      resourceKind: "saga",
+      resourceId: "*",
+      action: "execute",
+    }),
+  ).toMatchObject({ status: 201 });
+  expect(
+    await call(`/api/orgs/${orgB}/roles/${inflightRole.body.id as string}/assignments`, "POST", USER_ADMIN, {
+      userId: USER_ORDINARY,
+    }),
+  ).toMatchObject({ status: 201 });
   const submit = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${TOKEN}`,
@@ -665,7 +698,7 @@ it("fails closed without migration 0007 and refuses cross-org elevation", async 
   const orgB = await seedSecondOrg();
   // Malformed scope headers fail closed.
   const bad = await worker.fetch(
-    new Request("http://local.test/api/sagas", {
+    new Request("https://local.test/api/sagas", {
       headers: { Authorization: `Bearer ${TOKEN}`, "X-Organization-Id": "not-a-uuid" },
     }),
     asUser(USER_ADMIN),
@@ -816,7 +849,7 @@ it("pins admin validation, error, and filter branches", async () => {
   const filterKey = `auth01-filter-${Date.now()}`;
   const filterInput = { sagaId: echoSaga.id, input: { message: "filter" } };
   const sub1 = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${TOKEN}`,
@@ -832,7 +865,7 @@ it("pins admin validation, error, and filter branches", async () => {
   // A second execution (distinct key, distinct row) gives the cursor pages
   // something to traverse.
   const sub2 = await worker.fetch(
-    new Request("http://local.test/api/executions", {
+    new Request("https://local.test/api/executions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${TOKEN}`,
@@ -924,7 +957,7 @@ it("pins admin validation, error, and filter branches", async () => {
     "CREATE TABLE org_memberships(org_id TEXT NOT NULL REFERENCES organizations(id), user_id TEXT NOT NULL REFERENCES users(user_id), role TEXT NOT NULL DEFAULT 'member', status TEXT NOT NULL DEFAULT 'invited', kind TEXT NOT NULL DEFAULT 'ordinary', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(org_id, user_id));",
   );
   const put = await worker.fetch(
-    new Request(`http://local.test/api/orgs`, { method: "PUT", headers: { Authorization: `Bearer ${TOKEN}` } }),
+    new Request(`https://local.test/api/orgs`, { method: "PUT", headers: { Authorization: `Bearer ${TOKEN}` } }),
     asUser(USER_ADMIN),
   );
   expect(put.status).toBe(400);
@@ -1035,4 +1068,7 @@ it("pins admin validation, error, and filter branches", async () => {
     ORG_A,
   );
   expect(disabledAdmin).toMatchObject({ isInstanceAdmin: true });
+  // NOTE: this test makes ~60 sequential workerd requests and runs ~4.5s
+  // even solo with coverage; the 30s budget only absorbs parallel-worker
+  // contention, it weakens no assertion.
 }, 30000);

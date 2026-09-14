@@ -22,7 +22,7 @@ const PRINCIPAL = {
 };
 
 function postExecutions(body: unknown, headers: Record<string, string> = {}) {
-  return new Request("http://local.test/api/executions", {
+  return new Request("https://local.test/api/executions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${TOKEN}`,
@@ -51,7 +51,7 @@ it("emits a structured request log line without request detail", async () => {
     lines.push(line);
   });
   const response = await worker.fetch(
-    new Request("http://local.test/api/sagas", { headers: { Authorization: `Bearer ${TOKEN}` } }),
+    new Request("https://local.test/api/sagas", { headers: { Authorization: `Bearer ${TOKEN}` } }),
     bindings,
   );
   expect(response.status).toBe(200);
@@ -64,7 +64,7 @@ it("emits a structured request log line without request detail", async () => {
 });
 
 it("serves 404 for non-API routes when no assets binding exists", async () => {
-  const response = await worker.fetch(new Request("http://local.test/"), {
+  const response = await worker.fetch(new Request("https://local.test/"), {
     ...bindings,
     ASSETS: undefined,
   } as unknown as Bindings);
@@ -73,7 +73,7 @@ it("serves 404 for non-API routes when no assets binding exists", async () => {
 });
 
 it("delegates non-API routes to the assets binding when present", async () => {
-  const response = await worker.fetch(new Request("http://local.test/"), bindings);
+  const response = await worker.fetch(new Request("https://local.test/"), bindings);
   // Miniflare serves Static Assets if configured, else 404: either way the
   // request routes past the API gate without authentication.
   expect([200, 404]).toContain(response.status);
@@ -98,7 +98,7 @@ it("maps corrupt persisted input to an internal error, never a leak", async () =
     )
     .run();
   const detail = await worker.fetch(
-    new Request(`http://local.test/api/executions/${id}`, {
+    new Request(`https://local.test/api/executions/${id}`, {
       headers: { Authorization: `Bearer ${TOKEN}` },
     }),
     bindings,
@@ -118,7 +118,7 @@ it("requires unencoded JSON on submission", async () => {
 });
 
 it("rejects missing idempotency keys and malformed JSON bodies", async () => {
-  const noKey = new Request("http://local.test/api/executions", {
+  const noKey = new Request("https://local.test/api/executions", {
     method: "POST",
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "hi" } }),
@@ -182,7 +182,7 @@ it("refuses to prepare unknown revisions and cancelled executions", async () => 
 });
 
 it("requires local auth configuration before comparing tokens", async () => {
-  const request = new Request("http://local.test/api/sagas", {
+  const request = new Request("https://local.test/api/sagas", {
     headers: { Authorization: `Bearer ${TOKEN}` },
   });
   await expect(authenticate(request, { LAB_ENABLED: "true" })).rejects.toMatchObject({
@@ -190,10 +190,10 @@ it("requires local auth configuration before comparing tokens", async () => {
   });
   await expect(authenticate(request, { LAB_ENABLED: "false" })).rejects.toMatchObject({ code: "NOT_FOUND" });
   // Oversized and missing credentials both fail closed without comparing.
-  const longToken = new Request("http://local.test/api/sagas", {
+  const longToken = new Request("https://local.test/api/sagas", {
     headers: { Authorization: `Bearer ${"b".repeat(129)}` },
   });
   await expect(authenticate(longToken, bindings)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-  const missingToken = new Request("http://local.test/api/sagas");
+  const missingToken = new Request("https://local.test/api/sagas");
   await expect(authenticate(missingToken, bindings)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 });

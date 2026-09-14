@@ -19,7 +19,7 @@ const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "0000
 const auth = { Authorization: `Bearer ${"a".repeat(64)}`, "Content-Type": "application/json" };
 
 function submitRequest(key: string, message = "hello") {
-  return new Request("http://local.test/api/executions", {
+  return new Request("https://local.test/api/executions", {
     method: "POST",
     headers: { ...auth, "Idempotency-Key": key },
     body: JSON.stringify({ sagaId: echoSaga.id, input: { message } }),
@@ -27,11 +27,11 @@ function submitRequest(key: string, message = "hello") {
 }
 
 function detailRequest(id: string) {
-  return new Request(`http://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } });
+  return new Request(`https://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } });
 }
 
 function cancelRequest(id: string) {
-  return new Request(`http://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } });
+  return new Request(`https://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } });
 }
 
 function mockEcho(implementation: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {

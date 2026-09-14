@@ -25,14 +25,14 @@ const auth = (key: string) => ({
   "Idempotency-Key": key,
 });
 function submitRequest(sagaId: string, input: unknown, key: string) {
-  return new Request("http://local.test/api/executions", {
+  return new Request("https://local.test/api/executions", {
     method: "POST",
     headers: auth(key),
     body: JSON.stringify({ sagaId, input }),
   });
 }
 function getRequest(path: string, key: string) {
-  return new Request(`http://local.test${path}`, { method: "GET", headers: auth(key) });
+  return new Request(`https://local.test${path}`, { method: "GET", headers: auth(key) });
 }
 
 beforeEach(async () => {
@@ -125,7 +125,7 @@ it("shapes structured errors to exactly {code, message} on every path", async ()
   const badInput = await worker.fetch(submitRequest(echoSaga.id, { message: 42 }, key), bindings);
   expect(badInput.status).toBe(400);
   const bodies: string[] = [await badInput.text()];
-  const noAuth = await worker.fetch(new Request("http://local.test/api/executions"), bindings);
+  const noAuth = await worker.fetch(new Request("https://local.test/api/executions"), bindings);
   expect(noAuth.status).toBe(401);
   bodies.push(await noAuth.text());
   const missing = await worker.fetch(getRequest(`/api/executions/${"0".repeat(64)}`, "redaction-errors-002"), bindings);

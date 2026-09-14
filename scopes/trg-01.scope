@@ -11,6 +11,7 @@ src/orgs.ts
 src/sdk.ts
 src/ops.ts
 migrations/0016_schedules.sql
+migrations/0016_scheduled_executions.sql
 test/schedules.test.ts
 test/schedule-branches.test.ts
 test/schedule-lifecycle.test.ts

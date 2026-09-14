@@ -42,6 +42,15 @@ export const helloSaga = Object.freeze({
   description:
     "Migration pilot: prepare input plus a pure greeting transform shaped from the workspace hello_world workflow — no vendor dependency",
 });
+// Nested-invocation demo (RUN-02, issue #136, ADR 018): a parent Saga that
+// invokes the hello Saga as an authorized child and awaits its typed JSON
+// output. Stable identity per ADR 002 (UUID + revision).
+export const helloParentSaga = Object.freeze({
+  id: "c0ff4b1e-7a2d-4a1e-9c3d-5e6f7a8b9c0d",
+  name: "hello-parent",
+  revision: "hello-parent-v1",
+  description: "Nested-invocation demo: invoke the hello Saga as a child and await its greeting",
+});
 // Disposable smoke Organization (ADR 004): smoke runs here, never against
 // production tenant/Connection data. Seeded in tests; provisioned in dev via
 // the runbook (docs/architecture/004-ci-cd.md).
@@ -204,7 +213,8 @@ export function checkpointRetryLimit(policy: SagaRuntimePolicy): number {
 }
 export const EXECUTION_ID = /^[a-f0-9]{64}$/;
 export const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-export type ExecutionStatus = "Pending" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelling" | "Cancelled";
+export type ExecutionStatus =
+  "Pending" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelling" | "Cancelled" | "Scheduled";
 // Retry policy table (upstream finding 14, issue #16): vendor/Integration
 // steps never auto-retry (0) unless destination-side idempotency is proven and
 // an explicit policy exists; only idempotent D1 checkpoint steps may retry, up
@@ -216,7 +226,13 @@ const CHECKPOINT_STEPS: ReadonlySet<string> = new Set([
   "persist-failure-v1",
   "timeout-mark-v1",
 ]);
+/** Child-dispatch Operations (`child-dispatch-<step>`) converge on one
+ * deterministic child row, so they retry like other idempotent D1
+ * checkpoints. Matched by prefix: each parent step dispatches under its own
+ * Operation name. */
+const CHILD_DISPATCH_PREFIX = "child-dispatch-";
 export function stepRetryLimit(stepName: string): number {
+  if (stepName.startsWith(CHILD_DISPATCH_PREFIX)) return STEP_RETRY_CEILING;
   return CHECKPOINT_STEPS.has(stepName) ? STEP_RETRY_CEILING : 0;
 }
 // Canonical transition table (ADR 001). Cancelling is transient:
@@ -226,6 +242,11 @@ export function stepRetryLimit(stepName: string): number {
 // cancellation is never flipped to Failed afterward. Terminal states have
 // no outgoing transitions. Unit-tested as pure TypeScript.
 const EXECUTION_TRANSITIONS: Record<ExecutionStatus, readonly ExecutionStatus[]> = {
+  // TRG-01 (issue #137): Scheduled is the durable pre-publish row the tick
+  // promotes. It advances only to Pending (tick claim) or Cancelling (owner
+  // schedule-cancel); the tick claim then flows through submit() into the
+  // normal Pending lifecycle. No other entry into Scheduled exists.
+  Scheduled: ["Pending", "Cancelling"],
   Pending: ["Running", "Failed", "Cancelling"],
   Running: ["Succeeded", "Failed", "TimedOut", "Cancelling"],
   Cancelling: ["Cancelled"],
@@ -312,6 +333,15 @@ export interface HelloResult {
   greeting: string;
   name: string;
 }
+export interface HelloParentInput {
+  name: string;
+  childKey?: string;
+}
+export interface HelloParentResult {
+  greeting: string;
+  name: string;
+  childExecutionId: string;
+}
 export interface ExecutionParams {
   executionId: string;
 }
@@ -378,6 +408,21 @@ export function parseHelloInput(value: unknown): HelloInput {
   }
   return { name: value.name };
 }
+export function parseHelloParentInput(value: unknown): HelloParentInput {
+  if (!object(value) || Object.keys(value).some((key) => !["name", "childKey"].includes(key))) {
+    throw new Fault(400, "INVALID_INPUT", "Expected a name plus an optional childKey.");
+  }
+  if (typeof value.name !== "string" || value.name.length === 0 || new TextEncoder().encode(value.name).length > 1024) {
+    throw new Fault(400, "INVALID_INPUT", "Expected one name of 1 to 1024 UTF-8 bytes.");
+  }
+  if (value.childKey !== undefined) {
+    if (typeof value.childKey !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(value.childKey)) {
+      throw new Fault(400, "INVALID_INPUT", "The childKey must be 1 to 128 safe characters.");
+    }
+    return { name: value.name, childKey: value.childKey };
+  }
+  return { name: value.name };
+}
 export function parseDigestInput(value: unknown): DigestInput {
   if (!object(value) || Object.keys(value).length !== 0) {
     throw new Fault(400, "INVALID_INPUT", "The ninjaone-echo-digest Saga takes an empty input object.");
@@ -413,6 +458,7 @@ const catalog: SagaDef[] = [
   { ...digestSaga, parse: parseDigestInput },
   { ...smokeSaga, parse: parseSmokeInput },
   { ...helloSaga, parse: parseHelloInput },
+  { ...helloParentSaga, parse: parseHelloParentInput },
 ];
 export function parseSubmission(value: unknown): { saga: SagaDef; input: unknown } {
   if (
@@ -425,6 +471,13 @@ export function parseSubmission(value: unknown): { saga: SagaDef; input: unknown
   const saga = catalog.find((entry) => entry.id === value.sagaId);
   if (!saga) throw new Fault(400, "UNKNOWN_SAGA", "Provide a built-in Saga ID and its input only.");
   return { saga, input: saga.parse(value.input) };
+}
+/** Resolve one stable Saga UUID to its submission definition without parsing
+ * input (RUN-03 provider route): lets the provider parser validate the body
+ * shape first, then parse input against the resolved Saga. Unknown IDs return
+ * undefined so the provider parser answers UNKNOWN_SAGA. */
+export function resolveSubmissionSaga(sagaId: string): SagaDef | undefined {
+  return catalog.find((entry) => entry.id === sagaId);
 }
 /** Internal key shape: 16-128 safe characters. Used by executionId and by
  * endpoint-derived keys. Callers go through parseCallerKey instead, which
@@ -525,6 +578,7 @@ const HISTORY_STATUSES: readonly string[] = [
   "TimedOut",
   "Cancelling",
   "Cancelled",
+  "Scheduled",
 ];
 export interface HistoryCursor {
   readonly createdAt: string;

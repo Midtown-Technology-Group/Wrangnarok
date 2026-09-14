@@ -1,0 +1,25 @@
+# RUN-03 lane scope (issue #150): bounded synchronous and data-provider execution.
+# Read-only inline provider path plus the untouched async receipt path; no
+# migration (no DDL); ADR for the Cloudflare mapping; SDK + docs surface.
+src/sync.ts
+src/domain.ts
+src/executions.ts
+src/sagas/shared.ts
+src/sagas/ninjaorgs.ts
+src/integrations/ninjaone.ts
+src/index.ts
+src/sdk.ts
+src/bindings.ts
+test/sync-provider.test.ts
+test/saga-contract.test.ts
+test/sdk.test.ts
+test/executions.test.ts
+test/execution-guards.test.ts
+docs/architecture/023-sync-providers.md
+docs/upstream-parity.md
+docs/upstream-spec.md
+docs/lexicon.md
+docs/sdk.md
+docs/sdk-capability-map.md
+scopes/run-03.scope
+wrangler.jsonc

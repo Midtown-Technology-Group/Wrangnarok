@@ -29,7 +29,7 @@ const LAB = { Authorization: `Bearer ${"a".repeat(64)}`, "Content-Type": "applic
 const HOOK_SECRET = "hook-secret-for-tests-0001";
 
 function authed(path: string, method: string, body?: unknown): Request {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers: { ...LAB },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -59,7 +59,7 @@ async function hookRequest(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (secret !== null) headers["X-Webhook-Signature"] = await sign(secret, raw);
   if (eventId !== null) headers["X-Endpoint-Event-Id"] = eventId;
-  return new Request(`http://local.test${extra?.path ?? `/hooks/${name}`}`, {
+  return new Request(`https://local.test${extra?.path ?? `/hooks/${name}`}`, {
     method: "POST",
     headers,
     body: raw,
@@ -70,7 +70,7 @@ function endpointRequest(name: string, payload: unknown, key: string | null, eve
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (key !== null) headers["X-Endpoint-Key"] = key;
   if (eventId !== null) headers["X-Endpoint-Event-Id"] = eventId;
-  return new Request(`http://local.test/api/endpoints/${name}`, {
+  return new Request(`https://local.test/api/endpoints/${name}`, {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
@@ -230,7 +230,7 @@ it("rejects bad keys, missing events, identity smuggling, and oversized bodies o
   expect(await smuggled.json()).toMatchObject({ error: { code: "ENDPOINT_IDENTITY_FORBIDDEN" } });
 
   const big = await worker.fetch(
-    new Request("http://local.test/api/endpoints/greet", {
+    new Request("https://local.test/api/endpoints/greet", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Endpoint-Key": raw, "X-Endpoint-Event-Id": "evt-014" },
       body: JSON.stringify({ input: { name: "x".repeat(5000) } }),
@@ -240,7 +240,7 @@ it("rejects bad keys, missing events, identity smuggling, and oversized bodies o
   expect(big.status).toBe(413);
   expect(await big.json()).toMatchObject({ error: { code: "BODY_TOO_LARGE" } });
 
-  const encoded = new Request("http://local.test/api/endpoints/greet", {
+  const encoded = new Request("https://local.test/api/endpoints/greet", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -300,7 +300,7 @@ it("verifies webhook HMAC signatures and rejects invalid ones without an Executi
   expect(unsigned.status).toBe(401);
 
   const malformed = await worker.fetch(
-    new Request("http://local.test/hooks/vendor", {
+    new Request("https://local.test/hooks/vendor", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -333,7 +333,7 @@ it("answers vendor challenges with plaintext and no Execution", async () => {
   );
 
   const challenge = await worker.fetch(
-    new Request("http://local.test/hooks/challenged?challenge=abc123", { method: "POST" }),
+    new Request("https://local.test/hooks/challenged?challenge=abc123", { method: "POST" }),
     bindings,
   );
   expect(challenge.status).toBe(200);
@@ -341,14 +341,14 @@ it("answers vendor challenges with plaintext and no Execution", async () => {
   expect(await challenge.text()).toBe("abc123");
 
   const badChallenge = await worker.fetch(
-    new Request("http://local.test/hooks/challenged?other=1", { method: "POST" }),
+    new Request("https://local.test/hooks/challenged?other=1", { method: "POST" }),
     bindings,
   );
   expect(badChallenge.status).toBe(400);
   expect(await badChallenge.json()).toMatchObject({ error: { code: "UNSUPPORTED_QUERY" } });
 
   const badToken = await worker.fetch(
-    new Request("http://local.test/hooks/challenged?challenge=", { method: "POST" }),
+    new Request("https://local.test/hooks/challenged?challenge=", { method: "POST" }),
     bindings,
   );
   expect(badToken.status).toBe(400);

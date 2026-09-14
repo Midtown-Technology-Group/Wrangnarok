@@ -6,6 +6,7 @@ import {
   encodeHistoryCursor,
   Fault,
   executionId,
+  helloParentSaga,
   helloSaga,
   ninjaSaga,
   parseSagaPolicy,
@@ -15,6 +16,7 @@ import {
   smokeSaga,
 } from "./domain";
 import type { ExecutionStatus, HistoryQuery, Principal, SafeError, SagaDef, SagaRuntimePolicy } from "./domain";
+import { executionId as hashExecutionId } from "./domain";
 import type { Connection } from "./integrations";
 import { buildOrgCtx } from "./saga";
 import type { OrgCtx } from "./saga";
@@ -36,6 +38,10 @@ export interface ExecutionRow {
   completed_at: string | null;
   result_json: string | null;
   error_json: string | null;
+  /** RUN-02 lineage (ADR 018): the parent Execution plus the parent step
+   * that dispatched this row. NULL for top-level submissions. */
+  parent_execution_id: string | null;
+  parent_step: string | null;
   /** Applied runtime-policy snapshot (RUN-01, ADR 018). Null on rows written
    * before migration 0007; read paths treat null as DEFAULT_SAGA_POLICY. */
   policy_json: string | null;
@@ -115,6 +121,12 @@ export async function storeSagaPolicy(
 export function policySnapshot(policy: SagaRuntimePolicy): string {
   return JSON.stringify({ version: POLICY_VERSION, policy });
 }
+/** Provider-path Execution identity (RUN-03, ADR 023): the same deterministic
+ * SHA-256 over (org, user, key) as async submit, so a key submitted to either
+ * route converges on one receipt instead of forking two Executions. */
+export function executionIdForProvider(caller: Principal, key: string): Promise<string> {
+  return hashExecutionId(caller, key);
+}
 export async function visibleExecution(db: D1Database, id: string, caller: Principal): Promise<ExecutionRow> {
   const row = await db
     .prepare("SELECT * FROM executions WHERE id = ? AND org_id = ? AND user_id = ?")
@@ -129,6 +141,7 @@ export function workflowForSaga(env: Bindings, sagaId: string): Workflow<{ execu
   if (sagaId === digestSaga.id) return env.DIGEST_WORKFLOW;
   if (sagaId === smokeSaga.id) return env.SMOKE_WORKFLOW;
   if (sagaId === helloSaga.id) return env.HELLO_WORKFLOW;
+  if (sagaId === helloParentSaga.id) return env.HELLO_PARENT_WORKFLOW;
   return env.ECHO_WORKFLOW;
 }
 export async function submit(env: Bindings, caller: Principal, key: string, saga: SagaDef, input: unknown) {
@@ -177,7 +190,7 @@ export async function submit(env: Bindings, caller: Principal, key: string, saga
   if (row.saga_id !== saga.id || row.input_json !== inputJson) {
     throw new Fault(409, "IDEMPOTENCY_CONFLICT", "This key already identifies different input.");
   }
-  // Snapshot backfill: rows inserted before migration 0007 (or by an old
+  // Snapshot backfill: rows inserted before migration 0012 (or by an old
   // insert path) carry NULL; the submit path stamps the effective policy so
   // detail always exposes what admission applied.
   try {

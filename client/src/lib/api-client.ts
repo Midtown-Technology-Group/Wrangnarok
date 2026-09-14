@@ -103,7 +103,19 @@ function isSagasResponse(value: unknown): value is SagasResponse {
 function isDetailResponse(value: unknown): value is ExecutionDetail {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
-  return typeof v["executionId"] === "string" && Array.isArray(v["operations"]) && "runtimeStatus" in v;
+  if (typeof v["executionId"] !== "string" || !Array.isArray(v["operations"]) || !("runtimeStatus" in v)) {
+    return false;
+  }
+  const detail = v as unknown as ExecutionDetail;
+  // Lineage is new (RUN-02); older payloads without it still read.
+  if (!("parentExecutionId" in v) || v["parentExecutionId"] === undefined) detail.parentExecutionId = null;
+  if (!("parentStep" in v) || v["parentStep"] === undefined) detail.parentStep = null;
+  if (!("children" in v) || v["children"] === undefined) detail.children = [];
+  return (
+    (detail.parentExecutionId === null || typeof detail.parentExecutionId === "string") &&
+    (detail.parentStep === null || typeof detail.parentStep === "string") &&
+    Array.isArray(detail.children)
+  );
 }
 
 /** Server-side history filters (allowlisted query keys; anything else is UNSUPPORTED_QUERY). */

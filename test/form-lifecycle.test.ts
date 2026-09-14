@@ -30,7 +30,7 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
 
 function call(path: string, method = "GET", body?: unknown, orgId = ORG, userId = OWNER, key?: string) {
   return worker.fetch(
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       method,
       headers: headers(key ? { "Idempotency-Key": key } : {}),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -292,7 +292,11 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     // Foreign user cannot use another session's handle.
     const foreignBody = { handle: started.handle, values: {} };
     const foreign = await call("/api/forms/contact/submit", "POST", foreignBody, ORG, OTHER_USER, "form-02-bogus-003");
-    expect(foreign.status).toBe(422);
+    // AUTH-02 union (issue #143): the submit-grant gate runs before handle
+    // validation, so a grantless caller answers 403 GRANT_REQUIRED instead
+    // of 422 — authorization first, never a handle-validity oracle.
+    expect(foreign.status).toBe(403);
+    expect(await foreign.json()).toMatchObject({ error: { code: "GRANT_REQUIRED" } });
     // First use wins; the replay answers stale and dispatches nothing.
     // (Values stay hello-compatible so the first submit reaches dispatch.)
     await createForm("greet", [{ name: "name", type: "text", required: true }]);
@@ -449,7 +453,7 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     expect(slot.status).toBe(200);
     const { entries } = (await slot.json()) as { entries: { token: string }[] };
     const put = await worker.fetch(
-      new Request(`http://local.test/api/files/content?token=${entries[0]!.token}`, {
+      new Request(`https://local.test/api/files/content?token=${entries[0]!.token}`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
         body: bytes as Uint8Array<ArrayBuffer>,
@@ -651,7 +655,7 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     expect(slot.status).toBe(200);
     const { entries } = (await slot.json()) as { entries: { token: string }[] };
     const put = await worker.fetch(
-      new Request(`http://local.test/api/files/content?token=${entries[0]!.token}`, {
+      new Request(`https://local.test/api/files/content?token=${entries[0]!.token}`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
         body: bytes as Uint8Array<ArrayBuffer>,
@@ -685,7 +689,7 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     });
     const { entries: pendingEntries } = (await pendingSlot.json()) as { entries: { token: string }[] };
     const pendingPut = await worker.fetch(
-      new Request(`http://local.test/api/files/content?token=${pendingEntries[0]!.token}`, {
+      new Request(`https://local.test/api/files/content?token=${pendingEntries[0]!.token}`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
         body: bytes as Uint8Array<ArrayBuffer>,

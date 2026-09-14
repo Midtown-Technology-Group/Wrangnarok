@@ -27,7 +27,7 @@ Total: 47 capability rows — 3 Implemented, 1 Complete (pending review), 26 Par
 | CON-02 | Expose scoped configuration and secret-reference APIs to authors and operators | 3 | Implemented | AUTH-02, SEC-01, CON-01 | #147 |
 | SEC-02 | Support genuinely per-Organization credentials behind the accepted secret-storage tripwire | 3 | Gated | SEC-01, CON-01 | new |
 | OAUTH-01 | Complete OAuth authorization, centralized refresh and credential health lifecycle | 3 | Partial | CON-01, SEC-02, AUTH-03 | new |
-| RUN-03 | Define and deliver bounded synchronous and data-provider execution | 2+4 | Missing | AUTH-02, RUN-01 | new |
+| RUN-03 | Define and deliver bounded synchronous and data-provider execution | 2+4 | Partial | AUTH-02, RUN-01 | new |
 | RUN-04 | Do not confirm cancellation when native Workflow termination is ambiguous | 2 | Partial | — | new |
 | OBS-01 | Complete the execution UI and CLI: results, failures, live status and history traversal | 2 | Partial | RUN-04 | new |
 | OBS-02 | Persist and stream authorized author logs and progress with reconnect recovery | 4 | Partial | SEC-01, AUTH-02, OBS-01 | #153 |
@@ -43,7 +43,7 @@ Total: 47 capability rows — 3 Implemented, 1 Complete (pending review), 26 Par
 | SOL-01 | Close the existing bundle reconciliation and activation contract gaps | 5 | Partial | — | new |
 | SOL-02 | Install and manage complete reusable Solutions across Organizations | 5 | Partial | SOL-01, AUTH-02, CON-02, TABLE-02, FORM-02, APP-01, AI-02, TRG-03 | new |
 | SOL-03 | Export, capture and import portable Solution source without tenant state | 5 | Partial | SOL-01, MIG-01, SEC-01 | #163 |
-| MIG-01 | Deliver the existing workspace-to-bundle bridge without false compatibility claims | 5 | Missing | — | #116 |
+| MIG-01 | Deliver the existing workspace-to-bundle bridge without false compatibility claims | 5 | Partial | — | #116 |
 | MIG-02 | Verify and close out the existing TypeScript migration pilot | 1 | Partial | — | #119 |
 | AI-01 | Configure AI provider Connections, model profiles and capability assignments | 6 | Missing | SEC-01, CON-01, AUTH-02 | new |
 | AI-02 | Run user-managed agents with scoped tools, delegation and bounded autonomy | 6 | Missing | AI-01, TOOL-01, RUN-02, AUTH-02 | new |
@@ -62,9 +62,9 @@ Total: 47 capability rows — 3 Implemented, 1 Complete (pending review), 26 Par
 
 ## RUN-01: Persist and enforce per-Saga runtime policy without changing source identity
 
-Phase 2; **Partial**; existing issue: new
+Phase 2; **Implemented**; existing issue: #135
 
-Local status: Static identity, catalog schemas and bounded Operations exist. Policy is a fixed retry table/platform timeout, not an operator-managed workflow policy surface.
+Local status: Per-Saga runtime policy persists as org-scoped rows (migration 0012) with applied-policy snapshots on every Execution (ADR 018). Operator inspect/change rides GET/PUT /api/sagas/:id/policy on the AUTH-01 membership gate (admin-only writes); the typed SDK (getSagaPolicy/updateSagaPolicy), the CLI (saga-policy/saga-policy-set), and ExecutionDetail all expose it. The behavioral matrix (timeout 0/default/custom, engine-loss-only retry ceilings, business-error non-retry, pause/admission, CompletedWithErrors-as-Failed, Stuck-as-Running-until-cancel, stale fencing, crash/recovery) is proven by test/runtime-policy.test.ts on local Workflows/D1.
 
 Depends: AUTH-02
 
@@ -111,7 +111,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase 2; **Implemented**; existing issue: #137
 
-Local status: Schedules ship as persisted environment state (migration 0016, `src/schedules.ts`, ADR 012 accepted): one org-scoped row binds a name to a stable Saga UUID plus cadence, timezone, enablement, input, and run-as policy. A minute Cloudflare Cron Trigger (the only Cron trigger; `test/timeout-sweeper.test.ts` tripwire pins it) promotes due rows through the standard submit protocol with deterministic `sch-` schedule-window keys. Operator create/preview/disable/delete ride the AUTH-01 membership gate (writes admin-only); run-as always resolves to the creating caller, never caller-supplied identity. Delivery visibility maps windows to Executions. `Scheduled` stays a non-status by design: promotion writes Pending rows, never a new Execution state.
+Local status: Schedules ship as persisted environment state (migration 0016, `src/schedules.ts`, ADR 012 accepted): one org-scoped row binds a name to a stable Saga UUID plus cadence, timezone, enablement, input, and run-as policy. A minute Cloudflare Cron Trigger (the only Cron trigger; `test/timeout-sweeper.test.ts` tripwire pins it) promotes due rows through the standard submit protocol with deterministic `sch-` schedule-window keys. Operator create/preview/disable/delete ride the AUTH-01 membership gate (writes admin-only); run-as always resolves to the creating caller, never caller-supplied identity. Pre-dispatch fence: `promoteWindow` re-reads the row by id immediately before submit (a post-scan disable/delete wins the race as a skip with zero dispatch) and revalidates the run-as owner through request-path lifecycle semantics (disabled org/user, non-active membership fail closed; an unattended tick never activates membership). Delivery visibility maps windows to Executions. `Scheduled` stays a non-status by design: promotion writes Pending rows, never a new Execution state.
 
 Depends: AUTH-02, RUN-01
 
@@ -447,9 +447,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## RUN-03: Define and deliver bounded synchronous and data-provider execution
 
-Phase 2+4; **Missing**; existing issue: new
+Phase 2+4; **Partial** (RUN-03 lane, issue #150; ADR 023); existing issue: new
 
-Local status: Local submission is async-only. Current upstream has sync, transient and data-provider modes, contrary to our older spec.
+Local status: Async receipts are unchanged (`POST /api/executions` returns 202/200 with no inline result). Bounded inline providers ride `POST /api/executions/provider` for the closed allowlist (`ninjaone-orgs`, plus the `echo` fixture as the local harness proof): same admission (install gate, deterministic idempotency, policy snapshot, 409 conflict/cancelled fences), then the read-only Integration Action runs inside a 5000ms request deadline and checkpoints terminal state directly with no Workflow binding. The durable receipt persists in both modes. Caller-chosen `sync`/`transient` flags stay named exceptions (`SYNC_NOT_SUPPORTED`/`TRANSIENT_NOT_SUPPORTED`); async-only Sagas answer `PROVIDER_NOT_SUPPORTED` with the async path; inline `code` has no route. Upstream `transient` no-persistence, caller-chosen sync on the async route, endpoint persisted `execution_mode`, provider caching, and inline `code` stay explicit non-adoptions (ADR 023).
 
 Depends: AUTH-02, RUN-01
 
@@ -907,9 +907,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## MIG-01: Deliver the existing workspace-to-bundle bridge without false compatibility claims
 
-Phase 5; **Missing**; existing issue: #116
+Phase 5; **Partial**; existing issue: #116
 
-Local status: Reuse #116. A field mapping/converter is smaller than native execution of legacy workspace Python or full Solution lifecycle.
+Local status: `src/migration.ts` (367 lines) plus `test/migration-bridge.test.ts` (6 tests, green): documented field mapping (`WORKSPACE_TO_BUNDLE_MAPPING`), converter producing valid manifests via the real installer validator, explicit source identity through the operator saga map, environment exclusion (no scope pinning, no credential values), actionable gap results (UNSUPPORTED_FORMS/TABLES, unmapped integrations, malformed input fail-closed). Legacy decorator IDs resolve through the operator-provided saga map, distinct from current upstream registered/installed identity.
 
 Depends: none
 

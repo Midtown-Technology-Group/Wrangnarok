@@ -109,7 +109,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
   it("searches the contract and selects the right operation without a pre-authored tool", async () => {
     // The agent's first move: free-text search over the pinned contract.
     const search = await worker.fetch(
-      new Request(`http://local.test/api/openapi/search?integration=halo&q=${encodeURIComponent("ticket team")}`, {
+      new Request(`https://local.test/api/openapi/search?integration=halo&q=${encodeURIComponent("ticket team")}`, {
         headers: headers(),
       }),
       bindings,
@@ -119,7 +119,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     expect(found.operations.map((entry) => entry.operationId)).toContain("Ticket_Search");
     // Second move: inspect the chosen operation before executing.
     const inspect = await worker.fetch(
-      new Request("http://local.test/api/openapi/operations/Ticket_Search", { headers: headers() }),
+      new Request("https://local.test/api/openapi/operations/Ticket_Search", { headers: headers() }),
       bindings,
     );
     expect(inspect.status).toBe(200);
@@ -131,7 +131,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     mockHalo();
     const env = haloEnv();
     const read = await worker.fetch(
-      new Request("http://local.test/api/openapi/execute", {
+      new Request("https://local.test/api/openapi/execute", {
         method: "POST",
         headers: headers(),
         body: JSON.stringify({
@@ -159,7 +159,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     expect(JSON.stringify(readBody)).not.toContain(HALO_SECRET);
     // The explicitly-authorized non-destructive mutation.
     const mutate = await worker.fetch(
-      new Request("http://local.test/api/openapi/execute", {
+      new Request("https://local.test/api/openapi/execute", {
         method: "POST",
         headers: headers(),
         body: JSON.stringify({
@@ -184,7 +184,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     const env = haloEnv();
     // Destructive without explicit enablement: deny-by-default.
     const destructive = await worker.fetch(
-      new Request("http://local.test/api/openapi/execute", {
+      new Request("https://local.test/api/openapi/execute", {
         method: "POST",
         headers: headers(),
         body: JSON.stringify({ integration: "halo", operationId: "Ticket_Delete", params: { path: { id: "7" } } }),
@@ -205,7 +205,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     // The fixture caller is not a member of OTHER_ORG, so selection fails at
     // the membership gate (403/404) — a stranger cannot borrow the org.
     const crossOrg = await worker.fetch(
-      new Request("http://local.test/api/openapi/execute", {
+      new Request("https://local.test/api/openapi/execute", {
         method: "POST",
         headers: { ...headers(), "X-Organization-Id": OTHER_ORG },
         body: JSON.stringify({ integration: "halo", operationId: "Ticket_Get", params: { path: { id: "7" } } }),
@@ -231,7 +231,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
       .bind("https://evil.example.com", ORG, HALO_INTEGRATION_ID)
       .run();
     const escaped = await worker.fetch(
-      new Request("http://local.test/api/openapi/execute", {
+      new Request("https://local.test/api/openapi/execute", {
         method: "POST",
         headers: headers(),
         body: JSON.stringify({ integration: "halo", operationId: "Ticket_Get", params: { path: { id: "7" } } }),
@@ -246,7 +246,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     await createHaloConnection();
     mockHalo();
     const read = await worker.fetch(
-      new Request("http://local.test/api/openapi/execute", {
+      new Request("https://local.test/api/openapi/execute", {
         method: "POST",
         headers: headers(),
         body: JSON.stringify({ integration: "halo", operationId: "Ticket_Get", params: { path: { id: "7" } } }),
@@ -254,7 +254,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
       haloEnv(),
     );
     expect(read.status).toBe(200);
-    const audit = await worker.fetch(new Request("http://local.test/api/audit", { headers: headers() }), bindings);
+    const audit = await worker.fetch(new Request("https://local.test/api/audit", { headers: headers() }), bindings);
     expect(audit.status).toBe(200);
     const events = (await audit.json()) as { events: { action: string; detail: Record<string, string> }[] };
     const entry = events.events.find((event) => event.action === "codemode.execute");
@@ -266,7 +266,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     await createHaloConnection();
     mockHalo();
     const denied = await worker.fetch(
-      new Request("http://local.test/api/openapi/execute", {
+      new Request("https://local.test/api/openapi/execute", {
         method: "POST",
         headers: headers(),
         body: JSON.stringify({ integration: "halo", operationId: "Ticket_Get", params: { path: { id: "7" } } }),

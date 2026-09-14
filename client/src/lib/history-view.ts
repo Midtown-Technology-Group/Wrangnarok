@@ -11,7 +11,7 @@
 // slice. The summary line states the scope honestly when hasMore is true.
 import type { ExecutionSummary } from "./client-types";
 
-/** Every Execution status the Worker can persist (ADR 001 CHECK). */
+/** Every Execution status the Worker can persist (ADR 001 CHECK, plus Scheduled per TRG-01/ADR 012). */
 export const HISTORY_STATUSES = [
   "Pending",
   "Running",
@@ -20,6 +20,7 @@ export const HISTORY_STATUSES = [
   "TimedOut",
   "Cancelling",
   "Cancelled",
+  "Scheduled",
 ] as const;
 
 export type HistoryStatus = (typeof HISTORY_STATUSES)[number];

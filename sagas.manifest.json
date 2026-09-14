@@ -26,6 +26,11 @@
       "id": "395e15f0-3627-41f6-8922-008ce37e3b35",
       "name": "hello",
       "revision": "hello-v1"
+    },
+    {
+      "id": "c0ff4b1e-7a2d-4a1e-9c3d-5e6f7a8b9c0d",
+      "name": "hello-parent",
+      "revision": "hello-parent-v1"
     }
   ]
 }

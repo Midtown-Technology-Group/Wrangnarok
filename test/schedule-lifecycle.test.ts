@@ -10,7 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { executionId, helloSaga, parseHelloInput } from "../src/domain";
-import { promoteDueSchedules, scheduleWindowKey } from "../src/schedules";
+import { promoteDueSchedules, promoteWindow, scheduleWindowKey } from "../src/schedules";
+import type { ScheduleRow } from "../src/schedules";
 import { submit } from "../src/executions";
 import { SAGA_DEFINITIONS } from "../src/sagas";
 import migration1 from "../migrations/0001_initial.sql?raw";
@@ -27,7 +28,7 @@ const TOKEN = "a".repeat(64);
 const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
 
 function authed(path: string, method: string, body?: unknown): Request {
-  return new Request(`http://local.test${path}`, {
+  return new Request(`https://local.test${path}`, {
     method,
     headers: { ...auth },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -203,7 +204,7 @@ describe("TRG-01 promotion semantics (workerd)", () => {
     const promoted = first.promoted.find((entry) => entry.scheduleName === "cancel-probe");
     expect(promoted).toBeDefined();
     const cancelled = await worker.fetch(
-      new Request(`http://local.test/api/executions/${promoted?.executionId}/cancel`, {
+      new Request(`https://local.test/api/executions/${promoted?.executionId}/cancel`, {
         method: "POST",
         headers: { ...auth },
       }),
@@ -224,5 +225,182 @@ describe("TRG-01 promotion semantics (workerd)", () => {
       await worker.fetch(authed(`/api/executions/${promoted?.executionId}`, "GET"), bindings)
     ).json()) as { status: string };
     expect(detail.status).toBe("Cancelled");
+  }, 25000);
+  it("loses a mid-tick disable race at the pre-dispatch fence with zero dispatch", async () => {
+    // Regression (#137 race): the tick scan selects the row while enabled,
+    // then the operator disable lands before promoteWindow runs. The stale
+    // row must lose at the fence: skip, never dispatch.
+    await createRecurring("race-disable-probe");
+    const stale = await bindings.DB.prepare("SELECT * FROM schedules WHERE org_id=? AND name=?")
+      .bind(principal.orgId, "race-disable-probe")
+      .first<ScheduleRow>();
+    expect(stale?.enabled).toBe(1);
+    await worker.fetch(authed("/api/schedules/race-disable-probe/disable", "POST"), bindings);
+    let submitCalls = 0;
+    const forbiddenSubmit: typeof submit = async (...args) => {
+      submitCalls += 1;
+      return submit(...args);
+    };
+    await expect(
+      promoteWindow(
+        bindings.DB,
+        { DB: bindings.DB } as never,
+        stale as ScheduleRow,
+        "2026-09-12T10:01",
+        SAGA_DEFINITIONS,
+        forbiddenSubmit,
+      ),
+    ).rejects.toMatchObject({ code: "SCHEDULE_DISABLED" });
+    expect(submitCalls).toBe(0);
+    const deliveries = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM schedule_deliveries WHERE schedule_id=?")
+      .bind(stale?.id ?? "")
+      .first<{ n: number }>();
+    expect(deliveries?.n).toBe(0);
+  }, 25000);
+  it("loses a mid-tick delete race at the pre-dispatch fence with zero dispatch", async () => {
+    // Same interleaving for delete: the selected row is gone before
+    // promoteWindow runs, so the fence reports SCHEDULE_GONE and the
+    // delivery FK never comes into play.
+    await createRecurring("race-delete-probe");
+    const stale = await bindings.DB.prepare("SELECT * FROM schedules WHERE org_id=? AND name=?")
+      .bind(principal.orgId, "race-delete-probe")
+      .first<ScheduleRow>();
+    expect(stale?.id).toBeDefined();
+    expect((await worker.fetch(authed("/api/schedules/race-delete-probe", "DELETE"), bindings)).status).toBe(200);
+    let submitCalls = 0;
+    const forbiddenSubmit: typeof submit = async (...args) => {
+      submitCalls += 1;
+      return submit(...args);
+    };
+    await expect(
+      promoteWindow(
+        bindings.DB,
+        { DB: bindings.DB } as never,
+        stale as ScheduleRow,
+        "2026-09-12T10:01",
+        SAGA_DEFINITIONS,
+        forbiddenSubmit,
+      ),
+    ).rejects.toMatchObject({ code: "SCHEDULE_GONE" });
+    expect(submitCalls).toBe(0);
+  }, 25000);
+  it("dispatches zero work when the run-as membership is revoked before the tick", async () => {
+    // Regression (#137 revocation): the persisted run-as owner is not
+    // continuing authorization. Revoke after create; the tick must skip.
+    await createRecurring("revoked-owner-probe");
+    await bindings.DB.prepare("UPDATE org_memberships SET status='revoked' WHERE org_id=? AND user_id=?")
+      .bind(principal.orgId, principal.userId)
+      .run();
+    const executionsBefore = await bindings.DB.prepare(
+      "SELECT COUNT(*) AS n FROM executions WHERE org_id=? AND user_id=?",
+    )
+      .bind(principal.orgId, principal.userId)
+      .first<{ n: number }>();
+    try {
+      const past = new Date(Date.now() - 60_000).toISOString();
+      await bindings.DB.prepare("UPDATE schedules SET next_due_at=? WHERE org_id=? AND name=?")
+        .bind(past, principal.orgId, "revoked-owner-probe")
+        .run();
+      let submitCalls = 0;
+      const countingSubmit: typeof submit = async (...args) => {
+        submitCalls += 1;
+        return submit(...args);
+      };
+      const report = await promoteDueSchedules(
+        bindings.DB,
+        { DB: bindings.DB, HELLO_WORKFLOW: bindings.HELLO_WORKFLOW } as never,
+        SAGA_DEFINITIONS,
+        countingSubmit,
+        new Date(),
+      );
+      expect(submitCalls).toBe(0);
+      expect(report.promoted.map((entry) => entry.scheduleName)).not.toContain("revoked-owner-probe");
+      expect(report.skipped).toContain("revoked-owner-probe");
+      const executions = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM executions WHERE org_id=? AND user_id=?")
+        .bind(principal.orgId, principal.userId)
+        .first<{ n: number }>();
+      expect(executions?.n).toBe(executionsBefore?.n ?? 0);
+    } finally {
+      // Fixture auth resurrects membership on next use, but restore here so
+      // no later test can observe the revoked row.
+      await bindings.DB.prepare("UPDATE org_memberships SET status='active' WHERE org_id=? AND user_id=?")
+        .bind(principal.orgId, principal.userId)
+        .run();
+    }
+  }, 25000);
+  it("dispatches zero work when the run-as user is suspended or disabled before the tick", async () => {
+    await createRecurring("suspended-owner-probe");
+    await createRecurring("disabled-user-probe");
+    await bindings.DB.prepare("UPDATE org_memberships SET status='suspended' WHERE org_id=? AND user_id=?")
+      .bind(principal.orgId, principal.userId)
+      .run();
+    try {
+      const past = new Date(Date.now() - 60_000).toISOString();
+      await bindings.DB.prepare("UPDATE schedules SET next_due_at=? WHERE name IN (?,?)")
+        .bind(past, "suspended-owner-probe", "disabled-user-probe")
+        .run();
+      // Suspend first: the suspended membership must already fence both rows.
+      let submitCalls = 0;
+      const countingSubmit: typeof submit = async (...args) => {
+        submitCalls += 1;
+        return submit(...args);
+      };
+      const suspended = await promoteDueSchedules(
+        bindings.DB,
+        { DB: bindings.DB, HELLO_WORKFLOW: bindings.HELLO_WORKFLOW } as never,
+        SAGA_DEFINITIONS,
+        countingSubmit,
+        new Date(),
+      );
+      expect(submitCalls).toBe(0);
+      expect(suspended.skipped).toContain("suspended-owner-probe");
+      expect(suspended.skipped).toContain("disabled-user-probe");
+      // Then disable the user as well: still zero dispatch, still skips.
+      await bindings.DB.prepare("UPDATE users SET status='disabled' WHERE user_id=?").bind(principal.userId).run();
+      const disabled = await promoteDueSchedules(
+        bindings.DB,
+        { DB: bindings.DB, HELLO_WORKFLOW: bindings.HELLO_WORKFLOW } as never,
+        SAGA_DEFINITIONS,
+        countingSubmit,
+        new Date(),
+      );
+      expect(submitCalls).toBe(0);
+      expect(disabled.skipped).toContain("suspended-owner-probe");
+      expect(disabled.skipped).toContain("disabled-user-probe");
+    } finally {
+      await bindings.DB.prepare("UPDATE users SET status='active' WHERE user_id=?").bind(principal.userId).run();
+      await bindings.DB.prepare("UPDATE org_memberships SET status='active' WHERE org_id=? AND user_id=?")
+        .bind(principal.orgId, principal.userId)
+        .run();
+    }
+  }, 25000);
+  it("dispatches zero work when the run-as Organization is disabled before the tick", async () => {
+    await createRecurring("disabled-org-probe");
+    await bindings.DB.prepare("UPDATE organizations SET status='disabled' WHERE id=?").bind(principal.orgId).run();
+    try {
+      const past = new Date(Date.now() - 60_000).toISOString();
+      await bindings.DB.prepare("UPDATE schedules SET next_due_at=? WHERE org_id=? AND name=?")
+        .bind(past, principal.orgId, "disabled-org-probe")
+        .run();
+      let submitCalls = 0;
+      const countingSubmit: typeof submit = async (...args) => {
+        submitCalls += 1;
+        return submit(...args);
+      };
+      const report = await promoteDueSchedules(
+        bindings.DB,
+        { DB: bindings.DB, HELLO_WORKFLOW: bindings.HELLO_WORKFLOW } as never,
+        SAGA_DEFINITIONS,
+        countingSubmit,
+        new Date(),
+      );
+      expect(submitCalls).toBe(0);
+      expect(report.promoted.map((entry) => entry.scheduleName)).not.toContain("disabled-org-probe");
+      expect(report.skipped).toContain("disabled-org-probe");
+    } finally {
+      // The disabled org blocks fixture-auth resurrection (fail closed), so
+      // restore here: later tests need a usable org.
+      await bindings.DB.prepare("UPDATE organizations SET status='active' WHERE id=?").bind(principal.orgId).run();
+    }
   }, 25000);
 });

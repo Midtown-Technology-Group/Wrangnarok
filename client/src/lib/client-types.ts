@@ -2,8 +2,9 @@
 // Adapted from upstream gobifrost/bifrost client/src/lib/client-types.ts
 // (reference: vendor/upstream). Structure borrowed; Wrangnarök shapes only.
 
-/** Execution status values served by the Wrangnarök Worker (ADR 001 CHECK). */
-export type ExecutionStatus = "Pending" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelling" | "Cancelled";
+/** Execution status values served by the Wrangnarök Worker (ADR 001 CHECK, plus Scheduled per TRG-01/ADR 012). */
+export type ExecutionStatus =
+  "Pending" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelling" | "Cancelled" | "Scheduled";
 
 /** One durable unit of Saga execution (maps to a Workflow step). */
 export interface OperationSummary {
@@ -120,6 +121,9 @@ export interface ConnectionTestResponse {
 /** Detail shape for GET /api/executions/:id. */
 export interface ExecutionDetail extends ExecutionSummary {
   runtimeStatus: string | null;
+  parentExecutionId: string | null;
+  parentStep: string | null;
+  children: ExecutionChild[];
   /** Applied runtime-policy snapshot (RUN-01, ADR 018): what this Execution ran under. */
   policy: {
     sagaId: string;
@@ -134,6 +138,15 @@ export interface ExecutionDetail extends ExecutionSummary {
   result: unknown;
   error: unknown;
   operations: OperationSummary[];
+}
+
+/** One direct child Execution (RUN-02 lineage, ADR 018). */
+export interface ExecutionChild {
+  executionId: string;
+  sagaId: string;
+  sagaName: string;
+  status: string;
+  createdAt: string;
 }
 
 /** OBS-02 author log level: DEBUG rows persist but are hidden from default

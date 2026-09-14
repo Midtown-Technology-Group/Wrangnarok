@@ -33,7 +33,7 @@ function headers(): Record<string, string> {
 
 function call(path: string, method = "GET", body?: unknown) {
   return worker.fetch(
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       method,
       headers: headers(),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),

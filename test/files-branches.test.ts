@@ -44,7 +44,7 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
 
 function call(path: string, method = "GET", body?: unknown, orgId = ORG, userId?: string) {
   return worker.fetch(
-    new Request(`http://local.test${path}`, {
+    new Request(`https://local.test${path}`, {
       method,
       headers: headers(),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -294,7 +294,7 @@ it("rejects uploads without policy, malformed tokens, and over-cap bytes", async
   // Malformed tokens never reach the database.
   for (const bad of ["short", "z".repeat(64), `?token=${"a".repeat(64)}&extra=1`]) {
     const put = await worker.fetch(
-      new Request(`http://local.test/api/files/content?token=${bad}`, {
+      new Request(`https://local.test/api/files/content?token=${bad}`, {
         method: "PUT",
         headers: headers(),
         body: new TextEncoder().encode("x") as Uint8Array<ArrayBuffer>,
@@ -305,7 +305,7 @@ it("rejects uploads without policy, malformed tokens, and over-cap bytes", async
   }
   // Unknown-but-shaped tokens answer 401.
   const unknown = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${"b".repeat(64)}`, {
+    new Request(`https://local.test/api/files/content?token=${"b".repeat(64)}`, {
       method: "PUT",
       headers: headers(),
       body: new TextEncoder().encode("x") as Uint8Array<ArrayBuffer>,
@@ -317,7 +317,7 @@ it("rejects uploads without policy, malformed tokens, and over-cap bytes", async
   const slot = await call("/api/files/uploads", "POST", { entries: [{ location: "tight", path: "big.txt" }] });
   const { entries } = (await slot.json()) as { entries: { token: string }[] };
   const big = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${entries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${entries[0]!.token}`, {
       method: "PUT",
       headers: { ...headers(), "Content-Type": "text/plain" },
       body: new TextEncoder().encode("six!!!") as Uint8Array<ArrayBuffer>,
@@ -331,18 +331,18 @@ it("rejects uploads without policy, malformed tokens, and over-cap bytes", async
 it("rejects downloads with malformed tokens, extra query keys, and stale bytes", async () => {
   expect((await call("/api/file-locations", "POST", { name: "dl", contentTypes: ["text/plain"] })).status).toBe(201);
   const malformed = await worker.fetch(
-    new Request("http://local.test/api/files/content?token=short", { headers: headers() }),
+    new Request("https://local.test/api/files/content?token=short", { headers: headers() }),
     bindings,
   );
   expect(malformed.status).toBe(401);
   const unknown = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${"c".repeat(64)}`, { headers: headers() }),
+    new Request(`https://local.test/api/files/content?token=${"c".repeat(64)}`, { headers: headers() }),
     bindings,
   );
   expect(unknown.status).toBe(401);
   // Extra query keys fail closed on both token and Bearer downloads.
   const extraToken = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${"c".repeat(64)}&location=dl`, { headers: headers() }),
+    new Request(`https://local.test/api/files/content?token=${"c".repeat(64)}&location=dl`, { headers: headers() }),
     bindings,
   );
   expect(extraToken.status).toBe(400);
@@ -354,7 +354,7 @@ it("rejects downloads with malformed tokens, extra query keys, and stale bytes",
   const { entries } = (await slot.json()) as { entries: { token: string }[] };
   const bytes = new TextEncoder().encode("ghost");
   const put = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${entries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${entries[0]!.token}`, {
       method: "PUT",
       headers: { ...headers(), "Content-Type": "text/plain" },
       body: bytes as Uint8Array<ArrayBuffer>,
@@ -446,7 +446,7 @@ it("finalizes fail-closed: validation, missing slots, caps, types, and sizes", a
   const { entries } = (await slot.json()) as { entries: { token: string }[] };
   const bytes = new TextEncoder().encode("12345678");
   const put = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${entries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${entries[0]!.token}`, {
       method: "PUT",
       headers: { ...headers(), "Content-Type": "text/plain" },
       body: bytes as Uint8Array<ArrayBuffer>,
@@ -506,7 +506,7 @@ it("lists paginate with prefix and cursor", async () => {
     const { entries } = (await slot.json()) as { entries: { token: string }[] };
     const bytes = new TextEncoder().encode(`bytes-${name}`);
     const put = await worker.fetch(
-      new Request(`http://local.test/api/files/content?token=${entries[0]!.token}`, {
+      new Request(`https://local.test/api/files/content?token=${entries[0]!.token}`, {
         method: "PUT",
         headers: { ...headers(), "Content-Type": "text/plain" },
         body: bytes as Uint8Array<ArrayBuffer>,
@@ -551,7 +551,7 @@ it("expires download tokens and races upload revocation and staging", async () =
     .bind(ORG, "race", "write")
     .run();
   const revokedPut = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${entries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${entries[0]!.token}`, {
       method: "PUT",
       headers: { ...headers(), "Content-Type": "text/plain" },
       body: new TextEncoder().encode("x") as Uint8Array<ArrayBuffer>,
@@ -565,7 +565,7 @@ it("expires download tokens and races upload revocation and staging", async () =
   const slot2 = await call("/api/files/uploads", "POST", { entries: [{ location: "race", path: "r.txt" }] });
   const token2 = (await slot2.json()) as { entries: { token: string }[] };
   const put2 = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${token2.entries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${token2.entries[0]!.token}`, {
       method: "PUT",
       headers: { ...headers(), "Content-Type": "text/plain" },
       body: bytes as Uint8Array<ArrayBuffer>,
@@ -587,7 +587,7 @@ it("expires download tokens and races upload revocation and staging", async () =
     .bind("2000-01-01T00:00:00.000Z")
     .run();
   const expired = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${dl.entries[0]!.token}`, { headers: headers() }),
+    new Request(`https://local.test/api/files/content?token=${dl.entries[0]!.token}`, { headers: headers() }),
     bindings,
   );
   expect(expired.status).toBe(401);
@@ -597,7 +597,7 @@ it("expires download tokens and races upload revocation and staging", async () =
   const token3 = (await slot3.json()) as { entries: { token: string }[] };
   const lostBytes = new TextEncoder().encode("lost");
   const put3 = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${token3.entries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${token3.entries[0]!.token}`, {
       method: "PUT",
       headers: { ...headers(), "Content-Type": "text/plain" },
       body: lostBytes as Uint8Array<ArrayBuffer>,
@@ -630,7 +630,7 @@ it("deletes locations end to end once their files are gone", async () => {
   const { entries } = (await slot.json()) as { entries: { token: string }[] };
   const bytes = new TextEncoder().encode("t");
   const put = await worker.fetch(
-    new Request(`http://local.test/api/files/content?token=${entries[0]!.token}`, {
+    new Request(`https://local.test/api/files/content?token=${entries[0]!.token}`, {
       method: "PUT",
       headers: headers(),
       body: bytes as Uint8Array<ArrayBuffer>,

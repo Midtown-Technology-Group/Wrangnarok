@@ -35,7 +35,18 @@
 // it. The saga pins below reuse the same domain constants the Saga
 // definitions are built from; test/solutions-install.test.ts asserts they
 // stay in agreement with the static code Catalog.
-import { digestSaga, echoSaga, Fault, hash, helloSaga, ninjaSaga, object, smokeSaga, UUID } from "./domain";
+import {
+  digestSaga,
+  echoSaga,
+  Fault,
+  hash,
+  helloParentSaga,
+  helloSaga,
+  ninjaSaga,
+  object,
+  smokeSaga,
+  UUID,
+} from "./domain";
 import { integrationById } from "./integrations";
 import { scrubTextWithSecrets } from "./secrets";
 
@@ -47,7 +58,7 @@ interface CatalogSaga {
 
 /** Static code Catalog as seen by the installer: the same stable IDs and
  * revision pins the Saga definitions are built from (ADR 002). */
-const CODE_SAGAS: readonly CatalogSaga[] = [echoSaga, ninjaSaga, digestSaga, smokeSaga, helloSaga];
+const CODE_SAGAS: readonly CatalogSaga[] = [echoSaga, ninjaSaga, digestSaga, smokeSaga, helloSaga, helloParentSaga];
 
 export interface ManifestSagaPin {
   readonly id: string;

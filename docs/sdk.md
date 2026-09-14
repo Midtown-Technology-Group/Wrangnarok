@@ -22,28 +22,39 @@ compatibility with upstream Bifrost is not promised; see
 
 Authenticated like every other `/api/*` route: `Authorization: Bearer
 <token>` (local fixture token or Access service identity). Only
-`GET /api/executions`, `GET /api/executions/:id/logs`, and `GET /api/logs`
-accept a query string, and only each route's allowlisted keys.
+`GET /api/executions`, `GET /api/orgs/:id/executions`,
+`GET /api/schedules/:id/preview`, `GET /api/executions/:id/logs`, and
+`GET /api/logs` accept a query string, and only each route's allowlisted
+keys.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/sdk` | Versioned contract descriptor (`describeContract`) |
 | `GET` | `/api/sagas` | Saga discovery catalog (read-only metadata) |
-| `POST` | `/api/executions` | Submit (`Idempotency-Key` required; 202 + `Location`, replay 200 + `replayed:true`) |
+| `POST` | `/api/executions` | Submit (`Idempotency-Key` required; 202 + `Location`, replay 200 + `replayed:true`); `sync:true`/`transient:true` flags stay named rejections |
+| `POST` | `/api/executions/provider` | Bounded inline provider (RUN-03, ADR 023): eligible read-only Sagas return the result inline with the durable receipt; async-only Sagas answer 501 |
 | `POST` | `/api/dev/preview` | No-registration local preview (authoritative parse; no D1 writes, no dispatch; opt-in `checkEnvironment` read-only Connection check) |
 | `GET` | `/api/executions` | History summaries (`status` single or comma-separated, `sagaId`, `sagaName`, `startDate`, `endDate`, `limit`, `cursor`) |
 | `GET` | `/api/executions/:id` | Detail with Operations, input/result, safe error, `runtimeStatus` |
 | `GET` | `/api/executions/:id/logs` | OBS-02 scoped log tail (`level`, `limit`, `cursor`; DEBUG hidden unless asked; polling view over durable rows) |
 | `GET` | `/api/logs` | OBS-02 operator log search (`level`, `sagaId`, `sagaName`, `startDate`, `endDate`, `limit`, `cursor`) |
 | `POST` | `/api/executions/:id/cancel` | Owner-only cancel (exact 64-hex ID) |
+| `GET` | `/api/forms/:name` | Form declaration for this Organization (FORM-01; FORM-02 designer surface on main) |
+| `POST` | `/api/forms/:name/submit` | Validate then submit the bound Saga (FORM-02: consume a startup handle, 422 `STALE_FORM_HANDLE`) |
+| `POST` | `/api/schedules` | Create a one-off (`runAt`) or recurring (`cron`) schedule (TRG-01; 201) |
+| `GET` | `/api/schedules` | Schedule summaries for this Organization |
+| `GET` | `/api/schedules/:id` | Schedule detail (policy, windows, receipts) |
+| `GET` | `/api/schedules/:id/preview` | Next UTC windows (`count` 1-20, default 5) |
+| `POST` | `/api/schedules/:id/disable` | Disable (ticks skip; receipts retained) |
+| `POST` | `/api/schedules/:id/enable` | Re-enable (due index recomputed) |
+| `DELETE` | `/api/schedules/:id` | Soft-delete (ticks ignore; history retained) |
+| `POST` | `/api/schedules/executions/:id/cancel` | Cancel a `Scheduled` intent row only |
 | `GET` | `/api/forms` | Org-scoped form summaries (FORM-02 designer list) |
 | `POST` | `/api/forms` | Create a form declaration (400 `INVALID_FORM` on bad fields) |
-| `GET` | `/api/forms/:name` | Form declaration for this Organization (FORM-02 metadata + fields) |
 | `PUT` | `/api/forms/:name` | Replace a form declaration wholesale (FORM-02 designer edit) |
 | `DELETE` | `/api/forms/:name` | Delete a form declaration |
 | `POST` | `/api/forms/:name/startup` | Mint a session-bound 30-minute handle with snapshot + provider options |
 | `GET` | `/api/forms/:name/providers` | Resolved select/multiselect options through the caller Table gate |
-| `POST` | `/api/forms/:name/submit` | Consume a startup handle (422 `STALE_FORM_HANDLE`), validate, merge defaults, submit or schedule |
 | `GET` | `/api/config` | Typed config rows for this Organization (secrets answer `[SECRET]`) |
 | `POST` | `/api/config` | Set a non-secret value or provision a secret reference (upsert by key) |
 | `PUT` | `/api/config/:id` | Update one row; omitted secret values preserve the reference |
@@ -77,11 +88,23 @@ const hello = await client.inspectSaga("hello");
 // Invoke and wait for terminal status.
 const done = await client.submitExecution({ saga: "hello", input: { name: "Ada" } });
 
+// Bounded inline provider (RUN-03, ADR 023): eligible read-only Sagas return
+// the result inline with the durable receipt; async-only Sagas answer
+// PROVIDER_NOT_SUPPORTED with the async path.
+const census = await client.runProvider({ saga: "ninjaone-orgs", input: {} });
+
 // Status, history, cancel, diagnosis.
 await client.getExecution(done.executionId);
 await client.listHistory({ status: "Failed,TimedOut", limit: 20 });
 await client.cancelExecution(done.executionId);
 await client.diagnoseExecution(done.executionId); // detail + hint for known codes
+
+// Runtime policy (RUN-01, issue #135): operator inspect/change independent
+// of Saga source; applied snapshots ride Execution detail. Writes need an
+// Organization admin (or instance admin); ordinary members read only.
+await client.getSagaPolicy("hello");
+await client.updateSagaPolicy("hello", { admission: { enabled: false } });
+// CLI: saga-policy --saga hello | saga-policy-set --saga hello --policy '{"admission":{"enabled":false}}'
 
 // Author logs (OBS-02): scoped tail plus operator search. Polling views over
 // durable D1 rows; reconnect by refetching from nextCursor (replays dedupe
@@ -126,7 +149,9 @@ Offline helpers (no network): `scaffoldSaga` (emit a `defineSaga` module),
 `parseFormDetail`, `parseFormStartup`, `parseFormProviders`,
 `parseFormSubmit`, `parseScheduleList`, `parseScheduleDetail`,
 `parseScheduleDelivery`) fail loud with
-`SDK_CLIENT_MISMATCH` instead of trusting the wire.
+`SDK_CLIENT_MISMATCH` instead of trusting the wire. Provider outcomes ride
+`parseProviderOutcome` over `POST /api/executions/provider` with the same
+receipt fields plus the inline `dispatch` marker.
 
 ## CLI (`scripts/wrangnarok.mjs`: thin fetch calls, no Saga logic)
 

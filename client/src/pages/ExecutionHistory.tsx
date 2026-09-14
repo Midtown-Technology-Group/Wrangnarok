@@ -46,6 +46,7 @@ export const SERVER_STATUS_FILTERS: Readonly<Record<StatusFilter, ExecutionStatu
   TimedOut: ["TimedOut"],
   Cancelling: ["Cancelling"],
   Cancelled: ["Cancelled"],
+  Scheduled: ["Scheduled"],
 };
 
 function RowCells({ row, localTime }: { row: ExecutionSummary; localTime: boolean }): React.JSX.Element {

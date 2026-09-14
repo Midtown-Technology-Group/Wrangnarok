@@ -1,0 +1,11 @@
+# MIG-01 lane scope (issue #116): workspace solution to Wrangnarok bundle bridge.
+# Field mapping plus validator/converter from workspace-style solution
+# definitions to valid manifests, failing loudly with gaps. No credentials
+# in output, ever.
+src/migration.ts
+src/solutions.ts
+test/migration-bridge.test.ts
+docs/architecture/011-solutions-contract.md
+docs/upstream-parity.md
+scopes/mig-01.scope
+package.json

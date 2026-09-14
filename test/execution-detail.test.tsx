@@ -39,6 +39,9 @@ function detailFixture(overrides: Partial<ExecutionDetail> = {}): ExecutionDetai
     startedAt: "2026-09-10T08:00:01.000Z",
     completedAt: "2026-09-10T08:00:02.000Z",
     runtimeStatus: "complete",
+    parentExecutionId: null,
+    parentStep: null,
+    children: [],
     policy: {
       sagaId: echoSaga.id,
       version: 1,
@@ -123,6 +126,33 @@ describe("execution detail rendering", () => {
     );
     expect(html).toContain("detail-runtime");
     expect(html).toContain("unavailable (native history expired or not yet dispatched)");
+  });
+
+  it("renders child lineage and the child list", () => {
+    const childId = "b".repeat(64);
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <ExecutionDetailView
+          initial={detailFixture({
+            parentExecutionId: "c".repeat(64),
+            parentStep: "child-dispatch-invoke-v1",
+            children: [
+              {
+                executionId: childId,
+                sagaId: echoSaga.id,
+                sagaName: "echo",
+                status: "Succeeded",
+                createdAt: "2026-09-10T08:00:03.000Z",
+              },
+            ],
+          })}
+        />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("detail-lineage");
+    expect(html).toContain("child-dispatch-invoke-v1");
+    expect(html).toContain("child-row");
+    expect(html).toContain(childId);
   });
 
   it("renders the applied runtime-policy snapshot", () => {
@@ -215,7 +245,7 @@ describe("execution detail + history traversal over the real Worker", () => {
       )
       .run();
     const response = await worker.fetch(
-      new Request(`http://local.test/api/executions/${id}`, { headers: { ...auth } }),
+      new Request(`https://local.test/api/executions/${id}`, { headers: { ...auth } }),
       bindings,
     );
     expect(response.status).toBe(200);
@@ -224,7 +254,7 @@ describe("execution detail + history traversal over the real Worker", () => {
     expect(JSON.stringify(body.operations)).toContain("prepare-input-v1");
     // Hidden-owner denial: a foreign requester gets 404, never the payload.
     const foreign = await worker.fetch(
-      new Request(`http://local.test/api/executions/${id}`, { headers: { ...auth } }),
+      new Request(`https://local.test/api/executions/${id}`, { headers: { ...auth } }),
       {
         ...bindings,
         LAB_USER_ID: "00000000-0000-4000-8000-000000000003",
@@ -236,7 +266,7 @@ describe("execution detail + history traversal over the real Worker", () => {
   it("denies foreign cancellation with 404 and keeps the row", async () => {
     const id = await insertHistoryRow("obs01-deny-00001", "Running", "2026-09-10T09:00:00.000Z");
     const foreign = await worker.fetch(
-      new Request(`http://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } }),
+      new Request(`https://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } }),
       {
         ...bindings,
         LAB_USER_ID: "00000000-0000-4000-8000-000000000003",
@@ -258,7 +288,7 @@ describe("execution detail + history traversal over the real Worker", () => {
       );
     }
     const first = (await (
-      await worker.fetch(new Request("http://local.test/api/executions?limit=2", { headers: { ...auth } }), bindings)
+      await worker.fetch(new Request("https://local.test/api/executions?limit=2", { headers: { ...auth } }), bindings)
     ).json()) as { executions: { executionId: string }[]; hasMore: boolean; nextCursor: string | null };
     expect(first.executions).toHaveLength(2);
     expect(first.hasMore).toBe(true);
@@ -266,7 +296,7 @@ describe("execution detail + history traversal over the real Worker", () => {
     const second = (await (
       await worker.fetch(
         new Request(
-          `http://local.test/api/executions?limit=2&cursor=${encodeURIComponent(first.nextCursor as string)}`,
+          `https://local.test/api/executions?limit=2&cursor=${encodeURIComponent(first.nextCursor as string)}`,
           {
             headers: { ...auth },
           },
@@ -279,7 +309,7 @@ describe("execution detail + history traversal over the real Worker", () => {
     // Filtered traversal: same cursor mechanics under a status filter.
     const failed = (await (
       await worker.fetch(
-        new Request("http://local.test/api/executions?status=Failed&limit=1", { headers: { ...auth } }),
+        new Request("https://local.test/api/executions?status=Failed&limit=1", { headers: { ...auth } }),
         bindings,
       )
     ).json()) as { executions: unknown[]; hasMore: boolean; nextCursor: string | null };
@@ -308,7 +338,7 @@ describe("execution detail + history traversal over the real Worker", () => {
       )
       .run();
     const response = await worker.fetch(
-      new Request(`http://local.test/api/executions/${id}`, { headers: { ...auth } }),
+      new Request(`https://local.test/api/executions/${id}`, { headers: { ...auth } }),
       bindings,
     );
     expect(response.status).toBe(200);

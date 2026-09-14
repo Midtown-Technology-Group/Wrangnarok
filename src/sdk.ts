@@ -75,6 +75,13 @@ export const SDK_ERROR_CODES = [
   "INVALID_POLICY",
   "SAGA_PAUSED",
   "ADMISSION_LIMITED",
+  "SYNC_NOT_SUPPORTED",
+  "TRANSIENT_NOT_SUPPORTED",
+  "PROVIDER_NOT_SUPPORTED",
+  "PROVIDER_MISCONFIGURED",
+  "PROVIDER_TIMEOUT",
+  "PROVIDER_IN_FLIGHT",
+  "PROVIDER_OUTPUT_TOO_LARGE",
   "FORM_VALIDATION_FAILED",
   "INVALID_FORM",
   "FORM_NOT_FOUND",
@@ -97,6 +104,27 @@ export const SDK_ERROR_CODES = [
   "NINJA_INTEGRATION_FAILED",
   "SMOKE_WRITE_UNVERIFIED",
   "SMOKE_READ_UNVERIFIED",
+  "CHILD_SAGA_NOT_FOUND",
+  "CHILD_PARENT_INVALID",
+  "CHILD_SELF_INVOKE",
+  "CHILD_INPUT_NOT_SERIALIZABLE",
+  "CHILD_KEY_INVALID",
+  "CHILD_DISPATCH_CONFLICT",
+  "CHILD_DISPATCH_UNCONFIRMED",
+  "CHILD_RECEIPT_INVALID",
+  "CHILD_AWAIT_INVALID",
+  "CHILD_AWAIT_TIMEOUT",
+  "CHILD_RESULT_CORRUPT",
+  "CHILD_FAILED",
+  "SCHEDULE_NOT_FOUND",
+  "INVALID_SCHEDULE",
+  "INVALID_CRON",
+  "INVALID_TIMEZONE",
+  "INVALID_RUN_AT",
+  "INVALID_OVERLAP",
+  "INVALID_PREVIEW",
+  "SCHEDULE_LIMIT",
+  "SCHEDULE_UNMATCHABLE",
   "EXECUTION_FAILED",
   "INVALID_ARTIFACT",
   "INVALID_ARTIFACT_ID",
@@ -263,6 +291,22 @@ export const SDK_ERROR_CODES = [
   "SDK_SAGA_NOT_FOUND",
   "SDK_SAGA_AMBIGUOUS",
   "SDK_INVALID_REF",
+  "GRANT_REQUIRED",
+  "ROLE_STORE_NOT_MIGRATED",
+  "INVALID_ROLE",
+  "ROLE_EXISTS",
+  "ROLE_NOT_FOUND",
+  "INVALID_GRANT",
+  "GRANT_EXISTS",
+  "GRANT_NOT_FOUND",
+  "ASSIGNMENT_EXISTS",
+  "ASSIGNMENT_NOT_FOUND",
+  "INVALID_REVOCATION",
+  "INVALID_RULE",
+  "RULE_EXISTS",
+  "RULE_NOT_FOUND",
+  "INVALID_SUBJECT",
+  "USER_NOT_FOUND",
 ] as const;
 
 export type SdkErrorCode = (typeof SDK_ERROR_CODES)[number];
@@ -352,6 +396,9 @@ export interface SdkExecutionSummary {
 
 export interface SdkExecutionDetail extends SdkExecutionSummary {
   readonly runtimeStatus: string | null;
+  readonly parentExecutionId: string | null;
+  readonly parentStep: string | null;
+  readonly children: readonly SdkExecutionChild[];
   readonly policy: SdkRuntimePolicySnapshot;
   readonly input: unknown;
   readonly result: unknown;
@@ -580,6 +627,9 @@ function isOperation(value: unknown): value is SdkOperation {
 export function parseExecutionDetail(value: unknown): SdkExecutionDetail {
   if (!isRecord(value)) throw new SdkError("SDK_CLIENT_MISMATCH", "The Execution detail has an unexpected shape.");
   const operations = value.operations;
+  const children = value.children;
+  const parentExecutionId = value.parentExecutionId;
+  const parentStep = value.parentStep;
   if (
     typeof value.executionId !== "string" ||
     typeof value.sagaId !== "string" ||
@@ -593,6 +643,9 @@ export function parseExecutionDetail(value: unknown): SdkExecutionDetail {
     (value.startedAt !== null && typeof value.startedAt !== "string") ||
     (value.completedAt !== null && typeof value.completedAt !== "string") ||
     (value.runtimeStatus !== null && typeof value.runtimeStatus !== "string") ||
+    (parentExecutionId !== null && parentExecutionId !== undefined && typeof parentExecutionId !== "string") ||
+    (parentStep !== null && parentStep !== undefined && typeof parentStep !== "string") ||
+    (children !== undefined && (!Array.isArray(children) || !children.every(isChild))) ||
     !isRecord(value.policy) ||
     !("input" in value) ||
     !("result" in value) ||
@@ -602,7 +655,12 @@ export function parseExecutionDetail(value: unknown): SdkExecutionDetail {
   ) {
     throw new SdkError("SDK_CLIENT_MISMATCH", "The Execution detail has an unexpected shape.");
   }
-  return value as unknown as SdkExecutionDetail;
+  return {
+    ...(value as unknown as SdkExecutionDetail),
+    parentExecutionId: (parentExecutionId ?? null) as string | null,
+    parentStep: (parentStep ?? null) as string | null,
+    children: ((children ?? []) as readonly SdkExecutionChild[]).slice(),
+  };
 }
 
 /** Guard a GET /api/executions payload. Throws SDK_CLIENT_MISMATCH. */
@@ -629,6 +687,25 @@ export function parseHistoryPage(value: unknown): SdkHistoryPage {
     hasMore: value.hasMore,
     nextCursor: (nextCursor ?? null) as string | null,
   };
+}
+
+export interface SdkExecutionChild {
+  readonly executionId: string;
+  readonly sagaId: string;
+  readonly sagaName: string;
+  readonly status: string;
+  readonly createdAt: string;
+}
+
+function isChild(value: unknown): value is SdkExecutionChild {
+  return (
+    isRecord(value) &&
+    typeof value.executionId === "string" &&
+    typeof value.sagaId === "string" &&
+    typeof value.sagaName === "string" &&
+    typeof value.status === "string" &&
+    typeof value.createdAt === "string"
+  );
 }
 
 /** Guard a GET /api/executions/:id/logs or GET /api/logs payload. Throws SDK_CLIENT_MISMATCH. */
@@ -1698,6 +1775,43 @@ export interface SdkSubmitOptions {
   readonly wait?: boolean;
 }
 
+export interface SdkProviderOutcome {
+  readonly executionId: string;
+  readonly sagaId: string;
+  readonly sagaName: string;
+  readonly status: string;
+  readonly result: unknown;
+  readonly durationMs: number;
+  readonly dispatch: { readonly inline: true; readonly workflow: false };
+  readonly statusUrl: string;
+}
+
+export interface SdkProviderOptions {
+  readonly saga: string;
+  readonly input?: unknown;
+  readonly key?: string;
+}
+
+/** Guard a POST /api/executions/provider payload. Throws SDK_CLIENT_MISMATCH. */
+export function parseProviderOutcome(value: unknown): SdkProviderOutcome {
+  if (
+    !isRecord(value) ||
+    typeof value.executionId !== "string" ||
+    typeof value.sagaId !== "string" ||
+    typeof value.sagaName !== "string" ||
+    typeof value.status !== "string" ||
+    typeof value.durationMs !== "number" ||
+    !isRecord(value.dispatch) ||
+    value.dispatch.inline !== true ||
+    value.dispatch.workflow !== false ||
+    typeof value.statusUrl !== "string" ||
+    !("result" in value)
+  ) {
+    throw new SdkError("SDK_CLIENT_MISMATCH", "The provider outcome has an unexpected shape.");
+  }
+  return value as unknown as SdkProviderOutcome;
+}
+
 export interface SdkHistoryQuery {
   /** One status or a comma-separated set (mirrors the server + upstream
    * multi-status filter). Unknown values fail server-side with INVALID_STATUS. */
@@ -1734,6 +1848,8 @@ export interface SdkDiagnosis {
   readonly executionId: string;
   readonly status: string;
   readonly sagaName: string;
+  readonly parentExecutionId: string | null;
+  readonly children: readonly SdkExecutionChild[];
   readonly operations: readonly SdkOperation[];
   readonly result: unknown;
   readonly error: unknown;
@@ -1744,6 +1860,16 @@ export interface SdkDiagnosis {
 function hintFor(code: unknown): string | null {
   if (!isRecord(code)) return null;
   switch (code.code) {
+    case "CHILD_SAGA_NOT_FOUND":
+      return "No Saga matches that child reference; use a stable UUID or exact catalog name.";
+    case "CHILD_FAILED":
+      return "The child Execution ended without success; inspect the child Execution for its safe error.";
+    case "CHILD_AWAIT_TIMEOUT":
+      return "The child did not settle in time; it keeps running and stays inspectable via its statusUrl.";
+    case "CHILD_DISPATCH_UNCONFIRMED":
+      return "Child dispatch may have started. Retry the parent under the same key.";
+    case "CHILD_RESULT_CORRUPT":
+      return "The child row carries no JSON-serializable result; inspect it directly, never assume success.";
     case "INTEGRATION_REQUIREMENT_UNSATISFIED":
       return "This Saga requires an Integration Connection that is not configured for this Organization.";
     case "ECHO_VENDOR_TIMEOUT":
@@ -1776,6 +1902,10 @@ export interface SdkClient {
    * static Catalog with no D1 writes and no Workflow dispatch. */
   previewSaga(options: SdkPreviewOptions): Promise<SdkPreview>;
   submitExecution(options: SdkSubmitOptions): Promise<SdkSubmitReceipt | SdkExecutionDetail>;
+  /** RUN-03 inline provider (POST /api/executions/provider): bounded
+   * read-only Sagas return their result inline with the durable receipt.
+   * Async-only Sagas answer PROVIDER_NOT_SUPPORTED with the async path. */
+  runProvider(options: SdkProviderOptions): Promise<SdkProviderOutcome>;
   getExecution(id: string): Promise<SdkExecutionDetail>;
   cancelExecution(id: string): Promise<SdkCancelReceipt>;
   listHistory(query?: SdkHistoryQuery): Promise<SdkHistoryPage>;
@@ -1863,6 +1993,18 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
   if (!/^https?:\/\//.test(base)) {
     throw new SdkError("SDK_INVALID_REF", "The SDK base must be an http(s) URL.");
   }
+  // Credential-bearing requests (Bearer plus optional Cloudflare Access)
+  // must not ride cleartext to non-loopback hosts: require HTTPS except for
+  // explicit loopback development hosts, and strip Access credentials on any
+  // HTTP exception below.
+  const baseUrl = new URL(base);
+  // Loopback hosts only (localhost/127.0.0.1/::1) for local dev: every
+  // other http base rejects, including RFC 2606 .test names, so no
+  // credential-bearing request ever rides cleartext off-machine.
+  const loopback = baseUrl.hostname === "localhost" || baseUrl.hostname === "127.0.0.1" || baseUrl.hostname === "::1";
+  if (baseUrl.protocol !== "https:" && !loopback) {
+    throw new SdkError("SDK_INVALID_REF", "The SDK base must be https, except loopback development hosts.");
+  }
   if (!options.token) throw new SdkError("UNAUTHORIZED", "The SDK needs a bearer token.");
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? 120000;
@@ -1873,7 +2015,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     "Content-Type": "application/json",
     Accept: "application/json",
   };
-  if (options.access) {
+  if (options.access && baseUrl.protocol === "https:") {
     headers["CF-Access-Client-Id"] = options.access.clientId;
     headers["CF-Access-Client-Secret"] = options.access.clientSecret;
   }
@@ -2016,6 +2158,23 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       }
       return pollDetail(data.executionId, true);
     },
+    async runProvider(options: SdkProviderOptions): Promise<SdkProviderOutcome> {
+      const key = options.key ?? randomKey();
+      if (!IDEMPOTENCY_KEY_RE.test(key)) {
+        throw new SdkError("SDK_INVALID_REF", "Idempotency-Key must be 16-128 chars [A-Za-z0-9._:-].");
+      }
+      const sagaId = await resolveSagaId(options.saga);
+      const response = await guard(
+        () =>
+          fetchImpl(`${base}/api/executions/provider`, {
+            method: "POST",
+            headers: { ...headers, "Idempotency-Key": key },
+            body: JSON.stringify({ sagaId, input: options.input ?? {} }),
+          }),
+        "provider execution",
+      );
+      return parseProviderOutcome(await readJson(response, "provider execution"));
+    },
     async getExecution(id: string): Promise<SdkExecutionDetail> {
       checkExecutionId(id);
       return pollDetail(id, false);
@@ -2076,6 +2235,8 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
         executionId: detail.executionId,
         status: detail.status,
         sagaName: detail.sagaName,
+        parentExecutionId: detail.parentExecutionId,
+        children: detail.children,
         operations: detail.operations,
         result: detail.result,
         error: detail.error,
@@ -2444,6 +2605,12 @@ export function describeContract(): SdkContractDescriptor {
       },
       { method: "POST", path: "/api/executions", description: "Submit an Execution (Idempotency-Key required)." },
       {
+        method: "POST",
+        path: "/api/executions/provider",
+        description:
+          "Bounded inline data-provider execution for eligible read-only Sagas (Idempotency-Key required; RUN-03).",
+      },
+      {
         method: "GET",
         path: "/api/executions",
         description: "ExecutionHistory summaries (status/sagaId/sagaName/startDate/endDate/limit/cursor).",
@@ -2502,6 +2669,30 @@ export function describeContract(): SdkContractDescriptor {
           "OBS-02 operator log search across the caller's own rows (level, sagaId, sagaName, startDate, endDate, limit, cursor).",
       },
       { method: "POST", path: "/api/executions/:id/cancel", description: "Owner-only cancellation (exact ID)." },
+      { method: "POST", path: "/api/schedules", description: "Create a one-off or recurring schedule (TRG-01)." },
+      { method: "GET", path: "/api/schedules", description: "Schedule summaries for this Organization." },
+      { method: "GET", path: "/api/schedules/:id", description: "Schedule detail with policy and receipts." },
+      {
+        method: "GET",
+        path: "/api/schedules/:id/preview",
+        description: "Next UTC windows for a recurring schedule (count 1-20).",
+      },
+      {
+        method: "POST",
+        path: "/api/schedules/:id/disable",
+        description: "Disable a schedule (ticks skip; receipts retained).",
+      },
+      {
+        method: "POST",
+        path: "/api/schedules/:id/enable",
+        description: "Re-enable a schedule (due index recomputed).",
+      },
+      { method: "DELETE", path: "/api/schedules/:id", description: "Soft-delete a schedule." },
+      {
+        method: "POST",
+        path: "/api/schedules/executions/:id/cancel",
+        description: "Cancel a Scheduled intent row (promoted rows use the owner cancel).",
+      },
       {
         method: "GET",
         path: "/api/forms",
@@ -3008,6 +3199,18 @@ export function describeContract(): SdkContractDescriptor {
         detail: "Offline validateAgainstSchema plus server parse; the server remains authoritative.",
       },
       { name: "execute-status-cancel", status: "supported", detail: "Submit, poll, detail, history, and cancel." },
+      {
+        name: "sync-providers",
+        status: "supported",
+        detail:
+          "Bounded inline data-provider execution (RUN-03, ADR 023): eligible read-only Sagas return inline results with the durable receipt; async-only Sagas answer PROVIDER_NOT_SUPPORTED; sync/transient flags stay named exceptions.",
+      },
+      {
+        name: "schedule-triggers",
+        status: "supported",
+        detail:
+          "One-off and recurring schedules (TRG-01): create, preview UTC windows, disable/enable/delete, cancel Scheduled intents; Cron tick promotes due windows through submit with per-window idempotency.",
+      },
       {
         name: "runtime-policy",
         status: "supported",

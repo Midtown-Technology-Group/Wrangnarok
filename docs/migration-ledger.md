@@ -25,6 +25,7 @@ must update every importing test in the same commit.
 | 0019   | 0019_files.sql                  | FILE-01 | managed file locations, policies, capabilities (renumbered from colliding 0007 on 2026-09-11; was 0007_files.sql from #203) |
 | 0023   | 0023_config.sql                 | CON-02  | scoped config + secret references (issue #147) |
 | 0024   | 0024_tool_enrollments.sql       | TOOL-01 | opt-in Saga tool enrollments (issue #170) |
+| 0012   | 0012_saga_policies.sql          | RUN-01  | per-Saga runtime policy rows + executions.policy_json snapshot (issue #135) |
 
 ## Resolved collisions
 

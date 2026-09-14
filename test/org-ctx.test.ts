@@ -134,7 +134,7 @@ it("keeps Execution history readable after a Saga source rename", async () => {
     .bind("echo-renamed", "echo-v2", id)
     .run();
   const detail = await worker.fetch(
-    new Request(`http://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } }),
+    new Request(`https://local.test/api/executions/${id}`, { method: "GET", headers: { ...auth } }),
     bindings,
   );
   expect(detail.status).toBe(200);

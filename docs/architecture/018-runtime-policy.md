@@ -10,7 +10,7 @@ Upstream Bifrost keeps workflow source metadata limited to identity and discover
 
 ## Decision
 
-Persist one runtime policy row per `(org_id, saga_id)` in D1 (`migrations/0007_saga_policies.sql`), keyed by stable Saga UUID, never by export name or path:
+Persist one runtime policy row per `(org_id, saga_id)` in D1 (`migrations/0012_saga_policies.sql`), keyed by stable Saga UUID, never by export name or path:
 
 ```sql
 CREATE TABLE saga_policies(org_id TEXT, saga_id TEXT, policy_json TEXT, version INTEGER, updated_at TEXT, PRIMARY KEY(org_id, saga_id));
