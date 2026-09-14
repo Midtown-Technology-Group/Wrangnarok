@@ -9,7 +9,9 @@ import { introspectWorkflowInstance, reset } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
-import { executionId, helloSaga } from "../src/domain";
+import { executionId, Fault, helloSaga } from "../src/domain";
+import { consumeAfterAdmission, consumeStartupHandle, mayStartForm, parseFileRef } from "../src/forms";
+import { createPolicyRule, ensureRoleTables } from "../src/roles";
 import migration1 from "../migrations/0001_initial.sql?raw";
 import migration5 from "../migrations/0005_forms.sql?raw";
 import migration7 from "../migrations/0007_org_membership.sql?raw";
@@ -240,11 +242,34 @@ describe("FORM-02 startup: bounded handles, prefill opt-in, provider projection"
     const providers = await call("/api/forms/team-pick/providers");
     expect(providers.status).toBe(200);
     expect(await providers.json()).toMatchObject({ options: { team: ["blue", "red"] }, errors: {} });
-    // A caller denied the table sees an empty list plus an error, never rows.
-    const denied = await call("/api/forms/team-pick/providers", "GET", undefined, ORG, OTHER_USER);
-    expect(await denied.json()).toMatchObject({ options: { team: [] }, errors: { team: expect.any(String) } });
+    // FORM-02 authorization (#155): a grantless caller never reaches
+    // provider resolution — 403 GRANT_REQUIRED before any Table read.
+    // (The Table-gate empty-list path below still applies to callers who
+    // hold a form grant but are denied the underlying Table.)
+    const grantless = await call("/api/forms/team-pick/providers", "GET", undefined, ORG, OTHER_USER);
+    expect(grantless.status).toBe(403);
+    expect(await grantless.json()).toMatchObject({ error: { code: "GRANT_REQUIRED" } });
     // Foreign orgs see 404, never the provider shape.
     expect((await call("/api/forms/team-pick/providers", "GET", undefined, OTHER_ORG)).status).toBe(404);
+  });
+  it("denies startup and provider lifecycle routes by grant absence", async () => {
+    // FORM-02 authorization (#155): the lifecycle routes mint capabilities
+    // and read provider state, so an ordinary member with zero form grants
+    // answers 403 before any handle is minted or provider resolved.
+    await createForm("gated", [{ name: "name", type: "text", required: true }]);
+    const started = await call("/api/forms/gated/startup", "POST", {}, ORG, OTHER_USER);
+    expect(started.status).toBe(403);
+    expect(await started.json()).toMatchObject({ error: { code: "GRANT_REQUIRED" } });
+    const listed = await call("/api/forms/gated/providers", "GET", undefined, ORG, OTHER_USER);
+    expect(listed.status).toBe(403);
+    expect(await listed.json()).toMatchObject({ error: { code: "GRANT_REQUIRED" } });
+    // No startup row was created for the denied caller (the table itself
+    // may not exist yet — the grant gate runs before any session write).
+    const rows = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM form_startups WHERE user_id=?")
+      .bind(OTHER_USER.toLowerCase())
+      .first<{ n: number }>()
+      .catch(() => ({ n: 0 }));
+    expect(rows?.n).toBe(0);
   });
 });
 
@@ -279,6 +304,49 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
       result: { greeting: "Hello, Ada!", name: "Ada" },
     });
     expect(fetch).not.toHaveBeenCalled();
+  });
+  it("recovers the same handle after a dispatch-uncertain 503 instead of burning it", async () => {
+    // FORM-02 recovery (#155): submit answers 503 DISPATCH_UNCONFIRMED when
+    // Workflow creation/dispatch confirmation fails, and tells the caller to
+    // retry the same request + key. The handle must survive that 503 so the
+    // retry reaches the idempotent recovery path — not STALE_FORM_HANDLE.
+    await createForm("greet", [{ name: "name", type: "text", required: true }]);
+    const started = await startup("greet");
+    const key = "form-02-recover-001";
+    const body = { handle: started.handle, values: { name: "Ada" } };
+    const failing = {
+      ...bindings,
+      HELLO_WORKFLOW: {
+        createBatch: async () => {
+          throw new Error("control plane down");
+        },
+      },
+    } as unknown as Bindings;
+    const failCall = (path: string, method = "GET", payload?: unknown, orgId = ORG, userId = OWNER, idemKey?: string) =>
+      worker.fetch(
+        new Request(`https://local.test${path}`, {
+          method,
+          headers: headers(idemKey ? { "Idempotency-Key": idemKey } : {}),
+          ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+        }),
+        { ...failing, LAB_ORG_ID: orgId, LAB_USER_ID: userId },
+      );
+    const first = await failCall("/api/forms/greet/submit", "POST", body, ORG, OWNER, key);
+    expect(first.status).toBe(503);
+    expect(await first.json()).toMatchObject({ error: { code: "DISPATCH_UNCONFIRMED" } });
+    // Same body + handle + key retries through the live bindings: the
+    // durable row admits (200 replayed:true) instead of answering stale —
+    // the handle survived the 503 and the canonical idempotent recovery
+    // path ran.
+    const id = await executionId({ orgId: ORG, userId: OWNER }, key);
+    const retry = await call("/api/forms/greet/submit", "POST", body, ORG, OWNER, key);
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ form: "greet", executionId: id, replayed: true });
+    // The handle is now spent: a further same-key use replays canonically
+    // (200 + same execution id), never a second dispatch.
+    const spent = await call("/api/forms/greet/submit", "POST", body, ORG, OWNER, key);
+    expect(spent.status).toBe(200);
+    expect(await spent.json()).toMatchObject({ executionId: id, replayed: true });
   });
   it("rejects unknown, foreign, reused, and payload-mismatched handles without dispatching", async () => {
     await createForm();
@@ -555,6 +623,40 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     expect(corruptRes.status).toBe(422);
     expect(await corruptRes.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
   });
+  it("invalidates handles when the form is deleted and recreated under the same name", async () => {
+    // FORM-02 identity (#155): the handle binds to the definition id, not
+    // just the name. Recreate keeps the name but mints a new id, so the
+    // old session must answer stale and dispatch nothing.
+    await createForm("rekey", [{ name: "name", type: "text", required: true }]);
+    const old = await startup("rekey");
+    expect((await call("/api/forms/rekey", "DELETE")).status).toBe(200);
+    await createForm("rekey", [{ name: "name", type: "text", required: true }]);
+    const replay = await call(
+      "/api/forms/rekey/submit",
+      "POST",
+      { handle: old.handle, values: { name: "Ada" } },
+      ORG,
+      OWNER,
+      "form-02-rekey-001",
+    );
+    expect(replay.status).toBe(422);
+    expect(await replay.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+    const executions = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM executions WHERE org_id=?")
+      .bind(ORG)
+      .first<{ n: number }>();
+    expect(executions?.n).toBe(0);
+    // A handle minted after the recreate works normally.
+    const fresh = await startup("rekey");
+    const ok = await call(
+      "/api/forms/rekey/submit",
+      "POST",
+      { handle: fresh.handle, values: { name: "Ada" } },
+      ORG,
+      OWNER,
+      "form-02-rekey-002",
+    );
+    expect(ok.status).toBe(202);
+  });
   it("replays scheduled submits canonically and rejects malformed designer writes", async () => {
     await createForm("greet", [{ name: "name", type: "text", required: true }]);
     const future = new Date(Date.now() + 3600 * 1000).toISOString();
@@ -770,5 +872,246 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     // the omission was not a file-gate failure.
     expect(skip.status).toBe(202);
     expect(await skip.json()).toMatchObject({ form: "file-skip", replayed: false });
+  });
+});
+
+describe("FORM-02 recovery fence: consume-after-admission arms (#155)", () => {
+  const owner = { orgId: ORG, userId: OWNER };
+
+  it("tolerates a lost consume race when the caller owns the admission", async () => {
+    // The handle is already spent by the successful submit below, so the
+    // consume half of consumeAfterAdmission loses its race (STALE) and the
+    // fence falls through to verifyOwnAdmission: the deterministic
+    // execution row proves OUR submission admitted, so it resolves instead
+    // of answering stale.
+    const { id } = await createForm("greet", [{ name: "name", type: "text", required: true }]);
+    const started = await startup("greet");
+    const key = "form-02-own-race-001";
+    const values = { name: "Ada" };
+    const submitted = await call(
+      "/api/forms/greet/submit",
+      "POST",
+      { handle: started.handle, values },
+      ORG,
+      OWNER,
+      key,
+    );
+    expect(submitted.status).toBe(202);
+    const row = await bindings.DB.prepare("SELECT input_json FROM executions WHERE id=?")
+      .bind(await executionId(owner, key))
+      .first<{ input_json: string }>();
+    expect(row).toBeTruthy();
+    const admitted = JSON.parse(row?.input_json ?? "{}") as Record<string, unknown>;
+    await expect(
+      consumeAfterAdmission(bindings.DB, owner, "greet", started.handle, id, key, { id: helloSaga.id }, admitted),
+    ).resolves.toBeUndefined();
+  });
+
+  it("answers stale when a foreign submission won the handle race", async () => {
+    // Same spent-handle shape, but the admission proof fails: an unknown
+    // key has no execution row, and a known key with different input is not
+    // OUR admission — both answer 422, never a replay of foreign work.
+    const { id } = await createForm("greet", [{ name: "name", type: "text", required: true }]);
+    const started = await startup("greet");
+    const key = "form-02-foreign-race-001";
+    const submitted = await call(
+      "/api/forms/greet/submit",
+      "POST",
+      { handle: started.handle, values: { name: "Ada" } },
+      ORG,
+      OWNER,
+      key,
+    );
+    expect(submitted.status).toBe(202);
+    await expect(
+      consumeAfterAdmission(
+        bindings.DB,
+        owner,
+        "greet",
+        started.handle,
+        id,
+        "form-02-foreign-race-zzz",
+        {
+          id: helloSaga.id,
+        },
+        { name: "Ada" },
+      ),
+    ).rejects.toMatchObject({ code: "STALE_FORM_HANDLE" });
+    await expect(
+      consumeAfterAdmission(
+        bindings.DB,
+        owner,
+        "greet",
+        started.handle,
+        id,
+        key,
+        { id: helloSaga.id },
+        { name: "Zed" },
+      ),
+    ).rejects.toMatchObject({ code: "STALE_FORM_HANDLE" });
+  });
+
+  it("fails a dead consume fence and rethrows non-stale Faults", async () => {
+    // A consume UPDATE that cannot persist (dead D1) answers STALE rather
+    // than dispatching twice; a non-STALE Fault from the fence propagates
+    // untouched instead of being mistaken for a lost race.
+    const handle = "c".repeat(64);
+    const stamp = new Date(Date.now() + 60000).toISOString();
+    const validRow = {
+      handle_hash: "h",
+      org_id: ORG,
+      user_id: OWNER,
+      form_id: "f",
+      form_name: "greet",
+      prefill_json: null,
+      options_json: null,
+      expires_at: stamp,
+      used_at: null,
+      created_at: stamp,
+    };
+    const deadDb = {
+      prepare: (sql: string) => {
+        if (sql.startsWith("UPDATE")) {
+          return { bind: () => ({ run: async () => ({ meta: { changes: 0 } }) }) };
+        }
+        if (sql.startsWith("SELECT")) {
+          return { bind: () => ({ first: async () => validRow }) };
+        }
+        return { run: async () => ({}) };
+      },
+    } as unknown as D1Database;
+    await expect(consumeStartupHandle(deadDb, owner, "greet", handle, "f")).rejects.toMatchObject({
+      code: "STALE_FORM_HANDLE",
+    });
+    const faultDb = {
+      prepare: (sql: string) => {
+        if (sql.startsWith("CREATE") || sql.startsWith("ALTER")) return { run: async () => ({}) };
+        return {
+          bind: () => {
+            throw new Fault(500, "FENCE_BROKEN", "The fence query failed.");
+          },
+        };
+      },
+    } as unknown as D1Database;
+    await expect(
+      consumeAfterAdmission(faultDb, owner, "greet", handle, "f", "k", { id: helloSaga.id }, {}),
+    ).rejects.toMatchObject({ code: "FENCE_BROKEN" });
+  });
+
+  it("rejects malformed file references before the file gate", async () => {
+    // parseFileRef is shape-only: non-records and missing location/path
+    // fail closed here, while a location outside the declared policy fails
+    // on the policy arm — all 422, never an implicit accept.
+    const field = { name: "doc" };
+    for (const bad of ["nope", 7, null, {}, { location: "uploads" }, { path: "a/b" }]) {
+      expect(() => parseFileRef(field, bad)).toThrow(/did not pass validation/);
+    }
+    const policyField = { name: "doc", file: { location: "uploads" } };
+    expect(() => parseFileRef(policyField, { location: "elsewhere", path: "a/b" })).toThrow(/did not pass validation/);
+    expect(parseFileRef(policyField, { location: "uploads", path: "a/b" })).toEqual({
+      location: "uploads",
+      path: "a/b",
+    });
+  });
+
+  it("starts forms on a submit-only grant when read denies", async () => {
+    // mayStartForm checks read first and falls back to submit: a member
+    // with zero grants denies both, while a submit-only policy rule admits
+    // the startup route (201) without ever granting read.
+    await ensureRoleTables(bindings.DB);
+    await createForm("gated", [{ name: "name", type: "text", required: true }]);
+    const memberCtx = {
+      principal: { userId: OTHER_USER, orgId: ORG },
+      role: "member" as const,
+      kind: "ordinary" as const,
+      isInstanceAdmin: false,
+      isOrgAdmin: false,
+    };
+    await expect(mayStartForm(bindings.DB, memberCtx, ORG, "gated")).resolves.toBe(false);
+    await createPolicyRule(bindings.DB, ORG, "form", "gated", "submit", "user", OTHER_USER);
+    await expect(mayStartForm(bindings.DB, memberCtx, ORG, "gated")).resolves.toBe(true);
+    const started = await call("/api/forms/gated/startup", "POST", {}, ORG, OTHER_USER);
+    expect(started.status).toBe(201);
+  });
+
+  it("binds a spent handle to its key: a different key cannot reuse it", async () => {
+    // PR 320 review (thread 1): one handle admits exactly one key. After
+    // key A succeeds, key B with the same handle answers STALE before
+    // dispatch — and B's execution row is never created.
+    await createForm("greet", [{ name: "name", type: "text", required: true }]);
+    const started = await startup("greet");
+    const body = { handle: started.handle, values: { name: "Ada" } };
+    const first = await call("/api/forms/greet/submit", "POST", body, ORG, OWNER, "form-02-bind-001");
+    expect(first.status).toBe(202);
+    const second = await call("/api/forms/greet/submit", "POST", body, ORG, OWNER, "form-02-bind-002");
+    expect(second.status).toBe(422);
+    expect(await second.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+    const missing = await bindings.DB.prepare("SELECT id FROM executions WHERE id=?")
+      .bind(await executionId(owner, "form-02-bind-002"))
+      .first<{ id: string }>();
+    expect(missing).toBeNull();
+  });
+
+  it("spends the handle on idempotent replay so a new key cannot claim it", async () => {
+    // PR 320 review (thread 2): the 503-retry path replays (200) and must
+    // still consume the handle. A later different key then answers STALE
+    // instead of minting a second Execution from the same session.
+    await createForm("greet", [{ name: "name", type: "text", required: true }]);
+    const started = await startup("greet");
+    const key = "form-02-replay-bind-001";
+    const body = { handle: started.handle, values: { name: "Ada" } };
+    const failing = {
+      ...bindings,
+      HELLO_WORKFLOW: {
+        createBatch: async () => {
+          throw new Error("control plane down");
+        },
+      },
+    } as unknown as Bindings;
+    const failCall = (path: string, method = "GET", payload?: unknown, idemKey?: string) =>
+      worker.fetch(
+        new Request(`https://local.test${path}`, {
+          method,
+          headers: headers(idemKey ? { "Idempotency-Key": idemKey } : {}),
+          ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+        }),
+        { ...failing, LAB_ORG_ID: ORG, LAB_USER_ID: OWNER },
+      );
+    expect((await failCall("/api/forms/greet/submit", "POST", body, key)).status).toBe(503);
+    const retry = await call("/api/forms/greet/submit", "POST", body, ORG, OWNER, key);
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ replayed: true });
+    const other = await call("/api/forms/greet/submit", "POST", body, ORG, OWNER, "form-02-replay-bind-002");
+    expect(other.status).toBe(422);
+    expect(await other.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+  });
+
+  it("rejects a valid admission proof under a foreign key binding, claims legacy rows", async () => {
+    // The binding is the second proof: OUR execution row plus a handle
+    // claimed by another key still answers STALE. A legacy row with no
+    // binding is claimed on proof and resolves.
+    const { id } = await createForm("greet", [{ name: "name", type: "text", required: true }]);
+    const started = await startup("greet");
+    const key = "form-02-claim-001";
+    const values = { name: "Ada" };
+    expect(
+      (await call("/api/forms/greet/submit", "POST", { handle: started.handle, values }, ORG, OWNER, key)).status,
+    ).toBe(202);
+    const row = await bindings.DB.prepare("SELECT input_json FROM executions WHERE id=?")
+      .bind(await executionId(owner, key))
+      .first<{ input_json: string }>();
+    const admitted = JSON.parse(row?.input_json ?? "{}") as Record<string, unknown>;
+    await bindings.DB.prepare("UPDATE form_startups SET claimed_key=?").bind("foreign-key").run();
+    await expect(
+      consumeAfterAdmission(bindings.DB, owner, "greet", started.handle, id, key, { id: helloSaga.id }, admitted),
+    ).rejects.toMatchObject({ code: "STALE_FORM_HANDLE" });
+    await bindings.DB.prepare("UPDATE form_startups SET claimed_key=NULL").run();
+    await expect(
+      consumeAfterAdmission(bindings.DB, owner, "greet", started.handle, id, key, { id: helloSaga.id }, admitted),
+    ).resolves.toBeUndefined();
+    const claimed = await bindings.DB.prepare("SELECT claimed_key FROM form_startups").first<{
+      claimed_key: string | null;
+    }>();
+    expect(claimed?.claimed_key).toBe(key);
   });
 });

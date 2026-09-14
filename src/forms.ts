@@ -30,11 +30,11 @@
 // - Bounded startup handles: POST /api/forms/:name/startup mints a
 //   random 30-minute session-bound handle (token hash persisted in
 //   `form_startups`, single row per handle). Submit peeks the handle for
-//   validation and consumes it only after all validation gates pass
-//   (form gate, file check, Saga parse), so failed validation leaves it
-//   live for a corrected retry; the dispatch fence then answers 202/200
-//   or 409. Unknown, expired, foreign, or already-used handles answer
-//   422 STALE_FORM_HANDLE and dispatch nothing.
+//   validation, dispatches, then consumes on success — so failed
+//   validation leaves it live for a corrected retry and a 503
+//   DISPATCH_UNCONFIRMED retry can still reach idempotent recovery.
+//   Unknown, expired, foreign, already-used, or definition-mismatched
+//   handles answer 422 STALE_FORM_HANDLE and dispatch nothing.
 // - Delegated authorization: the handle is the form-to-Saga grant. Submit
 //   through a live handle dispatches without requiring a separate
 //   direct-Saga grant; the submitter still needs the form readable in
@@ -57,8 +57,10 @@
 //   contentTypes? }`; submit accepts a finalized FILE-01 `{ location,
 //   path }` reference and re-validates readiness/size/type against the
 //   live file row, so a stale or foreign pointer cannot bypass upload.
-import { Fault, parseSubmission, UUID } from "./domain";
+import { executionId, Fault, parseSubmission, UUID } from "./domain";
 import type { FieldFailure, Principal, SagaDef } from "./domain";
+import type { CallerCtx } from "./orgs";
+import { can } from "./roles";
 
 /** Closed v2 field type set. Display-only kinds (heading, paragraph,
 // divider) render layout and never bind to Saga inputs. */
@@ -200,6 +202,7 @@ interface StartupRow {
   expires_at: string;
   used_at: string | null;
   created_at: string;
+  claimed_key: string | null;
 }
 
 export interface FormStartup {
@@ -1166,9 +1169,16 @@ export function parseScheduleAt(value: unknown): string | null {
 async function ensureStartupTable(db: D1Database): Promise<void> {
   await db
     .prepare(
-      "CREATE TABLE IF NOT EXISTS form_startups(handle_hash TEXT PRIMARY KEY, org_id TEXT NOT NULL, user_id TEXT NOT NULL, form_id TEXT NOT NULL, form_name TEXT NOT NULL, prefill_json TEXT, options_json TEXT, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS form_startups(handle_hash TEXT PRIMARY KEY, org_id TEXT NOT NULL, user_id TEXT NOT NULL, form_id TEXT NOT NULL, form_name TEXT NOT NULL, prefill_json TEXT, options_json TEXT, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL, claimed_key TEXT)",
     )
     .run();
+  // Additive convergence for databases created before the handle-to-key
+  // binding (PR 320 review): fresh tables already carry claimed_key, older
+  // ones gain it here; the duplicate-column error is the converged state.
+  await db
+    .prepare("ALTER TABLE form_startups ADD COLUMN claimed_key TEXT")
+    .run()
+    .catch(() => undefined);
   await db
     .prepare("CREATE INDEX IF NOT EXISTS form_startups_expiry ON form_startups(expires_at)")
     .run()
@@ -1330,23 +1340,30 @@ export async function startFormSession(
 }
 
 /** Peek a startup handle for (org, user, form) without consuming it.
- * Unknown, expired, foreign, already-used, or form-mismatched handles
- * answer 422 STALE_FORM_HANDLE. Returns the persisted snapshot (prefill
- * plus resolved provider options) for the submit merge. The route peeks
- * first so failed validation leaves the handle live for a corrected
- * retry, and consumes only after every validation gate passes. */
+ * Unknown, expired, foreign, already-used-by-another-key, or
+ * form-mismatched handles answer 422 STALE_FORM_HANDLE. A handle already
+ * spent by THIS key (claimed_key matches) peeks live so same-key retries
+ * and canonical replays keep working after the replay path consumes the
+ * handle (PR 320 review: replay must spend the handle, so the peek has to
+ * stay open for the key that owns it). Returns the persisted snapshot
+ * (prefill plus resolved provider options) for the submit merge. The route
+ * peeks first so failed validation leaves the handle live for a corrected
+ * retry, dispatches, then consumes on success so a 503
+ * DISPATCH_UNCONFIRMED retry can still reach idempotent recovery. */
 export async function peekStartupHandle(
   db: D1Database,
   caller: Principal,
   formName: string,
   handle: string,
+  expectedFormId?: string,
+  key?: string,
 ): Promise<{ snapshot: Record<string, unknown>; options: Record<string, readonly string[]>; handleHash: string }> {
   parseStartupHandle(handle);
   await ensureStartupTable(db);
   const handleHash = await hashHandle(handle);
   const row = await db
     .prepare(
-      "SELECT handle_hash,org_id,user_id,form_id,form_name,prefill_json,options_json,expires_at,used_at,created_at FROM form_startups WHERE handle_hash=?",
+      "SELECT handle_hash,org_id,user_id,form_id,form_name,prefill_json,options_json,expires_at,used_at,created_at,claimed_key FROM form_startups WHERE handle_hash=?",
     )
     .bind(handleHash)
     .first<StartupRow>()
@@ -1356,7 +1373,8 @@ export async function peekStartupHandle(
     row.org_id !== caller.orgId ||
     row.user_id !== caller.userId ||
     row.form_name !== formName ||
-    row.used_at !== null ||
+    row.form_id !== (expectedFormId ?? row.form_id) ||
+    (row.used_at !== null && row.claimed_key !== null && row.claimed_key !== key) ||
     Date.parse(row.expires_at) <= Date.now()
   ) {
     throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
@@ -1373,29 +1391,112 @@ export async function peekStartupHandle(
 }
 
 /** Consume a startup handle for (org, user, form): peek first (same 422
- * contract), then win the single-use fence. Unknown, expired, foreign,
- * already-used, form-mismatched, or corrupt handles answer 422
- * STALE_FORM_HANDLE and dispatch nothing. Returns the persisted snapshot
- * (prefill + resolved provider options) for the submit merge. */
+ * contract), then win the single-use fence while binding the handle to the
+ * caller's idempotency key. Unknown, expired, foreign, already-used,
+ * form-mismatched, or corrupt handles answer 422 STALE_FORM_HANDLE and
+ * dispatch nothing. Returns the persisted snapshot (prefill + resolved
+ * provider options) for the submit merge. Called after durable admission
+ * (not before dispatch): a lost consume race is tolerated only when the
+ * caller owns the admitted row AND the durable key binding. */
 export async function consumeStartupHandle(
   db: D1Database,
   caller: Principal,
   formName: string,
   handle: string,
+  expectedFormId?: string,
+  claimKey?: string,
 ): Promise<{ snapshot: Record<string, unknown>; options: Record<string, readonly string[]> }> {
-  const { snapshot, options, handleHash } = await peekStartupHandle(db, caller, formName, handle);
+  const { snapshot, options, handleHash } = await peekStartupHandle(db, caller, formName, handle, expectedFormId);
   // The conditional UPDATE is the single-use fence: exactly one consumer
-  // wins the row; a lost race (changes === 0) answers stale rather than
-  // dispatching twice.
+  // wins the row and binds it to its idempotency key; a lost race
+  // (changes === 0) answers stale rather than dispatching twice.
   const consumed = await db
-    .prepare("UPDATE form_startups SET used_at=? WHERE handle_hash=? AND used_at IS NULL")
-    .bind(new Date().toISOString(), handleHash)
+    .prepare("UPDATE form_startups SET used_at=?,claimed_key=? WHERE handle_hash=? AND used_at IS NULL")
+    .bind(new Date().toISOString(), claimKey ?? null, handleHash)
     .run()
     .catch(() => null);
   if (!consumed || consumed.meta.changes === 0) {
     throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
   }
   return { snapshot, options };
+}
+
+/** FORM-02 lifecycle authorization (#155): the startup and provider routes
+ * mint capabilities and read provider-derived state, so they need a form
+ * read-or-submit grant — never a separate saga execute grant
+ * (delegation), never nothing. Read is checked first; submit is checked
+ * only when read denies. */
+export async function mayStartForm(db: D1Database, ctx: CallerCtx, orgId: string, formName: string): Promise<boolean> {
+  if (await can(db, ctx, { orgId, resourceKind: "form", resourceId: formName, action: "read" })) return true;
+  return can(db, ctx, { orgId, resourceKind: "form", resourceId: formName, action: "submit" });
+}
+
+/** FORM-02 recovery fence (#155): after dispatch succeeds but the
+ * handle-consume loses a race (used_at set by a concurrent submit), decide
+ * whether the caller owns the admission. Two proofs are required: the
+ * deterministic execution id for (org, user, key) plus the exact persisted
+ * input must match THIS submission, AND the durable handle-to-key binding
+ * must name THIS key. A foreign submission that won the consume race binds
+ * the handle to its own key, so the caller's handle is spent: answer
+ * stale, never a replay of foreign work. A legacy row with no binding is
+ * claimed on proof (same key), preserving same-key recovery. */
+export async function verifyOwnAdmission(
+  db: D1Database,
+  caller: Principal,
+  handle: string,
+  key: string,
+  saga: { id: string },
+  input: unknown,
+): Promise<void> {
+  const id = await executionId(caller, key);
+  const expectedInput = JSON.stringify(input);
+  const row = await db
+    .prepare("SELECT saga_id,input_json FROM executions WHERE id=? AND org_id=? AND user_id=?")
+    .bind(id, caller.orgId, caller.userId)
+    .first<{ saga_id: string; input_json: string }>()
+    .catch(() => null);
+  if (!row || row.saga_id !== saga.id || row.input_json !== expectedInput) {
+    throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+  }
+  const handleHash = await hashHandle(handle);
+  const binding = await db
+    .prepare("SELECT claimed_key FROM form_startups WHERE handle_hash=?")
+    .bind(handleHash)
+    .first<{ claimed_key: string | null }>()
+    .catch(() => null);
+  if (!binding || (binding.claimed_key !== null && binding.claimed_key !== key)) {
+    throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+  }
+  if (binding.claimed_key === null) {
+    await db
+      .prepare("UPDATE form_startups SET claimed_key=? WHERE handle_hash=? AND claimed_key IS NULL")
+      .bind(key, handleHash)
+      .run()
+      .catch(() => null);
+  }
+}
+
+/** FORM-02 consume-after-admission (#155): the submit route dispatches
+ * first, then spends the one-time handle bound to its idempotency key. A
+ * lost consume race is tolerated only when the deterministic execution row
+ * plus the durable key binding both prove OUR submission admitted (same
+ * key); anything else rethrows. */
+export async function consumeAfterAdmission(
+  db: D1Database,
+  caller: Principal,
+  formName: string,
+  handle: string,
+  formId: string,
+  key: string,
+  saga: { id: string },
+  admittedInput: unknown,
+): Promise<void> {
+  try {
+    await consumeStartupHandle(db, caller, formName, handle, formId, key);
+  } catch (error) {
+    if (!(error instanceof Fault) || error.code !== "STALE_FORM_HANDLE") throw error;
+    await verifyOwnAdmission(db, caller, handle, key, saga, admittedInput);
+  }
 }
 
 /** Parse a file-field reference against its declared policy (shape only;

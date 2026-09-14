@@ -152,12 +152,13 @@ import {
   setScheduleEnabled,
 } from "./schedules";
 import {
-  consumeStartupHandle,
+  consumeAfterAdmission,
   deleteForm,
   FORM_NAME,
   type FormDefinition,
   listForms,
   loadForm,
+  mayStartForm,
   parseFileRef,
   parseScheduleAt,
   parseStartupHandle,
@@ -1159,6 +1160,12 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       requireJson(request);
       const def = await loadForm(env.DB, caller.orgId, name);
       if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      // FORM-02 authorization (#155): startup mints a capability and reads
+      // provider-derived state, so it needs a form read-or-submit grant —
+      // never a separate saga execute grant (delegation), never nothing.
+      if (!(await mayStartForm(env.DB, ctx, caller.orgId, name))) {
+        throw new Fault(403, "GRANT_REQUIRED", "Starting this Form requires a read or submit grant.");
+      }
       const started = await startFormSession(env.DB, caller, def, await boundedJson(request.body), readProviderTable);
       return json(
         {
@@ -1182,6 +1189,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
       const def = await loadForm(env.DB, caller.orgId, name);
       if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      // FORM-02 authorization (#155): provider resolution reads
+      // Table-backed state through the declaration, so it needs the same
+      // form read-or-submit grant as startup — never a separate saga
+      // execute grant, never nothing.
+      if (!(await mayStartForm(env.DB, ctx, caller.orgId, name))) {
+        throw new Fault(403, "GRANT_REQUIRED", "Reading this Form's providers requires a read or submit grant.");
+      }
       const resolved = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
       return json({ form: name, options: resolved.options, errors: resolved.errors });
     }
@@ -1232,9 +1246,12 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const scheduleAt = parseScheduleAt(record.scheduleAt);
       // Peek the session without consuming: validation, provider refresh,
       // and the file check all run first so a submission that fails them
-      // leaves the handle live for a corrected retry. Only validated
-      // submissions reach the consume-then-dispatch fence below.
-      const session = await peekStartupHandle(env.DB, caller, name, handle);
+      // leaves the handle live for a corrected retry. The handle binds to
+      // the current definition id, so delete/recreate under the same name
+      // invalidates sessions minted against the old form. The caller's key
+      // rides along so a handle spent by THIS key still peeks live for
+      // same-key retries and canonical replays.
+      const session = await peekStartupHandle(env.DB, caller, name, handle, def.id, key);
       const fresh = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
       const values = record.values === undefined ? {} : record.values;
       // Order matters: form-gate validation + defaults merge first, then
@@ -1244,14 +1261,25 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const merged = validateAndMerge(def, values, { allowedOptions: fresh.options, values: session.snapshot });
       await checkFormFiles(env.DB, caller, def, merged);
       const { saga, input } = parseSubmission({ sagaId: def.sagaId, input: merged });
-      // Consume only after every validation gate passes (form gate, file
-      // check, Saga parse), immediately before dispatch: failed validation
-      // leaves the handle live for retry, while the single-use fence wins
-      // the row for exactly one submit so a concurrent duplicate racing
-      // past validation answers stale instead of dispatching twice.
-      await consumeStartupHandle(env.DB, caller, name, handle);
+      // FORM-02 recovery (#155): consume AFTER durable admission, not
+      // before. The old consume-then-dispatch order burned the one-time
+      // handle when submit answered 503 DISPATCH_UNCONFIRMED, making the
+      // documented same-request retry impossible (STALE_FORM_HANDLE instead
+      // of the idempotent recovery path). The flow below:
+      // 1. peek the fence (unused + live + same form id),
+      // 2. dispatch (or durable schedule insert) first,
+      // 3. consume only on success, tolerating a lost consume race only
+      //    when the Execution row proves OUR submission admitted (same
+      //    deterministic execution id + same input). A lost race over a
+      //    foreign admission still answers stale, never a replay of ours.
       if (scheduleAt !== null) {
         const scheduled = await scheduleFormExecution(env.DB, caller, key, name, saga, input, scheduleAt);
+        // Consume on every confirmed admission, including idempotent
+        // replay: the replay proves OUR key admitted, so the handle binds
+        // to it here. A live handle after replay would stay reusable under
+        // a different key (PR 320 review).
+        const scheduledInput = { ...(input as Record<string, unknown>), __form: name, __scheduleAt: scheduleAt };
+        await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, scheduledInput);
         return json({ form: name, ...scheduled }, scheduled.replayed ? 200 : 202, {
           Location: scheduled.statusUrl,
         });
@@ -1263,6 +1291,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       void _internalForm;
       void _internalAt;
       const accepted = await submit(env, caller, key, saga, sagaInput);
+      // Consume on every confirmed admission, including idempotent replay
+      // (same rationale as the scheduled path above): the replayed row
+      // proves OUR key, so the handle binds to it and cannot be reused
+      // under a different key afterwards.
+      await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, sagaInput);
       // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
       return json({ form: name, ...accepted }, accepted.replayed ? 200 : 202, { Location: accepted.statusUrl });
     }
