@@ -163,13 +163,19 @@ OAuth token mechanics are centralized in `src/oauth.ts` (OAUTH-01, issue
   state-bound callback validation), and rotating refresh-token refresh. Sagas
   never implement refresh independently. The module performs no D1 I/O, so no
   database transaction is ever held over vendor HTTP.
-- Concurrency fencing is per-tenant single-flight: concurrent token requests
-  for the same (endpoint, path, tenant, scope) share one in-flight vendor
-  call. The vendor sees exactly one refresh POST per rotation no matter how
-  many 401 retries race — the Cloudflare-native equivalent of upstream's
-  serialized refresh (bifrost PR #741 row-lock pin, recorded in
-  `docs/upstream-spec.md` section 15). Authorization-code exchanges are
-  deliberately never coalesced: codes are single-use.
+- Concurrency fencing is per-tenant single-flight with a cross-instance fence:
+  concurrent token requests for the same (endpoint, path, tenant, generation,
+  scope) share one in-flight vendor call. Rotating refreshes funnel through
+  the memory-only `OAuthRefreshFence` Durable Object (one stub per
+  tenant+generation key, one volatile vendor POST per round) whenever the
+  caller supplies the `OAUTH_REFRESH_FENCE` binding, because a module-global
+  map alone cannot serialize refreshes across Worker instances (issue #149
+  follow-up). The object holds no storage, performs no D1 I/O, and persists
+  no token (SEC-02 stays shut). The vendor sees exactly one refresh POST per
+  rotation no matter how many 401 retries race — the Cloudflare-native
+  equivalent of upstream's serialized refresh (bifrost PR #741 row-lock pin,
+  recorded in `docs/upstream-spec.md` section 15). Authorization-code
+  exchanges are deliberately never coalesced: codes are single-use.
 - Audience/scope overrides use replacement semantics per the corrected
   upstream attribution: a requested scope replaces the configured default for
   that token request (Graph-to-Exchange style audience change), with no subset

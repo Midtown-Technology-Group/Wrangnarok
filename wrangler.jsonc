@@ -67,6 +67,28 @@
       "bucket_name": "wrangnarok-artifacts-local",
     },
   ],
+  // OAUTH-01 follow-up (issue #149): cross-instance rotating-refresh fence.
+  // The OAuthRefreshFence object behind each (tenant, generation) key runs
+  // one volatile vendor POST per rotation round. Memory-only: no storage, no
+  // D1, no persisted token. Per AGENTS.md constraint 7 the primitive is
+  // earned by the distributed-execution requirement: Workers gives no
+  // guarantee two requests share an instance, so module memory cannot fence
+  // a one-time rotating refresh token. Named envs repeat this block (DO
+  // bindings are not inherited) and each adds the v1 migration below.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "OAUTH_REFRESH_FENCE",
+        "class_name": "OAuthRefreshFence",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["OAuthRefreshFence"],
+    },
+  ],
   "workflows": [
     {
       "binding": "ECHO_WORKFLOW",
@@ -148,6 +170,20 @@
           "bucket_name": "wrangnarok-artifacts-dev",
         },
       ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "OAUTH_REFRESH_FENCE",
+            "class_name": "OAuthRefreshFence",
+          },
+        ],
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": ["OAuthRefreshFence"],
+        },
+      ],
       "workflows": [
         {
           "binding": "ECHO_WORKFLOW",
@@ -219,6 +255,20 @@
         {
           "binding": "FILES",
           "bucket_name": "wrangnarok-preview",
+        },
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "OAUTH_REFRESH_FENCE",
+            "class_name": "OAuthRefreshFence",
+          },
+        ],
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": ["OAuthRefreshFence"],
         },
       ],
       "workflows": [

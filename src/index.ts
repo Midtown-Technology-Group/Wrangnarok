@@ -321,6 +321,9 @@ export {
   NinjaOrgsWorkflow,
   SmokeWorkflow,
 } from "./sagas";
+// OAUTH-01 follow-up (issue #149): the cross-instance rotating-refresh fence
+// Durable Object, bound as OAUTH_REFRESH_FENCE in wrangler.jsonc.
+export { OAuthRefreshFence } from "./oauth-refresh-fence";
 
 /** Baseline defense headers for every user-facing response (issue #237).
  * JSON API responses already carried no-store + nosniff; this extends the same
