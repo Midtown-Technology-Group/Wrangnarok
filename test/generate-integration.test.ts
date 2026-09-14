@@ -2,7 +2,6 @@
 // INT-01 (issue #229): generator tests. Pure node-safe: no bindings, no D1,
 // no Workflows, no vendor HTTP. A Halo-shaped fixture proves the exit:
 // converts to a compiling-shaped module or fails loudly with the gap.
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { runCommand } from "../scripts/wrangnarok.mjs";
 import { Fault } from "../src/domain";
@@ -36,6 +35,11 @@ function opts() {
   };
 }
 
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 describe("INT-01 generator (issue #229)", () => {
   it("emits a self-contained module from a Halo-shaped spec", () => {
     const out = generateIntegrationModule(haloShaped(), opts(), DIGEST);
@@ -64,7 +68,7 @@ describe("INT-01 generator (issue #229)", () => {
 
   it("keeps the plain-node CLI on the exact canonical emitted implementation", async () => {
     const spec = haloShaped();
-    const digest = createHash("sha256").update(spec, "utf-8").digest("hex");
+    const digest = await sha256Hex(spec);
     const canonical = generateIntegrationModule(spec, opts(), digest);
     const cli = await runCommand({
       command: "generate-integration",
