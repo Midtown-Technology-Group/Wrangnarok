@@ -113,6 +113,12 @@ jobs:
             exit 1
           fi
 
+      # ADR numbers are steward-owned identities. New proposals stay ADR TBD
+      # until docs/adr-ledger.md reserves a number; duplicate or mismatched
+      # assignments fail closed before they can reach main.
+      - name: ADR number ledger
+        run: node scripts/check-adr-ledger.mjs
+
       # Temp-dir roundtrip of the file-based mailbox bridge (alias, send,
       # read, reply correlation). No credentials, no network, no live store.
       - name: Mailbox bridge selftest
@@ -132,6 +138,8 @@ jobs:
           test -s docs/lexicon.md
           test -s docs/upstream-spec.md
           test -s docs/testing.md
+          test -s docs/adr-ledger.md
+          test -s scripts/check-adr-ledger.mjs
           test -s docs/architecture/001-execution-model.md
           test -s docs/architecture/002-saga-identity.md
           test -s docs/architecture/003-integrations-connections.md
