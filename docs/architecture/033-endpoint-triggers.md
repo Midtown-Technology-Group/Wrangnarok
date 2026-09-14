@@ -1,4 +1,4 @@
-# ADR 018: Endpoint and webhook Triggers
+# ADR 033: Endpoint and webhook Triggers
 
 **Status:** Accepted for issue #138 (TRG-02). Implements the webhook half of
 the ADR 012 investigation; schedule Triggers stay deferred to TRG-01.

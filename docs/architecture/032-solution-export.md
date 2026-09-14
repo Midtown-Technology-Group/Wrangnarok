@@ -1,4 +1,4 @@
-# ADR 016: Solution source capture, export, and import
+# ADR 032: Solution source capture, export, and import
 
 - **Status:** Accepted (2026-09-11; issue #163, SOL-03)
 - **Date:** 2026-09-11

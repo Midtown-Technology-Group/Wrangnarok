@@ -1,4 +1,4 @@
-# ADR 018: Managed file locations over R2 with D1 metadata, policy-checked proxy access, and finalize-after-upload
+# ADR 034: Managed file locations over R2 with D1 metadata, policy-checked proxy access, and finalize-after-upload
 
 - **Status:** Accepted (2026-09-11; gates FILE-01 per issue #157)
 - **Date:** 2026-09-11

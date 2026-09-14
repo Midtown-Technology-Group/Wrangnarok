@@ -1,4 +1,4 @@
-# ADR 018: Resource Roles, Claims, and Delegated Authorization (AUTH-02)
+# ADR 035: Resource Roles, Claims, and Delegated Authorization (AUTH-02)
 
 - **Status:** Accepted
 - **Date:** 2026-09-11

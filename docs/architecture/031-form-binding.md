@@ -1,4 +1,4 @@
-# ADR 015: Forms-to-Saga input binding (FORM-01)
+# ADR 031: Forms-to-Saga input binding (FORM-01)
 
 - **Status:** Accepted
 - **Date:** 2026-09-11

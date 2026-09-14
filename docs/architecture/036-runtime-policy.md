@@ -1,4 +1,4 @@
-# ADR 018: Persisted per-Saga runtime policy (RUN-01)
+# ADR 036: Persisted per-Saga runtime policy (RUN-01)
 
 - **Status:** Implemented (RUN-01, issue #135)
 - **Date:** 2026-09-11

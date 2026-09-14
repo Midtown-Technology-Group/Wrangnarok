@@ -1,4 +1,4 @@
-# ADR 019: Generated Artifacts — D1 identity plus R2 bytes, attachment bindings, retention
+# ADR 037: Generated Artifacts — D1 identity plus R2 bytes, attachment bindings, retention
 
 - **Status:** Accepted (2026-09-11; gates FILE-02 per issue #158)
 - **Date:** 2026-09-11
