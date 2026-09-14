@@ -715,6 +715,52 @@ describe("cross-instance refresh fence (issue #149 follow-up)", () => {
           )
         ).status,
       ).toBe(400);
+      // Non-object fault table and misshaped fault lines also fail closed.
+      const badTable = new URLSearchParams({
+        token_url: "https://v.invalid",
+        form: "a=b",
+        faults: JSON.stringify(["not", "a", "table"]),
+        timeout_ms: "50",
+      }).toString();
+      expect(
+        (await fence.fetch(new Request("https://fence/refresh/k", { method: "POST", body: badTable }))).status,
+      ).toBe(400);
+      const badLine = new URLSearchParams({
+        token_url: "https://v.invalid",
+        form: "a=b",
+        faults: JSON.stringify({
+          authFailed: { status: "bad", code: 7, message: null },
+          badResponse: FAULTS.badResponse,
+          vendorTimeout: FAULTS.vendorTimeout,
+        }),
+        timeout_ms: "50",
+      }).toString();
+      expect(
+        (await fence.fetch(new Request("https://fence/refresh/k", { method: "POST", body: badLine }))).status,
+      ).toBe(400);
+      // AbortError (not just TimeoutError) maps to the vendor-timeout fault.
+      const aborting = vi.spyOn(globalThis, "fetch").mockRejectedValue(new DOMException("aborted", "AbortError"));
+      try {
+        const aborted = await fence.fetch(
+          new Request("https://fence/refresh/abort-key", {
+            method: "POST",
+            body: new URLSearchParams({
+              token_url: "https://oauth-in-test.invalid/oauth/token",
+              form: "grant_type=refresh_token",
+              faults: JSON.stringify({
+                authFailed: FAULTS.authFailed,
+                badResponse: FAULTS.badResponse,
+                vendorTimeout: FAULTS.vendorTimeout,
+              }),
+              timeout_ms: "50",
+            }).toString(),
+          }),
+        );
+        expect(aborted.status).toBe(504);
+        expect(await aborted.json()).toMatchObject({ code: "TEST_VENDOR_TIMEOUT" });
+      } finally {
+        aborting.mockRestore();
+      }
       expect(vendorSpy).not.toHaveBeenCalled();
     } finally {
       vendorSpy.mockRestore();
@@ -745,6 +791,96 @@ describe("cross-instance refresh fence (issue #149 follow-up)", () => {
       expect(await relayed.json()).toMatchObject({ code: "TEST_VENDOR_TIMEOUT" });
     } finally {
       slow.mockRestore();
+    }
+  });
+
+  it("releases the fence after failures and maps malformed relays", async () => {
+    const fence = new OAuthRefreshFence();
+    const faultsBody = new URLSearchParams({
+      token_url: "https://oauth-in-test.invalid/oauth/token",
+      form: "grant_type=refresh_token",
+      faults: JSON.stringify({
+        authFailed: FAULTS.authFailed,
+        badResponse: FAULTS.badResponse,
+        vendorTimeout: FAULTS.vendorTimeout,
+      }),
+      timeout_ms: "50",
+    }).toString();
+    const post = (key: string, body: string): Request =>
+      new Request(`https://fence/refresh/${key}`, { method: "POST", body });
+
+    // Malformed fault table and timeout values fail closed before any fetch.
+    const vendorSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      for (const body of [
+        new URLSearchParams({
+          token_url: "https://v.invalid",
+          form: "a=b",
+          faults: "not-json",
+          timeout_ms: "50",
+        }).toString(),
+        new URLSearchParams({
+          token_url: "https://v.invalid",
+          form: "a=b",
+          faults: JSON.stringify({ authFailed: FAULTS.authFailed }),
+          timeout_ms: "50",
+        }).toString(),
+        new URLSearchParams({
+          token_url: "https://v.invalid",
+          form: "a=b",
+          faults: "{}",
+          timeout_ms: "nope",
+        }).toString(),
+        new URLSearchParams({
+          token_url: "https://v.invalid",
+          form: "a=b",
+          faults: JSON.stringify({
+            authFailed: FAULTS.authFailed,
+            badResponse: FAULTS.badResponse,
+            vendorTimeout: FAULTS.vendorTimeout,
+          }),
+          timeout_ms: "99999",
+        }).toString(),
+        "x".repeat(9000),
+      ]) {
+        expect((await fence.fetch(post("edge", body))).status).toBe(400);
+      }
+      expect(vendorSpy).not.toHaveBeenCalled();
+    } finally {
+      vendorSpy.mockRestore();
+    }
+
+    // A raw transport failure propagates (not a fence fault), and the fence
+    // releases so the next round fetches again.
+    const broken = vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("connection reset"));
+    try {
+      await expect(fence.fetch(post("flaky", faultsBody))).rejects.toThrow("connection reset");
+    } finally {
+      broken.mockRestore();
+    }
+    const recovering = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(tokenJson({ access_token: "recovered-access", refresh_token: "recovered-next" }));
+    try {
+      const retry = await fence.fetch(post("flaky", faultsBody));
+      expect(retry.status).toBe(200);
+      expect(await retry.json()).toMatchObject({ access_token: "recovered-access" });
+    } finally {
+      recovering.mockRestore();
+    }
+
+    // An oversized vendor body fails closed with the transport bound.
+    const huge = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response("x".repeat(5000), { status: 200, headers: { "Content-Type": "application/json" } }),
+      );
+    try {
+      const oversized = await fence.fetch(post("huge", faultsBody));
+      expect(oversized.status).toBe(413);
+      expect(await oversized.json()).toMatchObject({ code: "BODY_TOO_LARGE" });
+    } finally {
+      huge.mockRestore();
     }
   });
 });

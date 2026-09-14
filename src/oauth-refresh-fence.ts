@@ -109,6 +109,8 @@ export class OAuthRefreshFence {
         headers: { "Content-Type": "application/json" },
       });
     } catch (error) {
+      // No leaked flight survives here: flightFor releases on settle, so a
+      // failure never poisons the next rotation round for this key.
       return fenceError(error);
     }
   }
