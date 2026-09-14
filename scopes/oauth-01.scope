@@ -16,4 +16,5 @@ test/ninjaone.test.ts
 test/integration-faults.test.ts
 docs/architecture/003-integrations-connections.md
 docs/upstream-parity.md
+scripts/check-bundle-budget.mjs
 scopes/oauth-01.scope

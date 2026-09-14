@@ -495,13 +495,8 @@ export async function refreshRotatingToken(request: RefreshTokenRequest): Promis
   const scopeKey = request.scope ?? "";
   const key = `rt|${tokenUrl}|${tenantKey}|${generation}|${scopeKey}`;
   const fence = request.fence;
-  if (fence !== undefined) {
-    // Cross-instance path: the fence object's single-threaded fetch handler
-    // admits one vendor POST per key however many isolates race. The posted
-    // fields are the non-secret fence identity plus the vendor form; the
-    // refresh token itself travels to the object (same trust domain as the
-    // Worker) but is never persisted there — the object performs one volatile
-    // POST and drops it on settle.
+  const faults = request.faults;
+  const buildForm = (): URLSearchParams => {
     const form = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: submitted,
@@ -509,11 +504,19 @@ export async function refreshRotatingToken(request: RefreshTokenRequest): Promis
       client_secret: clientSecret,
     });
     if (request.scope !== undefined) form.set("scope", request.scope);
-    const faults = request.faults;
+    return form;
+  };
+  if (fence !== undefined) {
+    // Cross-instance path: the fence object's single-threaded fetch handler
+    // admits one vendor POST per key however many isolates race. The posted
+    // fields are the non-secret fence identity plus the vendor form; the
+    // refresh token itself travels to the object (same trust domain as the
+    // Worker) but is never persisted there — the object performs one volatile
+    // POST and drops it on settle.
     const timeoutMs = request.timeoutMs ?? 5000;
     const envelope = new URLSearchParams({
       token_url: tokenUrl,
-      form: form.toString(),
+      form: buildForm().toString(),
       faults: JSON.stringify({
         authFailed: faults.authFailed,
         badResponse: faults.badResponse,
@@ -538,14 +541,7 @@ export async function refreshRotatingToken(request: RefreshTokenRequest): Promis
     });
   }
   return singleFlight(key, async () => {
-    const form = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: submitted,
-      client_id: clientId,
-      client_secret: clientSecret,
-    });
-    if (request.scope !== undefined) form.set("scope", request.scope);
-    const token = await postTokenForm(tokenUrl, form, request.faults, request);
+    const token = await postTokenForm(tokenUrl, buildForm(), request.faults, request);
     const next = token.refreshToken ?? submitted;
     return Object.freeze({ token, rotated: token.refreshToken !== undefined, refreshToken: next });
   });

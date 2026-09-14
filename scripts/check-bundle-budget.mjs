@@ -238,7 +238,14 @@ import { join } from "node:path";
 // bytes in CI against the 630 KiB line. Hand-written security-fix code, no
 // new dependencies (package.json unchanged versus main); deliberate
 // feature headroom only.
-const BUDGET_BYTES = 635 * 1024;
+// 2026-09-14 (OAUTH-01 fence follow-up, issue #149): 640 KiB. The memory-only
+// OAuthRefreshFence Durable Object (src/oauth-refresh-fence.ts: one stub per
+// tenant+generation key, one volatile vendor POST per round; no storage, no
+// D1, no persisted token) plus the fence delegation in refreshRotatingToken
+// measures 653395 bytes locally (CI number governs) against the 635 KiB line.
+// Hand-written feature code, no new dependencies (package.json unchanged
+// versus main); deliberate feature headroom only.
+const BUDGET_BYTES = 640 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");
