@@ -11,8 +11,21 @@ import {
 } from "../domain";
 import type { NinjaOrgSummary, NinjaOrgsResult } from "../domain";
 import { assertSafeEndpoint } from "./index";
+import { requestClientCredentialsToken } from "../oauth";
+import type { OAuthFaultTable } from "../oauth";
 import { registerExecutionSecrets, scrubTextWithSecrets } from "../secrets";
 export const ninjaIntegration = Object.freeze({ id: NINJA_INTEGRATION_ID, name: "ninjaone" });
+/** NinjaOne token Fault taxonomy (OAUTH-01): the exact codes/messages the
+ * existing acceptance pins. Centralizing mechanics never renames them. */
+const NINJA_TOKEN_FAULTS: OAuthFaultTable = {
+  notConfigured: { status: 502, code: "NINJA_NOT_CONFIGURED", message: "NinjaOne credentials are not configured." },
+  redirected: { status: 502, code: "NINJA_AUTH_FAILED", message: "NinjaOne redirected the token request." },
+  unauthorized: { status: 502, code: "NINJA_UNAUTHORIZED", message: "NinjaOne rejected the credentials." },
+  rateLimited: { status: 502, code: "NINJA_RATE_LIMITED", message: "NinjaOne rate-limited the token request." },
+  authFailed: { status: 502, code: "NINJA_AUTH_FAILED", message: "NinjaOne did not issue a token." },
+  badResponse: { status: 502, code: "NINJA_BAD_RESPONSE", message: "NinjaOne returned an unexpected token response." },
+  vendorTimeout: { status: 504, code: "NINJA_VENDOR_TIMEOUT", message: "NinjaOne exceeded its deadline." },
+};
 export interface NinjaConnection {
   endpoint: string;
 }
@@ -53,6 +66,15 @@ export async function listOrganizations(
   // never copied in — shaping is the primary guard, scrubbing the backstop.
   const registered = [clientId, clientSecret];
   const clean = (message: string): string => scrubTextWithSecrets(message, registered);
+  // Explicit deadline, same posture as echo: a vendor that is slow (abort
+  // fires) or merely late (resolves after the deadline because the transport
+  // ignored the abort) surfaces NINJA_VENDOR_TIMEOUT. The clock anchors
+  // before token acquisition, so the deadline covers the whole vendor
+  // interaction end to end — the centralized token primitive stamps expiry
+  // with one Date.now() read, which must never consume the Action's own
+  // start tick.
+  const started = Date.now();
+  const timedOut = () => Date.now() - started >= deadline;
   // Token stays a transient local: fetched, used, dropped. It must never
   // reach D1, ExecutionHistory, logs, or Workflow persisted state.
   let token: string;
@@ -65,18 +87,22 @@ export async function listOrganizations(
   if (executionId !== undefined) registerExecutionSecrets(executionId, [token]);
   const withToken = [...registered, token];
   const cleanToken = (message: string): string => scrubTextWithSecrets(message, withToken);
-  // Explicit deadline, same posture as echo: a vendor that is slow (abort
-  // fires) or merely late (resolves after the deadline because the transport
-  // ignored the abort) surfaces NINJA_VENDOR_TIMEOUT.
-  const started = Date.now();
-  const timedOut = () => Date.now() - started >= deadline;
+  // The organizations hop spends only what the end-to-end deadline has left:
+  // token acquisition already consumed part of it, so a fresh full deadline
+  // here could run the whole interaction to nearly twice the configured
+  // bound. Fail immediately when nothing remains instead of issuing a vendor
+  // call that cannot succeed in time.
+  const remaining = deadline - (Date.now() - started);
+  if (remaining <= 0) {
+    throw new Fault(504, "NINJA_VENDOR_TIMEOUT", "NinjaOne exceeded its deadline.");
+  }
   let response: Response;
   try {
     try {
       response = await fetch(`${connection.endpoint}${NINJA_ORGS_PATH}`, {
         method: "GET",
         redirect: "manual",
-        signal: AbortSignal.timeout(deadline),
+        signal: AbortSignal.timeout(remaining),
         headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
       });
     } catch (error) {
@@ -142,53 +168,17 @@ async function fetchToken(
 ): Promise<string> {
   // Regional token host derived from the Connection endpoint, so an EU/OC
   // Connection authenticates against its own region with no code change.
-  // Scope is pinned read-only; the M2M app carries nothing broader.
-  const tokenUrl = new URL(NINJA_TOKEN_PATH, connection.endpoint).toString();
-  let response: Response;
-  try {
-    response = await fetch(tokenUrl, {
-      method: "POST",
-      redirect: "manual",
-      signal: AbortSignal.timeout(timeoutMs),
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-      body: new URLSearchParams({
-        grant_type: "client_credentials",
-        client_id: credentials.clientId,
-        client_secret: credentials.clientSecret,
-        scope: NINJA_SCOPE,
-      }).toString(),
-    });
-  } catch (error) {
-    throwIfNinjaTimeout(error);
-    throw error;
-  }
-  if (response.status >= 300 && response.status < 400) {
-    await response.body?.cancel();
-    throw new Fault(502, "NINJA_AUTH_FAILED", "NinjaOne redirected the token request.");
-  }
-  if (response.status === 401) {
-    await response.body?.cancel();
-    throw new Fault(502, "NINJA_UNAUTHORIZED", "NinjaOne rejected the credentials.");
-  }
-  if (response.status === 429) {
-    await response.body?.cancel();
-    throw new Fault(502, "NINJA_RATE_LIMITED", "NinjaOne rate-limited the token request.");
-  }
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Fault(502, "NINJA_AUTH_FAILED", "NinjaOne did not issue a token.");
-  }
-  const value = await boundedJson(response.body);
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    Array.isArray(value) ||
-    typeof (value as Record<string, unknown>).access_token !== "string" ||
-    ((value as Record<string, unknown>).access_token as string).length === 0
-  ) {
-    throw new Fault(502, "NINJA_BAD_RESPONSE", "NinjaOne returned an unexpected token response.");
-  }
-  return (value as Record<string, unknown>).access_token as string;
+  // Scope is pinned read-only; the M2M app carries nothing broader. The token
+  // stays transient (ADR 005 v0): returned to the caller, never persisted.
+  const token = await requestClientCredentialsToken({
+    endpoint: connection.endpoint,
+    tokenPath: NINJA_TOKEN_PATH,
+    scope: NINJA_SCOPE,
+    credentials,
+    faults: NINJA_TOKEN_FAULTS,
+    timeoutMs,
+  });
+  return token.accessToken;
 }
 
 /** A slow vendor is an actionable deadline, not a generic vendor failure:

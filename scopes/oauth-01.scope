@@ -1,0 +1,15 @@
+# OAUTH-01 lane scope (issue #149): OAuth authorization, centralized refresh, credential health.
+# Centralized fetch-and-discard token primitive (SEC-02 stays shut: no token
+# persistence), auth-code/PKCE/callback contracts, audience/scope override
+# semantics, non-secret health lifecycle. NinjaOne wired onto the primitive;
+# halo auth shape unchanged.
+src/oauth.ts
+src/integrations/ninjaone.ts
+test/oauth.test.ts
+test/ninjaone.test.ts
+# integration-faults pins the NinjaOne Action fault/deadline mapping the
+# shared primitive must preserve (added by this lane for the review fix).
+test/integration-faults.test.ts
+docs/architecture/003-integrations-connections.md
+docs/upstream-parity.md
+scopes/oauth-01.scope
