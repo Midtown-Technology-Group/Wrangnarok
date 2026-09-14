@@ -12,7 +12,7 @@ client/src/lib/api-client.ts
 client/src/lib/client-types.ts
 client/src/App.tsx
 client/src/components/Nav.tsx
-docs/architecture/018-managed-files.md
+docs/architecture/034-managed-files.md
 docs/sdk-capability-map.md
 docs/upstream-parity.md
 scripts/check-bundle-budget.mjs
