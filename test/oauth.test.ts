@@ -338,6 +338,43 @@ describe("single-flight concurrency fencing (upstream PR #741 equivalent)", () =
     expect(recovered.accessToken).toBe(TOKEN_SENTINEL);
     expect(calls).toHaveLength(2);
   });
+
+  it("never evicts a newer fence entry when an older flight settles late", async () => {
+    // The cleanup guard (inflight.get(key) identity check) matters when an
+    // entry is replaced mid-flight: an older flight settling late must not
+    // delete the newer entry. Through the public API plus the suite-isolation
+    // hook: start flight A, replace its entry with flight B for the same key,
+    // settle A — B must still resolve from its own vendor call.
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const { calls, fetchImpl } = stubVendor([
+      async () => {
+        await firstGate;
+        return tokenJson({ access_token: "older-flight-token" });
+      },
+      async () => tokenJson({ access_token: "newer-flight-token" }),
+    ]);
+    const base = {
+      endpoint: ENDPOINT,
+      tokenPath: TOKEN_PATH,
+      scope: "evict-same",
+      credentials: { clientId: CLIENT_ID, clientSecret: SECRET_SENTINEL },
+      faults: FAULTS,
+      fetchImpl,
+    };
+    const older = requestClientCredentialsToken(base);
+    await Promise.resolve();
+    clearOAuthInflight();
+    const newer = requestClientCredentialsToken(base);
+    const newerToken = await newer;
+    expect(newerToken.accessToken).toBe("newer-flight-token");
+    releaseFirst();
+    const olderToken = await older;
+    expect(olderToken.accessToken).toBe("older-flight-token");
+    expect(calls).toHaveLength(2);
+  });
 });
 
 describe("rotating refresh (one-time refresh tokens submit exactly once)", () => {
@@ -505,6 +542,23 @@ describe("authorization-code exchange with PKCE", () => {
   });
 
   it("passes plain values through and pins the audience override", () => {
+    // A PKCE challenge without an explicit method defaults to S256; an
+    // audience without a scope override still resolves against the default.
+    const pkceUrl = new URL(
+      buildAuthorizationUrl({
+        authorizeEndpoint: "https://login-in-test.invalid/oauth/authorize",
+        clientId: CLIENT_ID,
+        redirectUri: "https://app-in-test.invalid/oauth/callback",
+        scope: "User.Read",
+        state: "state-pkce-default",
+        codeChallenge: "challenge-default-method",
+      }),
+    );
+    expect(pkceUrl.searchParams.get("code_challenge")).toBe("challenge-default-method");
+    expect(pkceUrl.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(resolveTokenScope({ defaultScope: "User.Read", audience: "https://x-in-test.invalid" })).toMatchObject({
+      scope: "User.Read",
+    });
     const url = new URL(
       buildAuthorizationUrl({
         authorizeEndpoint: "https://login-in-test.invalid/oauth/authorize",
@@ -604,6 +658,20 @@ describe("authorization-code exchange with PKCE", () => {
   });
 
   it("rejects exchange inputs before any vendor call", async () => {
+    // A scope-less exchange omits the scope form field entirely.
+    const { calls: minimalCalls, fetchImpl: minimal } = stubVendor([tokenJson({ access_token: "minimal-exchange" })]);
+    const minimalToken = await exchangeAuthorizationCode({
+      endpoint: ENDPOINT,
+      tokenPath: TOKEN_PATH,
+      code: "code-minimal",
+      redirectUri: "https://app-in-test.invalid/oauth/callback",
+      credentials: { clientId: CLIENT_ID, clientSecret: SECRET_SENTINEL },
+      faults: FAULTS,
+      fetchImpl: minimal,
+    });
+    expect(minimalToken.accessToken).toBe("minimal-exchange");
+    expect(new URLSearchParams(minimalCalls[0]?.body ?? "").has("scope")).toBe(false);
+    expect(new URLSearchParams(minimalCalls[0]?.body ?? "").has("code_verifier")).toBe(false);
     const { calls, fetchImpl } = stubVendor([]);
     const base = {
       endpoint: ENDPOINT,
@@ -642,6 +710,13 @@ describe("audience and scope overrides (corrected upstream attribution)", () => 
     });
     expect(resolved.scope).toBe("https://exchange-in-test.invalid/Mail.Read");
     expect(resolved.audience).toBe("https://exchange-in-test.invalid");
+  });
+
+  it("resolves a scope override with no audience as scope-only", () => {
+    expect(resolveTokenScope({ defaultScope: "User.Read", scope: "Mail.Read" })).toMatchObject({
+      scope: "Mail.Read",
+      audience: null,
+    });
   });
 
   it("resolves a SharePoint-style audience without a scope override", () => {
@@ -801,5 +876,17 @@ describe("token revocation", () => {
       revokeOAuthToken({ endpoint: ENDPOINT, revocationPath: "/oauth/revoke", token: TOKEN_SENTINEL, fetchImpl: raw }),
     ).rejects.toThrow("connection reset");
     expect(rawCalls).toHaveLength(1);
+
+    // Default vendor (no fetchImpl/timeout given) rides global fetch.
+    const globalStub = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => new Response(null, { status: 200 }));
+    const defaulted = await revokeOAuthToken({
+      endpoint: ENDPOINT,
+      revocationPath: "/oauth/revoke",
+      token: TOKEN_SENTINEL,
+    });
+    expect(defaulted).toMatchObject({ revoked: true });
+    expect(globalStub).toHaveBeenCalledTimes(1);
   });
 });
