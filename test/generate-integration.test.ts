@@ -9,6 +9,16 @@ import { generateIntegrationModule } from "../src/generate-integration";
 
 const DIGEST = "ab".repeat(32);
 
+interface GeneratedCliResult {
+  readonly generated: {
+    readonly content: string;
+    readonly operations: number;
+    readonly path: string;
+    readonly specDigest: string;
+    readonly next: readonly string[];
+  };
+}
+
 function haloShaped() {
   return JSON.stringify({
     openapi: "3.0.3",
@@ -70,14 +80,14 @@ describe("INT-01 generator (issue #229)", () => {
     const spec = haloShaped();
     const digest = await sha256Hex(spec);
     const canonical = generateIntegrationModule(spec, opts(), digest);
-    const cli = await runCommand({
+    const cli = (await runCommand({
       command: "generate-integration",
       genId: "halo",
       genName: "halo",
       genSpec: spec,
       genOrigins: ["https://halo-lab.example.com"],
       genClassifications: { Ticket_Delete: "destructive" },
-    });
+    })) as GeneratedCliResult;
 
     expect(cli.generated.content).toBe(canonical.source);
     expect(cli.generated.content).toContain("await fetchImpl(url");
