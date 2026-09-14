@@ -152,12 +152,13 @@ import {
   setScheduleEnabled,
 } from "./schedules";
 import {
-  consumeStartupHandle,
+  consumeAfterAdmission,
   deleteForm,
   FORM_NAME,
   type FormDefinition,
   listForms,
   loadForm,
+  mayStartForm,
   parseFileRef,
   parseScheduleAt,
   parseStartupHandle,
@@ -274,7 +275,6 @@ import {
 } from "./tables";
 import {
   assignRole,
-  can,
   createPolicyRule,
   createRole,
   deletePolicyRule,
@@ -628,33 +628,6 @@ async function checkFormFiles(
         { field: field.name, code: "FILE_TYPE_REJECTED", message: "The referenced file type is not accepted." },
       ]);
     }
-  }
-}
-
-/** FORM-02 recovery fence (#155): after dispatch succeeds but the
- * handle-consume loses a race (used_at set by a concurrent submit of the
- * same or a different key), decide whether the caller owns the admission.
- * The deterministic execution id for (org, user, key) plus the exact
- * persisted input must match THIS submission — only then is the lost race
- * harmless (the caller's own work admitted; answer the success). Any
- * mismatch means a foreign submission consumed the handle first: the
- * caller's handle is spent, answer stale, never a replay of foreign work. */
-async function verifyOwnAdmission(
-  db: D1Database,
-  caller: Principal,
-  key: string,
-  saga: { id: string },
-  input: unknown,
-): Promise<void> {
-  const id = await executionId(caller, key);
-  const expectedInput = JSON.stringify(input);
-  const row = await db
-    .prepare("SELECT saga_id,input_json FROM executions WHERE id=? AND org_id=? AND user_id=?")
-    .bind(id, caller.orgId, caller.userId)
-    .first<{ saga_id: string; input_json: string }>()
-    .catch(() => null);
-  if (!row || row.saga_id !== saga.id || row.input_json !== expectedInput) {
-    throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
   }
 }
 
@@ -1190,10 +1163,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // FORM-02 authorization (#155): startup mints a capability and reads
       // provider-derived state, so it needs a form read-or-submit grant —
       // never a separate saga execute grant (delegation), never nothing.
-      if (
-        !(await can(env.DB, ctx, { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "read" })) &&
-        !(await can(env.DB, ctx, { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "submit" }))
-      ) {
+      if (!(await mayStartForm(env.DB, ctx, caller.orgId, name))) {
         throw new Fault(403, "GRANT_REQUIRED", "Starting this Form requires a read or submit grant.");
       }
       const started = await startFormSession(env.DB, caller, def, await boundedJson(request.body), readProviderTable);
@@ -1223,10 +1193,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // Table-backed state through the declaration, so it needs the same
       // form read-or-submit grant as startup — never a separate saga
       // execute grant, never nothing.
-      if (
-        !(await can(env.DB, ctx, { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "read" })) &&
-        !(await can(env.DB, ctx, { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "submit" }))
-      ) {
+      if (!(await mayStartForm(env.DB, ctx, caller.orgId, name))) {
         throw new Fault(403, "GRANT_REQUIRED", "Reading this Form's providers requires a read or submit grant.");
       }
       const resolved = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
@@ -1306,11 +1273,8 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (scheduleAt !== null) {
         const scheduled = await scheduleFormExecution(env.DB, caller, key, name, saga, input, scheduleAt);
         if (!scheduled.replayed) {
-          await consumeStartupHandle(env.DB, caller, name, handle, def.id).catch(async (error) => {
-            if (!(error instanceof Fault) || error.code !== "STALE_FORM_HANDLE") throw error;
-            const scheduledInput = { ...(input as Record<string, unknown>), __form: name, __scheduleAt: scheduleAt };
-            await verifyOwnAdmission(env.DB, caller, key, saga, scheduledInput);
-          });
+          const scheduledInput = { ...(input as Record<string, unknown>), __form: name, __scheduleAt: scheduleAt };
+          await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, scheduledInput);
         }
         return json({ form: name, ...scheduled }, scheduled.replayed ? 200 : 202, {
           Location: scheduled.statusUrl,
@@ -1324,10 +1288,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       void _internalAt;
       const accepted = await submit(env, caller, key, saga, sagaInput);
       if (!accepted.replayed) {
-        await consumeStartupHandle(env.DB, caller, name, handle, def.id).catch(async (error) => {
-          if (!(error instanceof Fault) || error.code !== "STALE_FORM_HANDLE") throw error;
-          await verifyOwnAdmission(env.DB, caller, key, saga, sagaInput);
-        });
+        await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, sagaInput);
       }
       // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
       return json({ form: name, ...accepted }, accepted.replayed ? 200 : 202, { Location: accepted.statusUrl });

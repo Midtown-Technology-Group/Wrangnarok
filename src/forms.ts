@@ -30,11 +30,11 @@
 // - Bounded startup handles: POST /api/forms/:name/startup mints a
 //   random 30-minute session-bound handle (token hash persisted in
 //   `form_startups`, single row per handle). Submit peeks the handle for
-//   validation and consumes it only after all validation gates pass
-//   (form gate, file check, Saga parse), so failed validation leaves it
-//   live for a corrected retry; the dispatch fence then answers 202/200
-//   or 409. Unknown, expired, foreign, or already-used handles answer
-//   422 STALE_FORM_HANDLE and dispatch nothing.
+//   validation, dispatches, then consumes on success — so failed
+//   validation leaves it live for a corrected retry and a 503
+//   DISPATCH_UNCONFIRMED retry can still reach idempotent recovery.
+//   Unknown, expired, foreign, already-used, or definition-mismatched
+//   handles answer 422 STALE_FORM_HANDLE and dispatch nothing.
 // - Delegated authorization: the handle is the form-to-Saga grant. Submit
 //   through a live handle dispatches without requiring a separate
 //   direct-Saga grant; the submitter still needs the form readable in
@@ -57,8 +57,10 @@
 //   contentTypes? }`; submit accepts a finalized FILE-01 `{ location,
 //   path }` reference and re-validates readiness/size/type against the
 //   live file row, so a stale or foreign pointer cannot bypass upload.
-import { Fault, parseSubmission, UUID } from "./domain";
+import { executionId, Fault, parseSubmission, UUID } from "./domain";
 import type { FieldFailure, Principal, SagaDef } from "./domain";
+import type { CallerCtx } from "./orgs";
+import { can } from "./roles";
 
 /** Closed v2 field type set. Display-only kinds (heading, paragraph,
 // divider) render layout and never bind to Saga inputs. */
@@ -1358,10 +1360,7 @@ export async function peekStartupHandle(
     row.org_id !== caller.orgId ||
     row.user_id !== caller.userId ||
     row.form_name !== formName ||
-    // FORM-02 identity (#155): the persisted form_id must match the current
-    // definition, so delete/recreate under the same name invalidates old
-    // handles. Skipped only when the caller has no definition loaded.
-    (expectedFormId !== undefined && row.form_id !== expectedFormId) ||
+    row.form_id !== (expectedFormId ?? row.form_id) ||
     row.used_at !== null ||
     Date.parse(row.expires_at) <= Date.now()
   ) {
@@ -1405,6 +1404,64 @@ export async function consumeStartupHandle(
     throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
   }
   return { snapshot, options };
+}
+
+/** FORM-02 lifecycle authorization (#155): the startup and provider routes
+ * mint capabilities and read provider-derived state, so they need a form
+ * read-or-submit grant — never a separate saga execute grant
+ * (delegation), never nothing. Read is checked first; submit is checked
+ * only when read denies. */
+export async function mayStartForm(db: D1Database, ctx: CallerCtx, orgId: string, formName: string): Promise<boolean> {
+  if (await can(db, ctx, { orgId, resourceKind: "form", resourceId: formName, action: "read" })) return true;
+  return can(db, ctx, { orgId, resourceKind: "form", resourceId: formName, action: "submit" });
+}
+
+/** FORM-02 recovery fence (#155): after dispatch succeeds but the
+ * handle-consume loses a race (used_at set by a concurrent submit), decide
+ * whether the caller owns the admission. The deterministic execution id
+ * for (org, user, key) plus the exact persisted input must match THIS
+ * submission — only then is the lost race harmless. Any mismatch means a
+ * foreign submission consumed the handle first: the caller's handle is
+ * spent, answer stale, never a replay of foreign work. */
+export async function verifyOwnAdmission(
+  db: D1Database,
+  caller: Principal,
+  key: string,
+  saga: { id: string },
+  input: unknown,
+): Promise<void> {
+  const id = await executionId(caller, key);
+  const expectedInput = JSON.stringify(input);
+  const row = await db
+    .prepare("SELECT saga_id,input_json FROM executions WHERE id=? AND org_id=? AND user_id=?")
+    .bind(id, caller.orgId, caller.userId)
+    .first<{ saga_id: string; input_json: string }>()
+    .catch(() => null);
+  if (!row || row.saga_id !== saga.id || row.input_json !== expectedInput) {
+    throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+  }
+}
+
+/** FORM-02 consume-after-admission (#155): the submit route dispatches
+ * first, then spends the one-time handle. A lost consume race is tolerated
+ * only when the deterministic execution row proves OUR submission admitted
+ * (same id + exact input); anything else rethrows. */
+export async function consumeAfterAdmission(
+  db: D1Database,
+  caller: Principal,
+  formName: string,
+  handle: string,
+  formId: string,
+  key: string,
+  saga: { id: string },
+  admittedInput: unknown,
+): Promise<void> {
+  try {
+    await consumeStartupHandle(db, caller, formName, handle, formId);
+  } catch (error) {
+    if (!(error instanceof Fault) || error.code !== "STALE_FORM_HANDLE") throw error;
+    await verifyOwnAdmission(db, caller, key, saga, admittedInput);
+  }
 }
 
 /** Parse a file-field reference against its declared policy (shape only;
