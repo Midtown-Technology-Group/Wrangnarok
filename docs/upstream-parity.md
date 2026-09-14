@@ -424,7 +424,7 @@ Related Wrangnarok issues: #110
 
 Phase 3; **Partial**; existing issue: new
 
-Local status: NinjaOne client-credentials is fetched per Execution and discarded. Auth-code consent, cached refresh, token replacement and health events are absent.
+Local status: OAuth token mechanics are centralized in `src/oauth.ts` (issue #149): inline client-credentials fetch, auth-code/PKCE/state/callback contract, URL/entity templating, audience/scope replacement semantics (corrected attribution: replacement, never subset), rotating-refresh single-flight fencing (Cloudflare-native equivalent of the PR #741 row-lock serialization), and a pure non-secret health lifecycle (healthy/failed/revoked with failed/recovered transitions). NinjaOne rides the shared primitive with identical Fault codes/messages, proven by its unchanged regression suites. Tokens stay transient fetch-and-discard (SEC-02 stays shut); health-row/token persistence and any scheduled refresh path stay deferred behind the tripwire. Mock only vendor OAuth HTTP in local acceptance tests (`test/oauth.test.ts`, 34 tests).
 
 Depends: CON-01, SEC-02, AUTH-03
 

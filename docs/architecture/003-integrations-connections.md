@@ -155,14 +155,37 @@ Per-Organization envelope encryption, token persistence, key lifecycle and rotat
 
 ### OAuth
 
-OAuth is deferred, but the Connection contract must leave room for:
+OAuth token mechanics are centralized in `src/oauth.ts` (OAUTH-01, issue
+#149); the Connection contract below stays non-secret throughout.
 
-- authorization-code tokens;
-- client-credentials flows;
-- access/refresh token expiry;
-- refresh coordination;
-- alternate requested scopes/resources;
-- token replacement without replacing Connection identity.
+- One shared primitive serves inline client-credentials fetch,
+  authorization-code exchange (PKCE pair mint, tenant-templated authorize URL,
+  state-bound callback validation), and rotating refresh-token refresh. Sagas
+  never implement refresh independently. The module performs no D1 I/O, so no
+  database transaction is ever held over vendor HTTP.
+- Concurrency fencing is per-tenant single-flight: concurrent token requests
+  for the same (endpoint, path, tenant, scope) share one in-flight vendor
+  call. The vendor sees exactly one refresh POST per rotation no matter how
+  many 401 retries race — the Cloudflare-native equivalent of upstream's
+  serialized refresh (bifrost PR #741 row-lock pin, recorded in
+  `docs/upstream-spec.md` section 15). Authorization-code exchanges are
+  deliberately never coalesced: codes are single-use.
+- Audience/scope overrides use replacement semantics per the corrected
+  upstream attribution: a requested scope replaces the configured default for
+  that token request (Graph-to-Exchange style audience change), with no subset
+  enforcement. OAuth resource scopes are never Organization authorization
+  scope. `resolveTokenScope` is pure and test-pinned against Graph/Exchange/
+  SharePoint-style audiences.
+- Tokens stay transient fetch-and-discard per ADR 005 v0 (SEC-02 stays shut):
+  no token columns, no ciphertext, no cached refresh tokens in D1.
+- Credential health is a pure non-secret lifecycle (`healthy`/`failed`/
+  `revoked`, consecutive-failure counting, visible failed-to-recovered
+  transitions, fail-closed use). Persistence of health rows awaits the SEC-02
+  tripwire and its own steward migration number; Connection identity never
+  moves on a token transition.
+- Token replacement without replacing Connection identity, per-tenant
+  authorization-code consent storage, and any scheduled refresh path remain
+  deferred (see below).
 
 Token refresh must not be implemented independently in every Saga.
 
@@ -183,10 +206,12 @@ Token refresh must not be implemented independently in every Saga.
 - global/default Integration credential fallback;
 - provider-organization mapping enumeration;
 - cross-org mapping administration from ordinary workflow APIs;
-- full Solution install requirement resolution beyond the implemented Saga `requiredIntegrations` boundary;
-- OAuth scope override behavior.
+- full Solution install requirement resolution beyond the implemented Saga `requiredIntegrations` boundary.
 
-These remain specification fodder for later phases.
+These remain specification fodder for later phases. OAuth scope override
+behavior moved out of this list with OAUTH-01: audience/scope replacement
+semantics are implemented and pinned; only per-tenant consent storage and
+health-row persistence stay deferred below.
 
 ## Implementation mapping
 
@@ -203,4 +228,4 @@ Per issue #75 (lanes A: PRs #80, #83, #85, #88), extended by CON-01 (issue #146)
 - Secret-field declarations: `secretFields` on each `IntegrationDefinition` (`echo`: none; `ninjaone`: `clientSecret`), with selected output-shaping/sentinel tests. Universal output scrubbing remains the separate ADR 005/#110 mechanism gate.
 - Upstream 424 adaptation: upstream Bifrost serves declared-missing requirements as HTTP 424 at the API boundary (`SolutionConnectionSchema` resolution, org → defaults fallback). Wrangnarök keeps the stricter MVP posture — no global/default fallback — and the 424 surfaces in two places: as the structured step error inside ExecutionHistory on the submit path (existing ADR 010 contract), and as the HTTP status of `POST /api/connections/:integrationId/test` when the mapping is missing (CON-01 management parity for the same code).
 
-What stays deferred (not implemented by this closeout): OAuth authorization-code/refresh coordination/audience overrides/token replacement lifecycle, per-Organization envelope encryption behind ADR 005's tripwire, generic global/default credential fallback, provider-organization mapping enumeration beyond the caller's own Organization, and cross-org mapping administration. Provider-global v0 credentials are accepted, not a claim that these broader features or production gates are complete.
+What stays deferred (not implemented by this closeout): per-tenant authorization-code consent storage, health-row D1 persistence (awaits the SEC-02 tripwire and its own migration number), token replacement persistence, any scheduled refresh path, per-Organization envelope encryption behind ADR 005's tripwire, generic global/default credential fallback, provider-organization mapping enumeration beyond the caller's own Organization, and cross-org mapping administration. Provider-global v0 credentials are accepted, not a claim that these broader features or production gates are complete.
