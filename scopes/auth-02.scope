@@ -11,7 +11,7 @@ test/resource-roles.test.ts
 test/resource-roles-unit.test.ts
 test/org-lifecycle.test.ts
 test/sdk.test.ts
-docs/architecture/018-resource-roles.md
+docs/architecture/035-resource-roles.md
 scripts/check-bundle-budget.mjs
 scopes/auth-02.scope
 package.json
