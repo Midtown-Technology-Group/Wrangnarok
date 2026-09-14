@@ -87,13 +87,22 @@ export async function listOrganizations(
   if (executionId !== undefined) registerExecutionSecrets(executionId, [token]);
   const withToken = [...registered, token];
   const cleanToken = (message: string): string => scrubTextWithSecrets(message, withToken);
+  // The organizations hop spends only what the end-to-end deadline has left:
+  // token acquisition already consumed part of it, so a fresh full deadline
+  // here could run the whole interaction to nearly twice the configured
+  // bound. Fail immediately when nothing remains instead of issuing a vendor
+  // call that cannot succeed in time.
+  const remaining = deadline - (Date.now() - started);
+  if (remaining <= 0) {
+    throw new Fault(504, "NINJA_VENDOR_TIMEOUT", "NinjaOne exceeded its deadline.");
+  }
   let response: Response;
   try {
     try {
       response = await fetch(`${connection.endpoint}${NINJA_ORGS_PATH}`, {
         method: "GET",
         redirect: "manual",
-        signal: AbortSignal.timeout(deadline),
+        signal: AbortSignal.timeout(remaining),
         headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
       });
     } catch (error) {

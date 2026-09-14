@@ -429,6 +429,13 @@ export interface RefreshTokenRequest extends VendorEnv {
   readonly refreshToken: string;
   /** Non-secret tenant key (org id or client id) fencing concurrent rotations. */
   readonly tenantKey: string;
+  /** Stable non-secret rotation generation (e.g. a persisted token version).
+   * When supplied, fences partition per generation: a superseded generation
+   * reusing a rotated one-time token can never coalesce onto the live
+   * rotation's flight. Omit when the caller holds no generation (v0
+   * fetch-and-discard): fencing falls back to (endpoint, path, tenant,
+   * scope). Never a token or credential value. */
+  readonly generation?: string;
   readonly scope?: string;
   readonly credentials: OAuthClientCredentials;
   readonly faults: OAuthFaultTable;
@@ -456,8 +463,9 @@ export async function refreshRotatingToken(request: RefreshTokenRequest): Promis
   const tokenUrl = resolveTokenUrl(request.endpoint, request.tokenPath);
   const submitted = requireRequestField(request.refreshToken, 4096);
   const tenantKey = requireRequestField(request.tenantKey, 256);
+  const generation = request.generation === undefined ? "" : requireGeneration(request.generation);
   const scopeKey = request.scope ?? "";
-  const key = `rt|${tokenUrl}|${tenantKey}|${scopeKey}`;
+  const key = `rt|${tokenUrl}|${tenantKey}|${generation}|${scopeKey}`;
   return singleFlight(key, async () => {
     const form = new URLSearchParams({
       grant_type: "refresh_token",
@@ -519,6 +527,13 @@ function requireScope(_name: string, value: unknown): string {
 function requireAudience(value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || value.length > 512) {
     throw new Fault(400, "OAUTH_SCOPE_INVALID", "The requested OAuth audience is invalid.");
+  }
+  return value;
+}
+
+function requireGeneration(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 128 || !/^[A-Za-z0-9._-]+$/u.test(value)) {
+    throw new Fault(400, "OAUTH_REQUEST_INVALID", "The OAuth request is invalid.");
   }
   return value;
 }

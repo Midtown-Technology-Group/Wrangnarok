@@ -502,7 +502,50 @@ describe("rotating refresh (one-time refresh tokens submit exactly once)", () =>
         credentials: { clientId: "", clientSecret: "" },
       }),
     ).rejects.toMatchObject({ code: "TEST_NOT_CONFIGURED" });
+    await expect(
+      refreshRotatingToken({ ...base, refreshToken: REFRESH_SENTINEL, generation: "../evil" }),
+    ).rejects.toMatchObject({ code: "OAUTH_REQUEST_INVALID" });
     expect(calls).toHaveLength(0);
+  });
+
+  it("partitions concurrent refreshes by rotation generation", async () => {
+    // A superseded generation reusing a rotated one-time token must never
+    // coalesce onto the live generation's flight: distinct generations are
+    // distinct fence keys, so the vendor sees one POST per generation.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { calls, fetchImpl } = stubVendor([
+      async (call) => {
+        await gate;
+        expect(new URLSearchParams(call.body).get("refresh_token")).toBe("live-refresh-v2");
+        return tokenJson({ access_token: "live-access", refresh_token: "live-refresh-v3" });
+      },
+      async () => tokenJson({ access_token: "stale-access" }),
+    ]);
+    const base = {
+      endpoint: ENDPOINT,
+      tokenPath: TOKEN_PATH,
+      tenantKey: "org-tenant-1",
+      credentials: { clientId: CLIENT_ID, clientSecret: SECRET_SENTINEL },
+      faults: FAULTS,
+      fetchImpl,
+    };
+    const livePending = [
+      refreshRotatingToken({ ...base, refreshToken: "live-refresh-v2", generation: "v2" }),
+      refreshRotatingToken({ ...base, refreshToken: "live-refresh-v2", generation: "v2" }),
+    ];
+    await Promise.resolve();
+    const stale = await refreshRotatingToken({ ...base, refreshToken: "live-refresh-v2", generation: "v1" });
+    expect(stale.token.accessToken).toBe("stale-access");
+    release();
+    const live = await Promise.all(livePending);
+    expect(calls).toHaveLength(2);
+    for (const result of live) {
+      expect(result.rotated).toBe(true);
+      expect(result.refreshToken).toBe("live-refresh-v3");
+    }
   });
 });
 

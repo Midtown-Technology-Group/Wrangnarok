@@ -167,6 +167,21 @@ it("maps organization transport faults and deadlines", async () => {
     status: 504,
     code: "NINJA_VENDOR_TIMEOUT",
   });
+
+  // The organizations hop spends only the deadline remainder: when token
+  // acquisition already consumed the whole deadline, the Action fails
+  // immediately without issuing an orgs call that cannot succeed in time.
+  vi.spyOn(Date, "now")
+    .mockImplementationOnce(() => 0)
+    .mockImplementation(() => NINJA_TIMEOUT_MS + 1);
+  mockVendor((url) => {
+    if (url === NINJA_TOKEN_URL) return jsonResponse(token);
+    throw new Error("must not fetch orgs on an exhausted deadline");
+  });
+  expect(await faultOf(listOrganizations({ endpoint: NINJA_ENDPOINT }, secrets))).toMatchObject({
+    status: 504,
+    code: "NINJA_VENDOR_TIMEOUT",
+  });
 });
 
 it("rejects unexpected organization list shapes", async () => {
