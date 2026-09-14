@@ -4,4 +4,4 @@ export interface CliContext {
 }
 
 export function parseContext(argv?: string[]): CliContext;
-export function runCommand(ctx: CliContext, deps?: Record<string, unknown>): Promise<any>;
+export function runCommand(ctx: CliContext, deps?: Record<string, unknown>): Promise<unknown>;
