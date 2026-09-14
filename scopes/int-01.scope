@@ -2,10 +2,14 @@
 # Pure emitter (OpenAPI 3.x JSON to typed Integration module) plus the
 # offline CLI wrapper. No fetch, no D1, no secrets in output.
 src/generate-integration.ts
+src/generate-integration-source.mjs
+src/generate-integration-source.d.mts
 src/openapi.ts
 src/integrations/halo.ts
 src/integrations/index.ts
 scripts/wrangnarok.mjs
+scripts/wrangnarok-core.mjs
+scripts/wrangnarok.d.mts
 test/generate-integration.test.ts
 test/sdk.test.ts
 docs/architecture/022-code-mode.md
