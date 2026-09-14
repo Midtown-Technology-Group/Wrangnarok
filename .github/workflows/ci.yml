@@ -149,6 +149,10 @@ jobs:
     name: Runtime checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Step-level `if:` cannot read the secrets context, so expose token
+    # presence once here (job-level env CAN read secrets).
+    env:
+      HAS_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
 
     steps:
       - name: Checkout
@@ -170,6 +174,14 @@ jobs:
         run: npm run test:coverage
 
       - name: Upload coverage to Codecov
+        # Tokenless uploads are rejected for this repo (HTTP 400), and PR
+        # runs from Dependabot do not receive the token: without this guard
+        # every dependency PR reds on the upload step after its tests pass.
+        # The 95% coverage gate itself is enforced by the test step above;
+        # this upload is informational only, so skip it when no token exists
+        # and keep fail-closed behavior where the token is present. Step
+        # `if:` cannot read secrets, so this reads the job-level flag above.
+        if: ${{ env.HAS_CODECOV_TOKEN == 'true' }}
         uses: codecov/codecov-action@v5 # v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
