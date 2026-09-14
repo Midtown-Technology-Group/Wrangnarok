@@ -2,6 +2,8 @@
 
 This file is the steward-owned reservation source for Wrangnarok ADR numbers.
 
+`docs/architecture/000-steward-checklist.md` is a reserved control/sentinel document, not ADR 000. The assignable ADR namespace begins at 001.
+
 ## Rules
 
 1. An assigned ADR number is a permanent identity. Never reuse it, including after rejection, supersession, or renumbering history.
@@ -15,7 +17,6 @@ This file is the steward-owned reservation source for Wrangnarok ADR numbers.
 
 | ADR | File |
 | --- | --- |
-| 000 | `docs/architecture/000-steward-checklist.md` |
 | 001 | `docs/architecture/001-execution-model.md` |
 | 002 | `docs/architecture/002-saga-identity.md` |
 | 003 | `docs/architecture/003-integrations-connections.md` |
