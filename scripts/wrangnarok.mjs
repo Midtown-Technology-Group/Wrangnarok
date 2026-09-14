@@ -58,7 +58,8 @@ function validateAndGenerate(ctx) {
     fail("GENERATOR_INVALID_SPEC", "The OpenAPI spec exceeds the 2 MiB generator bound.");
   }
   const origins = ctx.genOrigins ?? [];
-  if (origins.length === 0) fail("USAGE", "generate-integration needs --origin URL (repeatable; never the spec servers entries).");
+  if (origins.length === 0)
+    fail("USAGE", "generate-integration needs --origin URL (repeatable; never the spec servers entries).");
   for (const origin of origins) {
     let url;
     try {
@@ -101,7 +102,9 @@ function validateAndGenerate(ctx) {
     fail("GENERATOR_INVALID_SPEC", "Only OpenAPI 3.x contracts can be generated.");
   }
   const version =
-    doc.info && typeof doc.info === "object" && typeof doc.info.version === "string" ? doc.info.version.slice(0, 64) : "";
+    doc.info && typeof doc.info === "object" && typeof doc.info.version === "string"
+      ? doc.info.version.slice(0, 64)
+      : "";
   if (!version) fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract needs info.version.");
   if (!doc.paths || typeof doc.paths !== "object" || Array.isArray(doc.paths)) {
     fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract needs a paths object.");
@@ -117,9 +120,13 @@ function validateAndGenerate(ctx) {
       if (def === null || typeof def !== "object" || Array.isArray(def)) continue;
       const operationId = def.operationId;
       if (typeof operationId !== "string" || !OPERATION_ID.test(operationId)) {
-        fail("GENERATOR_INVALID_SPEC", `Contract operation ${method.toUpperCase()} ${path} needs a stable operationId.`);
+        fail(
+          "GENERATOR_INVALID_SPEC",
+          `Contract operation ${method.toUpperCase()} ${path} needs a stable operationId.`,
+        );
       }
-      if (seen.has(operationId)) fail("GENERATOR_INVALID_SPEC", `Duplicate operationId ${JSON.stringify(operationId)}.`);
+      if (seen.has(operationId))
+        fail("GENERATOR_INVALID_SPEC", `Duplicate operationId ${JSON.stringify(operationId)}.`);
       seen.add(operationId);
       const summary = typeof def.summary === "string" ? def.summary.slice(0, 280) : "";
       const classified = classifications[operationId];

@@ -11,16 +11,7 @@ function cap(slug) {
     .join("");
 }
 
-export function emitIntegrationSource({
-  doc,
-  operations,
-  id,
-  name,
-  allowedOrigins,
-  envPrefix,
-  digestHex,
-  version,
-}) {
+export function emitIntegrationSource({ doc, operations, id, name, allowedOrigins, envPrefix, digestHex, version }) {
   const prefix = id
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, "_")
