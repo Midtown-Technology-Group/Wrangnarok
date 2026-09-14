@@ -304,6 +304,88 @@ describe("tool enrollment (TOOL-01 opt-in)", () => {
     await bindings.DB.prepare("DELETE FROM tool_enrollments WHERE tool_name=?").bind("ghost_tool").run();
   });
 
+  it("preserves non-schema D1 failures instead of masking them as absence", async () => {
+    // A backend fault that is NOT a missing table must never become an
+    // empty list, TOOL_NOT_FOUND, or TOOL_STORE_NOT_MIGRATED: reads
+    // rethrow to the route's sanitized 500 path, and writes reserve the
+    // migration code for a specifically identified missing table.
+    const readFaultDb = {
+      prepare() {
+        throw new Error("D1 backend failure: connection reset");
+      },
+    } as unknown as D1Database;
+    await expect(toolRegistry.list(readFaultDb, principal, SAGA_CATALOG)).rejects.toThrow("D1 backend failure");
+    const resolveFailure = await toolRegistry
+      .resolve(readFaultDb, principal, "greet_tool", SAGA_CATALOG)
+      .then(() => null)
+      .catch((error: unknown) => error);
+    expect(resolveFailure).toBeInstanceOf(Error);
+    expect((resolveFailure as { code?: string }).code).not.toBe("TOOL_NOT_FOUND");
+    const disableFailure = await toolRegistry
+      .disable(readFaultDb, principal, "greet_tool")
+      .then(() => null)
+      .catch((error: unknown) => error);
+    expect(disableFailure).toBeInstanceOf(Error);
+    expect((disableFailure as { code?: string }).code).not.toBe("TOOL_NOT_FOUND");
+    // Discovery over a broken backend answers 500, never 200 { tools: [] }.
+    const brokenList = await worker.fetch(call("/api/tools"), { ...bindings, DB: readFaultDb });
+    expect(brokenList.status).toBe(500);
+    expect(await brokenList.json()).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
+    // Fault only the targeted tool write: everything else (including the
+    // auth bootstrap's exec/prepare calls) delegates to the real binding,
+    // so HTTP failures prove the registry preserved the backend fault
+    // rather than tripping an unrelated gate.
+    function faultToolWrites(prefix: string, message: string): D1Database {
+      return new Proxy(bindings.DB, {
+        get(target, prop) {
+          if (prop === "prepare") {
+            return (sql: string, ...rest: unknown[]) => {
+              if (typeof sql === "string" && sql.startsWith(prefix)) {
+                throw new Error(message);
+              }
+              return (target.prepare as (...args: unknown[]) => unknown)(sql, ...rest);
+            };
+          }
+          const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }
+    // Enroll INSERT throws a non-schema fault (timeout/constraint style):
+    // enroll must not misdiagnose it as a missing migration.
+    const writeFaultDb = faultToolWrites("INSERT INTO tool_enrollments", "D1 backend failure: statement timeout");
+    const enrollFailure = await toolRegistry
+      .enroll(writeFaultDb, principal, helloSaga, { name: "writefault_tool" })
+      .then(() => null)
+      .catch((error: unknown) => error);
+    expect(enrollFailure).toBeInstanceOf(Error);
+    expect((enrollFailure as { code?: string }).code).not.toBe("TOOL_STORE_NOT_MIGRATED");
+    const brokenEnroll = await worker.fetch(call("/api/tools", "POST", { sagaId: helloSaga.id }), {
+      ...bindings,
+      DB: writeFaultDb,
+    });
+    expect(brokenEnroll.status).toBe(500);
+    expect(await brokenEnroll.json()).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
+    // The disable write path (UPDATE) carries no catch: a backend fault
+    // there must propagate, never become TOOL_NOT_FOUND.
+    await toolRegistry.enroll(bindings.DB, principal, helloSaga, { name: "disablefault_tool" });
+    const disableWriteFaultDb = faultToolWrites("UPDATE tool_enrollments", "D1 backend failure: write unavailable");
+    const disableWriteFailure = await toolRegistry
+      .disable(disableWriteFaultDb, principal, "disablefault_tool")
+      .then(() => null)
+      .catch((error: unknown) => error);
+    expect(disableWriteFailure).toBeInstanceOf(Error);
+    expect((disableWriteFailure as { code?: string }).code).not.toBe("TOOL_NOT_FOUND");
+    expect((disableWriteFailure as Error).message).toContain("D1 backend failure");
+    const brokenDisable = await worker.fetch(call("/api/tools/disablefault_tool/disable", "POST", {}), {
+      ...bindings,
+      DB: disableWriteFaultDb,
+    });
+    expect(brokenDisable.status).toBe(500);
+    expect(await brokenDisable.json()).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
+    await bindings.DB.prepare("DELETE FROM tool_enrollments WHERE tool_name=?").bind("disablefault_tool").run();
+  });
+
   it("covers post-write racing deletes and custom descriptions", async () => {
     // Enroll-then-delete races the post-write re-read: the 500 path proves
     // the write was verified, never assumed.

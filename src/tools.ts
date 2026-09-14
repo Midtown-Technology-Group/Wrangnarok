@@ -80,6 +80,19 @@ function invalid(code: string, message: string, status = 400): Fault {
   return new Fault(status, code, message);
 }
 
+/** Missing-migration probe shared by every tool-store read and write: only a
+ * missing-table driver error means "pre-migration absence" (empty list,
+ * TOOL_NOT_FOUND, or TOOL_STORE_NOT_MIGRATED). Any other D1 fault rethrows
+ * so the route's sanitized 500 path preserves the backend failure instead
+ * of translating it into normal absence. */
+function isMissingTable(error: unknown): boolean {
+  return error instanceof Error && /no such table/i.test(error.message);
+}
+
+function notMigrated(): Fault {
+  return new Fault(503, "TOOL_STORE_NOT_MIGRATED", "Tool enrollments are not migrated on this database.");
+}
+
 function parseToolName(value: unknown): string {
   if (typeof value !== "string" || !TOOL_NAME.test(value)) {
     throw invalid(
@@ -138,9 +151,12 @@ async function ownedRow(db: D1Database, orgId: string, toolName: string): Promis
       )
       .bind(orgId, toolName)
       .first<ToolEnrollmentRow>();
-  } catch {
+  } catch (error) {
     // Pre-migration databases (no tool_enrollments table): no tools exist.
-    return null;
+    // Any other D1 fault rethrows so callers never read a backend failure
+    // as "no such tool".
+    if (isMissingTable(error)) return null;
+    throw error;
   }
 }
 
@@ -153,9 +169,12 @@ async function listRows(db: D1Database, orgId: string): Promise<readonly ToolEnr
       .bind(orgId)
       .all<ToolEnrollmentRow>();
     return rows.results;
-  } catch {
+  } catch (error) {
     // Pre-migration databases (no tool_enrollments table): no tools exist.
-    return [];
+    // Any other D1 fault rethrows so discovery never answers a backend
+    // failure as a successful empty list.
+    if (isMissingTable(error)) return [];
+    throw error;
   }
 }
 
@@ -199,8 +218,12 @@ export const toolRegistry: ToolRegistry = {
           now,
         )
         .run();
-    } catch {
-      throw invalid("TOOL_STORE_NOT_MIGRATED", "Tool enrollments are not migrated on this database.", 503);
+    } catch (error) {
+      // Only a missing table means "not migrated". Timeouts, constraint,
+      // driver, and other write failures rethrow so the route's sanitized
+      // 500 path preserves them instead of misdiagnosing a missing table.
+      if (isMissingTable(error)) throw notMigrated();
+      throw error;
     }
     const row = await ownedRow(db, caller.orgId, name);
     if (!row) throw invalid("TOOL_NOT_FOUND", "The tool could not be read after enroll.", 500);
