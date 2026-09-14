@@ -8,7 +8,7 @@ Status vocabulary: **Implemented** (shipped locally), **Partial** (materially na
 
 Upstream tests are evidence of intended assertions, not passing-test claims. Upstream sources were inspected, not executed; no upstream production instance was used.
 
-Total: 47 capability rows — 3 Implemented, 1 Complete (pending review), 26 Partial, 16 Missing, 1 Gated.
+Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 28 Partial, 13 Missing, 1 Gated.
 
 | ID | Title | Phase | Status | Depends | Existing issue |
 | --- | --- | --- | --- | --- | --- |
@@ -20,7 +20,7 @@ Total: 47 capability rows — 3 Implemented, 1 Complete (pending review), 26 Par
 | DEV-01 | Provide a complete typed TypeScript author and automation SDK | 1+4 | Partial | — | new |
 | DEV-02 | Preview, sync and deploy author source with explicit dependency compatibility | 5 | Partial | DEV-01, SOL-01 | new |
 | AUTH-01 | Replace the single-org allowlist with Organization and user lifecycle management | 3 | Partial | — | new |
-| AUTH-02 | Enforce resource roles, claims and explicit delegated authorization end to end | 3 | Missing | AUTH-01 | new |
+| AUTH-02 | Enforce resource roles, claims and explicit delegated authorization end to end | 3 | Implemented | AUTH-01 | #143 |
 | AUTH-03 | Manage scoped machine credentials and verify delegated human identity parity | 3 | Partial | AUTH-01, AUTH-02 | #144 |
 | SEC-01 | Enforce execution-scoped secret registration and universal output scrubbing | 3 | Partial | — | new |
 | CON-01 | Manage Integration definitions and scoped Connection mappings through authorized APIs | 3 | Complete (pending review) | AUTH-02, SEC-01 | #146 |
