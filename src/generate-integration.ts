@@ -2,25 +2,20 @@
 // INT-01 (issue #229): OpenAPI-to-Integration generator. Pure emitter:
 // validated OpenAPI 3.x JSON in, committed TypeScript Integration source
 // out. No fetch, no D1, no secrets — the operator supplies the spec text
-// (file or URL fetched by the CLI layer) and the generated module plugs
-// into the Integration/Connection contract (ADR 003) plus the Code Mode
-// host (ADR 022). Generated code is committed source, regenerable: same
-// spec plus same options yields byte-identical output, so spec drift shows
-// as a diff, never a silent overwrite.
+// and the generated module plugs into the Integration/Connection contract.
 import { Fault } from "./domain";
 import { indexOperations, validateContractDocument } from "./openapi";
 import type { OpenApiDocument, OperationRisk } from "./openapi";
+import { emitIntegrationSource } from "./generate-integration-source.mjs";
 
 const INTEGRATION_ID = /^[a-z][a-z0-9-]{1,63}$/;
 const SPEC_BYTES_MAX = 2 * 1024 * 1024;
+const RISKS = ["read", "mutation", "destructive", "credential", "billing", "security", "tenant-admin"] as const;
 
 function invalid(message: string): Fault {
   return new Fault(400, "GENERATOR_INVALID_SPEC", message);
 }
 
-/** Options the operator supplies: stable Integration identity, the origin
- * allowlist (never the spec `servers` entries), and per-operation risk
- * classifications. Everything else derives from the spec. */
 export interface GenerateIntegrationOptions {
   readonly id: string;
   readonly name: string;
@@ -31,13 +26,9 @@ export interface GenerateIntegrationOptions {
 }
 
 export interface GeneratedIntegration {
-  /** File name the module should be committed under. */
   readonly fileName: string;
-  /** Full TypeScript source, prettier-clean by construction. */
   readonly source: string;
-  /** Spec digest for the provenance comment header. */
   readonly specDigest: string;
-  /** Operation count emitted. */
   readonly operationCount: number;
 }
 
@@ -48,11 +39,6 @@ function slugConst(id: string): string {
     .replace(/^_+|_+$/g, "");
 }
 
-/** Emit a typed Integration module from a validated OpenAPI document. Pure
- * and deterministic: same document plus same options yields identical
- * source, so regeneration diffs cleanly on spec drift. Throws
- * GENERATOR_INVALID_SPEC on structural defects (delegates to the Code Mode
- * contract validator), GENERATOR_INVALID_OPTIONS on bad operator inputs. */
 export function generateIntegrationModule(
   specText: string,
   options: GenerateIntegrationOptions,
@@ -86,6 +72,7 @@ export function generateIntegrationModule(
       throw new Fault(400, "GENERATOR_INVALID_OPTIONS", `Allowed origin ${JSON.stringify(origin)} must be http(s).`);
     }
   }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(specText);
@@ -100,12 +87,10 @@ export function generateIntegrationModule(
     if (error instanceof Fault) throw new Fault(400, "GENERATOR_INVALID_SPEC", error.message);
     throw error;
   }
+
   const operations = indexOperations(doc, options.classifications ?? {});
-  // Validate explicit classifications against the closed OperationRisk set:
-  // a typo would otherwise emit a module that fails its declared type.
-  const RISKS = ["read", "mutation", "destructive", "credential", "billing", "security", "tenant-admin"];
   for (const [op, risk] of Object.entries(options.classifications ?? {})) {
-    if (typeof risk !== "string" || !RISKS.includes(risk)) {
+    if (typeof risk !== "string" || !RISKS.includes(risk as (typeof RISKS)[number])) {
       throw new Fault(
         400,
         "GENERATOR_INVALID_OPTIONS",
@@ -113,8 +98,7 @@ export function generateIntegrationModule(
       );
     }
   }
-  // Validate the secret env prefix as a TypeScript identifier fragment: it
-  // lands in interface property names, so hyphens would emit invalid code.
+
   const envPrefix = options.secretEnvPrefix ?? `${slugConst(options.id)}_CLIENT`;
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envPrefix)) {
     throw new Fault(
@@ -123,9 +107,7 @@ export function generateIntegrationModule(
       "secretEnvPrefix must be a valid TypeScript identifier fragment (letters, digits, underscore; not starting with a digit).",
     );
   }
-  // Credential-bearing origins must be https: the generated executor sends
-  // client credentials in the Authorization header, and redirect:manual does
-  // not protect the initial request. Loopback http stays allowed for local dev.
+
   for (const origin of options.allowedOrigins) {
     const url = new URL(origin);
     const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
@@ -137,228 +119,26 @@ export function generateIntegrationModule(
       );
     }
   }
-  const prefix = slugConst(options.id);
+
   const version =
     doc.info && typeof doc.info === "object" && typeof (doc.info as { version?: unknown }).version === "string"
       ? (doc.info as { version: string }).version.slice(0, 64)
       : "unversioned";
-  const name = JSON.stringify(options.name);
-  const opsLiteral = operations
-    .map(
-      (op) =>
-        `    ${JSON.stringify(op.operationId)}: ${JSON.stringify(op.risk)}, // ${op.method.toUpperCase()} ${op.path}`,
-    )
-    .join("\n");
-  const originsLiteral = options.allowedOrigins.map((o) => `  ${JSON.stringify(o)},`).join("\n");
-  const integrationId = JSON.stringify(options.id);
-  // Sanitize free-text fields for comment emission: strip CR/LF so no spec
-  // content can break out of the header comments into forged code.
-  const cleanVersion = version.replace(/[\r\n]+/g, " ").slice(0, 64);
-  const cleanDigest = digestHex.replace(/[^a-f0-9]/g, "").slice(0, 64);
-  // Embed the validated spec as runtime data: the generated module is
-  // self-contained (pinnedSpec returns the real document, not a dangling
-  // declare). JSON.stringify output is expression-safe by construction.
-  const specLiteral = JSON.stringify(doc);
-  const source = `// SPDX-License-Identifier: AGPL-3.0
-// Generated by \`wrangnarok generate-integration\` (INT-01, issue #229).
-// DO NOT EDIT BY HAND: regenerate from the pinned spec instead.
-// Spec digest: ${cleanDigest}
-// Spec version: ${cleanVersion}
-// Operations: ${operations.length}
-import { Fault } from "../domain";
-import type { Principal } from "../domain";
-import {
-  authorizeOperation,
-  buildProvenance,
-  indexOperations,
-  inspectOperation,
-  pinContract,
-  resolveRequestUrl,
-  searchOperations,
-} from "../openapi";
-import type { CodeModeProvenance, ContractOperation, OpenApiDocument, OperationPolicy, OperationRisk } from "../openapi";
-import { getConnection } from "../connections";
-import { scrubTextWithSecrets, scrubValueWithSecrets } from "../secrets";
-
-/** Stable Integration identity for this generated provider. */
-export const ${prefix}_INTEGRATION_ID = ${integrationId};
-
-/** Allowed origins for this Integration (operator-configured, never spec servers). */
-export const ${prefix}_ALLOWED_ORIGINS: readonly string[] = Object.freeze([
-${originsLiteral}
-]);
-
-/** Default Code Mode policy: reads execute under Connection authority;
- * mutations need explicit per-operation enablement; destructive and above
- * stay deny-by-default until an operator enables them. */
-export const ${prefix}_DEFAULT_POLICY: OperationPolicy = {
-  enabledOperations: [],
-  deniedOperations: [],
-  enabledRisks: [],
-};
-
-/** Risk classification per operationId (method defaults refined here). */
-export const ${prefix}_CLASSIFICATIONS: Readonly<Record<string, OperationRisk>> = Object.freeze({
-${opsLiteral}
-});
-
-export interface ${prefix}Secrets {
-  readonly clientId?: string;
-  readonly clientSecret?: string;
-}
-
-export function require${cap(prefix)}Secrets(secrets: ${prefix}Secrets): { clientId: string; clientSecret: string } {
-  const { clientId, clientSecret } = secrets;
-  if (!clientId || !clientSecret) {
-    throw new Fault(502, "${prefix}_NOT_CONFIGURED", "Integration credentials are not configured.");
-  }
-  return { clientId, clientSecret };
-}
-
-export interface ${prefix}Env {
-  readonly ${envPrefix}_ID?: string;
-  readonly ${envPrefix}_SECRET?: string;
-}
-
-export interface CodeModeCall {
-  readonly operationId: string;
-  readonly path?: Readonly<Record<string, string>>;
-  readonly query?: Readonly<Record<string, string>>;
-  readonly body?: unknown;
-}
-
-export interface CodeModeResult {
-  readonly result: unknown;
-  readonly provenance: CodeModeProvenance;
-}
-
-export async function execute${cap(prefix)}Operation(
-  db: D1Database,
-  caller: Principal,
-  secrets: ${prefix}Secrets,
-  call: CodeModeCall,
-  vendor: { readonly fetchImpl?: typeof fetch } = {},
-): Promise<CodeModeResult> {
-  const { clientId, clientSecret } = require${cap(prefix)}Secrets(secrets);
-  const view = await getConnection(db, caller, ${prefix}_INTEGRATION_ID).catch(() => null);
-  if (!view) {
-    throw new Fault(424, "OPENAPI_CONNECTION_MISSING", "No Connection exists for this Organization.");
-  }
-  if (!view.enabled) {
-    throw new Fault(404, "OPENAPI_CONNECTION_MISSING", "The Connection is disabled.");
-  }
-  const operations = indexOperations(await pinnedSpec(), ${prefix}_CLASSIFICATIONS);
-  const operation: ContractOperation = inspectOperation(operations, call.operationId);
-  authorizeOperation(operation, ${prefix}_DEFAULT_POLICY);
-  const pinned = await pinnedContract();
-  let endpointOrigin: string;
-  try {
-    endpointOrigin = new URL(view.endpoint).origin;
-  } catch {
-    throw new Fault(403, "OPENAPI_ORIGIN_FORBIDDEN", "The Connection endpoint is not an allowed origin.");
-  }
-  const allowed = ${prefix}_ALLOWED_ORIGINS.some((origin) => {
-    try {
-      return new URL(origin).origin === endpointOrigin;
-    } catch {
-      return false;
-    }
+  const source = emitIntegrationSource({
+    doc,
+    operations,
+    id: options.id,
+    name: options.name,
+    allowedOrigins: options.allowedOrigins,
+    envPrefix,
+    digestHex,
+    version,
   });
-  if (!allowed) {
-    throw new Fault(403, "OPENAPI_ORIGIN_FORBIDDEN", "The Connection endpoint is not an allowed origin.");
-  }
-  // Origin binding: resolve against the validated Connection endpoint
-  // origin, never the allowlist head. resolveRequestUrl binds to
-  // allowedOrigins[0]; with multiple configured origins the request (plus
-  // bearer credentials) would otherwise ride to the first origin while the
-  // Connection points elsewhere. Narrowing the contract to the validated
-  // endpoint keeps the spec digest identical (digest covers spec bytes only)
-  // while binding this request to the Connection's actual origin.
-  const url = resolveRequestUrl({ ...pinned, allowedOrigins: [endpointOrigin] }, operation, { path: call.path, query: call.query });
-  const fetchImpl = vendor.fetchImpl ?? globalThis.fetch;
-  const hasBody = call.body !== undefined;
-  let response: Response;
-  try {
-    response = await fetchImpl(url, {
-      method: operation.method.toUpperCase(),
-      redirect: "manual",
-      signal: AbortSignal.timeout(5000),
-      headers: {
-        Accept: "application/json",
-        Authorization: \`Bearer \${clientId}:\${clientSecret}\`,
-        ...(hasBody ? { "Content-Type": "application/json" } : {}),
-      },
-      ...(hasBody ? { body: JSON.stringify(call.body) } : {}),
-    });
-  } catch (error) {
-    if (error instanceof Fault) throw error;
-    throw new Fault(502, "OPENAPI_EXECUTION_FAILED", "The vendor API did not answer.");
-  }
-  const clean = (message: string): string => scrubTextWithSecrets(message, [clientId, clientSecret]);
-  if (response.status >= 300 && response.status < 400) {
-    await response.body?.cancel();
-    throw new Fault(502, "OPENAPI_EXECUTION_FAILED", clean("The vendor API redirected the request."));
-  }
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Fault(502, "OPENAPI_EXECUTION_FAILED", clean(\`The vendor API answered \${response.status}.\`));
-  }
-  let result: unknown;
-  try {
-    const text = await response.text();
-    result = text.length === 0 ? null : (JSON.parse(text) as unknown);
-  } catch {
-    throw new Fault(502, "OPENAPI_EXECUTION_FAILED", "The vendor API returned an unreadable body.");
-  }
-  const scrubbed = scrubValueWithSecrets(result, [clientId, clientSecret]);
-  const provenance = buildProvenance({
-    callerUserId: caller.userId,
-    orgId: caller.orgId,
-    integrationId: ${prefix}_INTEGRATION_ID,
-    connectionId: view.id,
-    operationId: operation.operationId,
-    method: operation.method,
-    path: operation.path,
-    specDigest: pinned.specDigest,
-    specVersion: pinned.specVersion,
-  });
-  return { result: scrubbed, provenance };
-}
 
-/** Pinned spec document embedded at generation time: the generated module
- * is self-contained. Validated before emission, so this literal is always
- * a well-formed OpenAPI 3.x document. */
-const __GENERATED_SPEC__: OpenApiDocument = ${specLiteral};
-
-async function pinnedSpec(): Promise<OpenApiDocument> {
-  return __GENERATED_SPEC__;
-}
-
-async function pinnedContract() {
-  return pinContract({ id: ${prefix}_INTEGRATION_ID, name: ${name} }, JSON.stringify(__GENERATED_SPEC__), [
-    ...${prefix}_ALLOWED_ORIGINS,
-  ]);
-}
-
-export function search${cap(prefix)}Operations(query: string): readonly ContractOperation[] {
-  return searchOperations(indexOperations(__GENERATED_SPEC__, ${prefix}_CLASSIFICATIONS), query);
-}
-
-export function inspect${cap(prefix)}Operation(operationId: string): ContractOperation {
-  return inspectOperation(indexOperations(__GENERATED_SPEC__, ${prefix}_CLASSIFICATIONS), operationId);
-}
-`;
   return {
     fileName: `${options.id}.ts`,
     source,
     specDigest: digestHex,
     operationCount: operations.length,
   };
-}
-
-function cap(slug: string): string {
-  return slug
-    .split("_")
-    .map((part) => (part.length === 0 ? part : (part[0] as string).toUpperCase() + part.slice(1).toLowerCase()))
-    .join("");
 }
