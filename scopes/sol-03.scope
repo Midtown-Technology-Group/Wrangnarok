@@ -10,7 +10,7 @@ test/solution-export.test.ts
 test/solutions-validation.test.ts
 test/saga-contract.test.ts
 scripts/export-local.mjs
-docs/architecture/016-solution-export.md
+docs/architecture/032-solution-export.md
 docs/architecture/011-solutions-contract.md
 docs/upstream-parity.md
 scopes/sol-03.scope
