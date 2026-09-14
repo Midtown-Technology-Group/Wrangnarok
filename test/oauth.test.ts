@@ -27,7 +27,8 @@ import {
   resolveTokenUrl,
   revokeOAuthToken,
 } from "../src/oauth";
-import type { OAuthFaultTable, OAuthToken } from "../src/oauth";
+import type { OAuthFaultTable, OAuthRefreshFenceBinding, OAuthToken, RefreshTokenRequest } from "../src/oauth";
+import { OAuthRefreshFence } from "../src/oauth-refresh-fence";
 
 const SECRET_SENTINEL = "test-oauth-client-secret-sentinel";
 const CLIENT_ID = "test-oauth-client-id";
@@ -545,6 +546,341 @@ describe("rotating refresh (one-time refresh tokens submit exactly once)", () =>
     for (const result of live) {
       expect(result.rotated).toBe(true);
       expect(result.refreshToken).toBe("live-refresh-v3");
+    }
+  });
+});
+
+describe("cross-instance refresh fence (issue #149 follow-up)", () => {
+  /** Namespace double routing every fence key to one shared `OAuthRefreshFence`
+   * instance — the test analogue of separate Worker instances resolving one
+   * Durable Object stub per fence key. */
+  function sharedFenceNamespace(instance: OAuthRefreshFence): OAuthRefreshFenceBinding {
+    return {
+      getByName: () => ({
+        fetch: async (input: RequestInfo | URL): Promise<Response> => {
+          const url = input instanceof Request ? input.url : String(input);
+          const body = input instanceof Request ? await input.text() : "";
+          return instance.fetch(new Request(url, { method: "POST", body }));
+        },
+      }),
+    };
+  }
+
+  it("serializes racers from isolated module copies into one vendor POST", async () => {
+    // Regression target: racers must NOT share one module-global map, yet
+    // still prove exactly one vendor refresh POST per tenant/generation. Each
+    // racer imports its own oauth module copy (distinct `inflight` maps, the
+    // separate-isolate analogue) and all copies share one fence object.
+    const vendorCalls: SeenCall[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const namespace = sharedFenceNamespace(new OAuthRefreshFence());
+    const origFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = input instanceof Request ? input.url : String(input);
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (url.startsWith("https://oauth-in-test.invalid/")) {
+        vendorCalls.push({ url, body, headers: {} });
+        await gate;
+        return tokenJson({ access_token: "fenced-access", refresh_token: "fenced-refresh-next" });
+      }
+      throw new Error(`Unexpected fenced vendor call: ${url}`);
+    }) as typeof fetch;
+    try {
+      // Isolated module copies: `vi.resetModules` plus distinct specifiers
+      // gives each racer its own oauth module copy with its own module-global
+      // `inflight` map — the separate-Worker-instance analogue. The queries
+      // are Vite graph keys only; untyped dynamic imports keep tsc on the
+      // plain specifier.
+      const copyA = "../src/oauth.ts?fence=copy-a";
+      const copyB = "../src/oauth.ts?fence=copy-b";
+      vi.resetModules();
+      const first = (await import(/* @vite-ignore */ copyA)) as typeof import("../src/oauth");
+      vi.resetModules();
+      const second = (await import(/* @vite-ignore */ copyB)) as typeof import("../src/oauth");
+      expect(first.refreshRotatingToken).not.toBe(second.refreshRotatingToken);
+      const base = {
+        endpoint: ENDPOINT,
+        tokenPath: TOKEN_PATH,
+        refreshToken: REFRESH_SENTINEL,
+        tenantKey: "org-tenant-fence",
+        generation: "v7",
+        credentials: { clientId: CLIENT_ID, clientSecret: SECRET_SENTINEL },
+        faults: FAULTS,
+        fence: namespace,
+      } satisfies RefreshTokenRequest;
+      const pending = [
+        first.refreshRotatingToken({ ...base }),
+        second.refreshRotatingToken({ ...base }),
+        first.refreshRotatingToken({ ...base }),
+        second.refreshRotatingToken({ ...base }),
+        first.refreshRotatingToken({ ...base }),
+      ];
+      // Every copy cleared its own map mid-flight: without the shared fence
+      // each copy would issue its own vendor POST.
+      first.clearOAuthInflight();
+      second.clearOAuthInflight();
+      await Promise.resolve();
+      release();
+      const results = await Promise.all(pending);
+      expect(vendorCalls).toHaveLength(1);
+      expect(new URLSearchParams(vendorCalls[0]?.body ?? "").get("refresh_token")).toBe(REFRESH_SENTINEL);
+      for (const result of results) {
+        expect(result.rotated).toBe(true);
+        expect(result.token.accessToken).toBe("fenced-access");
+        expect(result.refreshToken).toBe("fenced-refresh-next");
+      }
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = origFetch;
+    }
+  });
+
+  it("partitions fenced flights by generation and releases between rounds", async () => {
+    const vendorCalls: string[] = [];
+    const origFetch = globalThis.fetch;
+    const namespace = sharedFenceNamespace(new OAuthRefreshFence());
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = input instanceof Request ? input.url : String(input);
+      const body = typeof init?.body === "string" ? init.body : "";
+      vendorCalls.push(new URLSearchParams(body).get("refresh_token") ?? "");
+      if (url.startsWith("https://oauth-in-test.invalid/")) {
+        return tokenJson({
+          access_token: `access-for-${vendorCalls.length}`,
+          refresh_token: `next-${vendorCalls.length}`,
+        });
+      }
+      throw new Error(`Unexpected fenced vendor call: ${url}`);
+    }) as typeof fetch;
+    try {
+      const base = {
+        endpoint: ENDPOINT,
+        tokenPath: TOKEN_PATH,
+        credentials: { clientId: CLIENT_ID, clientSecret: SECRET_SENTINEL },
+        faults: FAULTS,
+        fence: namespace,
+      };
+      const first = await refreshRotatingToken({
+        ...base,
+        refreshToken: "gen-v1-token",
+        tenantKey: "t",
+        generation: "v1",
+      });
+      const second = await refreshRotatingToken({
+        ...base,
+        refreshToken: "gen-v2-token",
+        tenantKey: "t",
+        generation: "v2",
+      });
+      expect(vendorCalls).toEqual(["gen-v1-token", "gen-v2-token"]);
+      expect(first.token.accessToken).not.toBe(second.token.accessToken);
+      // Fence released after settle: the next round for v1 fetches again.
+      const third = await refreshRotatingToken({
+        ...base,
+        refreshToken: first.refreshToken,
+        tenantKey: "t",
+        generation: "v1",
+      });
+      expect(vendorCalls).toHaveLength(3);
+      expect(vendorCalls[2]).toBe("next-1");
+      expect(third.token.accessToken).toBe("access-for-3");
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = origFetch;
+    }
+  });
+
+  it("rejects malformed fence requests without touching the vendor", async () => {
+    const fence = new OAuthRefreshFence();
+    const vendorSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      expect((await fence.fetch(new Request("https://fence/refresh/k", { method: "GET" }))).status).toBe(405);
+      expect((await fence.fetch(new Request("https://fence/nope", { method: "POST", body: "x" }))).status).toBe(400);
+      expect((await fence.fetch(new Request("https://fence/refresh/k", { method: "POST", body: "" }))).status).toBe(
+        400,
+      );
+      expect(
+        (
+          await fence.fetch(
+            new Request("https://fence/refresh/k", {
+              method: "POST",
+              body: new URLSearchParams({ token_url: "https://v.invalid", form: "a=b" }).toString(),
+            }),
+          )
+        ).status,
+      ).toBe(400);
+      // Non-object fault table and misshaped fault lines also fail closed.
+      const badTable = new URLSearchParams({
+        token_url: "https://v.invalid",
+        form: "a=b",
+        faults: JSON.stringify(["not", "a", "table"]),
+        timeout_ms: "50",
+      }).toString();
+      expect(
+        (await fence.fetch(new Request("https://fence/refresh/k", { method: "POST", body: badTable }))).status,
+      ).toBe(400);
+      const badLine = new URLSearchParams({
+        token_url: "https://v.invalid",
+        form: "a=b",
+        faults: JSON.stringify({
+          authFailed: { status: "bad", code: 7, message: null },
+          badResponse: FAULTS.badResponse,
+          vendorTimeout: FAULTS.vendorTimeout,
+        }),
+        timeout_ms: "50",
+      }).toString();
+      expect(
+        (await fence.fetch(new Request("https://fence/refresh/k", { method: "POST", body: badLine }))).status,
+      ).toBe(400);
+      // AbortError (not just TimeoutError) maps to the vendor-timeout fault.
+      const aborting = vi.spyOn(globalThis, "fetch").mockRejectedValue(new DOMException("aborted", "AbortError"));
+      try {
+        const aborted = await fence.fetch(
+          new Request("https://fence/refresh/abort-key", {
+            method: "POST",
+            body: new URLSearchParams({
+              token_url: "https://oauth-in-test.invalid/oauth/token",
+              form: "grant_type=refresh_token",
+              faults: JSON.stringify({
+                authFailed: FAULTS.authFailed,
+                badResponse: FAULTS.badResponse,
+                vendorTimeout: FAULTS.vendorTimeout,
+              }),
+              timeout_ms: "50",
+            }).toString(),
+          }),
+        );
+        expect(aborted.status).toBe(504);
+        expect(await aborted.json()).toMatchObject({ code: "TEST_VENDOR_TIMEOUT" });
+      } finally {
+        aborting.mockRestore();
+      }
+      expect(vendorSpy).not.toHaveBeenCalled();
+    } finally {
+      vendorSpy.mockRestore();
+    }
+  });
+
+  it("maps fence relay timeouts to the caller vendor-timeout fault", async () => {
+    const fence = new OAuthRefreshFence();
+    const slow = vi.spyOn(globalThis, "fetch").mockRejectedValue(new DOMException("timed out", "TimeoutError"));
+    try {
+      const relayed = await fence.fetch(
+        new Request("https://fence/refresh/k", {
+          method: "POST",
+          body: new URLSearchParams({
+            token_url: "https://oauth-in-test.invalid/oauth/token",
+            form: "grant_type=refresh_token",
+            faults: JSON.stringify({
+              authFailed: FAULTS.authFailed,
+              badResponse: FAULTS.badResponse,
+              vendorTimeout: FAULTS.vendorTimeout,
+            }),
+            timeout_ms: "50",
+          }).toString(),
+        }),
+      );
+      // The fence relays the abort as its mapped fault JSON, not a hang.
+      expect(relayed.status).toBe(504);
+      expect(await relayed.json()).toMatchObject({ code: "TEST_VENDOR_TIMEOUT" });
+    } finally {
+      slow.mockRestore();
+    }
+  });
+
+  it("releases the fence after failures and maps malformed relays", async () => {
+    const fence = new OAuthRefreshFence();
+    const faultsBody = new URLSearchParams({
+      token_url: "https://oauth-in-test.invalid/oauth/token",
+      form: "grant_type=refresh_token",
+      faults: JSON.stringify({
+        authFailed: FAULTS.authFailed,
+        badResponse: FAULTS.badResponse,
+        vendorTimeout: FAULTS.vendorTimeout,
+      }),
+      timeout_ms: "50",
+    }).toString();
+    const post = (key: string, body: string): Request =>
+      new Request(`https://fence/refresh/${key}`, { method: "POST", body });
+
+    // Malformed fault table and timeout values fail closed before any fetch.
+    const vendorSpy = vi.spyOn(globalThis, "fetch");
+    try {
+      for (const body of [
+        new URLSearchParams({
+          token_url: "https://v.invalid",
+          form: "a=b",
+          faults: "not-json",
+          timeout_ms: "50",
+        }).toString(),
+        new URLSearchParams({
+          token_url: "https://v.invalid",
+          form: "a=b",
+          faults: JSON.stringify({ authFailed: FAULTS.authFailed }),
+          timeout_ms: "50",
+        }).toString(),
+        new URLSearchParams({
+          token_url: "https://v.invalid",
+          form: "a=b",
+          faults: "{}",
+          timeout_ms: "nope",
+        }).toString(),
+        new URLSearchParams({
+          token_url: "https://v.invalid",
+          form: "a=b",
+          faults: JSON.stringify({
+            authFailed: FAULTS.authFailed,
+            badResponse: FAULTS.badResponse,
+            vendorTimeout: FAULTS.vendorTimeout,
+          }),
+          timeout_ms: "99999",
+        }).toString(),
+        "x".repeat(9000),
+      ]) {
+        expect((await fence.fetch(post("edge", body))).status).toBe(400);
+      }
+      expect(vendorSpy).not.toHaveBeenCalled();
+    } finally {
+      vendorSpy.mockRestore();
+    }
+
+    // A raw transport failure propagates (not a fence fault), and the fence
+    // releases so the next round fetches again.
+    const broken = vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("connection reset"));
+    try {
+      await expect(fence.fetch(post("flaky", faultsBody))).rejects.toThrow("connection reset");
+    } finally {
+      broken.mockRestore();
+    }
+    const recovering = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(tokenJson({ access_token: "recovered-access", refresh_token: "recovered-next" }));
+    try {
+      const retry = await fence.fetch(post("flaky", faultsBody));
+      expect(retry.status).toBe(200);
+      expect(await retry.json()).toMatchObject({ access_token: "recovered-access" });
+    } finally {
+      recovering.mockRestore();
+    }
+
+    // An oversized vendor body fails closed with the transport bound.
+    const huge = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response("x".repeat(5000), { status: 200, headers: { "Content-Type": "application/json" } }),
+      );
+    try {
+      const oversized = await fence.fetch(post("huge", faultsBody));
+      expect(oversized.status).toBe(413);
+      expect(await oversized.json()).toMatchObject({ code: "BODY_TOO_LARGE" });
+    } finally {
+      huge.mockRestore();
     }
   });
 });

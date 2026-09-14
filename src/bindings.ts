@@ -18,6 +18,12 @@ export interface Bindings extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials
   DB: D1Database;
   FILES: R2Bucket;
   ARTIFACTS?: R2Bucket;
+  /** OAUTH-01 follow-up (issue #149): cross-instance rotating-refresh fence.
+   * The `OAuthRefreshFence` object behind each (tenant, generation) key runs
+   * one volatile vendor POST per rotation round. Memory-only: no storage, no
+   * D1, no persisted token. Optional so unit tests can ride `env` without a
+   * DO binding; callers without it keep the isolate-local single-flight map. */
+  OAUTH_REFRESH_FENCE?: DurableObjectNamespace;
   ECHO_WORKFLOW: Workflow<ExecutionParams>;
   NINJA_WORKFLOW: Workflow<ExecutionParams>;
   DIGEST_WORKFLOW: Workflow<ExecutionParams>;

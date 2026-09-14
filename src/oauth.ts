@@ -12,15 +12,22 @@
 // and persistence of those transitions is explicitly out of this slice (it
 // awaits the SEC-02 tripwire and its own migration number).
 //
-// Concurrency fencing (upstream drift 2026-09-13, bifrost PR #741): upstream
-// now serializes concurrent SDK refreshes with a row lock held through vendor
-// refresh plus replacement persistence, so two simultaneous 401 retries cannot
-// both submit the same rotating one-time refresh token. The Cloudflare-native
-// equivalent here is per-tenant single-flight: concurrent token requests for
-// the same (endpoint, path, tenant, scope) share one in-flight vendor call and
-// all waiters receive the same response. The vendor therefore sees exactly one
-// refresh POST per rotation, which is the observable invariant PR #741 pins.
-// No SQL `FOR UPDATE` is copied; the race behavior is proven by test instead.
+// Concurrency fencing (upstream drift 2026-09-13, bifrost PR #741; fence
+// follow-up issue #149): upstream serializes concurrent SDK refreshes with a
+// row lock held through vendor refresh plus replacement persistence, so two
+// simultaneous 401 retries cannot both submit the same rotating one-time
+// refresh token. The Cloudflare-native equivalent here is per-tenant
+// single-flight with a cross-instance fence: concurrent token requests for
+// the same (endpoint, path, tenant, generation, scope) share one in-flight
+// vendor call and all waiters receive the same response. A module-global
+// `inflight` map alone cannot provide that across Worker instances (each
+// instance has its own empty map), so rotating refreshes additionally funnel
+// through the `OAuthRefreshFence` Durable Object (`src/oauth-refresh-fence.ts`)
+// whenever the caller supplies one: the object behind the fence key runs one
+// volatile vendor POST per round and streams the shaped body back. The vendor
+// therefore sees exactly one refresh POST per rotation, which is the
+// observable invariant PR #741 pins. No SQL `FOR UPDATE` is copied; the race
+// behavior is proven by test instead.
 //
 // Audience/scope correction (upstream-spec section 15): upstream `oauth_scope`
 // requests a fresh token for a *different resource audience* (Graph scopes
@@ -439,6 +446,23 @@ export interface RefreshTokenRequest extends VendorEnv {
   readonly scope?: string;
   readonly credentials: OAuthClientCredentials;
   readonly faults: OAuthFaultTable;
+  /** Cross-instance fence (issue #149 follow-up): the `OAuthRefreshFence`
+   * Durable Object namespace bound in `wrangler.jsonc`. When supplied, the
+   * rotating refresh funnels through the object addressed by the fence key
+   * (tenant plus generation), so Worker instances that do not share module
+   * memory still serialize onto one vendor POST per rotation round. The
+   * object holds no persisted state and no D1 I/O happens on any path: the
+   * fence carries only non-secret routing fields, and the vendor HTTP is a
+   * single volatile POST. Omit only where no namespace is bound (tests and
+   * same-isolate callers); then the module-local single-flight map applies. */
+  readonly fence?: OAuthRefreshFenceBinding;
+}
+
+/** Structural `OAuthRefreshFence` namespace: the Durable Object binding
+ * `Bindings.OAUTH_REFRESH_FENCE` satisfies this without oauth.ts importing
+ * workerd types, and single-stub test doubles slot in the same way. */
+export interface OAuthRefreshFenceBinding {
+  getByName(name: string): { fetch(input: RequestInfo | URL): Promise<Response> };
 }
 
 export interface RotatedToken {
@@ -452,12 +476,16 @@ export interface RotatedToken {
 }
 
 /** Centralized rotating refresh. Concurrent refreshes for the same
- * (endpoint, path, tenant, scope) share one in-flight vendor call, so the
- * one-time refresh token is submitted exactly once no matter how many
- * workflow/SDK 401 retries race — the Cloudflare-native serialization the
- * upstream row lock provides. No D1 read or write happens before, during, or
- * after the vendor call: replacement persistence awaits SEC-02, so v0 callers
- * use the returned token immediately and drop it. */
+ * (endpoint, path, tenant, generation, scope) share one in-flight vendor
+ * call, so the one-time refresh token is submitted exactly once no matter how
+ * many workflow/SDK 401 retries race — the Cloudflare-native serialization
+ * the upstream row lock provides. With `request.fence` (the `OAuthRefreshFence`
+ * namespace), the flight runs inside the object addressed by the fence key,
+ * so the serialization holds across Worker instances that share no module
+ * memory; without it the module-local map still fences one isolate. No D1
+ * read or write happens before, during, or after the vendor call: replacement
+ * persistence awaits SEC-02, so v0 callers use the returned token immediately
+ * and drop it. */
 export async function refreshRotatingToken(request: RefreshTokenRequest): Promise<RotatedToken> {
   const { clientId, clientSecret } = requireCredentials(request.credentials, request.faults);
   const tokenUrl = resolveTokenUrl(request.endpoint, request.tokenPath);
@@ -466,7 +494,9 @@ export async function refreshRotatingToken(request: RefreshTokenRequest): Promis
   const generation = request.generation === undefined ? "" : requireGeneration(request.generation);
   const scopeKey = request.scope ?? "";
   const key = `rt|${tokenUrl}|${tenantKey}|${generation}|${scopeKey}`;
-  return singleFlight(key, async () => {
+  const fence = request.fence;
+  const faults = request.faults;
+  const buildForm = (): URLSearchParams => {
     const form = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: submitted,
@@ -474,10 +504,67 @@ export async function refreshRotatingToken(request: RefreshTokenRequest): Promis
       client_secret: clientSecret,
     });
     if (request.scope !== undefined) form.set("scope", request.scope);
-    const token = await postTokenForm(tokenUrl, form, request.faults, request);
+    return form;
+  };
+  if (fence !== undefined) {
+    // Cross-instance path: the fence object's single-threaded fetch handler
+    // admits one vendor POST per key however many isolates race. The posted
+    // fields are the non-secret fence identity plus the vendor form; the
+    // refresh token itself travels to the object (same trust domain as the
+    // Worker) but is never persisted there — the object performs one volatile
+    // POST and drops it on settle.
+    const timeoutMs = request.timeoutMs ?? 5000;
+    const envelope = new URLSearchParams({
+      token_url: tokenUrl,
+      form: buildForm().toString(),
+      faults: JSON.stringify({
+        authFailed: faults.authFailed,
+        badResponse: faults.badResponse,
+        vendorTimeout: faults.vendorTimeout,
+      }),
+      timeout_ms: String(timeoutMs),
+    });
+    return singleFlight(key, async () => {
+      const stub = fence.getByName(fenceObjectName(tokenUrl, tenantKey, generation, scopeKey));
+      const relayed = await stub.fetch(
+        new Request(
+          `https://fence/refresh/${encodeURIComponent(tenantKey)}.${encodeURIComponent(generation === "" ? "-" : generation)}.${fenceScopeHash(scopeKey)}`,
+          {
+            method: "POST",
+            body: envelope.toString(),
+          },
+        ),
+      );
+      const token = await readTokenResponse(relayed, faults);
+      const next = token.refreshToken ?? submitted;
+      return Object.freeze({ token, rotated: token.refreshToken !== undefined, refreshToken: next });
+    });
+  }
+  return singleFlight(key, async () => {
+    const token = await postTokenForm(tokenUrl, buildForm(), request.faults, request);
     const next = token.refreshToken ?? submitted;
     return Object.freeze({ token, rotated: token.refreshToken !== undefined, refreshToken: next });
   });
+}
+
+/** Durable Object name for one fence key: tenant plus generation plus a
+ * scope digest. Non-secret routing only. Tenant/generation values are
+ * URL-encoded (never raw) so crafted keys cannot escape the `/refresh/<key>`
+ * path shape the object validates. */
+function fenceObjectName(tokenUrl: string, tenantKey: string, generation: string, scopeKey: string): string {
+  return `${tokenUrl}|${tenantKey}|${generation}|${fenceScopeHash(scopeKey)}`;
+}
+
+/** Short non-secret digest distinguishing fence keys by scope. FNV-1a over
+ * the scope string: deterministic, dependency-free, collision-tolerant for a
+ * routing name (a collision only widens, never breaks, the fence). */
+function fenceScopeHash(scopeKey: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < scopeKey.length; index += 1) {
+    hash ^= scopeKey.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 // --- Audience / scope overrides --------------------------------------------------

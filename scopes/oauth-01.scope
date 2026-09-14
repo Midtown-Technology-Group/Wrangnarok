@@ -4,6 +4,10 @@
 # semantics, non-secret health lifecycle. NinjaOne wired onto the primitive;
 # halo auth shape unchanged.
 src/oauth.ts
+src/oauth-refresh-fence.ts
+src/bindings.ts
+src/index.ts
+wrangler.jsonc
 src/integrations/ninjaone.ts
 test/oauth.test.ts
 test/ninjaone.test.ts
@@ -12,4 +16,5 @@ test/ninjaone.test.ts
 test/integration-faults.test.ts
 docs/architecture/003-integrations-connections.md
 docs/upstream-parity.md
+scripts/check-bundle-budget.mjs
 scopes/oauth-01.scope
