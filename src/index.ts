@@ -1248,8 +1248,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // and the file check all run first so a submission that fails them
       // leaves the handle live for a corrected retry. The handle binds to
       // the current definition id, so delete/recreate under the same name
-      // invalidates sessions minted against the old form.
-      const session = await peekStartupHandle(env.DB, caller, name, handle, def.id);
+      // invalidates sessions minted against the old form. The caller's key
+      // rides along so a handle spent by THIS key still peeks live for
+      // same-key retries and canonical replays.
+      const session = await peekStartupHandle(env.DB, caller, name, handle, def.id, key);
       const fresh = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
       const values = record.values === undefined ? {} : record.values;
       // Order matters: form-gate validation + defaults merge first, then
@@ -1272,10 +1274,12 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       //    foreign admission still answers stale, never a replay of ours.
       if (scheduleAt !== null) {
         const scheduled = await scheduleFormExecution(env.DB, caller, key, name, saga, input, scheduleAt);
-        if (!scheduled.replayed) {
-          const scheduledInput = { ...(input as Record<string, unknown>), __form: name, __scheduleAt: scheduleAt };
-          await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, scheduledInput);
-        }
+        // Consume on every confirmed admission, including idempotent
+        // replay: the replay proves OUR key admitted, so the handle binds
+        // to it here. A live handle after replay would stay reusable under
+        // a different key (PR 320 review).
+        const scheduledInput = { ...(input as Record<string, unknown>), __form: name, __scheduleAt: scheduleAt };
+        await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, scheduledInput);
         return json({ form: name, ...scheduled }, scheduled.replayed ? 200 : 202, {
           Location: scheduled.statusUrl,
         });
@@ -1287,9 +1291,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       void _internalForm;
       void _internalAt;
       const accepted = await submit(env, caller, key, saga, sagaInput);
-      if (!accepted.replayed) {
-        await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, sagaInput);
-      }
+      // Consume on every confirmed admission, including idempotent replay
+      // (same rationale as the scheduled path above): the replayed row
+      // proves OUR key, so the handle binds to it and cannot be reused
+      // under a different key afterwards.
+      await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, sagaInput);
       // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
       return json({ form: name, ...accepted }, accepted.replayed ? 200 : 202, { Location: accepted.statusUrl });
     }
