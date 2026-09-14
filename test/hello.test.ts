@@ -3,13 +3,11 @@
 // re-authored as the hello Saga, exercised end to end on the real local
 // runtime. No vendor boundary exists, so any outbound fetch is a failure.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { executionId, helloSaga } from "../src/domain";
-import migration from "../migrations/0001_initial.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
 const key = "hello-pilot-test-001";
@@ -30,20 +28,16 @@ function request(
     ...(method === "POST" ? { body: JSON.stringify({ sagaId, input: body }) } : {}),
   });
 }
-beforeEach(async () => {
-  await bindings.DB.exec(migration);
-  await bindings.DB.exec(seed);
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-    throw new Error("hello must not fetch");
-  });
-});
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  setup: () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("hello must not fetch");
+    });
+  },
 });
 it("runs the hello pilot end to end: prepare, pure greet, persisted success", async () => {
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, id);
   const listed = await worker.fetch(request("/api/sagas"), bindings);
   expect(await listed.json()).toMatchObject({
     sagas: expect.arrayContaining([expect.objectContaining({ name: "hello" })]),

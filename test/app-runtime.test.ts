@@ -20,17 +20,13 @@
 // - SDK contract: every served APP_* code is in SDK_ERROR_CODES, and the
 //   descriptor lists the runtime routes plus the app-runtime capability.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { executionId, helloSaga } from "../src/domain";
 import { APP_SDK_VERSION } from "../src/app-runtime";
 import { describeContract, SDK_ERROR_CODES } from "../src/sdk";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import migration6 from "../migrations/0006_apps.sql?raw";
-import migration22 from "../migrations/0022_app_runtime.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const TOKEN = "a".repeat(64);
@@ -70,16 +66,7 @@ async function declareTable(appId: string, name: string, visibility: "visible" |
   return (await response.json()) as { table: { revision: number } };
 }
 
-beforeEach(async () => {
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(migration6);
-  await bindings.DB.exec(migration22);
-});
-
-afterEach(async () => {
-  await reset();
-});
+useWorkflowHarness(bindings.DB);
 
 it("serves the handshake descriptor with the version tripwire", async () => {
   const appId = await createApp();
@@ -247,7 +234,7 @@ it("invokes a granted Saga end to end and tails scoped activity", async () => {
   await grant(appId, "saga", helloSaga.id, "invoke");
   const key = "app-runtime-invoke-0001";
   const id = await executionId({ orgId: ORG, userId: "00000000-0000-4000-8000-000000000002" }, key);
-  await using instance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, id);
   const accepted = await call(
     `/api/apps/${appId}/runtime/invoke`,
     "POST",

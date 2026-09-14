@@ -5,19 +5,13 @@
 // 0007 + 0008 + 0009 + 0019 so forms compose with the org-membership gate,
 // author Tables (providers), and managed file locations (file fields).
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { executionId, Fault, helloSaga } from "../src/domain";
 import { consumeAfterAdmission, consumeStartupHandle, mayStartForm, parseFileRef } from "../src/forms";
 import { createPolicyRule, ensureRoleTables } from "../src/roles";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration5 from "../migrations/0005_forms.sql?raw";
-import migration7 from "../migrations/0007_org_membership.sql?raw";
-import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
-import migration9 from "../migrations/0009_tables.sql?raw";
-import migration19 from "../migrations/0019_files.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const TOKEN = "a".repeat(64);
@@ -74,31 +68,25 @@ async function startup(name: string, body?: unknown): Promise<StartupReceipt> {
   return (await response.json()) as StartupReceipt;
 }
 
-beforeEach(async () => {
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration5);
-  await bindings.DB.exec(migration7);
-  await bindings.DB.exec(migration8);
-  await bindings.DB.exec(migration9);
-  await bindings.DB.exec(migration19);
-  const stamp = new Date().toISOString();
-  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind(ORG, "Local demo").run();
-  await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?)")
-    .bind(OTHER_USER, stamp)
-    .run();
-  await bindings.DB.prepare(
-    "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-  )
-    .bind(ORG, OTHER_USER, "member", "active", "ordinary", stamp, stamp)
-    .run();
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-    throw new Error("hello must not fetch");
-  });
-});
-
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  // This suite builds its own org rows (ORG + OTHER_USER member) rather than
+  // the shared fixture: keep the rows, keep the fetch guard.
+  seed: false,
+  setup: async () => {
+    const stamp = new Date().toISOString();
+    await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind(ORG, "Local demo").run();
+    await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?)")
+      .bind(OTHER_USER, stamp)
+      .run();
+    await bindings.DB.prepare(
+      "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+    )
+      .bind(ORG, OTHER_USER, "member", "active", "ordinary", stamp, stamp)
+      .run();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("hello must not fetch");
+    });
+  },
 });
 
 describe("FORM-02 designer: org-scoped CRUD with server-authoritative declarations", () => {
@@ -283,7 +271,7 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     const started = await startup("greet");
     const key = "form-02-contact-001";
     const id = await executionId({ orgId: ORG, userId: OWNER }, key);
-    await using instance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, id);
+    const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, id);
     const accepted = await call(
       "/api/forms/greet/submit",
       "POST",

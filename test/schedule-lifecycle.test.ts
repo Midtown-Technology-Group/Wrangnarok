@@ -5,22 +5,15 @@
 // never be mistaken for failed execution. Real workerd with real D1/Workflow
 // bindings; hello Saga needs no vendor fetch.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { executionId, helloSaga, parseHelloInput } from "../src/domain";
 import { promoteDueSchedules, promoteWindow, scheduleWindowKey } from "../src/schedules";
 import type { ScheduleRow } from "../src/schedules";
 import { submit } from "../src/executions";
 import { SAGA_DEFINITIONS } from "../src/sagas";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import migration7 from "../migrations/0007_org_membership.sql?raw";
-import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
-import migration12 from "../migrations/0012_saga_policies.sql?raw";
-import migration16 from "../migrations/0016_schedules.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
@@ -49,19 +42,7 @@ async function createRecurring(name: string): Promise<void> {
   expect(created.status).toBe(201);
 }
 
-beforeEach(async () => {
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(migration7);
-  await bindings.DB.exec(migration8);
-  await bindings.DB.exec(migration12);
-  await bindings.DB.exec(migration16);
-  await bindings.DB.exec(seed);
-});
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
-});
+useWorkflowHarness(bindings.DB);
 
 describe("TRG-01 promotion semantics (workerd)", () => {
   it("replays the same window while live and dispatches the next window independently", async () => {
@@ -73,7 +54,7 @@ describe("TRG-01 promotion semantics (workerd)", () => {
     // Direct same-window promotion converges on one Execution identity.
     const key = await scheduleWindowKey(row?.id ?? "", "2026-09-12T10:01");
     const firstId = await executionId(principal, key);
-    await using firstInstance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, firstId);
+    const { inner: firstInstance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, firstId);
     const firstSubmit = await submit(
       { ...bindings } as never,
       principal,

@@ -9,10 +9,10 @@
 // real workerd with real D1/Workflow bindings; nothing here uses unit
 // doubles for the runtime.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import {
   awaitChildResult,
   bindSagaChildren,
@@ -32,10 +32,6 @@ import { parseHelloParentInput } from "../src/domain";
 import type { OrgCtx } from "../src/saga";
 import type { SagaEventContext, SagaStep } from "../src/saga";
 import { helloParentSagaDef } from "../src/sagas/hello-parent";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import migration15 from "../migrations/0015_child_lineage.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
@@ -72,22 +68,13 @@ async function detail(id: string) {
   };
 }
 
-beforeEach(async () => {
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(migration15);
-  await bindings.DB.exec(seed);
-});
-
-afterEach(async () => {
-  await reset();
-});
+useWorkflowHarness(bindings.DB);
 
 describe("RUN-02 nested invocation (issue #136)", () => {
   it("runs a parent invoking an authorized child with typed I/O and inspectable lineage", async () => {
     const key = "run02-parent-happy-001";
     const id = await executionId(principal, key);
-    await using instance = await introspectWorkflowInstance(bindings.HELLO_PARENT_WORKFLOW, id);
+    const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_PARENT_WORKFLOW, id);
     expect((await worker.fetch(submitRequest(key, helloParentSaga.id, { name: "Ada" }), bindings)).status).toBe(202);
     await instance.waitForStatus("complete");
     const parent = await detail(id);
@@ -113,7 +100,7 @@ describe("RUN-02 nested invocation (issue #136)", () => {
     // CHILD_FAILED with the child code, and no greeting is fabricated.
     const key = "run02-parent-childfail-001";
     const id = await executionId(principal, key);
-    await using instance = await introspectWorkflowInstance(bindings.HELLO_PARENT_WORKFLOW, id);
+    const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_PARENT_WORKFLOW, id);
     expect((await worker.fetch(submitRequest(key, helloParentSaga.id, { name: "" }), bindings)).status).toBe(400);
     expect(instance).toBeDefined();
     // Direct proof at the row level: reserve a parent/child pair and drive

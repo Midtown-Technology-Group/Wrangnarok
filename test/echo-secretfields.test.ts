@@ -3,8 +3,7 @@
 // The echo Integration declares no secrets, its resolved Connection carries
 // no secret material, and echo API surfaces carry no secret-like text.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { ECHO_INTEGRATION_ID, echoSaga, executionId } from "../src/domain";
@@ -12,9 +11,7 @@ import { echoIntegrationDef } from "../src/integrations/index";
 import { buildOrgCtx } from "../src/saga";
 import { resolveConnection } from "../src/executions";
 import type { ExecutionRow } from "../src/executions";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 
 const bindings = env as unknown as Bindings;
 const orgId = "00000000-0000-4000-8000-000000000001";
@@ -47,21 +44,15 @@ async function insertExecution(id: string): Promise<void> {
     .run();
 }
 
-beforeEach(async () => {
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(seed);
-  // Intercept only outbound vendor HTTP. Native D1/Workflow bindings are never replaced.
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-    const url = input instanceof Request ? input.url : String(input);
-    if (url !== "http://127.0.0.1:8788/echo") throw new Error("Unexpected outbound request");
-    return Response.json({ message });
-  });
-});
-
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  setup: () => {
+    // Intercept only outbound vendor HTTP. Native D1/Workflow bindings are never replaced.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url !== "http://127.0.0.1:8788/echo") throw new Error("Unexpected outbound request");
+      return Response.json({ message });
+    });
+  },
 });
 
 it("declares empty secretFields for the echo Integration", () => {
@@ -89,7 +80,7 @@ it("resolves an echo Connection with IDs plus endpoint only, no secret material"
 
 it("carries no secret-like material through echo API surfaces", async () => {
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
   const accepted = await worker.fetch(
     new Request("https://local.test/api/executions", {
       method: "POST",

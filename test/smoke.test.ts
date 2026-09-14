@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { echoSaga, executionId, SMOKE_ORG_ID, SMOKE_USER_ID, smokeSaga } from "../src/domain";
 import { USAGE_VERSION } from "../src/usage";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0003_usage_blocks.sql?raw";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 const bindings = env as unknown as Bindings;
 // Per-run Free-tier budgets (docs/upstream-spec.md#free-tier-rule-measurable).
 // The smoke path is deterministic, so budgets sit close to observed actuals
@@ -43,26 +41,23 @@ function smokeRequest(
     ...(method === "POST" ? { body: JSON.stringify({ sagaId, input: body }) } : {}),
   });
 }
-beforeEach(async () => {
-  // Real local D1 SQL statements, not an in-memory repository double.
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?) ON CONFLICT(id) DO NOTHING")
-    .bind(SMOKE_ORG_ID, "org_system_smoke")
-    .run();
-  // Guard, not a fixture: system.smoke has no vendor boundary, so any
-  // outbound fetch is a failure. No URL is stubbed or served here.
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-    throw new Error("system.smoke must not fetch");
-  });
-});
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  // The smoke org row is org-specific (not in the shared seed); the fetch
+  // guard stays: system.smoke has no vendor boundary, so any outbound fetch
+  // is a failure.
+  seed: false,
+  setup: async () => {
+    await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?) ON CONFLICT(id) DO NOTHING")
+      .bind(SMOKE_ORG_ID, "org_system_smoke")
+      .run();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("system.smoke must not fetch");
+    });
+  },
 });
 it("runs the loopback-free system.smoke saga end to end with a usage block", async () => {
   const id = await executionId(smokePrincipal, key);
-  await using instance = await introspectWorkflowInstance(bindings.SMOKE_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.SMOKE_WORKFLOW, id);
   const logs: unknown[] = [];
   const originalLog = console.log;
   console.log = (...args: unknown[]) => {

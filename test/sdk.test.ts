@@ -4,10 +4,11 @@
 // @cloudflare/vitest-plugin; D1/Workflow bindings are never replaced, only
 // outbound vendor HTTP is intercepted. No production deployment.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { reset } from "cloudflare:test";
+import { applyFullMigrations, trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { executionId, helloSaga } from "../src/domain";
 import {
   createSdkClient,
@@ -49,9 +50,6 @@ import {
   validateAgainstSchema,
 } from "../src/sdk";
 import { SAGA_CATALOG } from "../src/sagas";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const TOKEN = "a".repeat(64);
@@ -208,9 +206,7 @@ describe("SDK contract version and descriptor (issue #140)", () => {
   });
 
   it("serves the same descriptor through the authenticated Worker route", async () => {
-    await bindings.DB.exec(migration1);
-    await bindings.DB.exec(migration2);
-    await bindings.DB.exec(seed);
+    await applyFullMigrations(bindings.DB);
     const denied = await worker.fetch(new Request("https://local.test/api/sdk"), bindings);
     expect(denied.status).toBe(401);
     const ok = await worker.fetch(new Request("https://local.test/api/sdk", { headers: authHeaders() }), bindings);
@@ -219,9 +215,7 @@ describe("SDK contract version and descriptor (issue #140)", () => {
   });
 
   it("keeps SDK_ERROR_CODES covering every served error code", async () => {
-    await bindings.DB.exec(migration1);
-    await bindings.DB.exec(migration2);
-    await bindings.DB.exec(seed);
+    await applyFullMigrations(bindings.DB);
     // Force representative failures through the real routes and assert each
     // served code is in the contract list.
     const unauth = await worker.fetch(new Request("https://local.test/api/sagas"), bindings);
@@ -323,25 +317,20 @@ describe("SDK offline authoring helpers", () => {
 });
 
 describe("SDK automation client: local happy/denied/error examples", () => {
-  beforeEach(async () => {
-    await bindings.DB.exec(migration1);
-    await bindings.DB.exec(migration2);
-    await bindings.DB.exec(seed);
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = input instanceof Request ? input.url : String(input);
-      if (url !== "http://127.0.0.1:8788/echo") throw new Error("Unexpected outbound request");
-      return Response.json({ message: "hello" });
-    });
-  });
-  afterEach(async () => {
-    vi.restoreAllMocks();
-    await reset();
+  useWorkflowHarness(bindings.DB, {
+    setup: () => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url !== "http://127.0.0.1:8788/echo") throw new Error("Unexpected outbound request");
+        return Response.json({ message: "hello" });
+      });
+    },
   });
 
   it("lists, inspects, submits, polls, and diagnoses a happy Execution", async () => {
     const key = "sdk-client-happy-001";
     const id = await executionId(principal, key);
-    await using instance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, id);
+    const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, id);
     const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) =>
       worker.fetch(
         new Request(url, { ...(init ?? {}), headers: authHeaders(init?.headers as Record<string, string>) }),
@@ -373,7 +362,7 @@ describe("SDK automation client: local happy/denied/error examples", () => {
   it("keeps the same caller policy as the UI: denied callers get 401/404, never data", async () => {
     const key = "sdk-client-denied-001";
     const id = await executionId(principal, key);
-    await using instance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, id);
+    const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, id);
     const authed = (async (url: string | URL | Request, init?: RequestInit) =>
       worker.fetch(
         new Request(url, { ...(init ?? {}), headers: authHeaders(init?.headers as Record<string, string>) }),

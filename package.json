@@ -14,6 +14,8 @@
     "typecheck": "npm run types && tsc --noEmit && tsc --noEmit -p client && tsc --noEmit -p test/tsconfig.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:unit": "node scripts/test-group.mjs unit",
+    "test:workflow": "node scripts/test-group.mjs workflow",
     "check:sagas": "vitest run test/saga-contract.test.ts",
     "check:bundle": "node scripts/check-bundle-budget.mjs",
     "build": "npm run build:ui && wrangler deploy --dry-run",

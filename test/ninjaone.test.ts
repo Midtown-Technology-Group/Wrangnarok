@@ -1,12 +1,9 @@
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { executionId, ninjaSaga } from "../src/domain";
-import migration from "../migrations/0001_initial.sql?raw";
-import migration3 from "../migrations/0003_usage_blocks.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
 const key = "ninjaone-test-001";
@@ -51,37 +48,29 @@ function mockNinja(token: unknown, orgs: unknown, tokenStatus = 200, orgsStatus 
     throw new Error(`Unexpected outbound request: ${url}`);
   });
 }
-beforeEach(async () => {
-  // Real local D1 SQL statements, not an in-memory repository double.
-  await bindings.DB.exec(migration);
-  // usage_blocks (0003) is audited below: persisted usage must never carry
-  // secrets, tokens, or payload bodies either.
-  await bindings.DB.exec(migration3);
-  await bindings.DB.exec(seed);
-  // The committed seed carries no real endpoints (override pattern); each
-  // suite owns its fixture Connection rows. Dummy host: never contacted
-  // (vendor HTTP is intercepted below) and never a real instance.
-  await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
-    .bind(
-      "00000000-0000-4000-8000-000000000102",
-      principal.orgId,
-      "0606e237-137b-4629-8346-85468e1c2df6",
-      "https://ninja-in-test.invalid/api",
-    )
-    .run();
-  // Intercept only outbound vendor HTTP. Native D1/Workflow bindings are never replaced.
-  mockNinja({ access_token: TOKEN_SENTINEL, expires_in: 3600, token_type: "Bearer" }, [
-    { id: 1, name: "Acme" },
-    { id: 2, name: "Globex" },
-  ]);
-});
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  setup: async () => {
+    // The committed seed carries no real endpoints (override pattern); each
+    // suite owns its fixture Connection rows. Dummy host: never contacted
+    // (vendor HTTP is intercepted below) and never a real instance.
+    await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
+      .bind(
+        "00000000-0000-4000-8000-000000000102",
+        principal.orgId,
+        "0606e237-137b-4629-8346-85468e1c2df6",
+        "https://ninja-in-test.invalid/api",
+      )
+      .run();
+    // Intercept only outbound vendor HTTP. Native D1/Workflow bindings are never replaced.
+    mockNinja({ access_token: TOKEN_SENTINEL, expires_in: 3600, token_type: "Bearer" }, [
+      { id: 1, name: "Acme" },
+      { id: 2, name: "Globex" },
+    ]);
+  },
 });
 it("lists NinjaOne organizations end to end and reuses a submission", async () => {
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id);
   const accepted = await worker.fetch(request("/api/executions", "POST"), bindings);
   expect(accepted.status).toBe(202);
   expect(accepted.headers.get("Location")).toBe(`/api/executions/${id}`);
@@ -123,7 +112,7 @@ it("exposes no secret material on discovery, history, or detail surfaces", async
   // v0 acceptance: the declared secretFields (clientSecret) plus transient
   // tokens must be absent from every browser-facing surface, not just D1.
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id);
   expect((await worker.fetch(request("/api/executions", "POST"), bindings)).status).toBe(202);
   await instance.waitForStatus("complete");
   const bodies: string[] = [];
@@ -141,7 +130,7 @@ it("exposes no secret material on discovery, history, or detail surfaces", async
 it("persists NINJA_UNAUTHORIZED without copying vendor bodies", async () => {
   mockNinja({ error: "invalid_client" }, [], 401, 200);
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id);
   expect((await worker.fetch(request("/api/executions", "POST"), bindings)).status).toBe(202);
   await instance.waitForStatus("errored");
   const response = await worker.fetch(request(`/api/executions/${id}`), bindings);
@@ -157,7 +146,7 @@ it("surfaces a throttled token request as NINJA_RATE_LIMITED without calling org
   // the orgs hop never runs and nothing retries.
   mockNinja({ error: "rate_limited" }, [], 429, 200);
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id);
   expect((await worker.fetch(request("/api/executions", "POST"), bindings)).status).toBe(202);
   await instance.waitForStatus("errored");
   const response = await worker.fetch(request(`/api/executions/${id}`), bindings);
@@ -179,7 +168,7 @@ it("truncates large organization lists to a bounded persisted summary", async ()
   const many = Array.from({ length: 100 }, (_, index) => ({ id: index + 1, name: `Org ${index + 1}` }));
   mockNinja({ access_token: TOKEN_SENTINEL, expires_in: 3600, token_type: "Bearer" }, many);
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id);
   expect((await worker.fetch(request("/api/executions", "POST"), bindings)).status).toBe(202);
   await instance.waitForStatus("complete");
   const detail = await worker.fetch(request(`/api/executions/${id}`), bindings);
@@ -203,7 +192,7 @@ it("surfaces a slow NinjaOne vendor as TimedOut through the explicit timeout ste
     6000,
   );
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id);
   expect((await worker.fetch(request("/api/executions", "POST"), bindings)).status).toBe(202);
   await instance.waitForStatus("errored");
   const response = await worker.fetch(request(`/api/executions/${id}`), bindings);

@@ -23,20 +23,14 @@
 // - SDK/CLI/MCP identity: the typed client reads the same route, so every
 //   caller family preserves the same identity.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { credentialClassFor, clearAccessCertCache, isEndpointPrincipal, isServicePrincipal } from "../src/access";
 import { describeCaller } from "../src/auth";
 import { helloSaga } from "../src/domain";
 import { createSdkClient, describeContract, parseCallerIdentity, SdkError, SDK_ERROR_CODES } from "../src/sdk";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import migration7 from "../migrations/0007_org_membership.sql?raw";
-import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
-import migration21 from "../migrations/0021_endpoints.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const TOKEN = "a".repeat(64);
@@ -143,19 +137,13 @@ async function accessRequest(token: string, envOverride?: Bindings): Promise<Res
   );
 }
 
-beforeEach(async () => {
-  clearAccessCertCache();
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(seed);
-  await bindings.DB.exec(migration7);
-  await bindings.DB.exec(migration8);
-  await bindings.DB.exec(migration21);
-});
-
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  setup: () => {
+    clearAccessCertCache();
+  },
+  teardown: () => {
+    clearAccessCertCache();
+  },
 });
 
 describe("credential classes (pure, access.ts)", () => {
@@ -463,7 +451,7 @@ describe("scoped endpoint credentials (workflow-key analogue)", () => {
     const body = (await first.json()) as { executionId: string; replayed: boolean };
     expect(body.replayed).toBe(false);
     expect(body.executionId).toMatch(/^[a-f0-9]{64}$/);
-    await using instance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, body.executionId);
+    const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, body.executionId);
     await instance.waitForStatus("complete");
     // Least privilege: the operator session cannot see endpoint executions.
     const hidden = await authed(`/api/executions/${body.executionId}`, "GET");
