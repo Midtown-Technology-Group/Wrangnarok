@@ -11,17 +11,26 @@ function cap(slug) {
     .join("");
 }
 
+// INT-01 review (CWE-94): OpenAPI path keys only have to start with `/`, so a
+// crafted spec could smuggle CR/LF/U+2028/U+2029 into the emitted `//`
+// comment and break out of the comment line. Collapse those separators, the
+// same treatment as the version/digest sanitizers, so emitted source stays
+// single-line per operation.
+function safeCommentFragment(text) {
+  return String(text).replace(/[\r\n\u2028\u2029]+/g, " ");
+}
+
 export function emitIntegrationSource({ doc, operations, id, name, allowedOrigins, envPrefix, digestHex, version }) {
   const prefix = id
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
-  const cleanVersion = version.replace(/[\r\n]+/g, " ").slice(0, 64);
+  const cleanVersion = safeCommentFragment(version).slice(0, 64);
   const cleanDigest = digestHex.replace(/[^a-f0-9]/g, "").slice(0, 64);
   const opsLiteral = operations
     .map(
       (op) =>
-        `    ${JSON.stringify(op.operationId)}: ${JSON.stringify(op.risk)}, // ${op.method.toUpperCase()} ${op.path}`,
+        `    ${JSON.stringify(op.operationId)}: ${JSON.stringify(op.risk)}, // ${safeCommentFragment(op.method.toUpperCase())} ${safeCommentFragment(op.path)}`,
     )
     .join("\n");
   const originsLiteral = allowedOrigins.map((origin) => `  ${JSON.stringify(origin)},`).join("\n");

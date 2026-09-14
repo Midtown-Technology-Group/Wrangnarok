@@ -108,6 +108,24 @@ describe("INT-01 generator (issue #229)", () => {
     );
   });
 
+  it("keeps crafted path separators inside the emitted comment line", () => {
+    const evil = JSON.parse(haloShaped());
+    evil.paths["/api/Evil\r\ninjected"] = { get: { operationId: "Evil_Get", summary: "Evil." } };
+    evil.paths["/api/Split\u2028line"] = { get: { operationId: "Evil_Split", summary: "Split." } };
+    const out = generateIntegrationModule(JSON.stringify(evil), opts(), DIGEST);
+    // The review thread (CWE-94) is about the emitted `//` comment: only the
+    // classification lines can break out of a comment. The embedded spec
+    // literal keeps U+2028 raw inside a quoted string, which is valid ES2019+
+    // and cannot terminate the comment.
+    for (const line of out.source.split("\n")) {
+      if (line.includes("// GET /api/Evil") || line.includes("// GET /api/Split")) {
+        expect(line).not.toMatch(/[\r\n\u2028\u2029]/);
+      }
+    }
+    expect(out.source).toContain("// GET /api/Evil injected");
+    expect(out.source).toContain("// GET /api/Split line");
+  });
+
   it("rejects oversized specs before parsing", () => {
     const big = " ".repeat(2 * 1024 * 1024 + 1);
     expect(() => generateIntegrationModule(big, opts(), DIGEST)).toThrow(
