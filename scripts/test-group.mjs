@@ -26,7 +26,7 @@ if (group !== "unit" && group !== "workflow") {
 const extra = process.argv.slice(3);
 
 const dir = new URL("../test/", import.meta.url);
-const files = readdirSync(dir)
+const files = readdirSync(dir, { recursive: true })
   .filter((name) => /\.test\.(ts|tsx)$/.test(name))
   .map((name) => join("test", name))
   .sort();
