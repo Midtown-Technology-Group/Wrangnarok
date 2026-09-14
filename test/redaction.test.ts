@@ -4,16 +4,12 @@
 // observability hook. Each test names its enforcement location — absence
 // alone is not the gate; the pinning mechanism is.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { echoSaga, executionId, ninjaSaga, smokeSaga } from "../src/domain";
 import { buildUsage } from "../src/usage";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import migration3 from "../migrations/0003_usage_blocks.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
@@ -35,34 +31,28 @@ function getRequest(path: string, key: string) {
   return new Request(`https://local.test${path}`, { method: "GET", headers: auth(key) });
 }
 
-beforeEach(async () => {
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(migration3);
-  await bindings.DB.exec(seed);
-  await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
-    .bind(
-      "00000000-0000-4000-8000-000000000102",
-      principal.orgId,
-      "0606e237-137b-4629-8346-85468e1c2df6",
-      "https://ninja-in-test.invalid/api",
-    )
-    .run();
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-    const url = input instanceof Request ? input.url : String(input);
-    if (url === "http://127.0.0.1:8788/echo") return Response.json({ message: "hello" });
-    if (url === "https://ninja-in-test.invalid/oauth/token") {
-      return Response.json({ access_token: TOKEN_SENTINEL, expires_in: 3600, token_type: "Bearer" });
-    }
-    if (url === "https://ninja-in-test.invalid/api/v2/organizations") {
-      return Response.json([{ id: 1, name: "Acme" }]);
-    }
-    throw new Error(`Unexpected outbound request: ${url}`);
-  });
-});
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  setup: async () => {
+    await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
+      .bind(
+        "00000000-0000-4000-8000-000000000102",
+        principal.orgId,
+        "0606e237-137b-4629-8346-85468e1c2df6",
+        "https://ninja-in-test.invalid/api",
+      )
+      .run();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "http://127.0.0.1:8788/echo") return Response.json({ message: "hello" });
+      if (url === "https://ninja-in-test.invalid/oauth/token") {
+        return Response.json({ access_token: TOKEN_SENTINEL, expires_in: 3600, token_type: "Bearer" });
+      }
+      if (url === "https://ninja-in-test.invalid/api/v2/organizations") {
+        return Response.json([{ id: 1, name: "Acme" }]);
+      }
+      throw new Error(`Unexpected outbound request: ${url}`);
+    });
+  },
 });
 
 it("pins the observability hook schema: counts, IDs, durations only", () => {
@@ -106,7 +96,7 @@ it("keeps the console hook free of secret material on a live run", async () => {
   }
   const key = "redaction-console-001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.SMOKE_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.SMOKE_WORKFLOW, id);
   expect((await worker.fetch(submitRequest(smokeSaga.id, {}, key), bindings)).status).toBe(202);
   await instance.waitForStatus("complete");
   // The hook must actually have fired: a vacuous capture proves nothing.
@@ -145,7 +135,7 @@ it("shapes Workflow results to exact vendor-free summaries", async () => {
   // carries exactly the shaped summary — no token, no raw vendor document.
   const key = "redaction-result-001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id);
   expect((await worker.fetch(submitRequest(ninjaSaga.id, {}, key), bindings)).status).toBe(202);
   await instance.waitForStatus("complete");
   const text = await (await worker.fetch(getRequest(`/api/executions/${id}`, key), bindings)).text();
@@ -165,7 +155,7 @@ it("shapes history rows to the summary allowlist, never input/result", async () 
   // SELECT column list. History rows cannot carry payloads by construction.
   const key = "redaction-history-001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
   expect((await worker.fetch(submitRequest(echoSaga.id, { message: "hello" }, key), bindings)).status).toBe(202);
   await instance.waitForStatus("complete");
   const text = await (await worker.fetch(getRequest("/api/executions", key), bindings)).text();

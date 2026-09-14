@@ -7,16 +7,12 @@
 // outbound vendor fetch (worker submit tests) and a prepare() Proxy that
 // holds one fenced statement to force a race.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { ECHO_INTEGRATION_ID, echoSaga, executionId, NINJA_INTEGRATION_ID, ninjaSaga, smokeSaga } from "../src/domain";
 import { activeInstallFor, installBundle, requireActiveInstall } from "../src/solutions";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import migration4 from "../migrations/0004_solutions_install.sql?raw";
-import migration5 from "../migrations/0010_solutions_activation.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const BUNDLE_ID = "b10a7c2e-3f4d-4a5b-8c6d-7e8f9a0b1c2d";
@@ -133,16 +129,10 @@ function gateStatement(matchSql: string) {
   return { gated, arrived, release: () => gate.release?.() };
 }
 
-beforeEach(async () => {
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(migration4);
-  await bindings.DB.exec(migration5);
-});
-
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  // No shared seed: these tests insert their own org rows with plain INSERT
+  // (UNIQUE-pinned assertions), and the seed's fixture org would collide.
+  seed: false,
 });
 
 it("activates the pointer on a fresh install and keeps it stable on no-op re-runs", async () => {
@@ -560,7 +550,7 @@ it("serves worker submits against the active install and fails them on revision 
     { orgId: LAB_ORG_ID, userId: "00000000-0000-4000-8000-000000000002" },
     allowedKey,
   );
-  await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, allowedId);
+  const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, allowedId);
   const accepted = await worker.fetch(submitRequest(echoSaga.id, { message: "hi" }, allowedKey), bindings);
   expect(accepted.status).toBe(202);
   await instance.waitForStatus("complete");

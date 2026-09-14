@@ -3,15 +3,11 @@
 // run in real workerd with real D1/Workflow bindings; only outbound vendor
 // HTTP is mocked.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { digestSaga, executionId } from "../src/domain";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import migration3 from "../migrations/0003_usage_blocks.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
 const key = "ninja-echo-digest-test-001";
@@ -73,35 +69,28 @@ function mockVendors(
     throw new Error(`Unexpected outbound request: ${url}`);
   });
 }
-beforeEach(async () => {
-  // Real local D1 SQL statements, not an in-memory repository double.
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(migration3);
-  await bindings.DB.exec(seed);
-  // Each suite owns its fixture Connection rows. Dummy host: never contacted
-  // (vendor HTTP is intercepted below) and never a real instance.
-  await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
-    .bind(
-      "00000000-0000-4000-8000-000000000103",
-      principal.orgId,
-      "0606e237-137b-4629-8346-85468e1c2df6",
-      "https://ninja-in-test.invalid/api",
-    )
-    .run();
-  calls.length = 0;
-  mockVendors({ access_token: TOKEN_SENTINEL, expires_in: 3600, token_type: "Bearer" }, [
-    { id: 1, name: "Acme" },
-    { id: 2, name: "Globex" },
-  ]);
-});
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  setup: async () => {
+    // Each suite owns its fixture Connection rows. Dummy host: never contacted
+    // (vendor HTTP is intercepted below) and never a real instance.
+    await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
+      .bind(
+        "00000000-0000-4000-8000-000000000103",
+        principal.orgId,
+        "0606e237-137b-4629-8346-85468e1c2df6",
+        "https://ninja-in-test.invalid/api",
+      )
+      .run();
+    calls.length = 0;
+    mockVendors({ access_token: TOKEN_SENTINEL, expires_in: 3600, token_type: "Bearer" }, [
+      { id: 1, name: "Acme" },
+      { id: 2, name: "Globex" },
+    ]);
+  },
 });
 it("runs the NinjaOne census through the echo Integration end to end", async () => {
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.DIGEST_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.DIGEST_WORKFLOW, id);
   const started = Date.now();
   const accepted = await worker.fetch(request("/api/executions", "POST"), bindings);
   expect(accepted.status).toBe(202);
@@ -145,7 +134,7 @@ it("runs the NinjaOne census through the echo Integration end to end", async () 
 it("fails loud on NinjaOne auth without ever calling echo", async () => {
   mockVendors({ error: "invalid_client" }, [], 401, 200);
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.DIGEST_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.DIGEST_WORKFLOW, id);
   expect((await worker.fetch(request("/api/executions", "POST"), bindings)).status).toBe(202);
   await instance.waitForStatus("errored");
   const response = await worker.fetch(request(`/api/executions/${id}`), bindings);
@@ -166,7 +155,7 @@ it("never auto-retries a failing echo of the digest", async () => {
     503,
   );
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.DIGEST_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.DIGEST_WORKFLOW, id);
   expect((await worker.fetch(request("/api/executions", "POST"), bindings)).status).toBe(202);
   await instance.waitForStatus("errored");
   const response = await worker.fetch(request(`/api/executions/${id}`), bindings);
@@ -188,7 +177,7 @@ it("surfaces a slow NinjaOne vendor as TimedOut through the explicit timeout ste
     6000,
   );
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.DIGEST_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.DIGEST_WORKFLOW, id);
   expect((await worker.fetch(request("/api/executions", "POST"), bindings)).status).toBe(202);
   await instance.waitForStatus("errored");
   const response = await worker.fetch(request(`/api/executions/${id}`), bindings);

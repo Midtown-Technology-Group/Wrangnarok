@@ -5,14 +5,11 @@
 // prove a failed termination is NOT reported as confirmed physical
 // cancellation (503 CANCELLATION_UNCONFIRMED, retry-safe, no false 200).
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { echoSaga, executionId } from "../src/domain";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
@@ -59,21 +56,12 @@ async function storedRow(id: string) {
     .first<{ status: string; dispatched: number; error_json: string | null }>();
 }
 
-beforeEach(async () => {
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(seed);
-});
-
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
-});
+useWorkflowHarness(bindings.DB);
 
 it("reaches the native terminated state through the cancel route", async () => {
   const key = "run04-native-terminated-001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
   // Never-settling vendor: the mocked fetch ignores the abort signal, so the
   // step stays Running until the native step timeout (10s) or terminate wins.
   mockEcho(() => new Promise<Response>(() => {}));

@@ -5,10 +5,10 @@
 // All gates run in real workerd with real D1/Workflow bindings; only outbound
 // vendor HTTP is mocked.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import {
   checkpointRetryLimit,
   DEFAULT_SAGA_POLICY,
@@ -27,12 +27,6 @@ import { loadSagaPolicy, parseStoredPolicy, policySnapshot, storeSagaPolicy } fr
 import { retryLimitForStep } from "../src/saga";
 import { buildCatalog, defineSaga } from "../src/saga";
 import { parseRuntimePolicy } from "../src/sdk";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import migration7 from "../migrations/0007_org_membership.sql?raw";
-import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
-import migration9 from "../migrations/0012_saga_policies.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
@@ -75,18 +69,7 @@ async function waitForExecutionStatus(id: string, want: string, timeoutMs = 1500
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
-beforeEach(async () => {
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(migration7);
-  await bindings.DB.exec(migration8);
-  await bindings.DB.exec(migration9);
-  await bindings.DB.exec(seed);
-});
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
-});
+useWorkflowHarness(bindings.DB);
 
 describe("RUN-01 policy parsing (pure)", () => {
   it("defaults to engine-loss-only retries, Integration deadlines, open admission", () => {
@@ -236,7 +219,7 @@ describe("RUN-01 enforcement matrix (workerd)", () => {
     expect(set.status).toBe(200);
     const key = "run01-timeout-custom-001";
     const id = await executionId(principal, key);
-    await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+    const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
     // The vendor answers fast, but the 50ms snapshot deadline fires first.
     mockEcho(async () => {
       await new Promise((resolve) => setTimeout(resolve, 400));
@@ -270,7 +253,7 @@ describe("RUN-01 enforcement matrix (workerd)", () => {
     // The refused row stays Pending undispatched, so the retry replays it.
     await worker.fetch(policyPut(echoSaga.id, { admission: { enabled: true } }), bindings);
     const id = await executionId(principal, key);
-    await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+    const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
     mockEcho(async () => Response.json({ message: "hello" }));
     // The refused submit inserted the Pending receipt: the retry converges
     // on it, so the replay status is 200, not 202.
@@ -316,7 +299,7 @@ describe("RUN-01 enforcement matrix (workerd)", () => {
   it("keeps stale fencing and recovery: late checkpoints no-op, expired windows never resurrect", async () => {
     const key = "run01-stale-0001";
     const id = await executionId(principal, key);
-    await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+    const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
     mockEcho(async () => Response.json({ message: "hello" }));
     expect((await worker.fetch(submitRequest(key), bindings)).status).toBe(202);
     await instance.waitForStatus("complete");
@@ -383,7 +366,7 @@ describe("RUN-01 enforcement matrix (workerd)", () => {
     // structured Failed with its safe code, never invented success.
     const failedKey = "run01-cwe-000001";
     const failedId = await executionId(principal, failedKey);
-    await using failed = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, failedId);
+    const { inner: failed } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, failedId);
     mockEcho(async () => new Response("private-vendor-diagnostic", { status: 503 }));
     expect((await worker.fetch(submitRequest(failedKey), bindings)).status).toBe(202);
     await failed.waitForStatus("errored");

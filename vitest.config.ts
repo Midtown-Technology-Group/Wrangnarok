@@ -19,6 +19,11 @@ export default defineConfig({
   ],
   test: {
     include: ["test/**/*.test.{ts,tsx}"],
+    // Unhandled-rejection guard (issues #332/#333): records every rejection
+    // escaping a test with an explicit allowlist for asserted stress paths
+    // and a HARD-FAIL marker for anything unexpected. See the header comment
+    // in test/setup-unhandled-guard.ts before broadening the allowlist.
+    setupFiles: ["./test/setup-unhandled-guard.ts"],
     coverage: {
       provider: "istanbul",
       reporter: ["text", "lcov", "json"],

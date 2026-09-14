@@ -8,17 +8,13 @@
 // responses, and usage/telemetry. Exercises success, rejection, retries,
 // and cancellation. Fixture sentinels only; no production credentials.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { echoSaga, executionId, ninjaSaga } from "../src/domain";
 import { buildUsage, logUsage, persistUsage } from "../src/usage";
 import { clearAllExecutionSecrets, scrubTextWithSecrets } from "../src/secrets";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import migration3 from "../migrations/0003_usage_blocks.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
@@ -49,26 +45,21 @@ function dumpD1(): Promise<string> {
   ]).then((tables) => JSON.stringify(tables.map((result) => result.results)));
 }
 
-beforeEach(async () => {
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(migration3);
-  await bindings.DB.exec(seed);
-  await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
-    .bind(
-      "00000000-0000-4000-8000-000000000102",
-      principal.orgId,
-      "0606e237-137b-4629-8346-85468e1c2df6",
-      "https://ninja-in-test.invalid/api",
-    )
-    .run();
-  clearAllExecutionSecrets();
-});
-
-afterEach(async () => {
-  vi.restoreAllMocks();
-  clearAllExecutionSecrets();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  setup: async () => {
+    await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
+      .bind(
+        "00000000-0000-4000-8000-000000000102",
+        principal.orgId,
+        "0606e237-137b-4629-8346-85468e1c2df6",
+        "https://ninja-in-test.invalid/api",
+      )
+      .run();
+    clearAllExecutionSecrets();
+  },
+  teardown: () => {
+    clearAllExecutionSecrets();
+  },
 });
 
 it("scrubs credential and token substrings across a successful ninja Execution", async () => {
@@ -92,7 +83,7 @@ it("scrubs credential and token substrings across a successful ninja Execution",
   });
   const key = "sec01-success-001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id);
   expect((await worker.fetch(submitRequest(ninjaSaga.id, {}, key), bindings)).status).toBe(202);
   await instance.waitForStatus("complete");
   // D1 rows: input/history/result/error plus operation payloads.
@@ -113,7 +104,7 @@ it("scrubs credential and token substrings across a successful ninja Execution",
   // its own surfaces stay clean too.
   const key2 = "sec01-success-002";
   const id2 = await executionId(principal, key2);
-  await using instance2 = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id2);
+  const { inner: instance2 } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id2);
   expect((await worker.fetch(submitRequest(ninjaSaga.id, {}, key2), bindings)).status).toBe(202);
   await instance2.waitForStatus("complete");
   expect(await dumpD1()).not.toContain(SECRET);
@@ -135,7 +126,7 @@ it("scrubs vendor-error substrings on the rejection path and maps transport erro
   });
   const key = "sec01-reject-001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id);
   expect((await worker.fetch(submitRequest(ninjaSaga.id, {}, key), bindings)).status).toBe(202);
   await instance.waitForStatus("errored");
   const text = await (await worker.fetch(getRequest(`/api/executions/${id}`, key), bindings)).text();
@@ -160,7 +151,7 @@ it("scrubs vendor-error substrings on the rejection path and maps transport erro
   });
   const key2 = "sec01-reject-002";
   const id2 = await executionId(principal, key2);
-  await using instance2 = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id2);
+  const { inner: instance2 } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id2);
   expect((await worker.fetch(submitRequest(ninjaSaga.id, {}, key2), bindings)).status).toBe(202);
   await instance2.waitForStatus("errored");
   const text2 = await (await worker.fetch(getRequest(`/api/executions/${id2}`, key2), bindings)).text();
@@ -184,7 +175,7 @@ it("never retries a failing vendor step and keeps retried checkpoints clean", as
   });
   const key = "sec01-noretry-0001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id);
   expect((await worker.fetch(submitRequest(ninjaSaga.id, {}, key), bindings)).status).toBe(202);
   await instance.waitForStatus("errored");
   expect(fetch).toHaveBeenCalledTimes(2);
@@ -217,7 +208,7 @@ it("keeps cancellation and timeout terminals free of secret substrings", async (
   });
   const key = "sec01-cancel-001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.NINJA_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.NINJA_WORKFLOW, id);
   // The cancel path below observes D1, not the introspection handle; the
   // reference keeps the instance pinned like the other suites.
   expect(instance).toBeDefined();

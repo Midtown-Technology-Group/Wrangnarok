@@ -2,14 +2,11 @@
 // Issue #16: retries, sleeps, cancellation, timeout. All gates run in real
 // workerd with real D1/Workflow bindings; only outbound vendor HTTP is mocked.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { echoSaga, executionId, smokeSaga } from "../src/domain";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
 const auth = { Authorization: `Bearer ${"a".repeat(64)}`, "Content-Type": "application/json" };
@@ -46,20 +43,11 @@ function mockEcho(implementation: (input: RequestInfo | URL, init?: RequestInit)
     return implementation(input as RequestInfo, args[1]);
   });
 }
-beforeEach(async () => {
-  // Real local D1 SQL statements, not an in-memory repository double.
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(seed);
-});
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
-});
+useWorkflowHarness(bindings.DB);
 it("wakes from the native sleep step and continues to success", async () => {
   const key = "resilience-sleep-001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
   mockEcho(async () => Response.json({ message: "hello" }));
   const started = Date.now();
   expect((await worker.fetch(submitRequest(key), bindings)).status).toBe(202);
@@ -82,7 +70,7 @@ it("wakes from the native sleep step and continues to success", async () => {
 it("never auto-retries a failing vendor operation", async () => {
   const key = "resilience-noretry-001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
   mockEcho(async () => new Response("private-vendor-diagnostic", { status: 503 }));
   expect((await worker.fetch(submitRequest(key), bindings)).status).toBe(202);
   await instance.waitForStatus("errored");
@@ -93,7 +81,7 @@ it("never auto-retries a failing vendor operation", async () => {
 it("surfaces a slow vendor as TimedOut through the explicit timeout step", async () => {
   const key = "resilience-timeout-001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
   mockEcho(async () => {
     await new Promise((resolve) => setTimeout(resolve, 2500));
     return new Response("slow-vendor-diagnostic", { status: 503 });
@@ -112,7 +100,7 @@ it("surfaces a slow vendor as TimedOut through the explicit timeout step", async
 it("cancels a Running execution through the native terminate control", async () => {
   const key = "resilience-cancel-001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
   // Never-settling vendor: the mocked fetch ignores the abort signal, so the
   // step stays Running until the native step timeout (10s) or terminate wins.
   mockEcho(() => new Promise<Response>(() => {}));
@@ -232,7 +220,7 @@ it("cancels a Pending system.smoke execution and never dispatches it", async () 
 it("refuses to cancel terminal executions", async () => {
   const key = "resilience-cancel-terminal-001";
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
   mockEcho(async () => Response.json({ message: "hello" }));
   expect((await worker.fetch(submitRequest(key), bindings)).status).toBe(202);
   await instance.waitForStatus("complete");

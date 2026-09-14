@@ -1,0 +1,33 @@
+# Testing-harness lane scope (issues #332/#333): isolate Workflow-runtime
+# harness errors in full-suite runs. New shared harness + guard + focused
+# runners own the feature; migrated suites are listed explicitly. Suites
+# with intentional partial-migration coverage keep their hand-built setup
+# and are NOT in scope for migration.
+scopes/testing-harness.scope
+vitest.config.ts
+package.json
+docs/testing.md
+scripts/test-group.mjs
+test/helpers/workflow-harness.ts
+test/setup-unhandled-guard.ts
+test/smoke.test.ts
+test/hello.test.ts
+test/echo-secretfields.test.ts
+test/endpoints.test.ts
+test/executions.test.ts
+test/resilience.test.ts
+test/forms.test.ts
+test/form-lifecycle.test.ts
+test/app-runtime.test.ts
+test/cancel-confirmation.test.ts
+test/child-invocation.test.ts
+test/logs.test.ts
+test/machine-credentials.test.ts
+test/ninja-echo-digest.test.ts
+test/ninjaone.test.ts
+test/redaction.test.ts
+test/runtime-policy.test.ts
+test/schedule-lifecycle.test.ts
+test/sdk.test.ts
+test/secret-scrub-live.test.ts
+test/solutions-activation.test.ts

@@ -5,10 +5,10 @@
 // deployment. No WebSocket/DO/Queue surface: polling over durable D1 rows is
 // the first slice, and any live-push design needs an earned ADR.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { echoSaga, executionId, helloSaga } from "../src/domain";
 import {
   appendAuthorLog,
@@ -23,12 +23,6 @@ import {
 import { createSdkClient, parseLogPage } from "../src/sdk";
 import { ensureLabFixture } from "../src/orgs";
 import { clearAllExecutionSecrets, registerExecutionSecrets } from "../src/secrets";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import migration7 from "../migrations/0007_org_membership.sql?raw";
-import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
-import migration9 from "../migrations/0014_execution_logs.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const TOKEN = "a".repeat(64);
@@ -76,33 +70,26 @@ async function logCount(executionIdValue: string): Promise<number> {
   return row?.n ?? 0;
 }
 
-beforeEach(async () => {
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(seed);
-  await bindings.DB.exec(migration7);
-  await bindings.DB.exec(migration8);
-  await bindings.DB.exec(migration9);
-  // AUTH-01 membership gate: the LAB fixture caller needs an active
-  // membership row or every /api/* request fails closed.
-  await ensureLabFixture(bindings.DB, principal.orgId, principal.userId);
-  clearAllExecutionSecrets();
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-    throw new Error("OBS-02 must not fetch");
-  });
-});
-
-afterEach(async () => {
-  vi.restoreAllMocks();
-  clearAllExecutionSecrets();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  setup: async () => {
+    // AUTH-01 membership gate: the LAB fixture caller needs an active
+    // membership row or every /api/* request fails closed.
+    await ensureLabFixture(bindings.DB, principal.orgId, principal.userId);
+    clearAllExecutionSecrets();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("OBS-02 must not fetch");
+    });
+  },
+  teardown: () => {
+    clearAllExecutionSecrets();
+  },
 });
 
 describe("OBS-02 hello pilot emission (issue #153)", () => {
   it("emits bounded PROGRESS + INFO rows with execution/org/caller attribution in seq order", async () => {
     const key = "obs02-hello-emit-01";
     const id = await executionId(principal, key);
-    await using instance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, id);
+    const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, id);
     const accepted = await worker.fetch(
       new Request("https://local.test/api/executions", {
         method: "POST",
@@ -321,7 +308,7 @@ describe("OBS-02 SEC-01 redaction (issue #153)", () => {
   it("scrubs secret substrings before persistence and before streaming", async () => {
     const key = "obs02-secret-redact-01";
     const id = await executionId(principal, key);
-    await using instance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, id);
+    const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, id);
     const accepted = await worker.fetch(
       new Request("https://local.test/api/executions", {
         method: "POST",

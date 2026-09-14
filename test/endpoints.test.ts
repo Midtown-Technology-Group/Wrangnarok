@@ -8,18 +8,12 @@
 // body, authorization revocation (disable/rotate), identity smuggling
 // rejection, wep- namespace reservation, and 202-vs-receipt separation.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { endpointIdempotencyKey, parseWebhookSecrets } from "../src/endpoints";
 import { hash, helloSaga, parseCallerKey } from "../src/domain";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import migration7 from "../migrations/0007_org_membership.sql?raw";
-import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
-import migration9 from "../migrations/0021_endpoints.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 
 const bindings = env as unknown as Bindings;
 const LAB_USER = "00000000-0000-4000-8000-000000000002";
@@ -84,21 +78,12 @@ async function seedEndpoint(kind: "api-key" | "webhook", name: string): Promise<
   return { raw: (body.apiKey ?? body.webhookSecret) as string, id: body.endpoint.id };
 }
 
-beforeEach(async () => {
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(seed);
-  await bindings.DB.exec(migration7);
-  await bindings.DB.exec(migration8);
-  await bindings.DB.exec(migration9);
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-    throw new Error("endpoint deliveries to hello must not fetch");
-  });
-});
-
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  setup: () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("endpoint deliveries to hello must not fetch");
+    });
+  },
 });
 
 it("creates, lists, reads, updates, rotates, and isolates endpoints per Organization", async () => {
@@ -190,7 +175,7 @@ it("delivers an api-key endpoint end to end: 202 receipt, redelivery replays, mi
   // The Execution itself ran the bound hello Saga under the endpoint
   // principal, so the operator session cannot see it (404, never a leak).
   const id = firstBody.executionId;
-  await using instance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, id);
   await instance.waitForStatus("complete");
   const detail = await worker.fetch(authed(`/api/executions/${id}`, "GET"), bindings);
   expect(detail.status).toBe(404);
@@ -281,6 +266,10 @@ it("enforces expiry, disable revocation, and rotation on api-key endpoints", asy
     bindings,
   );
   expect(fresh.status).toBe(202);
+  // Track the rotated-key dispatch so the harness drains it before reset:
+  // an untracked in-flight instance emits unhandled engine rejections.
+  const freshBody = (await fresh.json()) as { executionId: string };
+  await trackWorkflowInstance(bindings.HELLO_WORKFLOW, freshBody.executionId);
 });
 
 it("verifies webhook HMAC signatures and rejects invalid ones without an Execution", async () => {
@@ -290,7 +279,12 @@ it("verifies webhook HMAC signatures and rejects invalid ones without an Executi
   const payload = { input: { name: "Ada" } };
   const ok = await worker.fetch(await hookRequest("vendor", payload, raw, "wh-001"), withSecrets);
   expect(ok.status).toBe(202);
-  expect(await ok.json()).toMatchObject({ replayed: false });
+  const okBody = (await ok.json()) as { replayed?: boolean; executionId?: string };
+  expect(okBody).toMatchObject({ replayed: false });
+  // Track the webhook dispatch for the harness drain (see above).
+  if (okBody.executionId) {
+    await trackWorkflowInstance(bindings.HELLO_WORKFLOW, okBody.executionId);
+  }
 
   const wrongSecret = await worker.fetch(await hookRequest("vendor", payload, "wrong-secret", "wh-002"), withSecrets);
   expect(wrongSecret.status).toBe(401);
@@ -379,6 +373,9 @@ it("rate-limits a second delivery in the same minute window with 429", async () 
     bindings,
   );
   expect(first.status).toBe(202);
+  // Track the throttled dispatch for the harness drain (see above).
+  const firstBody = (await first.json()) as { executionId: string };
+  await trackWorkflowInstance(bindings.HELLO_WORKFLOW, firstBody.executionId);
   const second = await worker.fetch(
     endpointRequest("throttled", { input: { name: "Ada" } }, apiKey, "rl-002"),
     bindings,

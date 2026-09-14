@@ -6,15 +6,11 @@
 // submission against the persisted declaration, and only validated input
 // reaches the Saga. No provider, no publication.
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { executionId, helloSaga } from "../src/domain";
-import migration1 from "../migrations/0001_initial.sql?raw";
-import migration2 from "../migrations/0002_cancelling.sql?raw";
-import migration5 from "../migrations/0005_forms.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
 const key = "form-01-hello-001";
@@ -42,31 +38,23 @@ async function startupHandle(): Promise<string> {
 function submitBody(values: unknown, handle: string): Record<string, unknown> {
   return { handle, values };
 }
-beforeEach(async () => {
-  // Real local D1 SQL statements, not an in-memory repository double.
-  await bindings.DB.exec(migration1);
-  await bindings.DB.exec(migration2);
-  await bindings.DB.exec(migration5);
-  await bindings.DB.exec(seed);
-  // The pilot declaration is FORM-01 test fixture state, not shared seed:
-  // other suites apply only migration 0001 and must never see a forms table.
-  await bindings.DB.prepare("INSERT INTO forms(id,org_id,name,saga_id,fields_json,created_at) VALUES (?,?,?,?,?,?)")
-    .bind(
-      "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
-      principal.orgId,
-      "hello-greeting",
-      helloSaga.id,
-      '[{"name":"name","type":"text","required":true,"maxLength":1024}]',
-      "2026-09-11T00:00:00.000Z",
-    )
-    .run();
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-    throw new Error("hello must not fetch");
-  });
-});
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  setup: async () => {
+    // The pilot declaration is FORM-01 test fixture state, not shared seed.
+    await bindings.DB.prepare("INSERT INTO forms(id,org_id,name,saga_id,fields_json,created_at) VALUES (?,?,?,?,?,?)")
+      .bind(
+        "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
+        principal.orgId,
+        "hello-greeting",
+        helloSaga.id,
+        '[{"name":"name","type":"text","required":true,"maxLength":1024}]',
+        "2026-09-11T00:00:00.000Z",
+      )
+      .run();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("hello must not fetch");
+    });
+  },
 });
 it("reads the persisted pilot declaration", async () => {
   const res = await worker.fetch(authed("/api/forms/hello-greeting"), bindings);
@@ -87,7 +75,7 @@ it("reads the persisted pilot declaration", async () => {
 });
 it("submits the pilot form through the handle-bound gate: startup, bind, dispatch, persisted success", async () => {
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.HELLO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, id);
   const handle = await startupHandle();
   const accepted = await worker.fetch(
     authed("/api/forms/hello-greeting/submit", "POST", submitBody({ name: "Ada" }, handle)),

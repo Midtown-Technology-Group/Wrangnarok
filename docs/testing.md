@@ -102,6 +102,40 @@ Every metric (lines, functions, branches, statements) must stay at or above
 CI runtime gate. Raise coverage with the change, never lower the floor to
 make a red run green.
 
+## Workflow test harness (issues #332/#333)
+
+Full-suite runs execute 87 files against real local D1 + Workflow bindings.
+The engine reports step failures, hung-request cancels, and introspector
+lifecycle events as workerd-level unhandled exceptions even when the test
+already asserted the terminal D1 state — noisy, but inherent to the runtime,
+not to the product. Three pieces keep that noise isolated and honest:
+
+- `test/helpers/workflow-harness.ts` — `useWorkflowHarness(db, options)`
+  applies the FULL migration set in filename order in `beforeEach` (a
+  Workflow step touching a table outside an ad-hoc subset used to fail with
+  `D1_ERROR: no such table` as an unhandled exception instead of a readable
+  failure), tracks every introspector via `trackWorkflowInstance`, and in
+  `afterEach` drains each instance to a terminal status (bounded 2s waits,
+  last-awaited status first) before disposing and calling `reset()`. No
+  fire-and-forget waits cross the reset boundary.
+- `test/setup-unhandled-guard.ts` — loaded via `test.setupFiles`, records
+  every rejection escaping a test with an explicit allowlist for asserted
+  stress paths (unknown-revision / vendor-fault NonRetryableErrors,
+  not-found introspection, partial-migration gates, engine abort/cancel
+  telemetry) and logs a `[unhandled-guard] HARD-FAIL` marker for anything
+  outside it. Never broaden the allowlist to silence new noise without an
+  asserted stress path behind it; fix the harness instead.
+- Focused groups — `npm run test:unit` (pure TypeScript suites, no Worker
+  surface) and `npm run test:workflow` (suites driving local Workflow
+  instances). Membership is computed from file contents by
+  `scripts/test-group.mjs`, so new files join the right group without a
+  manifest update. Focused runs skip the coverage floor; the gates stay
+  `npm test` and `npm run test:coverage`.
+
+Files with intentional partial-migration coverage (pre-migration 503 gates,
+DROP-rebuild sequences) keep their hand-built setup and must NOT adopt the
+harness: applying the full set would mask the gate under test.
+
 ## CI direction
 
 Initial CI should require:

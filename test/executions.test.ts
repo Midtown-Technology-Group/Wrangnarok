@@ -1,11 +1,9 @@
 import { env } from "cloudflare:workers";
-import { introspectWorkflowInstance, reset } from "cloudflare:test";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { echoSaga, executionId } from "../src/domain";
-import migration from "../migrations/0001_initial.sql?raw";
-import seed from "../scripts/seed-local.sql?raw";
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
 const key = "mvp-slice-test-001";
@@ -20,24 +18,19 @@ function request(path: string, method = "GET", message = "hello", idempotencyKey
     ...(method === "POST" ? { body: JSON.stringify({ sagaId: echoSaga.id, input: { message } }) } : {}),
   });
 }
-beforeEach(async () => {
-  // These are real local D1 SQL statements, not an in-memory repository double.
-  await bindings.DB.exec(migration);
-  await bindings.DB.exec(seed);
-  // Intercept only outbound vendor HTTP. Native D1/Workflow bindings are never replaced.
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-    const url = input instanceof Request ? input.url : String(input);
-    if (url !== "http://127.0.0.1:8788/echo") throw new Error("Unexpected outbound request");
-    return Response.json({ message: "hello" });
-  });
-});
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await reset();
+useWorkflowHarness(bindings.DB, {
+  setup: () => {
+    // Intercept only outbound vendor HTTP. Native D1/Workflow bindings are never replaced.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url !== "http://127.0.0.1:8788/echo") throw new Error("Unexpected outbound request");
+      return Response.json({ message: "hello" });
+    });
+  },
 });
 it("traverses HTTP -> D1 -> Workflow -> HTTP Integration -> D1, and reuses a submission", async () => {
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
   const accepted = await worker.fetch(request("/api/executions", "POST"), bindings);
   expect(accepted.status).toBe(202);
   expect(accepted.headers.get("Location")).toBe(`/api/executions/${id}`);
@@ -83,7 +76,7 @@ it("traverses HTTP -> D1 -> Workflow -> HTTP Integration -> D1, and reuses a sub
 });
 it("persists structured failure without copying the vendor error body", async () => {
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
   vi.mocked(fetch).mockResolvedValue(new Response("private-vendor-diagnostic", { status: 503 }));
   expect((await worker.fetch(request("/api/executions", "POST"), bindings)).status).toBe(202);
   await instance.waitForStatus("errored");
@@ -105,7 +98,7 @@ it("does not resolve another Organization's Connection when this Organization ha
     "INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES ('other','other-organization','720b9ebf-9b6a-4eac-bae9-6ed22c970402','http://127.0.0.1:8788/echo')",
   ).run();
   const id = await executionId(principal, key);
-  await using instance = await introspectWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+  const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
   expect((await worker.fetch(request("/api/executions", "POST"), bindings)).status).toBe(202);
   await instance.waitForStatus("errored");
   const response = await worker.fetch(request(`/api/executions/${id}`), bindings);
