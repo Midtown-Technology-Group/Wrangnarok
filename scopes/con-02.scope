@@ -21,7 +21,7 @@ client/src/lib/api-client.ts
 client/src/lib/client-types.ts
 client/src/App.tsx
 client/src/components/Nav.tsx
-docs/architecture/020-scoped-config.md
+docs/architecture/038-scoped-config.md
 docs/upstream-parity.md
 docs/upstream-spec.md
 docs/sdk.md
