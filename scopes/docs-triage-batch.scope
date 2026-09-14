@@ -1,0 +1,4 @@
+# docs triage batch (issues #223, #298): ledger Landed rows plus SDK schedules row.
+docs/migration-ledger.md
+docs/sdk-capability-map.md
+scopes/docs-triage-batch.scope

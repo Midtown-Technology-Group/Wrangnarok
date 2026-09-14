@@ -25,7 +25,14 @@ must update every importing test in the same commit.
 | 0019   | 0019_files.sql                  | FILE-01 | managed file locations, policies, capabilities (renumbered from colliding 0007 on 2026-09-11; was 0007_files.sql from #203) |
 | 0023   | 0023_config.sql                 | CON-02  | scoped config + secret references (issue #147) |
 | 0024   | 0024_tool_enrollments.sql       | TOOL-01 | opt-in Saga tool enrollments (issue #170) |
+| 0011   | 0011_connection_admin.sql         | CON-01  | connection admin (issue #146)        |
 | 0012   | 0012_saga_policies.sql          | RUN-01  | per-Saga runtime policy rows + executions.policy_json snapshot (issue #135) |
+| 0013   | 0013_resource_roles.sql         | AUTH-02 | resource roles (issue #143)          |
+| 0015   | 0015_child_lineage.sql          | RUN-02  | child invocation lineage (issue #136) |
+| 0016   | 0016_schedules.sql              | TRG-01  | schedules (issue #137)               |
+| 0018   | 0018_ops.sql                    | OPS-01  | ops audit (issue #172)               |
+| 0020   | 0020_artifacts.sql              | FILE-02 | artifacts (issue #158)               |
+| 0022   | 0022_app_runtime.sql            | APP-02  | app runtime (issue #160)             |
 
 ## Resolved collisions
 
@@ -46,16 +53,7 @@ must update every importing test in the same commit.
 
 | Number | Lane    | Issue | Planned content              |
 | ------ | ------- | ----- | ---------------------------- |
-| 0011   | CON-01  | #146  | connection admin             |
-| 0012   | RUN-01  | #135  | saga runtime policies        |
-| 0013   | AUTH-02 | #143  | resource roles               |
-| 0015   | RUN-02  | #136  | child invocation lineage     |
-| 0016   | TRG-01  | #137  | schedules                    |
 | 0017   | SOL-03  | #163  | solution export (if DDL needed) |
-| 0018   | OPS-01  | #172  | ops audit                    |
-| 0019   | FILE-01 | #157  | managed files                |
-| 0020   | FILE-02 | #158  | artifacts                    |
-| 0022   | APP-02  | #160  | app runtime                  |
 
 Rule: a lane renames its migration file to the reserved number, updates its
 test imports, and runs the full gate before opening its PR. The ledger is
