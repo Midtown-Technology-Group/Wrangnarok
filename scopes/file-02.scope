@@ -15,8 +15,7 @@ client/src/lib/api-client.ts
 client/src/lib/client-types.ts
 client/src/App.tsx
 client/src/components/Nav.tsx
-docs/architecture/019-artifacts.md
-docs/architecture/018-artifacts.md
+docs/architecture/037-artifacts.md
 docs/sdk-capability-map.md
 docs/upstream-parity.md
 scripts/check-bundle-budget.mjs
