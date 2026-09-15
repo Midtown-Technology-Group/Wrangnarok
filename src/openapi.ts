@@ -348,6 +348,76 @@ export function resolveRequestUrl(
   return url.toString();
 }
 
+/** Maximum vendor response body the Code Mode host will buffer (ADR 022
+ * response-size rule, issue #170): large specs stay server-side and results
+ * must fit model context anyway, so a provider answering above this bound —
+ * chunked or declared — aborts fail-closed before full buffering. */
+export const CODEMODE_RESPONSE_BYTES_MAX = 256 * 1024;
+
+/** Read one vendor response body under the Code Mode response bound. A
+ * declared Content-Length above the bound fails before any byte is read; an
+ * undeclared (chunked) body is streamed and aborted at bound + 1 with the
+ * remainder cancelled, so a provider can never force full buffering of an
+ * arbitrarily large body. Returns the parsed JSON value (null for empty).
+ * Oversized bodies throw OPENAPI_RESPONSE_TOO_LARGE; malformed length
+ * headers and unparseable bodies throw OPENAPI_EXECUTION_FAILED. Fault
+ * messages are fixed strings — partial unsanitized bytes never reach the
+ * caller, so this is also a model/tool-output amplification fence. */
+export async function readBoundedVendorBody(response: Response): Promise<unknown> {
+  const failUnreadable = (): Fault =>
+    invalid("OPENAPI_EXECUTION_FAILED", "The vendor API returned an unreadable body.", 502);
+  const failTooLarge = (): Fault =>
+    invalid("OPENAPI_RESPONSE_TOO_LARGE", "The vendor API returned a body above the Code Mode response bound.", 502);
+  const declared = response.headers.get("Content-Length");
+  if (declared !== null) {
+    const length = Number(declared.trim());
+    if (!Number.isSafeInteger(length) || length < 0) {
+      await response.body?.cancel();
+      throw failUnreadable();
+    }
+    if (length > CODEMODE_RESPONSE_BYTES_MAX) {
+      await response.body?.cancel();
+      throw failTooLarge();
+    }
+  }
+  const stream = response.body;
+  if (!stream) return null;
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > CODEMODE_RESPONSE_BYTES_MAX) {
+        await reader.cancel();
+        throw failTooLarge();
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof Fault) throw error;
+    await reader.cancel().catch(() => undefined);
+    throw failUnreadable();
+  } finally {
+    reader.releaseLock();
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const text = new TextDecoder().decode(merged);
+  if (text.length === 0) return null;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw failUnreadable();
+  }
+}
+
 /** Sanitized provenance for every Code Mode execution: caller, Organization
  * and Connection identity, provider operation, and spec revision — never
  * credential material. */

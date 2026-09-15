@@ -79,6 +79,7 @@ import {
   searchHaloOperations,
   HALO_CLASSIFICATIONS,
   HALO_DEFAULT_POLICY,
+  HALO_SPEC_VERSION,
 } from "./integrations/halo";
 import {
   mcpResult,
@@ -405,33 +406,58 @@ function bearerToken(request: Request): string | null {
  * Takes operation selection + params only (never credentials, never a URL);
  * resolves the caller-org Connection, validates against the pinned
  * contract, applies policy, enforces egress, injects auth outside
- * model-visible state, and audits success with sanitized provenance. */
+ * model-visible state, and audits every attempt — success AND failure — with
+ * sanitized evidence. Denials and vendor faults carry caller/org/Connection-
+ * resolution context, operationId, and spec revision where known, never
+ * credential material or vendor body bytes. recordAudit is best-effort, so a
+ * failed audit insert never masks the execution Fault. */
 async function runCodeModeExecute(
   env: Bindings,
   caller: Principal,
   call: { operationId: string; path?: Record<string, string>; query?: Record<string, string>; body?: unknown },
 ): Promise<{ result: unknown; provenance: CodeModeProvenance }> {
-  const executed = await executeHaloOperation(
-    env.DB,
-    caller,
-    { clientId: env.HALO_CLIENT_ID, clientSecret: env.HALO_CLIENT_SECRET },
-    {
-      operationId: call.operationId,
-      ...(call.path === undefined ? {} : { path: call.path }),
-      ...(call.query === undefined ? {} : { query: call.query }),
-      ...(call.body === undefined ? {} : { body: call.body }),
-    },
-  );
-  await recordAudit(
-    env.DB,
-    caller,
-    "codemode.execute",
-    { type: "integration", id: HALO_INTEGRATION_ID },
-    "success",
-    executed.provenance,
-    deploymentSecretsFromEnv(env),
-  );
-  return executed;
+  const secrets = deploymentSecretsFromEnv(env);
+  try {
+    const executed = await executeHaloOperation(
+      env.DB,
+      caller,
+      { clientId: env.HALO_CLIENT_ID, clientSecret: env.HALO_CLIENT_SECRET },
+      {
+        operationId: call.operationId,
+        ...(call.path === undefined ? {} : { path: call.path }),
+        ...(call.query === undefined ? {} : { query: call.query }),
+        ...(call.body === undefined ? {} : { body: call.body }),
+      },
+    );
+    await recordAudit(
+      env.DB,
+      caller,
+      "codemode.execute",
+      { type: "integration", id: HALO_INTEGRATION_ID },
+      "success",
+      executed.provenance,
+      secrets,
+    );
+    return executed;
+  } catch (error) {
+    // Failure evidence mirrors the success row: the operation the caller
+    // attempted plus the stable denial/fault code. HALO_SPEC_VERSION is the
+    // pinned lab revision — known before any Connection or vendor contact.
+    await recordAudit(
+      env.DB,
+      caller,
+      "codemode.execute",
+      { type: "integration", id: HALO_INTEGRATION_ID },
+      "failure",
+      {
+        operationId: call.operationId,
+        code: error instanceof Fault ? error.code : "INTERNAL_ERROR",
+        specVersion: HALO_SPEC_VERSION,
+      },
+      secrets,
+    );
+    throw error;
+  }
 }
 /** Public TRG-02 deliveries (issue #138, ADR 019): vendor-facing webhook and
  * endpoint receivers. Authenticated by credential (per-endpoint key or HMAC
@@ -2825,17 +2851,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           });
           return json(scrubConnectionPayload(mcpResult(envelope.id, { result, provenance }), env));
         } catch (error) {
+          // Call-level denial: runCodeModeExecute already recorded the
+          // sanitized codemode.execute failure row, so this layer only
+          // serializes the error result (no second audit row).
           const code = error instanceof Fault ? error.code : "MCP_EXECUTION_FAILED";
           const message = error instanceof Fault ? error.message : "The Code Mode execution failed.";
-          await recordAudit(
-            env.DB,
-            caller,
-            "codemode.execute_denied",
-            { type: "integration", id: HALO_INTEGRATION_ID },
-            "failure",
-            { operationId: args.operationId, code },
-            deploymentSecretsFromEnv(env),
-          );
           return json(scrubConnectionPayload(mcpResult(envelope.id, { error: { code, message } }), env));
         }
       }

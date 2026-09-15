@@ -66,6 +66,12 @@ describe("INT-01 generator (issue #229)", () => {
     expect(out.source).toContain("executeHaloOperation");
     expect(out.source).toContain("scrubValueWithSecrets");
     expect(out.source).toContain("buildProvenance");
+    // TOOL-01 (issue #170) host boundaries: bounded vendor bodies and
+    // genuine-absence-only Connection mapping must survive regeneration.
+    expect(out.source).toContain("readBoundedVendorBody");
+    expect(out.source).not.toContain("await response.text()");
+    expect(out.source).toContain('error.code === "CONNECTION_NOT_FOUND"');
+    expect(out.source).not.toContain(".catch(() => null)");
     expect(out.source).not.toMatch(/clientSecret\s*[:=]\s*["'][^"']+["']/);
     expect(out.source).not.toContain("halo-lab.example.com/api");
   });

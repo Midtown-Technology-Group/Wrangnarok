@@ -262,6 +262,143 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     expect(JSON.stringify(entry)).not.toContain(HALO_SECRET);
   });
 
+  it("records sanitized failure evidence for denied and failed attempts", async () => {
+    await createHaloConnection();
+    mockHalo();
+    const env = haloEnv();
+    // Denied destructive attempt leaves a failure row (not silence): caller,
+    // org/Connection-resolution context, operationId, and spec revision where
+    // known — never credential material or vendor body bytes.
+    const denied = await worker.fetch(
+      new Request("https://local.test/api/openapi/execute", {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ integration: "halo", operationId: "Ticket_Delete", params: { path: { id: "7" } } }),
+      }),
+      env,
+    );
+    expect(denied.status).toBe(403);
+    const deniedAudit = await worker.fetch(
+      new Request("https://local.test/api/audit", { headers: headers() }),
+      bindings,
+    );
+    const deniedEvents = (await deniedAudit.json()) as {
+      events: { action: string; outcome: string; detail: Record<string, string> }[];
+    };
+    const deniedEntry = deniedEvents.events.find(
+      (event) => event.action === "codemode.execute" && event.outcome === "failure",
+    );
+    expect(deniedEntry?.detail).toMatchObject({
+      operationId: "Ticket_Delete",
+      code: "OPENAPI_OPERATION_DENIED",
+      specVersion: HALO_SPEC_VERSION,
+    });
+    expect(JSON.stringify(deniedEntry)).not.toContain(HALO_SECRET);
+    expect(JSON.stringify(deniedEntry)).not.toContain(HALO_ID);
+    // Vendor fault leaves the same sanitized failure shape.
+    const vendorDown = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("vendor down"));
+    const failed = await worker.fetch(
+      new Request("https://local.test/api/openapi/execute", {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ integration: "halo", operationId: "Ticket_Get", params: { path: { id: "7" } } }),
+      }),
+      env,
+    );
+    expect(failed.status).toBe(502);
+    vendorDown.mockRestore();
+  });
+
+  it("aborts oversized vendor bodies on both the REST and MCP execute paths", async () => {
+    await createHaloConnection();
+    const env = haloEnv();
+    // A provider answering above the response bound fails closed on the
+    // direct REST path before full buffering — no partial unsanitized bytes.
+    const hugeFetch = (async () =>
+      new Response("x".repeat(300 * 1024), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch;
+    const caller = { orgId: ORG, userId: "00000000-0000-4000-8000-000000000002" };
+    await expect(
+      executeHaloOperation(
+        bindings.DB,
+        caller,
+        { clientId: HALO_ID, clientSecret: HALO_SECRET },
+        { operationId: "Ticket_Get", path: { id: "7" } },
+        { fetchImpl: hugeFetch },
+      ),
+    ).rejects.toMatchObject({ code: "OPENAPI_RESPONSE_TOO_LARGE", status: 502 });
+    // The MCP gateway shares the same host boundary, so the same oversized
+    // vendor body denies as a call-level error with identical code.
+    const vendorSpy = vi.spyOn(globalThis, "fetch").mockImplementation(hugeFetch);
+    const denied = await worker.fetch(
+      new Request("https://local.test/api/mcp", {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { tool: "halo_api_execute", input: { operationId: "Ticket_Get", params: { path: { id: "7" } } } },
+        }),
+      }),
+      env,
+    );
+    expect(denied.status).toBe(200);
+    const deniedBody = (await denied.json()) as { result: { error: { code: string } } };
+    expect(deniedBody.result.error.code).toBe("OPENAPI_RESPONSE_TOO_LARGE");
+    expect(JSON.stringify(deniedBody)).not.toContain(HALO_SECRET);
+    vendorSpy.mockRestore();
+  });
+
+  it("keeps Connection backend failures out of the missing-Connection diagnosis", async () => {
+    await createHaloConnection();
+    const caller = { orgId: ORG, userId: "00000000-0000-4000-8000-000000000002" };
+    // D1/driver/query faults on the Connection read propagate through the
+    // sanitized 5xx path — only genuine CONNECTION_NOT_FOUND maps to 424.
+    const lookupFaultDb = new Proxy(bindings.DB, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string, ...rest: unknown[]) => {
+            if (typeof sql === "string" && sql.includes("FROM connections")) {
+              throw new Error("D1 backend failure: connection reset");
+            }
+            return (target.prepare as (...args: unknown[]) => unknown)(sql, ...rest);
+          };
+        }
+        const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as unknown as typeof bindings.DB;
+    const failure = await executeHaloOperation(
+      lookupFaultDb,
+      caller,
+      { clientId: HALO_ID, clientSecret: HALO_SECRET },
+      { operationId: "Ticket_Get", path: { id: "7" } },
+      { fetchImpl: (async () => Response.json({ id: 7 })) as typeof fetch },
+    ).then(
+      () => "resolved",
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as { code?: string }).code).not.toBe("OPENAPI_CONNECTION_MISSING");
+    // The genuine missing mapping still answers 424 through the same path.
+    await bindings.DB.prepare("DELETE FROM connections WHERE org_id=? AND integration_id=?")
+      .bind(ORG, HALO_INTEGRATION_ID)
+      .run();
+    await expect(
+      executeHaloOperation(
+        bindings.DB,
+        caller,
+        { clientId: HALO_ID, clientSecret: HALO_SECRET },
+        { operationId: "Ticket_Get", path: { id: "7" } },
+        { fetchImpl: (async () => Response.json({ id: 7 })) as typeof fetch },
+      ),
+    ).rejects.toMatchObject({ code: "OPENAPI_CONNECTION_MISSING", status: 424 });
+    await createHaloConnection();
+  });
+
   it("denies unconfigured credentials without leaking values", async () => {
     await createHaloConnection();
     mockHalo();
