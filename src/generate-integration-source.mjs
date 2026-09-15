@@ -53,6 +53,7 @@ import {
   indexOperations,
   inspectOperation,
   pinContract,
+  readBoundedVendorBody,
   resolveRequestUrl,
   searchOperations,
 } from "../openapi";
@@ -120,9 +121,16 @@ export async function execute${typeName}Operation(
   vendor: { readonly fetchImpl?: typeof fetch } = {},
 ): Promise<CodeModeResult> {
   const { clientId, clientSecret } = require${typeName}Secrets(secrets);
-  const view = await getConnection(db, caller, ${prefix}_INTEGRATION_ID).catch(() => null);
-  if (!view) {
-    throw new Fault(424, "OPENAPI_CONNECTION_MISSING", "No Connection exists for this Organization.");
+  // Only genuine absence maps to the 424 operator diagnosis: D1/driver/query
+  // faults propagate so a backend outage never misdiagnoses as "missing".
+  let view;
+  try {
+    view = await getConnection(db, caller, ${prefix}_INTEGRATION_ID);
+  } catch (error) {
+    if (error instanceof Fault && error.code === "CONNECTION_NOT_FOUND") {
+      throw new Fault(424, "OPENAPI_CONNECTION_MISSING", "No Connection exists for this Organization.");
+    }
+    throw error;
   }
   if (!view.enabled) {
     throw new Fault(404, "OPENAPI_CONNECTION_MISSING", "The Connection is disabled.");
@@ -176,13 +184,9 @@ export async function execute${typeName}Operation(
     await response.body?.cancel();
     throw new Fault(502, "OPENAPI_EXECUTION_FAILED", clean(\`The vendor API answered \${response.status}.\`));
   }
-  let result: unknown;
-  try {
-    const text = await response.text();
-    result = text.length === 0 ? null : (JSON.parse(text) as unknown);
-  } catch {
-    throw new Fault(502, "OPENAPI_EXECUTION_FAILED", "The vendor API returned an unreadable body.");
-  }
+  // Bounded host read: oversized or unreadable vendor bodies fail closed
+  // before full buffering; partial unsanitized bytes never reach the caller.
+  const result = await readBoundedVendorBody(response);
   const scrubbed = scrubValueWithSecrets(result, [clientId, clientSecret]);
   const provenance = buildProvenance({
     callerUserId: caller.userId,

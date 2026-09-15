@@ -21,6 +21,7 @@ import {
   indexOperations,
   inspectOperation,
   pinContract,
+  readBoundedVendorBody,
   resolveRequestUrl,
   searchOperations,
 } from "../openapi";
@@ -139,9 +140,17 @@ export async function executeHaloOperation(
   vendor: { readonly fetchImpl?: typeof fetch } = {},
 ): Promise<CodeModeResult> {
   const { clientId, clientSecret } = requireHaloSecrets(secrets);
-  const view = await getConnection(db, caller, HALO_INTEGRATION_ID).catch(() => null);
-  if (!view) {
-    throw new Fault(424, "OPENAPI_CONNECTION_MISSING", "No Halo Connection exists for this Organization.");
+  // Only genuine absence maps to the 424 operator diagnosis. getConnection
+  // answers CONNECTION_NOT_FOUND for a missing mapping; D1/driver/query
+  // faults propagate so a backend outage never misdiagnoses as "missing".
+  let view;
+  try {
+    view = await getConnection(db, caller, HALO_INTEGRATION_ID);
+  } catch (error) {
+    if (error instanceof Fault && error.code === "CONNECTION_NOT_FOUND") {
+      throw new Fault(424, "OPENAPI_CONNECTION_MISSING", "No Halo Connection exists for this Organization.");
+    }
+    throw error;
   }
   if (!view.enabled) {
     throw new Fault(404, "OPENAPI_CONNECTION_MISSING", "The Halo Connection is disabled.");
@@ -194,13 +203,11 @@ export async function executeHaloOperation(
     await response.body?.cancel();
     throw new Fault(502, "OPENAPI_EXECUTION_FAILED", clean(`The Halo API answered ${response.status}.`));
   }
-  let result: unknown;
-  try {
-    const text = await response.text();
-    result = text.length === 0 ? null : (JSON.parse(text) as unknown);
-  } catch {
-    throw new Fault(502, "OPENAPI_EXECUTION_FAILED", "The Halo API returned an unreadable body.");
-  }
+  // Bounded host read (ADR 022 response-size rule): chunked bodies abort at
+  // the bound with the remainder cancelled, so a provider can never force
+  // full buffering or amplify model/tool output. Partial unsanitized bytes
+  // never reach the caller; oversize and unreadable bodies fail closed.
+  const result = await readBoundedVendorBody(response);
   const scrubbed = scrubValueWithSecrets(result, [clientId, clientSecret]);
   const provenance = buildProvenance({
     callerUserId: caller.userId,

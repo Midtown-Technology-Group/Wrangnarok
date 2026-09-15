@@ -20,6 +20,7 @@ import {
   indexOperations,
   inspectOperation,
   pinContract,
+  readBoundedVendorBody,
   resolveRequestUrl,
   searchOperations,
   validateContractDocument,
@@ -184,6 +185,69 @@ describe("origin allowlist enforcement", () => {
     const evil = await pinContract({ id: "halo", name: "halo" }, JSON.stringify(SPEC), ["https://evil.example.com"]);
     expect(resolveRequestUrl(evil, get, { path: { id: "7" } }).startsWith("https://evil.example.com/")).toBe(true);
     expect(resolveRequestUrl(pinned, get, { path: { id: "7" } })).not.toContain("evil");
+  });
+});
+
+describe("bounded vendor response bodies (ADR 022 response-size rule)", () => {
+  it("reads small declared bodies and empty bodies", async () => {
+    const ok = new Response(JSON.stringify({ id: 7 }), {
+      status: 200,
+      headers: { "Content-Length": "8" },
+    });
+    expect(await readBoundedVendorBody(ok)).toEqual({ id: 7 });
+    expect(await readBoundedVendorBody(new Response("", { status: 200 }))).toBe(null);
+  });
+  it("fails before reading when Content-Length exceeds the bound", async () => {
+    const big = new Response("{}", {
+      status: 200,
+      headers: { "Content-Length": String(300 * 1024) },
+    });
+    await expect(readBoundedVendorBody(big)).rejects.toMatchObject({
+      code: "OPENAPI_RESPONSE_TOO_LARGE",
+      status: 502,
+    });
+  });
+  it("aborts chunked bodies above the bound without full buffering", async () => {
+    // No Content-Length: the reader must stop at the bound even though the
+    // stream would keep producing chunks.
+    const chunks = Array.from({ length: 40 }, () => new Uint8Array(10 * 1024).fill(120));
+    const streamed = new Response(
+      new ReadableStream({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk);
+          controller.close();
+        },
+      }),
+      { status: 200 },
+    );
+    await expect(readBoundedVendorBody(streamed)).rejects.toMatchObject({
+      code: "OPENAPI_RESPONSE_TOO_LARGE",
+    });
+  });
+  it("rejects malformed lengths and unreadable bodies without leaking bytes", async () => {
+    const badLength = new Response("{}", { status: 200, headers: { "Content-Length": "not-a-number" } });
+    await expect(readBoundedVendorBody(badLength)).rejects.toMatchObject({
+      code: "OPENAPI_EXECUTION_FAILED",
+    });
+    const negative = new Response("{}", { status: 200, headers: { "Content-Length": "-3" } });
+    await expect(readBoundedVendorBody(negative)).rejects.toMatchObject({
+      code: "OPENAPI_EXECUTION_FAILED",
+    });
+    const garbage = new Response("not-json{{{", { status: 200 });
+    await expect(readBoundedVendorBody(garbage)).rejects.toMatchObject({
+      code: "OPENAPI_EXECUTION_FAILED",
+    });
+    const broken = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.error(new Error("wire reset"));
+        },
+      }),
+      { status: 200 },
+    );
+    await expect(readBoundedVendorBody(broken)).rejects.toMatchObject({
+      code: "OPENAPI_EXECUTION_FAILED",
+    });
   });
 });
 
