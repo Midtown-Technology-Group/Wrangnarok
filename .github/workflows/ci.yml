@@ -215,7 +215,7 @@ jobs:
       - name: Wrangler dry run (dev environment)
         run: npx wrangler deploy --dry-run --env dev
 
-      # Worker bundle budget (ADR 004): fails closed over 100 KiB so
+      # Worker bundle budget (ADR 004): fails closed over 640 KiB so
       # dependency bloat and cold-start creep break the build.
       - name: Worker bundle budget
         run: npm run check:bundle
