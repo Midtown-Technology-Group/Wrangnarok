@@ -82,4 +82,24 @@ describe("INT-01 Postman converter (issue #229)", () => {
     expect(synthesizeOperationId("get", "/")).toBe("Get_root");
     expect(operationIdForItem("!!!", "GET", "/api/A")).toBe("Get_Api_A");
   });
+
+  it("treats string-form requests as implicit GET", () => {
+    const out = convertPostmanCollection({
+      info: { name: "str" },
+      item: [{ name: "Ping", request: "https://x.example/api/Ping" }],
+    });
+    expect(out.doc.paths).toMatchObject({ "/api/Ping": { get: { operationId: "Ping" } } });
+    expect(out.dropped).toBe(0);
+  });
+
+  it("fails closed when two operationIds share one method+path slot", () => {
+    const clash = {
+      info: { name: "clash" },
+      item: [
+        { name: "First", request: { method: "GET", url: "/api/A" } },
+        { name: "Second", request: { method: "GET", url: "/api/A" } },
+      ],
+    };
+    expect(() => convertPostmanCollection(clash)).toThrow(/Duplicate operation GET \/api\/A/);
+  });
 });

@@ -142,6 +142,8 @@ export function convertPostmanCollection(collection: unknown): PostmanConvertRes
       let method = "";
       let rawUrl: unknown = null;
       if (typeof request === "string") {
+        // Postman v2.1: a string request is a URL with an implicit GET.
+        method = "GET";
         rawUrl = request;
       } else if (request !== null && typeof request === "object" && !Array.isArray(request)) {
         const req = request as Record<string, unknown>;
@@ -173,6 +175,11 @@ export function convertPostmanCollection(collection: unknown): PostmanConvertRes
       seen.add(operationId);
       const summary = name.length > 0 ? name.slice(0, 280) : `${method.toUpperCase()} ${path}`;
       const slot = paths[path] ?? {};
+      // Two operationIds sharing one method+path slot would silently
+      // overwrite: fail closed instead of dropping the first operation.
+      if (Object.hasOwn(slot, lower)) {
+        throw new Error(`Duplicate operation ${method.toUpperCase()} ${path}.`);
+      }
       slot[lower] = { operationId, summary };
       paths[path] = slot;
     }
