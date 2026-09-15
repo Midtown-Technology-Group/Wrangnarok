@@ -1,7 +1,11 @@
-# ADR 020: Scoped Configuration and Secret References
+# ADR 031: Scoped Configuration and Secret References
 
 - **Status:** Accepted
 - **Date:** 2026-09-11
+- **Renumber note (2026-09-15, issue #225):** formerly ADR 020. The number
+  collided with ADR 020 (Administrative audit trail, OPS-01); per the
+  steward suggestion on #225 the later-landed file moves, and 031 is the
+  next free number above the highest assigned (030).
 - **Extends:** ADR 003 (Integrations and Connections), ADR 005 (secret storage v0), ADR 011 (Solutions install), `docs/upstream-spec.md` config rows
 - **Implements:** CON-02 (issue #147)
 

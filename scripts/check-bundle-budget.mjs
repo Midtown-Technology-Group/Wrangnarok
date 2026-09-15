@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0
 // Worker bundle budget (ADR 004): fail closed when the emitted Worker
 // bundle exceeds its size budget. Measures raw bytes of the exact bundle
-// `wrangler deploy --dry-run --outfile` produces — no CLI output parsing —
+// `wrangler deploy --dry-run --env dev --outfile` produces — no CLI output parsing —
 // so dependency bloat and cold-start creep break CI instead of drifting.
+// The dev env is pinned (issue #331) so the measurement never drifts against
+// the default environment when wrangler.jsonc defines multiple envs.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -254,7 +256,7 @@ try {
   // resolution, identical on every platform.
   execFileSync(
     process.execPath,
-    ["node_modules/wrangler/bin/wrangler.js", "deploy", "--dry-run", "--outfile", outfile],
+    ["node_modules/wrangler/bin/wrangler.js", "deploy", "--dry-run", "--env", "dev", "--outfile", outfile],
     {
       stdio: "inherit",
     },

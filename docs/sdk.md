@@ -112,7 +112,7 @@ await client.updateSagaPolicy("hello", { admission: { enabled: false } });
 await client.tailLogs(done.executionId, { level: "INFO", limit: 50 });
 await client.searchLogs({ saga: "hello", level: "ERROR", limit: 20 });
 
-// Scoped config (CON-02, ADR 020): typed rows for this Organization.
+// Scoped config (CON-02, ADR 031): typed rows for this Organization.
 // Secret rows answer "[SECRET]"; secret values never cross the wire.
 await client.listConfigs();
 await client.setConfig({ key: "timeout", type: "int", value: "30" });

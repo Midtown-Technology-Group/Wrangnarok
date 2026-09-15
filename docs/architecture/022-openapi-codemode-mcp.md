@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-11
-- **Extends:** ADR 003 (Integrations and Connections), ADR 005 (secret storage), ADR 013 (egress/resource limits), ADR 014/015 (identity and organization authorization), ADR 020 (scoped configuration), ADR 021 (user-code source/runtime)
+- **Extends:** ADR 003 (Integrations and Connections), ADR 005 (secret storage), ADR 013 (egress/resource limits), ADR 014/015 (identity and organization authorization), ADR 031 (scoped configuration), ADR 021 (user-code source/runtime)
 - **Implements:** issue #170 (TOOL-01)
 
 ## Context

@@ -112,6 +112,16 @@ jobs:
             echo "$dupes"
             exit 1
           fi
+          # ADR numbers must be unique (issue #225): duplicate numeric
+          # prefixes make "ADR NNN authorizes X" unresolvable. Warn-only
+          # until the steward's repo-wide renumber lands (015/016/018/019/
+          # 023 still collide on main); promote to fail-closed once the
+          # tree is clean. Lists offenders without failing today.
+          adr_dupes="$(ls docs/architecture/[0-9]*-*.md 2>/dev/null | sed 's|.*/||' | cut -c1-3 | sort | uniq -d || true)"
+          if [[ -n "$adr_dupes" ]]; then
+            echo "WARNING: duplicate ADR numbers (see issue #225):"
+            for n in $adr_dupes; do ls "docs/architecture/$n-"*.md; done
+          fi
 
       # Temp-dir roundtrip of the file-based mailbox bridge (alias, send,
       # read, reply correlation). No credentials, no network, no live store.
@@ -198,13 +208,14 @@ jobs:
       - name: Build UI
         run: npm run build:ui
 
-      - name: Wrangler dry run
-        run: npx wrangler deploy --dry-run
-
+      # Build validation always targets the dev environment explicitly
+      # (issue #331): with multiple envs defined, a bare dry-run warns and
+      # can drift against the default environment. Dev is the first
+      # deployment target (ADR 004), so it is the canonical check.
       - name: Wrangler dry run (dev environment)
         run: npx wrangler deploy --dry-run --env dev
 
-      # Worker bundle budget (ADR 004): fails closed over 100 KiB so
+      # Worker bundle budget (ADR 004): fails closed over 640 KiB so
       # dependency bloat and cold-start creep break the build.
       - name: Worker bundle budget
         run: npm run check:bundle

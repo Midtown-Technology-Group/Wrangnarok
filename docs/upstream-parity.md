@@ -14,7 +14,7 @@ Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 28 Par
 | --- | --- | --- | --- | --- | --- |
 | RUN-01 | Persist and enforce per-Saga runtime policy without changing source identity | 2 | Partial | AUTH-02 | new |
 | RUN-02 | Invoke child Sagas with explicit context, completion and failure semantics | 2 | Missing | AUTH-02, RUN-01 | new |
-| TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented | AUTH-02, RUN-01 | #137 |
+| TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented (gaps reopened, see #137) | AUTH-02, RUN-01 | #137 |
 | TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01 | #138 |
 | TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Missing | TRG-01, TRG-02, AUTH-02 | new |
 | DEV-01 | Provide a complete typed TypeScript author and automation SDK | 1+4 | Partial | — | new |
@@ -109,9 +109,11 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## TRG-01: Run one-off and recurring schedules with durable due-time and cancellation semantics
 
-Phase 2; **Implemented**; existing issue: #137
+Phase 2; **Implemented (with reopened gaps tracked on #137 — see caveat below)**; existing issue: #137
 
 Local status: Schedules ship as persisted environment state (migration 0016, `src/schedules.ts`, ADR 012 accepted): one org-scoped row binds a name to a stable Saga UUID plus cadence, timezone, enablement, input, and run-as policy. A minute Cloudflare Cron Trigger (the only Cron trigger; `test/timeout-sweeper.test.ts` tripwire pins it) promotes due rows through the standard submit protocol with deterministic `sch-` schedule-window keys. Operator create/preview/disable/delete ride the AUTH-01 membership gate (writes admin-only); run-as always resolves to the creating caller, never caller-supplied identity. Pre-dispatch fence: `promoteWindow` re-reads the row by id immediately before submit (a post-scan disable/delete wins the race as a skip with zero dispatch) and revalidates the run-as owner through request-path lifecycle semantics (disabled org/user, non-active membership fail closed; an unattended tick never activates membership). Delivery visibility maps windows to Executions. `Scheduled` stays a non-status by design: promotion writes Pending rows, never a new Execution state.
+
+Reopened-gap caveat (2026-09-15, issue #137 stays OPEN — verified on current main, not closable): (1) store/tick failures are fail-silent — `loadSchedule`/`listSchedules`/due-scan catches convert D1 faults to not-found/empty/nothing-due, and `scheduled()` swallows promotion errors, so a due window can miss a tick with no failed-Cron signal; (2) the SDK contract advertises id-based schedule routes (`GET /api/schedules/:id`, `:id/preview`, `:id/disable|enable`, `DELETE /api/schedules/:id`, `POST /api/schedules/executions/:id/cancel`) the Worker router does not implement (shipped surface is name-based); (3) `Scheduled` is now an exposed Execution status with no creation path, contradicting the non-status design above; (4) the LAB bootstrap can create a forked `schedules` schema that migration 0016 cannot converge. Core create/promote/cancel/disable flows are proven (24/24 schedule suites); the gaps above are owned follow-through on #137.
 
 Depends: AUTH-02, RUN-01
 
@@ -377,7 +379,7 @@ Related Wrangnarok issues: #75, #110
 
 ## CON-02: Expose scoped configuration and secret-reference APIs to authors and operators
 
-Phase 3; **Implemented** (issue #147; ADR 020); existing issue: #147
+Phase 3; **Implemented** (issue #147; ADR 031); existing issue: #147
 
 Local status: Typed key/value config (`string`/`int`/`bool`/`json`/`secret`) in D1 `configs` (migration 0023), org-only resolution (no global tier by design), `[SECRET]` list masking, reference-only secret provisioning against declared provider-global deployment secrets, managed-row ownership (`managed_by`), `bundle_config` pin reconciliation, export-declaration exclusion, `ctx.config` Saga handle with declared-versus-undeclared outcomes, plus SDK/CLI/UI parity.
 

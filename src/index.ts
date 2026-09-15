@@ -3140,7 +3140,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       await deleteTable(env.DB, caller, table);
       return json({ deleted: true });
     }
-    // Scoped configuration (CON-02, ADR 020): typed key/value rows for the
+    // Scoped configuration (CON-02, ADR 031): typed key/value rows for the
     // caller's own Organization. Secret rows answer "[SECRET]" on every read
     // surface and provision only references — values resolve transiently at
     // the Integration Action boundary and never persist, log, or return.

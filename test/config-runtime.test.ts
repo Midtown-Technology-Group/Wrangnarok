@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0
-// CON-02 Saga runtime proof (issue #147; ADR 020): ctx.config resolves only
+// CON-02 Saga runtime proof (issue #147; ADR 031): ctx.config resolves only
 // the Execution's own org/install context, inside step.do(), with the same
 // declared-versus-undeclared outcomes as the pure resolver. Runs through the
 // real executeSaga adapter (no native Workflow instance): D1 is real local

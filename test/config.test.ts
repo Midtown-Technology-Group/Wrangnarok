@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0
-// Scoped configuration and secret references (CON-02, issue #147; ADR 020):
+// Scoped configuration and secret references (CON-02, issue #147; ADR 031):
 // typed set/list/update/delete, upstream list-masking and partial-update
 // parity, org scoping, managed-row ownership, and export exclusion — proven
 // against real local D1 in workerd. Applies the migration chain (0001 +

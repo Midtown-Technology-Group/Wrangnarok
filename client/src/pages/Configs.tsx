@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0
-// Scoped configuration UI (CON-02, issue #147; ADR 020).
+// Scoped configuration UI (CON-02, issue #147; ADR 031).
 //
 // Borrowed structure from client/src/pages/Sagas.tsx (token form,
 // loading/error/empty states, truncated-mono ID + tooltip pattern). Lists

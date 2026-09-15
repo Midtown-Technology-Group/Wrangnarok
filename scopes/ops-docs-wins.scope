@@ -1,0 +1,34 @@
+# ops-docs-wins lane (issues #331, #225, #137, #332): ops/docs quick wins.
+# #331 pins wrangler build validation to --env dev; #225 renumbers the
+# later-landed ADR 020 (scoped-config) to 031 with ref updates, an advisory
+# ADR-number uniqueness check, and the preview.yml secrets-in-if fix;
+# #137 annotates the TRG-01 parity row with the reopened gaps; #332 is
+# verify-only (no repo change).
+package.json
+.github/workflows/ci.yml
+.github/workflows/preview.yml
+scripts/check-bundle-budget.mjs
+docs/architecture/004-ci-cd.md
+docs/architecture/020-ops-audit-notifications.md
+docs/architecture/020-scoped-config.md
+docs/architecture/021-user-code-source-runtime.md
+docs/architecture/022-openapi-codemode-mcp.md
+docs/architecture/023-cloudflare-agents-runtime.md
+docs/architecture/031-scoped-config.md
+docs/sdk.md
+docs/sdk-capability-map.md
+docs/upstream-parity.md
+docs/upstream-spec.md
+src/config.ts
+src/saga.ts
+src/index.ts
+src/sdk.ts
+client/src/pages/Configs.tsx
+client/src/lib/client-types.ts
+test/config.test.ts
+test/config-unit.test.ts
+test/config-redaction.test.ts
+test/config-runtime.test.ts
+test/config-sdk-ui.test.tsx
+scopes/con-02.scope
+scopes/ops-docs-wins.scope

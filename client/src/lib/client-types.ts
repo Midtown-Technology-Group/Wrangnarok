@@ -308,7 +308,7 @@ export interface ArtifactSummary {
   updatedAt: string;
 }
 
-/** Row shape for GET /api/config (CON-02, ADR 020): typed values for this
+/** Row shape for GET /api/config (CON-02, ADR 031): typed values for this
  * Organization; secret rows answer "[SECRET]", never values. */
 export interface ConfigEntry {
   id: string;
