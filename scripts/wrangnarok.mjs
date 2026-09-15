@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { emitIntegrationSource } from "../src/generate-integration-source.mjs";
+import { convertPostmanCollection } from "../src/postman-convert.mjs";
 import { parseContext as coreParseContext, runCommand as coreRunCommand } from "./wrangnarok-core.mjs";
 
 const RISKS = ["read", "mutation", "destructive", "credential", "billing", "security", "tenant-admin"];
@@ -51,7 +52,7 @@ function validateAndGenerate(ctx) {
   }
   const rawSpec = ctx.genSpec;
   if (typeof rawSpec !== "string" || rawSpec.length === 0) {
-    fail("USAGE", "generate-integration needs --spec JSON|@FILE (OpenAPI 3.x JSON).");
+    fail("USAGE", "generate-integration needs --spec JSON|@FILE (OpenAPI 3.x JSON or Postman Collection v2.1 JSON).");
   }
   const specText = rawSpec.startsWith("@") ? readFileSync(rawSpec.slice(1), "utf-8") : rawSpec;
   if (new TextEncoder().encode(specText).length > 2 * 1024 * 1024) {
@@ -94,6 +95,24 @@ function validateAndGenerate(ctx) {
     doc = JSON.parse(specText);
   } catch {
     fail("GENERATOR_INVALID_SPEC", "The OpenAPI spec must parse as JSON (convert YAML to JSON before generating).");
+  }
+  // Postman Collection v2.1 input: convert to the minimal OpenAPI document
+  // before validation so the CLI and the typed generator share one path.
+  if (
+    doc !== null &&
+    typeof doc === "object" &&
+    !Array.isArray(doc) &&
+    Array.isArray(doc.item) &&
+    typeof doc.openapi !== "string"
+  ) {
+    try {
+      doc = convertPostmanCollection(doc).doc;
+    } catch (error) {
+      fail(
+        "GENERATOR_INVALID_SPEC",
+        error instanceof Error ? error.message : "The Postman collection could not be converted to OpenAPI.",
+      );
+    }
   }
   if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
     fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract must be a JSON object.");

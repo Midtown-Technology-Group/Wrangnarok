@@ -190,4 +190,46 @@ describe("INT-01 generator (issue #229)", () => {
     expect(out.source).toContain("// Spec version: 1.0 injected: true");
     expect(out.source).toContain("const __GENERATED_SPEC__: OpenApiDocument = {");
   });
+
+  it("generates from a Postman Collection through the same validation path", () => {
+    const collection = JSON.stringify({
+      info: { name: "HaloPSA lab" },
+      item: [
+        { name: "Ticket_Get", request: { method: "GET", url: "https://halo-lab.example.com/api/Tickets/{id}" } },
+        { name: "Ticket_AddNote", request: { method: "POST", url: { path: ["api", "Tickets", ":id", "Notes"] } } },
+      ],
+    });
+    const out = generateIntegrationModule(collection, opts(), DIGEST);
+    expect(out.operationCount).toBe(2);
+    expect(out.source).toContain(`"Ticket_Get": "read"`);
+    expect(out.source).toContain(`"Ticket_AddNote": "mutation"`);
+    expect(out.source).toContain("// Spec version: postman-v2.1");
+  });
+
+  it("keeps the CLI on the canonical Postman output", async () => {
+    const collection = JSON.stringify({
+      info: { name: "HaloPSA lab" },
+      item: [{ name: "Ticket_Get", request: { method: "GET", url: "https://halo-lab.example.com/api/Tickets/{id}" } }],
+    });
+    const digest = await sha256Hex(collection);
+    const canonical = generateIntegrationModule(collection, opts(), digest);
+    const cli = (await runCommand({
+      command: "generate-integration",
+      genId: "halo",
+      genName: "halo",
+      genSpec: collection,
+      genOrigins: ["https://halo-lab.example.com"],
+    })) as GeneratedCliResult;
+    expect(cli.generated.content).toBe(canonical.source);
+    expect(cli.generated.operations).toBe(1);
+  });
+
+  it("fails loudly on malformed Postman collections", () => {
+    expect(() => generateIntegrationModule(JSON.stringify({ info: { name: "e" } }), opts(), DIGEST)).toThrow(
+      expect.objectContaining({ code: "GENERATOR_INVALID_SPEC" }),
+    );
+    expect(() => generateIntegrationModule(JSON.stringify({ info: { name: "e" }, item: [] }), opts(), DIGEST)).toThrow(
+      expect.objectContaining({ code: "GENERATOR_INVALID_SPEC" }),
+    );
+  });
 });

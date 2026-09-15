@@ -4,6 +4,11 @@
 src/generate-integration.ts
 src/generate-integration-source.mjs
 src/generate-integration-source.d.mts
+src/postman.ts
+src/postman-convert.mjs
+src/postman-convert.d.mts
+test/postman.test.ts
+test/postman-parity.test.ts
 src/openapi.ts
 src/integrations/halo.ts
 src/integrations/index.ts

@@ -7,6 +7,7 @@ import { Fault } from "./domain";
 import { indexOperations, validateContractDocument } from "./openapi";
 import type { OpenApiDocument, OperationRisk } from "./openapi";
 import { emitIntegrationSource } from "./generate-integration-source.mjs";
+import { convertPostmanCollection } from "./postman";
 
 const INTEGRATION_ID = /^[a-z][a-z0-9-]{1,63}$/;
 const SPEC_BYTES_MAX = 2 * 1024 * 1024;
@@ -78,6 +79,26 @@ export function generateIntegrationModule(
     parsed = JSON.parse(specText);
   } catch {
     throw invalid("The OpenAPI spec must parse as JSON (convert YAML to JSON before generating).");
+  }
+  // Postman Collection v2.1 input: convert to the minimal OpenAPI document
+  // before validation so both sources share one validation/emission path.
+  // Detection is structural (item array without an openapi marker), never
+  // content-sniffed; converter failures surface as GENERATOR_INVALID_SPEC.
+  if (
+    parsed !== null &&
+    typeof parsed === "object" &&
+    !Array.isArray(parsed) &&
+    Array.isArray((parsed as Record<string, unknown>)["item"]) &&
+    typeof (parsed as Record<string, unknown>)["openapi"] !== "string"
+  ) {
+    try {
+      const converted = convertPostmanCollection(parsed);
+      parsed = converted.doc;
+    } catch (error) {
+      throw invalid(
+        error instanceof Error ? error.message : "The Postman collection could not be converted to OpenAPI.",
+      );
+    }
   }
   let doc: OpenApiDocument;
   try {
