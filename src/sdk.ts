@@ -827,7 +827,7 @@ export function parsePreview(value: unknown): SdkPreview {
   return preview as unknown as SdkPreview;
 }
 
-// --- Scoped config (CON-02, ADR 020) -----------------------------------------
+// --- Scoped config (CON-02, ADR 031) -----------------------------------------
 // Typed key/value rows for the caller's own Organization. Secret rows answer
 // "[SECRET]" on every read surface; secret values never cross the wire.
 
@@ -3280,7 +3280,7 @@ export function describeContract(): SdkContractDescriptor {
         name: "author-config",
         status: "supported",
         detail:
-          "Scoped config over D1 (CON-02, ADR 020): typed string/int/bool/json rows plus secret references, org-only resolution, [SECRET] list masking, managed-row ownership. No global tier.",
+          "Scoped config over D1 (CON-02, ADR 031): typed string/int/bool/json rows plus secret references, org-only resolution, [SECRET] list masking, managed-row ownership. No global tier.",
       },
       {
         name: "endpoint-triggers",

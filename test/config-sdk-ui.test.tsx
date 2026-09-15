@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0
-// CON-02 SDK and UI parity (issue #147; ADR 020): the typed SDK client
+// CON-02 SDK and UI parity (issue #147; ADR 031): the typed SDK client
 // (list/set/update/delete plus guards) and the Configs page render from live
 // /api/* payloads, secret-masked everywhere. Worker routes run in real
 // workerd; the React page renders from mocked payloads like the apps UI

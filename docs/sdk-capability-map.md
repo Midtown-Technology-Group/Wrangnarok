@@ -26,7 +26,7 @@ context, and typed errors. Wrangnarok maps them as follows:
 | `data_provider` decorator | `runProvider` in `src/sdk.ts` over `POST /api/executions/provider` | Supported (adapted: bounded inline execution with persistence; see CLI row) |
 | `tool` decorator (opt-in agent tools) | None | Tracked | Opt-in tool exposure belongs to TOOL-01. |
 | Input validation, defaults, output metadata | `validateAgainstSchema` + `IoSchema` + per-Saga `parse` | Partial | Hand-derived object schemas (no codegen dependency); server `parse` stays authoritative. Defaults beyond schema `required` are not modeled. |
-| `config` (get/set/list) | `listConfigs` / `setConfig` / `updateConfig` / `deleteConfig` in `src/sdk.ts` over `GET/POST /api/config`, `PUT/DELETE /api/config/:id` | Supported | Scoped config (CON-02, ADR 020): typed string/int/bool/json plus secret references, org-only resolution, `[SECRET]` masking, managed-row ownership. No global tier by design. |
+| `config` (get/set/list) | `listConfigs` / `setConfig` / `updateConfig` / `deleteConfig` in `src/sdk.ts` over `GET/POST /api/config`, `PUT/DELETE /api/config/:id` | Supported | Scoped config (CON-02, ADR 031): typed string/int/bool/json plus secret references, org-only resolution, `[SECRET]` masking, managed-row ownership. No global tier by design. |
 | `integrations` (+ OAuth tokens) | `IntegrationDefinition` in `src/integrations/index.ts`; no management API | Tracked | Connection management belongs to CON-01; OAuth lifecycle to OAUTH-01. |
 | `organizations`, `roles`, `users` | None | Tracked | Organization/user/role lifecycle belongs to AUTH-01/AUTH-02. |
 | `tables` | None | Tracked | Author Tables belong to TABLE-01 (#117) and TABLE-02. |

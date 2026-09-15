@@ -18,7 +18,10 @@ concurrency:
 jobs:
   preview:
     name: Preview deploy and smoke
-    if: ${{ secrets.CLOUDFLARE_PREVIEW_TOKEN != '' }}
+    # NOTE (issue #225): GitHub rejects `secrets.*` in job-level `if:`
+    # (zero-job failed runs), so the job always evaluates and each
+    # credential-needing step gates on the probe below instead. Without
+    # secrets (forks) the workflow completes as a normal skip.
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -32,6 +35,21 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Credential-presence probe: exposes the secret through env (the
+      # supported pattern) and publishes a non-secret signal for the
+      # step-level conditionals below.
+      - name: Check preview credentials
+        id: creds
+        env:
+          PREVIEW_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_TOKEN }}
+        run: |
+          if [[ -z "$PREVIEW_TOKEN" ]]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No preview credentials; deploy/smoke steps will skip."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install dependencies
         run: npm ci
 
@@ -39,6 +57,7 @@ jobs:
         run: npm run build:ui
 
       - name: Deploy preview Worker
+        if: steps.creds.outputs.present == 'true'
         id: deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_TOKEN }}
@@ -50,6 +69,7 @@ jobs:
           echo "url=$URL" >> "$GITHUB_OUTPUT"
 
       - name: Migrate preview D1
+        if: steps.creds.outputs.present == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -59,6 +79,7 @@ jobs:
       # use, planted on the preview Worker only. Nothing to rotate on leak —
       # the next run replaces it.
       - name: Plant ephemeral LAB_TOKEN
+        if: steps.creds.outputs.present == 'true'
         id: lab
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_TOKEN }}
@@ -70,16 +91,18 @@ jobs:
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
       - name: Smoke preview
+        if: steps.creds.outputs.present == 'true'
         run: node scripts/smoke-preview.mjs --base-url "${{ steps.deploy.outputs.url }}" --token "${{ steps.lab.outputs.token }}"
 
       - name: Comment preview URL
+        if: steps.creds.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr comment "${{ github.event.pull_request.number }}" --body "Preview deployed and smoked green: ${{ steps.deploy.outputs.url }}"
 
       - name: Comment preview failure
-        if: failure()
+        if: failure() && steps.creds.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

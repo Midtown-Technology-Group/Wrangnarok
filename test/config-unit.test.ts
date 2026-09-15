@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0
-// CON-02 unit pins (issue #147; ADR 020): pure branches in src/config.ts
+// CON-02 unit pins (issue #147; ADR 031): pure branches in src/config.ts
 // that route tests cannot reach without thousand-row fixtures or fault
 // injection — corrupt persisted rows, resolver default-arg arms, deployment
 // name variants, helper fallbacks, and the installer conflict fences. The

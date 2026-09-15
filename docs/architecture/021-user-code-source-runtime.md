@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-11
-- **Extends:** ADR 002 (Saga identity), ADR 003 (Integrations and Connections), ADR 005 (secret storage), ADR 016 (dev/preview sync), ADR 019 (artifacts), ADR 020 (scoped configuration)
+- **Extends:** ADR 002 (Saga identity), ADR 003 (Integrations and Connections), ADR 005 (secret storage), ADR 016 (dev/preview sync), ADR 019 (artifacts), ADR 031 (scoped configuration)
 - **Implements:** issue #264
 - **Related:** issues #262 and #263
 
@@ -102,7 +102,7 @@ Large mutable source blobs should not become ordinary D1 rows unless later evide
 
 Userland source may declare required configuration, capabilities, Integration requirements, or secret field names. It must not contain customer credential values or mutable Organization configuration.
 
-Actual Connection/configuration values remain Organization-scoped runtime state under ADR 003, ADR 005, and ADR 020.
+Actual Connection/configuration values remain Organization-scoped runtime state under ADR 003, ADR 005, and ADR 031.
 
 This distinction is intentional:
 

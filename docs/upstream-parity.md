@@ -377,7 +377,7 @@ Related Wrangnarok issues: #75, #110
 
 ## CON-02: Expose scoped configuration and secret-reference APIs to authors and operators
 
-Phase 3; **Implemented** (issue #147; ADR 020); existing issue: #147
+Phase 3; **Implemented** (issue #147; ADR 031); existing issue: #147
 
 Local status: Typed key/value config (`string`/`int`/`bool`/`json`/`secret`) in D1 `configs` (migration 0023), org-only resolution (no global tier by design), `[SECRET]` list masking, reference-only secret provisioning against declared provider-global deployment secrets, managed-row ownership (`managed_by`), `bundle_config` pin reconciliation, export-declaration exclusion, `ctx.config` Saga handle with declared-versus-undeclared outcomes, plus SDK/CLI/UI parity.
 

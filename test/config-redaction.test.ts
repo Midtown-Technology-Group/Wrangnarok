@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0
-// CON-02 secret-redaction slice (issue #147; ADR 005 v0 + ADR 020): config
+// CON-02 secret-redaction slice (issue #147; ADR 005 v0 + ADR 031): config
 // secret references resolve transiently and register with the
 // execution-scoped registry, so a resolved value embedded in an Operation
 // result, terminal row, or error is scrubbed by substring on every egress

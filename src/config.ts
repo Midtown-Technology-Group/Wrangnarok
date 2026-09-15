@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0
-// Scoped configuration and secret references (CON-02, issue #147; ADR 020).
+// Scoped configuration and secret references (CON-02, issue #147; ADR 031).
 //
 // A Config declaration is portable source (a key name); a Config value is
 // environment state: one D1 `configs` row per (org_id, key) carrying a typed
 // value. Types mirror the upstream vocabulary (string/int/bool/json/secret).
-// There is no global tier in v1 (ADR 020): resolution is org-only, and any
+// There is no global tier in v1 (ADR 031): resolution is org-only, and any
 // future global tier needs its own ADR with explicit lookup/write semantics.
 //
 // Secret discipline (ADR 005 v0 unchanged): D1 holds no secret values in any
@@ -464,7 +464,7 @@ export async function deleteConfig(db: D1Database, caller: Principal, id: string
 
 // --- Saga resolution --------------------------------------------------------
 // A Saga resolves config only inside step.do() through its own Organization
-// context (ADR 020). Declared-but-missing without a default fails loud with
+// context (ADR 031). Declared-but-missing without a default fails loud with
 // CONFIG_REQUIREMENT_UNSATISFIED (the config analogue of
 // INTEGRATION_REQUIREMENT_UNSATISFIED); undeclared access with a default
 // resolves to the default and never throws. Secret references resolve
