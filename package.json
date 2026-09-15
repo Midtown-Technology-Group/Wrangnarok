@@ -18,7 +18,7 @@
     "test:workflow": "node scripts/test-group.mjs workflow",
     "check:sagas": "vitest run test/saga-contract.test.ts",
     "check:bundle": "node scripts/check-bundle-budget.mjs",
-    "build": "npm run build:ui && wrangler deploy --dry-run",
+    "build": "npm run build:ui && wrangler deploy --dry-run --env dev",
     "build:dev": "npm run build:ui && wrangler deploy --dry-run --env dev",
     "build:ui": "vite build --config client/vite.config.ts",
     "setup:local": "node scripts/setup-local.mjs",

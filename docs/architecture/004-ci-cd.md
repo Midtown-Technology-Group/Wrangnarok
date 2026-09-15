@@ -23,7 +23,7 @@ The baseline PR pipeline is:
 4. TypeScript typecheck;
 5. unit tests;
 6. Worker-runtime integration tests using Cloudflare's Vitest/workerd tooling and local bindings;
-7. `wrangler deploy --dry-run` or the closest current non-mutating build validation;
+7. `wrangler deploy --dry-run --env dev` or the closest current non-mutating build validation;
 8. Worker bundle budget (`npm run check:bundle`, see below).
 
 External Integration/vendor behavior is mocked or served by deterministic fixtures. Cloudflare services are locally emulated wherever Cloudflare provides supported local bindings.
@@ -98,7 +98,7 @@ D1 recovery features are a safety net, not a substitute for compatible migration
 
 ### Worker bundle budget
 
-The Worker bundle MUST stay under 100 KiB of raw emitted bytes, enforced by `npm run check:bundle` in PR CI. The script measures the exact bundle `wrangler deploy --dry-run --outfile` produces (no CLI output parsing), so a heavy dependency or cold-start creep breaks the build instead of drifting.
+The Worker bundle MUST stay under 100 KiB of raw emitted bytes, enforced by `npm run check:bundle` in PR CI. The script measures the exact bundle `wrangler deploy --dry-run --env dev --outfile` produces (no CLI output parsing), so a heavy dependency or cold-start creep breaks the build instead of drifting.
 
 The budget is deliberately generous against the current ~62 KiB bundle. Shrink the bundle first when it trips; raise the budget only with the reason recorded alongside the bump — never silently to make a red run green.
 
@@ -112,7 +112,7 @@ Retention and quotas follow the account plan, not this ADR: verify vs current Cl
 
 ### PR preview environments
 
-Every pull request deploys to one shared disposable preview Worker (`preview` env in `wrangler.jsonc`, `.github/workflows/preview.yml`) and smokes `system.smoke` against its workers.dev URL. Previews catch binding/config drift that `wrangler deploy --dry-run` cannot: real account calls, real D1 migrations, real Workflow dispatch.
+Every pull request deploys to one shared disposable preview Worker (`preview` env in `wrangler.jsonc`, `.github/workflows/preview.yml`) and smokes `system.smoke` against its workers.dev URL. Previews catch binding/config drift that `wrangler deploy --dry-run --env dev` cannot: real account calls, real D1 migrations, real Workflow dispatch.
 
 Design rules:
 
@@ -206,8 +206,10 @@ npm ci
 npm run typecheck
 npm test
 npx vitest run test/smoke.test.ts
-npx wrangler deploy --dry-run
 npx wrangler deploy --dry-run --env dev
+# NOTE (issue #331): always pass an explicit --env. With multiple envs
+# defined, a bare dry-run warns and can validate the wrong environment.
+# Dev is the first deployment target, so it is the canonical check.
 
 # 1. Create the distinct dev D1 database (one-time).
 wrangler d1 create wrangnarok-dev

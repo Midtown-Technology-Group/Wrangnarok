@@ -198,9 +198,10 @@ jobs:
       - name: Build UI
         run: npm run build:ui
 
-      - name: Wrangler dry run
-        run: npx wrangler deploy --dry-run
-
+      # Build validation always targets the dev environment explicitly
+      # (issue #331): with multiple envs defined, a bare dry-run warns and
+      # can drift against the default environment. Dev is the first
+      # deployment target (ADR 004), so it is the canonical check.
       - name: Wrangler dry run (dev environment)
         run: npx wrangler deploy --dry-run --env dev
 
