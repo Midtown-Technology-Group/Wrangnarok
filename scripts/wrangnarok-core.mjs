@@ -649,7 +649,10 @@ export async function runCommand(ctx, deps = {}) {
     const response = await fetchImpl(url, { redirect: "manual", ...init });
     const status = response.status;
     if (status >= 300 && status < 400) {
-      fail("SERVER_MISMATCH", `refusing redirect (HTTP ${status}) from ${JSON.stringify(String(url))}: re-run against the canonical --base.`);
+      fail(
+        "SERVER_MISMATCH",
+        `refusing redirect (HTTP ${status}) from ${JSON.stringify(String(url))}: re-run against the canonical --base.`,
+      );
     }
     return response;
   };
@@ -1695,8 +1698,7 @@ async function main() {
     configKey: command === "config-set" || command === "config-update" ? arg("key") : undefined,
     configType: command === "config-set" || command === "config-update" ? arg("type") : undefined,
     configValue: command === "config-set" || command === "config-update" ? arg("value") : undefined,
-    configDescription:
-      command === "config-set" || command === "config-update" ? arg("description") : undefined,
+    configDescription: command === "config-set" || command === "config-update" ? arg("description") : undefined,
     sagaNameFilter: command === "log-search" ? arg("saga-name") : undefined,
     id:
       command === "detail" ||
@@ -2298,7 +2300,11 @@ async function selftest() {
         seen.push({ method: req.method, url: req.url, body });
         res.setHeader("Content-Type", "application/json");
         if (req.url === "/api/sagas") {
-          res.end(JSON.stringify({ sagas: [{ id: "395e15f0-3627-41f6-8922-008ce37e3b35", name: "hello", revision: "hello-v1" }] }));
+          res.end(
+            JSON.stringify({
+              sagas: [{ id: "395e15f0-3627-41f6-8922-008ce37e3b35", name: "hello", revision: "hello-v1" }],
+            }),
+          );
         } else if (req.url === "/api/sagas/395e15f0-3627-41f6-8922-008ce37e3b35/policy") {
           res.end(JSON.stringify({ policy: { sagaId: "395e15f0-3627-41f6-8922-008ce37e3b35", version: 3 } }));
         } else if (req.url === "/api/config" && req.method === "POST") {

@@ -31,10 +31,15 @@
 #
 
 # - pre-tool-guard.mjs (gate, fails closed on error): splits each bash
+
 # command on shell operators and validates EVERY wrangler invocation own
+
 # argv. Selftest: node .jcode/hooks/pre-tool-guard.mjs --selftest.
+
 # Also blocks agent writes to local secret files.
+
 #
+
 # - session-end-checkpoint.mjs (observer, fire-and-forget): appends one terse
 
 # checkpoint line to `.opencode/goals/overnight-bifrost.md` when a session
