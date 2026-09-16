@@ -1,0 +1,13 @@
+# codex/sdk-credential-auth lane scope (issues #374, #365): SDK transport
+# policy and Access/fixture caller identity only.
+src/sdk.ts
+src/auth.ts
+src/access.ts
+src/index.ts
+docs/sdk.md
+docs/demo.md
+test/sdk.test.ts
+test/access-auth.test.ts
+test/config-sdk-ui.test.tsx
+test/app-sdk-client.test.tsx
+scopes/codex-sdk-auth.scope

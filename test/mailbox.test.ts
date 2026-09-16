@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0
 import { describe, expect, it } from "vitest";
+import opencodeConfig from "../.opencode/opencode.json";
+import tuiConfig from "../.opencode/tui.json";
+import opencodePackage from "../.opencode/package.json";
 import {
   MailboxFault,
   MailboxMessage,
   RECENT_WINDOW_MS,
   buildMessage,
+  claimAlias,
   findReply,
+  formatHead,
   formatLine,
   formatPushBlock,
   isRecentlyActive,
   markStatus,
   parseLine,
   peekPushable,
+  senderLine,
   unread,
   unreadSummary,
   validAlias,
@@ -113,5 +119,48 @@ describe("mailbox file-peer recency", () => {
     expect(isRecentlyActive(now - RECENT_WINDOW_MS - 1, now)).toBe(false);
     expect(isRecentlyActive(now + 1, now)).toBe(false);
     expect(isRecentlyActive(Number.NaN, now)).toBe(false);
+  });
+});
+
+describe("mailbox alias claims (issue #382)", () => {
+  it("rejects hijacking an alias owned by another session", () => {
+    const taken = claimAlias({ herb: "ses-victim" }, "herb", "ses-attacker");
+    expect(taken.ok).toBe(false);
+    if (!taken.ok) expect(taken.owner).toBe("ses-victim");
+    // The victim's mapping is untouched by the rejected claim.
+    expect(claimAlias({ herb: "ses-victim" }, "herb", "ses-victim").ok).toBe(true);
+  });
+  it("is idempotent for the owning session and releases stale aliases", () => {
+    const again = claimAlias({ herb: "ses-a" }, "herb", "ses-a");
+    expect(again).toEqual({ ok: true, aliases: { herb: "ses-a" } });
+    const moved = claimAlias({ old: "ses-a", other: "ses-b" }, "new", "ses-a");
+    expect(moved).toEqual({ ok: true, aliases: { other: "ses-b", new: "ses-a" } });
+  });
+});
+
+describe("mailbox sender presentation (issue #382)", () => {
+  it("always includes the immutable session ID beside any alias", () => {
+    expect(senderLine(note({ from: "ses-abc", fromAlias: undefined }))).toBe("ses-abc");
+    const both = senderLine(note({ from: "ses-abc", fromAlias: "herb" }));
+    expect(both).toContain("ses-abc");
+    expect(both).toContain("herb");
+    // A copied victim alias cannot pass as the victim session.
+    expect(both).not.toBe("herb");
+    expect(formatHead(note({ from: "ses-abc", fromAlias: "herb", id: "m9" }))).toContain("ses-abc");
+    expect(formatPushBlock([note({ from: "ses-abc", fromAlias: "herb", priority: "high" })])).toContain("ses-abc");
+  });
+});
+
+describe("opencode plugin pin (issue #383)", () => {
+  it("pins the goal plugin to one exact immutable version everywhere", () => {
+    // Bare specifiers float to latest at startup; a hijacked publish then
+    // runs as the developer. Every entry must name the same exact version,
+    // and the config package.json pins it for integrity-verified installs.
+    const plugins = (opencodeConfig as { plugin?: readonly unknown[] }).plugin;
+    const tuiPlugins = (tuiConfig as { plugin?: readonly unknown[] }).plugin;
+    const deps = (opencodePackage as { dependencies?: Record<string, string> }).dependencies;
+    expect(plugins).toEqual(["@prevalentware/opencode-goal-plugin@0.1.49"]);
+    expect(tuiPlugins).toEqual(["@prevalentware/opencode-goal-plugin@0.1.49"]);
+    expect(deps?.["@prevalentware/opencode-goal-plugin"]).toBe("0.1.49");
   });
 });

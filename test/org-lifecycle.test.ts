@@ -276,15 +276,15 @@ it("deactivates users, orgs, and memberships with immediate effect and no redepl
   )
     .bind(orgB, USER_STRANGER, "member", "active", "ordinary", new Date().toISOString(), new Date().toISOString())
     .run();
-  expect(await call(`/api/users/${USER_STRANGER}/disable`, "POST", USER_ADMIN)).toMatchObject({ status: 200 });
+  expect(await call(`/api/users/${USER_STRANGER}/disable`, "POST", USER_ADMIN, {})).toMatchObject({ status: 200 });
   expect(await call("/api/sagas", "GET", USER_STRANGER, undefined, orgB)).toMatchObject({
     status: 403,
     body: { error: { code: "USER_DISABLED" } },
   });
-  expect(await call(`/api/users/${USER_STRANGER}/enable`, "POST", USER_ADMIN)).toMatchObject({ status: 200 });
+  expect(await call(`/api/users/${USER_STRANGER}/enable`, "POST", USER_ADMIN, {})).toMatchObject({ status: 200 });
   expect(await call("/api/sagas", "GET", USER_STRANGER, undefined, orgB)).toMatchObject({ status: 200 });
   // Disabled org denies members but stays recoverable by instance admin.
-  expect(await call(`/api/orgs/${orgB}/disable`, "POST", USER_ADMIN)).toMatchObject({
+  expect(await call(`/api/orgs/${orgB}/disable`, "POST", USER_ADMIN, {})).toMatchObject({
     status: 200,
     body: { status: "disabled" },
   });
@@ -294,7 +294,7 @@ it("deactivates users, orgs, and memberships with immediate effect and no redepl
   });
   // Instance admin still reaches the disabled org (recovery path).
   expect(await call(`/api/orgs/${orgB}/delete-preview`, "GET", USER_ADMIN)).toMatchObject({ status: 200 });
-  expect(await call(`/api/orgs/${orgB}/enable`, "POST", USER_ADMIN)).toMatchObject({
+  expect(await call(`/api/orgs/${orgB}/enable`, "POST", USER_ADMIN, {})).toMatchObject({
     status: 200,
     body: { status: "active" },
   });
@@ -793,7 +793,7 @@ it("pins admin validation, error, and filter branches", async () => {
     body: { error: { code: "ORG_NOT_FOUND" } },
   });
   expect(await call(`/api/orgs/${UNKNOWN_ORG}/members`, "GET", USER_ADMIN)).toMatchObject({ status: 404 });
-  expect(await call(`/api/orgs/${UNKNOWN_ORG}/disable`, "POST", USER_ADMIN)).toMatchObject({ status: 404 });
+  expect(await call(`/api/orgs/${UNKNOWN_ORG}/disable`, "POST", USER_ADMIN, {})).toMatchObject({ status: 404 });
   expect(await call(`/api/orgs/${UNKNOWN_ORG}/delete-preview`, "GET", USER_ADMIN)).toMatchObject({ status: 404 });
   // Non-admin members cannot read the org detail even in their own org.
   expect(await call(`/api/orgs/${orgB}`, "GET", USER_ORDINARY)).toMatchObject({
@@ -833,19 +833,19 @@ it("pins admin validation, error, and filter branches", async () => {
     body: { error: { code: "INVALID_USER_ID" } },
   });
   // Inviting into a disabled org, or a disabled user, is refused.
-  expect(await call(`/api/orgs/${orgB}/disable`, "POST", USER_ADMIN)).toMatchObject({ status: 200 });
+  expect(await call(`/api/orgs/${orgB}/disable`, "POST", USER_ADMIN, {})).toMatchObject({ status: 200 });
   expect(await call(`/api/orgs/${orgB}/members`, "POST", USER_ADMIN, { userId: "late@example.com" })).toMatchObject({
     status: 409,
     body: { error: { code: "ORG_DISABLED" } },
   });
-  expect(await call(`/api/orgs/${orgB}/enable`, "POST", USER_ADMIN)).toMatchObject({ status: 200 });
-  expect(await call(`/api/users/${USER_STRANGER}/disable`, "POST", USER_ADMIN)).toMatchObject({ status: 200 });
+  expect(await call(`/api/orgs/${orgB}/enable`, "POST", USER_ADMIN, {})).toMatchObject({ status: 200 });
+  expect(await call(`/api/users/${USER_STRANGER}/disable`, "POST", USER_ADMIN, {})).toMatchObject({ status: 200 });
   expect(await call(`/api/orgs/${orgB}/members`, "POST", USER_ADMIN, { userId: USER_STRANGER })).toMatchObject({
     status: 409,
     body: { error: { code: "USER_DISABLED" } },
   });
-  expect(await call(`/api/users/${USER_STRANGER}/enable`, "POST", USER_ADMIN)).toMatchObject({ status: 200 });
-  expect(await call("/api/users/nobody@example.com/disable", "POST", USER_ADMIN)).toMatchObject({
+  expect(await call(`/api/users/${USER_STRANGER}/enable`, "POST", USER_ADMIN, {})).toMatchObject({ status: 200 });
+  expect(await call("/api/users/nobody@example.com/disable", "POST", USER_ADMIN, {})).toMatchObject({
     status: 404,
     body: { error: { code: "USER_NOT_FOUND" } },
   });
@@ -1112,7 +1112,7 @@ it("pins admin validation, error, and filter branches", async () => {
     ORG_A,
   );
   expect(recovered).toMatchObject({ isInstanceAdmin: true, role: null, isOrgAdmin: false });
-  expect(await call(`/api/orgs/${orgC}/disable`, "POST", USER_ADMIN)).toMatchObject({ status: 200 });
+  expect(await call(`/api/orgs/${orgC}/disable`, "POST", USER_ADMIN, {})).toMatchObject({ status: 200 });
   const intoDisabled = await resolveCaller(
     bindings.DB,
     { ADMIN_USER_IDS: USER_ADMIN },
@@ -1120,7 +1120,7 @@ it("pins admin validation, error, and filter branches", async () => {
     orgC,
   );
   expect(intoDisabled).toMatchObject({ isInstanceAdmin: true });
-  expect(await call(`/api/orgs/${orgC}/enable`, "POST", USER_ADMIN)).toMatchObject({ status: 200 });
+  expect(await call(`/api/orgs/${orgC}/enable`, "POST", USER_ADMIN, {})).toMatchObject({ status: 200 });
   // A disabled instance admin still resolves (recovery must stay usable).
   await bindings.DB.prepare("UPDATE users SET status='disabled' WHERE user_id=?").bind(USER_ADMIN).run();
   const disabledAdmin = await resolveCaller(
