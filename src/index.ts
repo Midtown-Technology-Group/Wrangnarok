@@ -379,7 +379,13 @@ function routeOf(request: Request): string {
   return `${request.method} ${pathname}`;
 }
 /** Guard for JSON write routes: unencoded application/json only, matching
- * the /api/executions submit gate. Shared by the app write routes below. */
+ * the /api/executions submit gate. Shared by the app write routes below.
+ * Beyond shape validation this is the CSRF control for Access-authenticated
+ * browser sessions (codex #349 #352 #355): a cross-origin HTML form can only
+ * send simple content types, never unencoded application/json, so the check
+ * rejects cross-site state-changing requests. LAB bearer authentication is
+ * not ambient and needs no CSRF control; the guard still applies uniformly
+ * so both credential classes share one authoritative write path. */
 function requireJson(request: Request): void {
   if (
     request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() !== "application/json" ||
@@ -1808,6 +1814,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         return json({ jobs: await listJobs(env.DB, caller, id) });
       }
       await requireAppVisible(env.DB, ctx, caller, id, "write", "Building this App requires a write grant.");
+      // Codex #355: starting a build mutates deploy state, so it shares the
+      // JSON-write gate: unencoded application/json rejects cross-origin
+      // form posts against Access-authenticated browser sessions.
+      requireJson(request);
       try {
         const job = await startBuild(env.DB, caller, id);
         await recordAudit(
@@ -2994,6 +3004,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     if (endpointRotate?.[1] && request.method === "POST") {
       const name = parseEndpointName(endpointRotate[1]);
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      // Codex #352: credential rotation is a state change, so it shares the
+      // JSON-write gate: unencoded application/json rejects cross-origin
+      // form posts against Access-authenticated browser sessions.
+      requireJson(request);
       const rotated = await rotateEndpointCredential(env.DB, caller.orgId, name).catch(() => null);
       if (!rotated) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
       return json({
@@ -3155,12 +3169,20 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // the Integration Action boundary and never persist, log, or return.
     // One explicit matcher per route, mirroring the tables style: boring and
     // greppable beats a shared capture.
+    // Codex #348: config administration is an org-admin operation. Every
+    // route gates on requireManageOrg for the caller's own Organization, so
+    // ordinary and external members cannot read or mutate config rows. The
+    // finding asks for a narrower read permission if non-admin authors need
+    // visibility; none exists yet (no shipped Saga reads ctx.config), so the
+    // gate stays uniform across reads and writes.
     if (url.pathname === "/api/config" && request.method === "GET") {
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      await requireManageOrg(env.DB, ctx, caller.orgId);
       return json({ configs: await listConfigs(env.DB, caller) });
     }
     if (url.pathname === "/api/config" && request.method === "POST") {
       requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
       const body: unknown = await boundedJson(request.body);
       if (!object(body))
         throw new Fault(400, "INVALID_CONFIG", "Config writes need { key, type, value?, description? }.");
@@ -3181,6 +3203,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     if (configOne?.[1]) {
       if (request.method === "PUT") {
         requireJson(request);
+        await requireManageOrg(env.DB, ctx, caller.orgId);
         return json({
           config: await updateConfig(
             env.DB,
@@ -3192,6 +3215,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         });
       }
       if (request.method === "DELETE") {
+        await requireManageOrg(env.DB, ctx, caller.orgId);
         await deleteConfig(env.DB, caller, configOne[1]);
         return json({ deleted: true });
       }
@@ -3435,6 +3459,10 @@ async function routeOrgs(request: Request, env: Bindings, ctx: CallerCtx, url: U
   const disable = /^\/api\/orgs\/([0-9a-fA-F-]{36})\/(disable|enable)$/.exec(pathname);
   if (disable?.[1] && disable[2] && request.method === "POST") {
     requireInstanceAdmin(ctx);
+    // Codex #349: status changes mutate global lifecycle state, so they
+    // share the JSON-write gate: unencoded application/json rejects
+    // cross-origin form posts against Access-authenticated sessions.
+    requireJson(request);
     return json(await setOrgStatus(env.DB, parseOrgId(disable[1]), disable[2] === "disable"));
   }
   const del = /^\/api\/orgs\/([0-9a-fA-F-]{36})$/.exec(pathname);
@@ -3631,6 +3659,8 @@ async function routeOrgs(request: Request, env: Bindings, ctx: CallerCtx, url: U
   const user = /^\/api\/users\/(.+?)\/(disable|enable)$/.exec(pathname);
   if (user?.[1] && user[2] && request.method === "POST") {
     requireInstanceAdmin(ctx);
+    // Codex #349: same JSON-write gate as the org status routes above.
+    requireJson(request);
     return json(await setUserStatus(env.DB, parseUserId(decodeURIComponent(user[1])), user[2] === "disable"));
   }
   if (pathname.startsWith("/api/orgs") || pathname.startsWith("/api/users/")) {

@@ -359,3 +359,80 @@ it("fails fast with 503 when the cert endpoint hangs, errors, or is malformed", 
 it("pins the default cert fetch budget at five seconds", () => {
   expect(ACCESS_CERT_FETCH_TIMEOUT_MS).toBe(5000);
 });
+
+it("rejects cross-origin form posts on Access-authenticated admin POSTs (codex #349)", async () => {
+  // CSRF shape: the victim's Access session verifies, but the request
+  // carries a simple form content type instead of unencoded
+  // application/json. requireJson must reject before any state changes.
+  const { publicKey, privateKey } = await keypair();
+  const pub = await crypto.subtle.exportKey("jwk", publicKey);
+  certsStub(pub, "k1");
+  const token = await mint(privateKey, "k1", validPayload());
+  const db = (env as unknown as Bindings).DB;
+  await db.exec(migration1);
+  await db.exec(seed);
+  await db.exec(migration7);
+  await db.exec(migration8);
+  const stamp = new Date().toISOString();
+  await db
+    .prepare(
+      "INSERT INTO organizations(id,name,status,created_at,disabled_at) VALUES (?,'Access team','active',?,NULL)",
+    )
+    .bind(ORG.toLowerCase(), stamp)
+    .run();
+  await db
+    .prepare("INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?)")
+    .bind(EMAIL.toLowerCase(), stamp)
+    .run();
+  await db
+    .prepare(
+      "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?, 'member','active','ordinary',?,?)",
+    )
+    .bind(ORG.toLowerCase(), EMAIL.toLowerCase(), stamp, stamp)
+    .run();
+  const bindings = {
+    ...(env as unknown as Bindings),
+    ...accessEnv,
+    ADMIN_USER_IDS: EMAIL.toLowerCase(),
+  };
+  delete (bindings as Record<string, unknown>).LAB_ENABLED;
+  delete (bindings as Record<string, unknown>).LAB_TOKEN;
+  const formPost = (path: string) =>
+    worker.fetch(
+      new Request(`https://local.test${path}`, {
+        method: "POST",
+        headers: { "Cf-Access-Jwt-Assertion": token, "Content-Type": "application/x-www-form-urlencoded" },
+        body: "confirm=yes",
+      }),
+      bindings,
+    );
+  // Org disable/enable: 415 JSON_REQUIRED, org untouched.
+  const disabled = await formPost(`/api/orgs/${ORG.toLowerCase()}/disable`);
+  expect(disabled.status).toBe(415);
+  expect(await disabled.json()).toMatchObject({ error: { code: "JSON_REQUIRED" } });
+  const enabled = await formPost(`/api/orgs/${ORG.toLowerCase()}/enable`);
+  expect(enabled.status).toBe(415);
+  const row = await db
+    .prepare("SELECT status FROM organizations WHERE id=?")
+    .bind(ORG.toLowerCase())
+    .first<{ status: string }>();
+  expect(row?.status).toBe("active");
+  // User disable: same gate, victim account untouched.
+  const userDisabled = await formPost(`/api/users/${encodeURIComponent(EMAIL.toLowerCase())}/disable`);
+  expect(userDisabled.status).toBe(415);
+  const user = await db
+    .prepare("SELECT status FROM users WHERE user_id=?")
+    .bind(EMAIL.toLowerCase())
+    .first<{ status: string }>();
+  expect(user?.status).toBe("active");
+  // The JSON control passes with the right content type.
+  const jsonDisabled = await worker.fetch(
+    new Request(`https://local.test/api/orgs/${ORG.toLowerCase()}/disable`, {
+      method: "POST",
+      headers: { "Cf-Access-Jwt-Assertion": token, "Content-Type": "application/json" },
+      body: "{}",
+    }),
+    bindings,
+  );
+  expect(jsonDisabled.status).toBe(200);
+});

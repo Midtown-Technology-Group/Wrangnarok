@@ -8,6 +8,17 @@
 // child value prints ONCE — store it as the CLOUDFLARE_PREVIEW_TOKEN GitHub
 // secret, then delete the parent token (or keep it offline for rotation).
 //
+// Issue #376 (trust boundary): the preview workflow runs PR-controlled code
+// (merge revision + PR dependency tree) with this token in the environment,
+// so a malicious same-repo PR could exfiltrate it. REQUIREMENTS:
+//   1. Mint the parent in a DEDICATED preview-only Cloudflare account that
+//      holds no production Workers, no production D1 data, and no other
+//      account tokens. Theft from that account cannot reach production.
+//   2. Keep the default 30-day expiry (override with --expires-days only
+//      for a documented reason): rotation bounds the theft window.
+//   3. A manual approval gate before preview deploy remains a steward
+//      follow-up; until then, review same-repo PRs before CI runs them.
+//
 // Permission group IDs resolve by name at runtime (no opaque IDs baked in).
 // `selftest` exercises payload construction with fixtures and touches no
 // network. `--dry-run` resolves live groups but skips the POST.
@@ -108,7 +119,7 @@ if (invokedAsCli) {
   } else {
     const accountId = arg("account-id", process.env.CLOUDFLARE_ACCOUNT_ID ?? "");
     const name = arg("name", "wrangnarok-preview-deploy");
-    const expiresDays = Number(arg("expires-days", "365"));
+    const expiresDays = Number(arg("expires-days", "30"));
     const dryRun = process.argv.includes("--dry-run");
     const parent = process.env.CLOUDFLARE_API_TOKEN ?? "";
     if (!accountId || !parent || !Number.isFinite(expiresDays) || expiresDays <= 0) {
