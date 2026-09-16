@@ -16,8 +16,10 @@ scripts/wrangnarok.mjs
 scripts/wrangnarok-core.mjs
 scripts/wrangnarok.d.mts
 test/generate-integration.test.ts
+test/definednet-generator.test.ts
+test/fixtures/definednet-openapi.json
 test/sdk.test.ts
-docs/architecture/022-code-mode.md
+docs/architecture/022-openapi-codemode-mcp.md
 docs/upstream-parity.md
 docs/upstream-spec.md
 scopes/int-01.scope

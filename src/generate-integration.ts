@@ -4,13 +4,22 @@
 // out. No fetch, no D1, no secrets — the operator supplies the spec text
 // and the generated module plugs into the Integration/Connection contract.
 import { Fault } from "./domain";
-import { indexOperations, validateContractDocument } from "./openapi";
-import type { OpenApiDocument, OperationRisk } from "./openapi";
+import { detectGeneratorAuthKind, indexOperations, integrationUuidV5, validateContractDocument } from "./openapi";
+import type { GeneratorAuthKind, OpenApiDocument, OperationRisk } from "./openapi";
 import { emitIntegrationSource } from "./generate-integration-source.mjs";
+import type { EmitterAuthKind } from "./generate-integration-source.mjs";
 import { convertPostmanCollection } from "./postman";
 
 const INTEGRATION_ID = /^[a-z][a-z0-9-]{1,63}$/;
 const SPEC_BYTES_MAX = 2 * 1024 * 1024;
+/** Embedded-spec literal budget (INT-01, issue #229): the JSON literal the
+ * emitter embeds must stay under this many UTF-8 bytes after stripping
+ * (examples, descriptions over the threshold, vendor extensions). Documented
+ * in docs/architecture/022-code-mode.md alongside the strip policy. */
+export const GENERATOR_EMBED_BYTES_MAX = 96 * 1024;
+/** Longest per-operation description text kept in the embedded spec; longer
+ * descriptions are truncated with an ellipsis marker. */
+export const GENERATOR_EMBED_DESCRIPTION_MAX = 280;
 const RISKS = ["read", "mutation", "destructive", "credential", "billing", "security", "tenant-admin"] as const;
 
 function invalid(message: string): Fault {
@@ -25,12 +34,20 @@ export interface GenerateIntegrationOptions {
   readonly classifications?: Readonly<Record<string, OperationRisk>>;
   readonly secretEnvPrefix?: string;
   /** OAuth token endpoint path, resolved against the Connection endpoint
-   * origin (HaloPSA default /auth/token). Must start with / when provided. */
+   * origin (client-credentials kind only; default /auth/token). Must start
+   * with / when provided. */
   readonly tokenPath?: string;
   /** OAuth scope requested at the token endpoint (default all). */
   readonly scope?: string;
   /** Shared vendor deadline ms over token plus resource call (1-30000). */
   readonly timeoutMs?: number;
+  /** Explicit auth override: when set, the spec's securitySchemes still
+   * detect but the override wins only when it agrees, otherwise generation
+   * fails closed (never silently stamp the wrong credential shape). */
+  readonly authKind?: GeneratorAuthKind;
+  /** Include `deprecated: true` operations in the classification map (default
+   * false: deprecated operations stay out and are never callable). */
+  readonly includeDeprecated?: boolean;
 }
 
 export interface GeneratedIntegration {
@@ -116,7 +133,8 @@ export function generateIntegrationModule(
     throw error;
   }
 
-  const operations = indexOperations(doc, options.classifications ?? {});
+  const includeDeprecated = options.includeDeprecated ?? false;
+  const operations = indexOperations(doc, options.classifications ?? {}, { includeDeprecated });
   for (const [op, risk] of Object.entries(options.classifications ?? {})) {
     if (typeof risk !== "string" || !RISKS.includes(risk as (typeof RISKS)[number])) {
       throw new Fault(
@@ -127,6 +145,22 @@ export function generateIntegrationModule(
     }
   }
 
+  // Auth-kind detection (INT-01 fix 1): read the spec's securitySchemes and
+  // emit the matching credential shape. Detected `unknown` fails closed here
+  // with a loud options error; an explicit override must agree with the
+  // detected kind, so a bearer spec can never silently stamp OAuth fields.
+  const detected = detectGeneratorAuthKind(doc);
+  const authKind: EmitterAuthKind =
+    options.authKind === undefined
+      ? detected === "unknown"
+        ? failClosedAuth()
+        : detected
+      : options.authKind !== detected
+        ? failClosedAuth(detected, options.authKind)
+        : options.authKind === "unknown"
+          ? failClosedAuth()
+          : options.authKind;
+
   const envPrefix = options.secretEnvPrefix ?? `${slugConst(options.id)}_CLIENT`;
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envPrefix)) {
     throw new Fault(
@@ -136,12 +170,20 @@ export function generateIntegrationModule(
     );
   }
 
-  // Auth strategy is explicit, never silently assumed: the generated host
-  // exchanges the deployment pair at this token path (resolved against the
-  // Connection endpoint origin) and sends only the access token as Bearer.
-  // A provider with a different token shape overrides it here; the default
-  // matches HaloPSA's documented /auth/token client-credentials flow.
+  // OAuth-only strategy options: tokenPath/scope/timeoutMs are accepted only
+  // for the clientCredentials kind. A bearer spec carrying them is a caller
+  // error, not silently ignored configuration.
   const tokenPath = options.tokenPath ?? "/auth/token";
+  if (
+    authKind === "apiToken" &&
+    (options.tokenPath !== undefined || options.scope !== undefined || options.timeoutMs !== undefined)
+  ) {
+    throw new Fault(
+      400,
+      "GENERATOR_INVALID_OPTIONS",
+      "tokenPath/scope/timeoutMs apply to OAuth client-credentials specs only; a bearer spec takes none.",
+    );
+  }
   if (!tokenPath.startsWith("/") || tokenPath.length > 128) {
     throw new Fault(
       400,
@@ -174,8 +216,23 @@ export function generateIntegrationModule(
     doc.info && typeof doc.info === "object" && typeof (doc.info as { version?: unknown }).version === "string"
       ? (doc.info as { version: string }).version.slice(0, 64)
       : "unversioned";
+  // Stable Integration identity (INT-01 fix 2): deterministic UUIDv5 derived
+  // from the pinned spec digest (see integrationUuidV5 in src/openapi.ts).
+  const integrationId = integrationUuidV5(digestHex);
+  // Embedding budget (INT-01 fix 4): strip examples/descriptions/vendor
+  // extensions before embedding; fail closed when the stripped literal still
+  // exceeds GENERATOR_EMBED_BYTES_MAX.
+  const strippedDoc = stripEmbeddedSpec(doc);
+  const strippedBytes = new TextEncoder().encode(JSON.stringify(strippedDoc)).length;
+  if (strippedBytes > GENERATOR_EMBED_BYTES_MAX) {
+    throw new Fault(
+      400,
+      "GENERATOR_INVALID_SPEC",
+      `The stripped embedded spec is ${strippedBytes} bytes, above the ${GENERATOR_EMBED_BYTES_MAX}-byte embedding budget.`,
+    );
+  }
   const source = emitIntegrationSource({
-    doc,
+    doc: strippedDoc,
     operations,
     id: options.id,
     name: options.name,
@@ -183,6 +240,8 @@ export function generateIntegrationModule(
     envPrefix,
     digestHex,
     version,
+    authKind,
+    integrationUuid: integrationId,
     tokenPath,
     scope,
     timeoutMs,
@@ -194,4 +253,41 @@ export function generateIntegrationModule(
     specDigest: digestHex,
     operationCount: operations.length,
   };
+}
+
+/** Fail closed on unrecognized or mismatched auth: the operator must fix the
+ * spec or the explicit override, never ship a wrong credential shape. */
+function failClosedAuth(detected?: GeneratorAuthKind, override?: GeneratorAuthKind): never {
+  throw new Fault(
+    400,
+    "GENERATOR_INVALID_OPTIONS",
+    override === undefined
+      ? "The spec declares no recognized securityScheme (need http/bearer, apiKey, or oauth2 client-credentials); refusing to guess the credential shape."
+      : `Auth override ${JSON.stringify(override)} disagrees with the spec's detected ${JSON.stringify(detected)} scheme; refusing to stamp the wrong credential shape.`,
+  );
+}
+
+/** Strip the embedded spec literal to the embedding budget policy: drop
+ * examples and vendor extensions, truncate descriptions over
+ * GENERATOR_EMBED_DESCRIPTION_MAX chars. Pure: never mutates the input. */
+export function stripEmbeddedSpec(doc: OpenApiDocument): OpenApiDocument {
+  return stripValue(doc) as OpenApiDocument;
+}
+
+function stripValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripValue);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (key === "example" || key === "examples") continue;
+      if (key.startsWith("x-")) continue;
+      if (key === "description" && typeof entry === "string" && entry.length > GENERATOR_EMBED_DESCRIPTION_MAX) {
+        out[key] = `${entry.slice(0, GENERATOR_EMBED_DESCRIPTION_MAX)}…[truncated]`;
+        continue;
+      }
+      out[key] = stripValue(entry);
+    }
+    return out;
+  }
+  return value;
 }

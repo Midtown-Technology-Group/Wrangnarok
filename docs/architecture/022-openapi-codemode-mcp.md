@@ -177,6 +177,37 @@ Wrangnarok should:
 
 A provider without a useful OpenAPI document may use a handwritten Integration client or a smaller authored schema. Code Mode is preferred where it fits, not mandatory for every provider.
 
+## Generated Integration contract (INT-01, issue #229)
+
+`wrangnarok generate-integration` emits a committed Code Mode host module from
+an OpenAPI 3.x document. Four generator contracts landed with the Defined
+Networking proof (2026-09-16) and stay stable:
+
+1. **Auth kind is detected, never assumed.** The generator reads the spec's
+   `components.securitySchemes`: `http` bearer, `apiKey`, and `http` basic
+   yield the bearer ApiToken shape (`Authorization: Bearer <token>`, one
+   `apiToken` secret); `oauth2` flows with a client-credentials-capable grant
+   yield the OAuth client-credentials exchange shape (the HaloPSA posture).
+   Anything else — including a spec with no recognizable scheme — fails
+   closed with `GENERATOR_INVALID_OPTIONS`. An explicit `--auth-kind`
+   override must agree with the detected kind.
+2. **Integration identity is a deterministic UUIDv5** over the pinned spec
+   digest hex (`SHA-256` of the exact spec bytes): `UUIDv5(namespace,
+   "wrangnarok.integration.v1:<digest>")` per RFC 9562 section 6.5. Same
+   spec bytes yield the same ID across checkouts, so Saga identity survives
+   ordinary source edits; any spec byte change mints a different
+   Integration, so drift is visible, never silent.
+3. **Deprecated operations are excluded by default.** `deprecated: true`
+   operations stay out of the classification map (never callable) unless the
+   operator passes `--include-deprecated` / `includeDeprecated: true`. The
+   embedded literal keeps them as pinned-contract evidence only.
+4. **Embedded-spec budget with a documented strip policy.** The embedded
+   literal must stay under 96 KiB (`GENERATOR_EMBED_BYTES_MAX`); before
+   embedding the generator strips `example`/`examples` keys, `x-` vendor
+   extensions, and truncates descriptions over 280 chars with a
+   `…[truncated]` marker. A stripped spec still over budget fails closed.
+   The DefinedNet output lands at ~75 KiB.
+
 ## Invariants
 
 1. Raw Connection credentials are never exposed to model-generated code or tool results.
