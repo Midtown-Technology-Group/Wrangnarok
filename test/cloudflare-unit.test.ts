@@ -203,3 +203,51 @@ describe("cloudflare input parsers", () => {
     }
   });
 });
+
+describe("vendor error shaping", () => {
+  it("tolerates malformed error payloads without copying content", async () => {
+    // Non-object payload, non-array errors, non-object entries, and
+    // schemaless codes/messages all fall back to the safe default.
+    for (const payload of [
+      null,
+      { success: false },
+      { success: false, errors: "nope" },
+      { success: false, errors: ["nope", { code: "str", message: "" }] },
+    ]) {
+      mockJson(payload, 500);
+      const err = await verifyConnection(CONNECTION, SECRETS, ACCOUNT).catch((e: Error) => e);
+      expect(err).toMatchObject({ code: "CLOUDFLARE_REQUEST_FAILED" });
+      expect(String((err as { message: string }).message).endsWith("Cloudflare request failed")).toBe(true);
+      vi.restoreAllMocks();
+    }
+  });
+  it("rethrows Faults from the transport untouched", async () => {
+    const { Fault } = await import("../src/domain");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Fault(502, "CLOUDFLARE_REQUEST_FAILED", "Cloudflare returned HTTP 502: stale.");
+    });
+    await expect(verifyConnection(CONNECTION, SECRETS, ACCOUNT)).rejects.toMatchObject({
+      code: "CLOUDFLARE_REQUEST_FAILED",
+    });
+  });
+  it("shapes non-object results and absences with safe defaults", async () => {
+    mockJson({ success: true, result: null });
+    const out = await verifyConnection(CONNECTION, SECRETS, { id: ACCOUNT.id, name: 42 });
+    expect(out).toMatchObject({ status: "unhealthy", account: { id: ACCOUNT.id, name: "" } });
+    expect(out.credential).toMatchObject({ status: "unknown", expiresOn: null, notBefore: null });
+  });
+  it("inventory tolerates schemaless payloads and stops without total pages", async () => {
+    mockJson({ success: true });
+    const out = await inventoryZones(CONNECTION, SECRETS, ACCOUNT, { maxZones: 5 });
+    expect(out).toMatchObject({ zoneCount: 0, totalAvailable: null, apiCalls: 1 });
+  });
+  it("caps at the 250-zone hard bound even under large maxZones", async () => {
+    const zones = Array.from({ length: 60 }, (_, i) => ({ id: `z${i}`, name: `n${i}` }));
+    mockJson({ success: true, result: zones });
+    const out = await inventoryZones(CONNECTION, SECRETS, ACCOUNT, { maxZones: 250 });
+    // No total_pages and non-empty pages: the loop refetches until the
+    // hard bound stops it (60/call, 5 calls, sliced to 250).
+    expect(out.zoneCount).toBe(250);
+    expect(out.apiCalls).toBe(5);
+  });
+});

@@ -101,8 +101,9 @@ async function getJson(
   const timedOut = () => Date.now() - started >= deadline;
   // Root-relative paths would discard the base path (`/client/v4`): join
   // against the base directory explicitly so the version prefix survives.
-  const baseDir = base.endsWith("/") ? base : `${base}/`;
-  const url = new URL(path.replace(/^\//, ""), baseDir);
+  // Callers pass validated exact-base endpoints (no trailing slash), so no
+  // conditional is needed here.
+  const url = new URL(path.replace(/^\//, ""), `${base}/`);
   if (params !== undefined) {
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
   }
