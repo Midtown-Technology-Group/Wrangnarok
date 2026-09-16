@@ -10,6 +10,7 @@ import {
   setAccessCertFetchTimeoutMs,
   verifyAccess,
 } from "../src/access";
+import { describeCaller } from "../src/auth";
 import { Fault } from "../src/domain";
 import migration1 from "../migrations/0001_initial.sql?raw";
 import migration7 from "../migrations/0007_org_membership.sql?raw";
@@ -161,6 +162,48 @@ it("keeps LAB behavior when no assertion header is present", async () => {
   expect(res.status).toBe(404);
   expect(await res.json()).toMatchObject({ error: { code: "NOT_FOUND" } });
   expect(new Fault(401, "UNAUTHORIZED", "Unauthorized.").status).toBe(401);
+});
+
+it("never reports Access authentication for an empty assertion header (#365)", async () => {
+  // A LAB bearer plus an empty Cf-Access-Jwt-Assertion must stay a plain
+  // fixture caller: authenticate() must route the empty header to LAB (not
+  // Access verification), and describeCaller() must agree instead of reading
+  // the header as present (which previously answered viaAccess:true,
+  // credentialClass:"human" and concealed fixture use from whoAmI()).
+  const bindings = { ...(env as unknown as Bindings) };
+  const labHeaders = {
+    Authorization: `Bearer ${"a".repeat(64)}`,
+    "Cf-Access-Jwt-Assertion": "",
+  };
+  const res = await worker.fetch(new Request("https://local.test/api/auth/me", { headers: labHeaders }), bindings);
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({
+    caller: {
+      userId: "00000000-0000-4000-8000-000000000002",
+      orgId: "00000000-0000-4000-8000-000000000001",
+      credentialClass: "fixture",
+      viaAccess: false,
+      fixture: true,
+    },
+    role: "admin",
+    kind: "ordinary",
+  });
+  // Pure-unit pin: the identity view derives from the verified Principal
+  // plus the header value, never from header presence alone.
+  const emptyView = describeCaller(
+    {
+      userId: "00000000-0000-4000-8000-000000000002",
+      orgId: "00000000-0000-4000-8000-000000000001",
+    },
+    new Request("https://local.test/api/auth/me", { headers: labHeaders }),
+  );
+  expect(emptyView).toEqual({
+    userId: "00000000-0000-4000-8000-000000000002",
+    orgId: "00000000-0000-4000-8000-000000000001",
+    credentialClass: "fixture",
+    viaAccess: false,
+    fixture: true,
+  });
 });
 
 it("maps allowlisted service common_name without email", async () => {
