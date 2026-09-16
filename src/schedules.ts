@@ -417,7 +417,9 @@ export async function createSchedule(
 }
 
 /** Load one schedule row for exact-org visibility: foreign rows resolve to
- * null so routes answer 404, never a cross-tenant leak. */
+ * null so routes answer 404, never a cross-tenant leak. A missing table
+ * reads as absence (pre-migration); any other D1 fault rethrows so a
+ * backend failure is never mistaken for an unknown schedule. */
 export async function loadSchedule(db: D1Database, orgId: string, name: string): Promise<ScheduleRow | null> {
   try {
     const row = await db
@@ -425,8 +427,9 @@ export async function loadSchedule(db: D1Database, orgId: string, name: string):
       .bind(orgId, name)
       .first<ScheduleRow>();
     return row ?? null;
-  } catch {
-    return null;
+  } catch (error) {
+    if (isMissingTable(error)) return null;
+    throw error;
   }
 }
 
@@ -442,8 +445,11 @@ export async function listSchedules(
       .bind(caller.orgId)
       .all<ScheduleRow>();
     rows = result.results;
-  } catch {
-    return [];
+  } catch (error) {
+    // Pre-migration absence reads as empty; a real backend fault rethrows
+    // so discovery never answers failure as a successful empty list.
+    if (isMissingTable(error)) return [];
+    throw error;
   }
   return rows.map((row) => toSummary(row, sagas));
 }
@@ -587,8 +593,11 @@ export async function promoteWindow(
   let fresh: ScheduleRow | null;
   try {
     fresh = await db.prepare("SELECT * FROM schedules WHERE id=?").bind(schedule.id).first<ScheduleRow>();
-  } catch {
-    fresh = null;
+  } catch (error) {
+    // A backend fault here is not a deletion: rethrow so the tick reports
+    // failure instead of answering a live schedule as gone.
+    if (isMissingTable(error)) fresh = null;
+    else throw error;
   }
   if (!fresh) throw new Fault(409, "SCHEDULE_GONE", "This schedule was deleted before dispatch.");
   if (fresh.enabled !== 1) throw new Fault(409, "SCHEDULE_DISABLED", "This schedule was disabled before dispatch.");
@@ -654,8 +663,12 @@ export async function promoteDueSchedules(
       .bind(now.toISOString(), SCHEDULE_TICK_LIMIT)
       .all<ScheduleRow>();
     due = result.results;
-  } catch {
-    return { promoted: [], skipped: [] };
+  } catch (error) {
+    // A backend fault on the tick scan is a failed tick, not an empty
+    // schedule set: rethrow so the Cron reports failure instead of
+    // silently skipping every due window.
+    if (isMissingTable(error)) return { promoted: [], skipped: [] };
+    throw error;
   }
   const promoted: PromotionResult[] = [];
   const skipped: string[] = [];
@@ -714,7 +727,8 @@ export async function deliveryForWindow(
       .bind(scheduleId, window)
       .first<{ execution_id: string }>();
     return row ?? null;
-  } catch {
-    return null;
+  } catch (error) {
+    if (isMissingTable(error)) return null;
+    throw error;
   }
 }

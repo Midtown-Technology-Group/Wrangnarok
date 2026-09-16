@@ -554,7 +554,16 @@ export default {
     // never writes timeouts, never sweeps Pending, and never resurrects a
     // cancelled window — promotion is the only write path here.
     void controller;
-    await promoteDueSchedules(env.DB, env, SAGA_DEFINITIONS, submit).catch(() => undefined);
+    // A failed tick must be visible: promoteDueSchedules rethrows backend
+    // faults (only per-schedule fences become skips), so log the failure
+    // for the Cron/telemetry surface instead of swallowing it. The throw
+    // preserves the failed-Cron signal; the log carries the cause.
+    try {
+      await promoteDueSchedules(env.DB, env, SAGA_DEFINITIONS, submit);
+    } catch (error) {
+      console.error(`[schedules] tick failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
   },
 } satisfies ExportedHandler<Bindings>;
 
