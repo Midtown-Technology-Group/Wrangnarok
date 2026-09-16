@@ -39,7 +39,10 @@ export async function runSmoke({
   } catch {
     throw new Error(`Preview base must be an https URL, got ${JSON.stringify(baseUrl)}.`);
   }
-  if (target.protocol !== "https:") {
+  if (target.protocol !== "https:" && target.protocol !== "http:") {
+    throw new Error(`Preview base must be an http(s) URL, got ${JSON.stringify(baseUrl)}.`);
+  }
+  if (target.protocol === "http:") {
     const host = target.hostname.toLowerCase();
     const loopback = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
     if (!loopback) throw new Error(`Preview base over plaintext http is loopback-only; use https.`);

@@ -640,13 +640,15 @@ export function parseContext(argv = process.argv) {
 }
 
 export async function runCommand(ctx, deps = {}) {
-  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
+  const rawFetch = deps.fetchImpl ?? globalThis.fetch;
   const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   // Issue #357: CF Access headers are custom headers that a redirect target
   // would receive, so authenticated fetches never follow redirects. Any 3xx
-  // fails closed instead of re-sending credentials elsewhere.
-  const checkedFetch = async (url, init = {}) => {
-    const response = await fetchImpl(url, { redirect: "manual", ...init });
+  // fails closed instead of re-sending credentials elsewhere. The wrapper
+  // takes the local name `fetchImpl` so every branch below uses it; the raw
+  // dep is only reachable as `rawFetch` (used by no branch).
+  const fetchImpl = async (url, init = {}) => {
+    const response = await rawFetch(url, { redirect: "manual", ...init });
     const status = response.status;
     if (status >= 300 && status < 400) {
       fail(
@@ -658,7 +660,7 @@ export async function runCommand(ctx, deps = {}) {
   };
   const full = {
     ...ctx,
-    fetchImpl: checkedFetch,
+    fetchImpl,
     headers: {
       Authorization: `Bearer ${ctx.token}`,
       "Content-Type": "application/json",

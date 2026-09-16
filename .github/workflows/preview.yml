@@ -35,14 +35,24 @@ jobs:
     # secrets (forks) the workflow completes as a normal skip.
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Issue #376: credential-bearing steps run under the `preview`
+    # environment, so the token is an environment secret (not a repo
+    # secret): stewards can add required reviewers on the environment as a
+    # manual approval gate, and PR code that runs before approval never
+    # sees the token. Move CLOUDFLARE_PREVIEW_TOKEN from a repo secret to
+    # the `preview` environment secret when enabling the gate.
+    environment: preview
 
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           # Explicit merge revision (issue #376): no ref ambiguity about
-          # which code runs alongside the preview token below.
+          # which code runs alongside the preview token below. Credentials
+          # are not persisted: no later step uses authenticated git, and
+          # PR-controlled commands must not read the checkout credential.
           ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
