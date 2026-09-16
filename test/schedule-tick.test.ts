@@ -270,5 +270,15 @@ describe("codex #364: per-org fairness and skip quarantine (workerd)", () => {
     await bindings.DB.prepare("DELETE FROM saga_policies WHERE org_id=? AND saga_id=?")
       .bind("00000000-0000-4000-8000-000000000001", helloSaga.id)
       .run();
+    // Operator re-enables: the next tick promotes the row and clears the
+    // quarantine streak (covers the streak-clear arm).
+    await bindings.DB.prepare("UPDATE schedules SET enabled=1,last_window=? WHERE org_id=? AND name=?")
+      .bind("quarantine:10", "00000000-0000-4000-8000-000000000001", "quarantine-me")
+      .run();
+    await tick.scheduled({ cron: "* * * * *" }, bindings);
+    const revived = await bindings.DB.prepare("SELECT enabled,last_window FROM schedules WHERE org_id=? AND name=?")
+      .bind("00000000-0000-4000-8000-000000000001", "quarantine-me")
+      .first<{ enabled: number; last_window: string | null }>();
+    expect(revived?.last_window ?? "").not.toMatch(/^quarantine:/);
   }, 60000);
 });
