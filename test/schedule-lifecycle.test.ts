@@ -154,6 +154,29 @@ describe("TRG-01 promotion semantics (workerd)", () => {
     expect(orphaned.promoted.map((entry) => entry.scheduleName)).not.toContain("paused-probe");
     expect(orphaned.skipped).toContain("paused-probe");
   }, 25000);
+  it("rethrows non-fence tick errors instead of recording a skip (issue #137)", async () => {
+    // The TICK_SKIP_CODES branch: a Fault outside the skip set (or a
+    // non-Fault backend error from submit) must fail the tick, proving the
+    // `throw error` line runs. Skips stay reserved for named fences.
+    await createRecurring("throw-probe");
+    const past = new Date(Date.now() - 60_000).toISOString();
+    await bindings.DB.prepare("UPDATE schedules SET next_due_at=? WHERE org_id=? AND name=?")
+      .bind(past, principal.orgId, "throw-probe")
+      .run();
+    const boom = async () => {
+      throw new Error("D1 backend failure: submit path down");
+    };
+    await expect(
+      promoteDueSchedules(
+        bindings.DB,
+        { DB: bindings.DB, HELLO_WORKFLOW: bindings.HELLO_WORKFLOW } as never,
+        SAGA_DEFINITIONS,
+        boom as never,
+        new Date(),
+      ),
+    ).rejects.toThrow("D1 backend failure");
+  });
+
   it("fails the tick loud on backend faults instead of reporting nothing-due (issue #137)", async () => {
     // A D1 fault that is NOT a missing table must fail the tick, never
     // masquerade as an empty schedule set: the Cron surface reports the
