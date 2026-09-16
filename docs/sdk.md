@@ -27,6 +27,25 @@ Authenticated like every other `/api/*` route: `Authorization: Bearer
 `GET /api/logs` accept a query string, and only each route's allowlisted
 keys.
 
+## Transport policy (issue #374)
+
+Every SDK call bears credentials (the bearer token, plus the Cloudflare
+Access client pair when configured), so the client fails closed on
+transport:
+
+- The base must be HTTPS, except explicit loopback development hosts
+  (`localhost`, `127.0.0.1`, `::1`). Any other plain-HTTP base rejects at
+  construction, before any fetch.
+- Access client credentials ride HTTPS only: a loopback HTTP client sends
+  the bearer alone, never the Access pair.
+- The client never follows redirects (`redirect: "manual"`): any 3xx
+  answers `SDK_CLIENT_NETWORK` instead of replaying credentials to the
+  redirect target. Fix the base URL and retry.
+- An empty or whitespace-only `Cf-Access-Jwt-Assertion` request header is
+  the same as absent (issue #365): it never authenticates, and
+  `GET /api/auth/me` reports such callers as `fixture` with
+  `viaAccess: false`, never `human`.
+
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/sdk` | Versioned contract descriptor (`describeContract`) |

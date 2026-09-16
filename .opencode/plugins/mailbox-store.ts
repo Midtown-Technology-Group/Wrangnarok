@@ -205,14 +205,65 @@ export function validAlias(alias: string): boolean {
   return ALIAS_RE.test(alias);
 }
 
+export interface AliasClaimOk {
+  readonly ok: true;
+  readonly aliases: Record<string, string>;
+}
+export interface AliasClaimTaken {
+  readonly ok: false;
+  readonly owner: string;
+}
+export type AliasClaim = AliasClaimOk | AliasClaimTaken;
+
+/**
+ * Atomic alias claim (issue #382): an alias owned by a different session is
+ * never overwritten, so a peer cannot hijack a victim's alias and divert or
+ * impersonate their mail. Re-claiming by the owning session is idempotent,
+ * and claiming a second alias releases the first, so one session holds at
+ * most one alias and stale mappings cannot linger as impersonation fuel.
+ */
+export function claimAlias(
+  current: Record<string, string>,
+  alias: string,
+  sessionId: string,
+): AliasClaim {
+  const owner = current[alias];
+  if (owner !== undefined && owner !== sessionId) return { ok: false, owner };
+  const next: Record<string, string> = {};
+  for (const [name, id] of Object.entries(current)) {
+    if (id !== sessionId) next[name] = id;
+  }
+  next[alias] = sessionId;
+  return { ok: true, aliases: next };
+}
+
+/**
+ * Sender line (issue #382): presentation always includes the immutable sender
+ * session ID alongside any claimed alias, so a peer that copies a victim's
+ * alias cannot pass its mail off as the victim's. Alias text is display-only.
+ */
+export function senderLine(message: MailboxMessage): string {
+  return message.fromAlias === undefined
+    ? message.from
+    : `${message.from} (alias ${JSON.stringify(message.fromAlias)})`;
+}
+
 /** Human-readable block thrown into the recipient's tool call for high-priority push. */
 export function formatPushBlock(messages: readonly MailboxMessage[]): string {
   const lines = messages.map((m) => {
-    const head = `[mailbox:${m.kind}] from ${m.fromAlias ?? m.from} (${m.id})`;
+    const head = `[mailbox:${m.kind}] from ${senderLine(m)} (${m.id})`;
     const subject = m.subject !== undefined ? ` subj=${JSON.stringify(m.subject)}` : "";
     return `${head}${subject}\n${m.body}`;
   });
   return `MAILBOX_HIGH_PRIORITY: ${messages.length} high-priority message(s). Read with mailbox_read, acknowledge with mailbox_ack.\n${lines.join("\n---\n")}`;
+}
+
+/**
+ * Single-message presentation head shared by mailbox_read, mailbox_ask, and
+ * the CLI so every surface carries the same tamper-evident sender line.
+ */
+export function formatHead(message: MailboxMessage): string {
+  return `[${message.kind}/${message.priority}] from ${senderLine(message)} id=${message.id}${message.replyTo ? ` replyTo=${message.replyTo}` : ""}${message.subject ? ` subj=${JSON.stringify(message.subject)}` : ""}`;
 }
 
 /** One-liner for compaction context and turn-start summaries. */

@@ -1,0 +1,9 @@
+# codex-agent-env-trust lane scope (issues #382, #380, #383): mailbox alias hijack, CLI repo scoping, plugin pin.
+.opencode/plugins/mailbox.ts
+.opencode/plugins/mailbox-store.ts
+scripts/mailbox-cli.mjs
+.opencode/opencode.json
+.opencode/tui.json
+.opencode/package.json
+test/mailbox.test.ts
+scopes/codex-agent-env.scope

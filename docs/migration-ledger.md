@@ -33,6 +33,47 @@ must update every importing test in the same commit.
 | 0018   | 0018_ops.sql                    | OPS-01  | ops audit (issue #172)               |
 | 0020   | 0020_artifacts.sql              | FILE-02 | artifacts (issue #158)               |
 | 0022   | 0022_app_runtime.sql            | APP-02  | app runtime (issue #160)             |
+| 0026   | 0026_cancelling_repair.sql      | codex-migration-replay | cancelling FK repair: child-preserving executions rebuild (issue #381) |
+| 0027   | 0027_rename_replay_repair.sql   | codex-migration-replay | rename-replay convergence, IF NOT EXISTS (issues #367-371) |
+
+## Stuck-database recovery (codex findings #381, #367-371)
+
+Wrangler records applied migrations by filename in `d1_migrations` and sends
+each pending file plus its journal INSERT as one atomic batch: a file whose
+DDL fails is never recorded, and later files never run. Two stuck states and
+their recoveries:
+
+- #381 (cancelling FK): databases that attempted migration 0002 with operation
+  history failed inside the 0002 batch, stranding `executions_new` next to the
+  old `executions` table. Recovery needs no journal edit: applying 0026 drops
+  the stranded table, reruns the same rebuild while briefly removing and
+  restoring the `operations` child (rows preserved), and converges healthy,
+  pre-0002, fresh, and rerun states.
+- #367-371 (renamed files): databases that applied an old filename
+  (`0010_ops`, `0007_files`, `0010_artifacts`, `0009_endpoints`,
+  `0005_solutions_activation`) treat the byte-identical new filename
+  (`0018`, `0019`, `0020`, `0021`, `0010`) as pending, but the new files use
+  bare CREATE/ALTER statements that fail against the already-existing objects.
+  Because the failing new-name files sort before 0027 and the batch is atomic,
+  such databases can never reach 0027 through `migrations apply` alone.
+  Recovery: delete the stuck new-name journal rows (and any half-applied
+  ledger entries) with
+  `DELETE FROM d1_migrations WHERE name IN
+  ('0018_ops.sql','0019_files.sql','0020_artifacts.sql','0021_endpoints.sql',
+  '0010_solutions_activation.sql')`, re-run `wrangler d1 migrations apply`
+  (the ORIGINAL old-name files are skipped as already applied; genuinely
+  missing objects are created by the new-name files that now run), then 0027
+  converges every renamed object with IF NOT EXISTS guards. The 0010
+  `config_json` column is intentionally absent from 0027: ALTER TABLE ADD
+  COLUMN has no conditional form in SQLite/D1, so an unconditional ADD would
+  fail on exactly the already-migrated databases 0027 serves. Both old-name
+  (0005) and new-name (0010) carriers already have the column, and fresh
+  databases receive it from 0010 itself, which sorts before 0027.
+
+Correction to the 2026-09-11 collision notes above: the "converge on
+re-application" claims were wrong for filename-tracked journals. Renamed files
+are never recognized as already applied; convergence now comes from the 0027
+repair, not from re-applying the renamed files.
 
 ## Resolved collisions
 
