@@ -1,0 +1,18 @@
+# Lane scope: codex/csrf-auth (issues #348 #349 #352 #355)
+# CSRF guards on admin POSTs + org-admin authorization on config routes.
+scopes/codex-csrf-auth.scope
+src/index.ts
+src/auth.ts
+src/config.ts
+src/orgs.ts
+src/endpoints.ts
+src/apps.ts
+test/access-auth.test.ts
+test/config.test.ts
+test/config-unit.test.ts
+test/config-redaction.test.ts
+test/endpoints.test.ts
+test/endpoint-branches.test.ts
+test/apps.test.ts
+test/apps-branches.test.ts
+client/src/lib/orgs-client.ts
