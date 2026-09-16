@@ -329,6 +329,25 @@ export interface SmokeResult {
 export interface HelloInput {
   name: string;
 }
+// codex/hello-domain (issues #377, #372): the accepted hello name must fit
+// every downstream bound it flows into. The HelloResult stores the name twice
+// (greeting plus name) after JSON escaping, both log lines prefix it, and the
+// INFO data row re-serializes it, so the input bound is sized from the
+// tightest downstream fit, not from the raw transport cap.
+export const HELLO_NAME_MAX_BYTES = 512;
+export const HELLO_NAME_MAX_CHARS = 512;
+// D1 CHECK bounds the persisted rows ride under: `length()` counts UTF-16
+// code units on TEXT, so the budget is in characters, not bytes. The result
+// rows carry the HelloResult JSON; the log rows carry the prefixed messages
+// and the serialized data payload.
+export const RESULT_JSON_MAX_CHARS = 4096;
+export const LOG_MESSAGE_MAX_CHARS = 1024;
+export const LOG_DATA_MAX_BYTES = 2048;
+/** Persisted size of the HelloResult for one name: the name appears twice
+ * (greeting plus name) after JSON escaping. Pure and unit-tested. */
+export function helloNameResultChars(name: string): number {
+  return JSON.stringify({ greeting: `Hello, ${name}!`, name }).length;
+}
 export interface HelloResult {
   greeting: string;
   name: string;
@@ -396,32 +415,52 @@ export function parseSmokeInput(value: unknown): SmokeInput {
   }
   return {};
 }
-export function parseHelloInput(value: unknown): HelloInput {
-  if (
-    !object(value) ||
-    Object.keys(value).some((key) => key !== "name") ||
-    typeof value.name !== "string" ||
-    value.name.length === 0 ||
-    new TextEncoder().encode(value.name).length > 1024
-  ) {
-    throw new Fault(400, "INVALID_INPUT", "Expected one name of 1 to 1024 UTF-8 bytes.");
+/** Pure bound check shared by the hello and hello-parent parsers: an accepted
+ * name must fit the D1 result CHECK after JSON escaping/duplication, both
+ * prefixed author-log lines after scrubbing, and the INFO data row. Rejects
+ * with INVALID_INPUT; never truncates caller input. */
+export function checkHelloName(name: unknown): string {
+  if (typeof name !== "string" || name.length === 0) {
+    throw new Fault(400, "INVALID_INPUT", `Expected one name of 1 to ${HELLO_NAME_MAX_BYTES} UTF-8 bytes.`);
   }
-  return { name: value.name };
+  if (name.length > HELLO_NAME_MAX_CHARS || new TextEncoder().encode(name).length > HELLO_NAME_MAX_BYTES) {
+    throw new Fault(400, "INVALID_INPUT", `Expected one name of 1 to ${HELLO_NAME_MAX_BYTES} UTF-8 bytes.`);
+  }
+  if (helloNameResultChars(name) > RESULT_JSON_MAX_CHARS) {
+    throw new Fault(400, "INVALID_INPUT", `Expected one name of 1 to ${HELLO_NAME_MAX_BYTES} UTF-8 bytes.`);
+  }
+  if (
+    `Greeting ${name}`.length > LOG_MESSAGE_MAX_CHARS ||
+    `Hello Saga greeted ${name}`.length > LOG_MESSAGE_MAX_CHARS
+  ) {
+    throw new Fault(400, "INVALID_INPUT", `Expected one name of 1 to ${HELLO_NAME_MAX_BYTES} UTF-8 bytes.`);
+  }
+  if (new TextEncoder().encode(JSON.stringify({ name })).length > LOG_DATA_MAX_BYTES) {
+    throw new Fault(400, "INVALID_INPUT", `Expected one name of 1 to ${HELLO_NAME_MAX_BYTES} UTF-8 bytes.`);
+  }
+  return name;
+}
+export function parseHelloInput(value: unknown): HelloInput {
+  if (!object(value) || Object.keys(value).some((key) => key !== "name")) {
+    throw new Fault(400, "INVALID_INPUT", `Expected one name of 1 to ${HELLO_NAME_MAX_BYTES} UTF-8 bytes.`);
+  }
+  return { name: checkHelloName(value.name) };
 }
 export function parseHelloParentInput(value: unknown): HelloParentInput {
   if (!object(value) || Object.keys(value).some((key) => !["name", "childKey"].includes(key))) {
     throw new Fault(400, "INVALID_INPUT", "Expected a name plus an optional childKey.");
   }
-  if (typeof value.name !== "string" || value.name.length === 0 || new TextEncoder().encode(value.name).length > 1024) {
-    throw new Fault(400, "INVALID_INPUT", "Expected one name of 1 to 1024 UTF-8 bytes.");
+  if (typeof value.name !== "string" || value.name.length === 0) {
+    throw new Fault(400, "INVALID_INPUT", `Expected one name of 1 to ${HELLO_NAME_MAX_BYTES} UTF-8 bytes.`);
   }
+  const name = checkHelloName(value.name);
   if (value.childKey !== undefined) {
     if (typeof value.childKey !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(value.childKey)) {
       throw new Fault(400, "INVALID_INPUT", "The childKey must be 1 to 128 safe characters.");
     }
-    return { name: value.name, childKey: value.childKey };
+    return { name, childKey: value.childKey };
   }
-  return { name: value.name };
+  return { name };
 }
 export function parseDigestInput(value: unknown): DigestInput {
   if (!object(value) || Object.keys(value).length !== 0) {
