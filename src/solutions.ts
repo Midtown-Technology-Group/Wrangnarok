@@ -1004,12 +1004,12 @@ export async function requireActiveInstall(
   if (!anyInstall) return null;
   const pin = await db
     .prepare(
-      "SELECT s.bundle_id AS bundleId, s.revision AS revision, a.version AS version, a.manifest_hash AS manifestHash " +
+      "SELECT s.bundle_id AS bundleId, s.revision AS revision, s.managed_by AS managedBy, a.version AS version, a.manifest_hash AS manifestHash " +
         "FROM bundle_sagas s JOIN bundle_active a ON a.bundle_id = s.bundle_id AND a.org_id = s.org_id " +
         "WHERE s.org_id = ? AND s.saga_id = ?",
     )
     .bind(orgId, sagaId)
-    .first<{ bundleId: string; revision: string; version: string; manifestHash: string }>();
+    .first<{ bundleId: string; revision: string; managedBy: string | null; version: string; manifestHash: string }>();
   if (!pin) {
     throw invalid(
       "NO_ACTIVE_INSTALL",
@@ -1021,6 +1021,45 @@ export async function requireActiveInstall(
     throw invalid(
       "STALE_INSTALL_REVISION",
       `Active install pins revision "${pin.revision}" but deployed code is "${sagaRevision}": reinstall the bundle before executing.`,
+      409,
+    );
+  }
+  // Codex #356: an interrupted install leaves reconciled rows carrying the
+  // unactivated version while the pointer still names the previous complete
+  // version. The gate must verify managed-row consistency with the active
+  // version, not just the Saga revision: block execution until a retry
+  // converges the rows and the pointer.
+  const expectedMarker = `${pin.bundleId}@${pin.version}`;
+  if (pin.managedBy !== expectedMarker) {
+    throw invalid(
+      "INCONSISTENT_INSTALL",
+      `Bundle install for this Saga is mid-reconcile: the saga pin carries marker "${pin.managedBy}" but the active version is "${pin.version}". Retry the install before executing.`,
+      409,
+    );
+  }
+  const strayConnection = await db
+    .prepare(
+      "SELECT integration_id AS integrationId FROM connections WHERE org_id = ? AND managed_by LIKE ? AND managed_by != ? LIMIT 1",
+    )
+    .bind(orgId, `${pin.bundleId}@%`, expectedMarker)
+    .first<{ integrationId: string }>();
+  if (strayConnection) {
+    throw invalid(
+      "INCONSISTENT_INSTALL",
+      `Bundle install for this Organization is mid-reconcile: Connection "${strayConnection.integrationId}" carries unactivated content. Retry the install before executing.`,
+      409,
+    );
+  }
+  const strayConfig = await db
+    .prepare(
+      "SELECT config_key AS configKey FROM bundle_config WHERE bundle_id = ? AND org_id = ? AND managed_by != ? LIMIT 1",
+    )
+    .bind(pin.bundleId, orgId, expectedMarker)
+    .first<{ configKey: string }>();
+  if (strayConfig) {
+    throw invalid(
+      "INCONSISTENT_INSTALL",
+      `Bundle install for this Organization is mid-reconcile: config "${strayConfig.configKey}" carries unactivated content. Retry the install before executing.`,
       409,
     );
   }
