@@ -411,7 +411,10 @@ export async function testConnection(
     // endpoint proves reachability either way (credential validity is the
     // submit path). The probe authenticates with the deployment credential
     // and drops it after the call; it never persists, logs, or returns.
-    const verifyUrl = new URL("/user/tokens/verify", row.endpoint).toString();
+    // Root-relative join would discard the `/client/v4` base path, so join
+    // against the base directory explicitly (same posture as the Action).
+    const probeBase = row.endpoint.endsWith("/") ? row.endpoint : `${row.endpoint}/`;
+    const verifyUrl = new URL("user/tokens/verify", probeBase).toString();
     const response = await fetchImpl(verifyUrl, {
       method: "GET",
       redirect: "manual",

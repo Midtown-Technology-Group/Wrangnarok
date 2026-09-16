@@ -17,7 +17,7 @@ import {
   testConnection,
   updateConnection,
 } from "../src/connections";
-import { ECHO_INTEGRATION_ID, NINJA_INTEGRATION_ID } from "../src/domain";
+import { CLOUDFLARE_INTEGRATION_ID, ECHO_INTEGRATION_ID, NINJA_INTEGRATION_ID } from "../src/domain";
 import { buildOrgCtx } from "../src/saga";
 import { resolveConnection } from "../src/executions";
 import type { ExecutionRow } from "../src/executions";
@@ -81,6 +81,9 @@ beforeEach(async () => {
     const url = input instanceof Request ? input.url : String(input);
     if (url === "http://127.0.0.1:8788/echo") return Response.json({ message: "connection-test" });
     if (url.endsWith("/oauth/token")) return Response.json({ access_token: "probe", token_type: "Bearer" });
+    if (url.endsWith("/client/v4/user/tokens/verify")) {
+      return Response.json({ success: true, result: { status: "active" } });
+    }
     throw new Error(`Unexpected outbound request: ${url}`);
   });
 });
@@ -327,6 +330,20 @@ describe("Connection health (CON-01)", () => {
     expect(posted.some((url) => url.endsWith("/oauth/token"))).toBe(true);
     const bodies = vi.mocked(fetch).mock.calls.map((args) => JSON.stringify(args[1] ?? ""));
     expect(bodies.join(" ")).not.toContain(SECRET_SENTINEL);
+  });
+
+  it("probes the Cloudflare token-verify endpoint with the versioned base path", async () => {
+    await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
+      .bind("00000000-0000-4000-8000-000000000109", ORG, CLOUDFLARE_INTEGRATION_ID, "https://api.cloudflare.com/client/v4")
+      .run();
+    const probed = await worker.fetch(call(`/api/connections/${CLOUDFLARE_INTEGRATION_ID}/test`, "POST", {}), bindings);
+    expect(probed.status).toBe(200);
+    expect(await probed.json()).toMatchObject({ test: { ok: true } });
+    // The versioned base path survives URL joining (no dropped /client/v4).
+    const posted = vi
+      .mocked(fetch)
+      .mock.calls.map((args) => String(args[1] instanceof Request ? args[1].url : args[0]));
+    expect(posted.some((url) => url.endsWith("/client/v4/user/tokens/verify"))).toBe(true);
   });
 
   it("fails loud on missing mappings, disabled mappings, and missing credentials", async () => {
