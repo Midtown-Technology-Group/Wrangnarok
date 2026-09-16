@@ -1,18 +1,3 @@
--- SPDX-License-Identifier: AGPL-3.0
--- 0026: cancelling-repair (issue #381).
---
--- Migration 0002 rebuilds executions via CREATE executions_new / INSERT /
--- DROP executions / RENAME, but the pre-existing operations child table holds
--- a FOREIGN KEY to executions(id). With foreign keys enabled the DROP fails
--- whenever at least one operation row exists, which ordinary workflow
--- execution produces -- so the failure is reachable through normal pre-upgrade
--- use, and it strands executions_new (with post-0002 data) next to the old
--- executions table. This repair runs the same rebuild while briefly removing
--- and restoring the operations child (rows preserved through a backup table),
--- so it completes on populated databases. Safe on every reachable state:
--- healthy post-0002 databases, pre-0002 backups restored from before 0002
--- (old-shape executions plus rows), fresh databases, and reruns of itself
--- (all temp and backup tables are dropped first, all creates guarded).
 DROP TABLE IF EXISTS executions_new;
 DROP TABLE IF EXISTS _operations_backup;
 DROP TABLE IF EXISTS _executions_repair_new;

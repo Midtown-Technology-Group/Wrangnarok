@@ -1,31 +1,3 @@
--- SPDX-License-Identifier: AGPL-3.0
--- 0027: rename-replay repair (issues #367, #368, #369, #370, #371).
---
--- Five migrations were renumbered without content changes (old -> new):
--- 0010_ops -> 0018_ops (#367), 0007_files -> 0019_files (#368),
--- 0010_artifacts -> 0020_artifacts (#369), 0009_endpoints -> 0021_endpoints
--- (#370), 0005_solutions_activation -> 0010_solutions_activation (#371).
--- Wrangler records applied migrations by filename in d1_migrations, so a
--- database that applied an old name treats the new name as pending -- but the
--- new files reuse bare CREATE TABLE / CREATE INDEX (and, for 0010, a bare
--- ALTER TABLE connections ADD COLUMN config_json), which fail against the
--- already-existing objects. Because the failing new-name files sort BEFORE
--- this repair and the batch is atomic, such databases stay stuck: they can
--- never reach this file through `wrangler d1 migrations apply`. The recovery
--- is therefore a journal repair plus this file (see docs/migration-ledger.md
--- "stuck-database recovery"): delete the stuck new-name journal rows (and any
--- half-applied ledger entries), re-run `migrations apply` so the ORIGINAL
--- old-name files execute (they are the ones this database still needs), then
--- this repair converges every object with IF NOT EXISTS guards -- safe on
--- old-name databases, new-name databases, fresh databases, and reruns of
--- itself. The 0010 config_json column is intentionally NOT added here: ALTER
--- TABLE ADD COLUMN has no IF NOT EXISTS form in SQLite/D1, so an
--- unconditional ADD would fail on exactly the already-migrated databases this
--- repair serves. Databases that applied the old 0005 file already carry the
--- column; databases that applied only the new 0010 file also carry it (its
--- first three statements succeed before line 4 fails, and the journal row is
--- absent so a later apply reruns it to completion). Fresh databases receive
--- the column from 0010 itself, which sorts before this file.
 CREATE TABLE IF NOT EXISTS audit_events(id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), actor_user_id TEXT NOT NULL, action TEXT NOT NULL CHECK(length(action) BETWEEN 1 AND 128), target_type TEXT, target_id TEXT, outcome TEXT NOT NULL CHECK(outcome IN ('success','failure')), detail_json TEXT, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS audit_events_org ON audit_events(org_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS audit_events_action ON audit_events(org_id, action, created_at DESC, id DESC);
