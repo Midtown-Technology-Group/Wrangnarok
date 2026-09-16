@@ -37,6 +37,7 @@ import seed from "../scripts/seed-local.sql?raw";
 const bindings = env as unknown as Bindings;
 const TOKEN = "a".repeat(64);
 const ORG = "00000000-0000-4000-8000-000000000001";
+const OTHER_USER = "00000000-0000-4000-8000-000000000003";
 const OTHER_ORG = "00000000-0000-4000-8000-000000000004";
 const HALO_SECRET = "halo-lab-secret-sentinel";
 const HALO_ID = "halo-lab-client-sentinel";
@@ -176,6 +177,90 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     expect(mutateBody.result.noted).toBe(true);
     expect(mutateBody.provenance.operationId).toBe("Ticket_AddNote");
     expect(JSON.stringify(mutateBody)).not.toContain(HALO_SECRET);
+  });
+
+  it("denies Halo mutations to non-admin members on REST and MCP (issue #346)", async () => {
+    await createHaloConnection();
+    mockHalo();
+    const env = haloEnv();
+    // OTHER_USER is a known user with no membership yet: make them an
+    // ordinary member so the denial proves Halo policy, not strangerhood.
+    // This suite runs a partial migration set (no 0007): create the
+    // membership tables the same way the LAB bootstrap does.
+    await bindings.DB.exec(
+      "CREATE TABLE IF NOT EXISTS users(user_id TEXT PRIMARY KEY,status TEXT NOT NULL DEFAULT 'active',created_at TEXT NOT NULL,disabled_at TEXT)",
+    );
+    await bindings.DB.exec(
+      "CREATE TABLE IF NOT EXISTS org_memberships(org_id TEXT NOT NULL REFERENCES organizations(id),user_id TEXT NOT NULL REFERENCES users(user_id),role TEXT NOT NULL DEFAULT 'member',status TEXT NOT NULL DEFAULT 'invited',kind TEXT NOT NULL DEFAULT 'ordinary',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(org_id,user_id))",
+    );
+    const stamp = new Date().toISOString();
+    await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?)")
+      .bind(OTHER_USER, stamp)
+      .run();
+    await bindings.DB.prepare(
+      "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+    )
+      .bind(ORG, OTHER_USER, "member", "active", "ordinary", stamp, stamp)
+      .run();
+    const memberHeaders = () => headers();
+    const memberEnv = { ...env, LAB_USER_ID: OTHER_USER };
+    // Reads still execute for ordinary members.
+    const read = await worker.fetch(
+      new Request("https://local.test/api/openapi/execute", {
+        method: "POST",
+        headers: memberHeaders(),
+        body: JSON.stringify({ integration: "halo", operationId: "Ticket_Get", params: { path: { id: "7" } } }),
+      }),
+      memberEnv,
+    );
+    expect(read.status).toBe(200);
+    // Mutations fail closed before any vendor contact.
+    const mutate = await worker.fetch(
+      new Request("https://local.test/api/openapi/execute", {
+        method: "POST",
+        headers: memberHeaders(),
+        body: JSON.stringify({
+          integration: "halo",
+          operationId: "Ticket_AddNote",
+          params: { path: { id: "7" } },
+          input: { note: "unauthorized note" },
+        }),
+      }),
+      memberEnv,
+    );
+    expect(mutate.status).toBe(403);
+    expect(await mutate.json()).toMatchObject({ error: { code: "OPENAPI_OPERATION_FORBIDDEN" } });
+    // The MCP gateway shares the same host boundary.
+    const mcp = await worker.fetch(
+      new Request("https://local.test/api/mcp", {
+        method: "POST",
+        headers: memberHeaders(),
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            tool: "halo_api_execute",
+            input: { operationId: "Ticket_AddNote", params: { path: { id: "7" } }, input: { note: "x" } },
+          },
+        }),
+      }),
+      memberEnv,
+    );
+    expect(mcp.status).toBe(200);
+    const mcpBody = (await mcp.json()) as { result: { error: { code: string } } };
+    expect(mcpBody.result.error.code).toBe("OPENAPI_OPERATION_FORBIDDEN");
+    // Ordinary members cannot create their own Connection either.
+    const created = await worker.fetch(
+      new Request("https://local.test/api/connections", {
+        method: "POST",
+        headers: memberHeaders(),
+        body: JSON.stringify({ integrationId: HALO_INTEGRATION_ID, config: {} }),
+      }),
+      memberEnv,
+    );
+    expect(created.status).toBe(403);
+    expect(await created.json()).toMatchObject({ error: { code: "CONNECTION_FORBIDDEN" } });
   });
 
   it("rejects the destructive operation, cross-org selection, and origin escape", async () => {

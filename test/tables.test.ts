@@ -126,6 +126,23 @@ describe("TABLE-01 minimal slice: declarations and single-row CRUD", () => {
     expect(await call("/api/tables").then((res) => res.json())).toEqual({ tables: [] });
   });
 
+  it("hides the table detail from non-grantees (issue #353)", async () => {
+    await createTable("notes");
+    // Owner sees the detail with owner identity metadata.
+    const owned = await call("/api/tables/notes");
+    expect(owned.status).toBe(200);
+    expect(await owned.json()).toMatchObject({ table: { name: "notes", ownerUserId: OWNER } });
+    // Same-org member without a grant: 404, never the UUID/owner/timestamp.
+    const hidden = await call("/api/tables/notes", "GET", undefined, ORG, OTHER_USER);
+    expect(hidden.status).toBe(404);
+    expect(await hidden.json()).toEqual({ error: { code: "NOT_FOUND", message: "Not found." } });
+    // Any grant restores the same visibility the list applies.
+    await call("/api/tables/notes/grants", "POST", { action: "read", granteeUserId: OTHER_USER });
+    const granted = await call("/api/tables/notes", "GET", undefined, ORG, OTHER_USER);
+    expect(granted.status).toBe(200);
+    expect(await granted.json()).toMatchObject({ table: { name: "notes" } });
+  });
+
   it("rejects bad table names and bodies", async () => {
     expect((await call("/api/tables", "POST", { name: "Nope" })).status).toBe(400);
     expect(await call("/api/tables", "POST", { name: "Nope" }).then((res) => res.json())).toMatchObject({

@@ -192,6 +192,36 @@ it("enforces the canonical access matrix: 404 foreign, 403 same-org non-creator,
   expect((await call(`/api/artifacts/${id}`, "GET", { userId: OTHER_USER })).status).toBe(410);
 });
 
+it("fences the list to the creator for non-admins (issue #354)", async () => {
+  await uploadArtifact("mine.md", "my bytes");
+  // A same-org non-admin member sees none of another user's rows: no ids,
+  // names, MIME types, sizes, or versions leak through the list.
+  const memberList = (await (await call("/api/artifacts", "GET", { userId: OTHER_USER })).json()) as {
+    artifacts: unknown[];
+    hasMore: boolean;
+  };
+  expect(memberList.artifacts).toEqual([]);
+  expect(memberList.hasMore).toBe(false);
+  // The creator (fixture identity, an org admin) sees the org-wide list.
+  const adminList = (await (await call("/api/artifacts")).json()) as {
+    artifacts: { name: string }[];
+  };
+  expect(adminList.artifacts.some((entry) => entry.name === "mine.md")).toBe(true);
+  // OTHER_USER's own upload is visible to them and stays invisible to the
+  // admin-wide signal above only in the fenced direction: member sees one.
+  await upload(
+    `/api/artifacts?name=${encodeURIComponent("theirs.md")}`,
+    new TextEncoder().encode("theirs"),
+    "text/markdown",
+    ORG,
+    OTHER_USER,
+  );
+  const memberOwn = (await (await call("/api/artifacts", "GET", { userId: OTHER_USER })).json()) as {
+    artifacts: { name: string }[];
+  };
+  expect(memberOwn.artifacts.map((entry) => entry.name)).toEqual(["theirs.md"]);
+});
+
 it("binds attachments, lists triples without bytes, and separates binding from canonical access", async () => {
   const { id } = await uploadArtifact("chat.png", "bytes", "image/png");
   const bound = await call(`/api/artifacts/${id}/bindings`, "POST", {

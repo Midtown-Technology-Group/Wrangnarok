@@ -168,10 +168,26 @@ it("scopes audit reads to the Organization and rejects bad filters", async () =>
   const foreign = await call("/api/audit", "GET", undefined, OTHER_ORG);
   expect(foreign.status).toBe(200);
   expect(((await foreign.json()) as { events: unknown[] }).events).toEqual([]);
-  // Same org, different user: org-scoped visibility holds (org boundary, not per-user).
+  // Owner isolation (issue #351): the fixture caller is the ORG admin, so
+  // the full org trail stays visible; a non-admin member sees only rows
+  // they acted on (here: none), never another user's actor metadata.
+  const adminView = await call("/api/audit", "GET");
+  expect(adminView.status).toBe(200);
+  expect(((await adminView.json()) as { events: unknown[] }).events.length).toBeGreaterThan(0);
+  const stamp = new Date().toISOString();
+  await bindings.DB.prepare(
+    "INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?) ON CONFLICT(user_id) DO NOTHING",
+  )
+    .bind(OTHER_USER, stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(org_id,user_id) DO NOTHING",
+  )
+    .bind(ORG, OTHER_USER, "member", "active", "ordinary", stamp, stamp)
+    .run();
   const sameOrg = await call("/api/audit", "GET", undefined, ORG, OTHER_USER);
   expect(sameOrg.status).toBe(200);
-  expect(((await sameOrg.json()) as { events: unknown[] }).events.length).toBeGreaterThan(0);
+  expect(((await sameOrg.json()) as { events: unknown[] }).events).toEqual([]);
   expect(await (await call("/api/audit?action=")).json()).toMatchObject({ error: { code: "INVALID_ACTION_PREFIX" } });
   expect(await (await call("/api/audit?outcome=bogus")).json()).toMatchObject({ error: { code: "INVALID_OUTCOME" } });
   expect(await (await call("/api/audit?search=")).json()).toMatchObject({ error: { code: "INVALID_SEARCH" } });
@@ -877,4 +893,53 @@ it("retries terminal executions and cancels live ones through repairs", async ()
     dryRun: false,
   });
   expect(await settled.json()).toMatchObject({ repair: { dryRun: false } });
+});
+
+it("hides foreign execution inputs from repair previews (issue #347)", async () => {
+  // A terminal Failed execution owned by the fixture caller.
+  const submitted = await worker.fetch(
+    new Request("https://local.test/api/executions", {
+      method: "POST",
+      headers: { ...headers(), "Idempotency-Key": "ops-repair-fence-001" },
+      body: JSON.stringify({ sagaId: echoSaga.id, input: { message: "owner secret" } }),
+    }),
+    bindings,
+  );
+  expect(submitted.status).toBe(202);
+  const { executionId } = (await submitted.json()) as { executionId: string };
+  await bindings.DB.prepare("UPDATE executions SET status='Failed',completed_at=? WHERE id=?")
+    .bind(new Date().toISOString(), executionId)
+    .run();
+  // Invite OTHER_USER as an ordinary member, then preview as them: the
+  // foreign execution answers 404, never the original input.
+  const stamp = new Date().toISOString();
+  await bindings.DB.prepare(
+    "INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?) ON CONFLICT(user_id) DO NOTHING",
+  )
+    .bind(OTHER_USER, stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(org_id,user_id) DO NOTHING",
+  )
+    .bind(ORG, OTHER_USER, "member", "active", "ordinary", stamp, stamp)
+    .run();
+  const foreign = await call(
+    "/api/ops/repairs",
+    "POST",
+    { kind: "retry-execution", targetId: executionId, idempotencyKey: "ops-repair-fence-002" },
+    ORG,
+    OTHER_USER,
+  );
+  expect(foreign.status).toBe(404);
+  expect(await foreign.json()).toMatchObject({ error: { code: "EXECUTION_NOT_FOUND" } });
+  // The owner still previews the original input.
+  const owned = await call("/api/ops/repairs", "POST", {
+    kind: "retry-execution",
+    targetId: executionId,
+    idempotencyKey: "ops-repair-fence-003",
+  });
+  expect(owned.status).toBe(200);
+  expect(await owned.json()).toMatchObject({
+    repair: { dryRun: true, result: { status: "Failed", input: { message: "owner secret" } } },
+  });
 });

@@ -38,6 +38,7 @@ import migration20 from "../migrations/0020_artifacts.sql?raw";
 import migration21 from "../migrations/0021_endpoints.sql?raw";
 import migration22 from "../migrations/0022_app_runtime.sql?raw";
 import migration23 from "../migrations/0023_config.sql?raw";
+import migration25 from "../migrations/0025_audit_retention.sql?raw";
 import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
@@ -129,6 +130,7 @@ beforeEach(async () => {
   await bindings.DB.exec(migration21);
   await bindings.DB.exec(migration22);
   await bindings.DB.exec(migration23);
+  await bindings.DB.exec(migration25);
   // Fixture caller bootstraps to admin of org A inside authenticate; the
   // ordinary identity holds org-A membership too (member), so collection
   // routes gate cleanly. External/stranger stay strangers until invited.
@@ -367,7 +369,7 @@ it("previews cascading deletes with retained ExecutionHistory and refuses manage
     files: 0,
     artifacts: 0,
     endpoints: 0,
-    retained: ["executions", "operations"],
+    retained: ["executions", "operations", "audit_events"],
     canDelete: true,
   });
   // Authenticated members hitting instance-admin routes are denied (403):
@@ -380,6 +382,66 @@ it("previews cascading deletes with retained ExecutionHistory and refuses manage
   const exec = await bindings.DB.prepare("SELECT id FROM executions WHERE id=?").bind(id).first<{ id: string }>();
   expect(exec?.id).toBe(id);
   expect(await call("/api/sagas", "GET", USER_ORDINARY, undefined, orgD)).toMatchObject({ status: 404 });
+});
+
+it("deletes an org with retained audit events intact (issue #350)", async () => {
+  // Migration 0025 drops the audit_events org FK: retained audit rows must
+  // never block the final organizations delete (previously a partially
+  // purged tenant — memberships, connections, files, and R2 bytes gone,
+  // org row stuck behind the FK).
+  const created = await call("/api/orgs", "POST", USER_ADMIN, { name: "audited" });
+  const orgA = created.body.id as string;
+  await call(`/api/orgs/${orgA}/members`, "POST", USER_ADMIN, { userId: USER_ORDINARY });
+  await call("/api/sagas", "GET", USER_ORDINARY, undefined, orgA);
+  // Seed retained audit rows directly (org routes emit no audit rows): an
+  // ordinary-member action plus an admin action, both for this org.
+  const auditStamp = new Date().toISOString();
+  await bindings.DB.prepare(
+    "INSERT INTO audit_events(id,org_id,actor_user_id,action,target_type,target_id,outcome,detail_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      "11111111-1111-4111-8111-111111111111",
+      orgA,
+      USER_ORDINARY,
+      "app.create",
+      "app",
+      "00000000-0000-4000-8000-000000000301",
+      "success",
+      null,
+      auditStamp,
+    )
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO audit_events(id,org_id,actor_user_id,action,target_type,target_id,outcome,detail_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      "22222222-2222-4222-8222-222222222222",
+      orgA,
+      USER_ADMIN,
+      "tool.execute",
+      "tool",
+      "halo_tool",
+      "success",
+      null,
+      auditStamp,
+    )
+    .run();
+  const preview = await call(`/api/orgs/${orgA}/delete-preview`, "GET", USER_ADMIN);
+  expect(preview.status).toBe(200);
+  expect(preview.body.auditEvents as number).toBe(2);
+  const deleted = await call(`/api/orgs/${orgA}`, "DELETE", USER_ADMIN);
+  expect(deleted.status).toBe(200);
+  expect(deleted.body).toMatchObject({ orgId: orgA });
+  // Retained audit rows outlive the org; the org row is gone.
+  const kept = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE org_id=?")
+    .bind(orgA)
+    .first<{ n: number }>();
+  expect(kept?.n ?? 0).toBeGreaterThan(0);
+  const gone = await bindings.DB.prepare("SELECT id FROM organizations WHERE id=?").bind(orgA).first<{ id: string }>();
+  expect(gone).toBeNull();
+});
+
+it("refuses managed rows on delete", async () => {
   // A managed Connection blocks deletion until the bundle is uninstalled.
   const created2 = await call("/api/orgs", "POST", USER_ADMIN, { name: "managed" });
   const orgM = created2.body.id as string;

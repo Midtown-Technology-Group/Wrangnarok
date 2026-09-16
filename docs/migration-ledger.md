@@ -33,6 +33,7 @@ must update every importing test in the same commit.
 | 0018   | 0018_ops.sql                    | OPS-01  | ops audit (issue #172)               |
 | 0020   | 0020_artifacts.sql              | FILE-02 | artifacts (issue #158)               |
 | 0022   | 0022_app_runtime.sql            | APP-02  | app runtime (issue #160)             |
+| 0025   | 0025_audit_retention.sql        | OPS-01  | audit_events without org FK (issue #350) |
 | 0026   | 0026_cancelling_repair.sql      | codex-migration-replay | cancelling FK repair: child-preserving executions rebuild (issue #381) |
 | 0027   | 0027_rename_replay_repair.sql   | codex-migration-replay | rename-replay convergence, IF NOT EXISTS (issues #367-371) |
 

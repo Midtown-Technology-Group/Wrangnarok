@@ -270,6 +270,7 @@ import {
   parseTableQuery,
   queryRows,
   readRow,
+  requireVisibleTable,
   revokeTable,
   TABLE_NAME,
   updateRow,
@@ -421,6 +422,7 @@ async function runCodeModeExecute(
   env: Bindings,
   caller: Principal,
   call: { operationId: string; path?: Record<string, string>; query?: Record<string, string>; body?: unknown },
+  ctx?: { readonly isInstanceAdmin: boolean; readonly isOrgAdmin: boolean },
 ): Promise<{ result: unknown; provenance: CodeModeProvenance }> {
   const secrets = deploymentSecretsFromEnv(env);
   try {
@@ -434,6 +436,8 @@ async function runCodeModeExecute(
         ...(call.query === undefined ? {} : { query: call.query }),
         ...(call.body === undefined ? {} : { body: call.body }),
       },
+      {},
+      ctx === undefined ? { isInstanceAdmin: false, isOrgAdmin: false } : ctx,
     );
     await recordAudit(
       env.DB,
@@ -2021,9 +2025,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // No per-row detail route (upstream has none either).
     if (url.pathname === "/api/audit" && request.method === "GET") {
       // Outward path: scrubbed again on read (defense in depth — a secret
-      // substring in a stored detail can never ride the list out).
+      // substring in a stored detail can never ride the list out). Non-admins
+      // see only their own actor rows (issue #351); admins see the org.
       return json(
-        scrubValueWithDeploymentSecrets(await listAudit(env.DB, caller, parseAuditQuery(url.searchParams)), env),
+        scrubValueWithDeploymentSecrets(
+          await listAudit(env.DB, caller, parseAuditQuery(url.searchParams), isAdminCaller(ctx)),
+          env,
+        ),
       );
     }
     // Operational notifications (OPS-01, ADR 020): durable personal/org inbox
@@ -2132,7 +2140,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const repair = parseRepairBody(await boundedJson(request.body));
       const admin = isAdminCaller(ctx);
       if (repair.dryRun) {
-        return json({ repair: await inspectRepair(env.DB, caller, repair) });
+        return json({ repair: await inspectRepair(env.DB, caller, repair, admin) });
       }
       if (!admin) {
         throw new Fault(403, "REPAIR_FORBIDDEN", "Only an admin may run operational repairs.");
@@ -2199,7 +2207,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           throw new Fault(400, "UNSUPPORTED_QUERY", "Only limit is supported here.");
         }
       }
-      return json(await listArtifacts(env.DB, caller, limit === undefined ? {} : { limit }));
+      return json(await listArtifacts(env.DB, caller, limit === undefined ? {} : { limit }, artifactAdmin));
     }
     if (url.pathname === "/api/artifacts" && request.method === "PUT") {
       // Upload: bytes arrive as the raw octet-stream body; name and mime ride
@@ -2563,6 +2571,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     if (url.pathname === "/api/connections" && request.method === "POST") {
       requireJson(request);
+      // Issue #346: a Connection selects the provider-global vendor identity,
+      // so only an admin may create or replace that routing.
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CONNECTION_FORBIDDEN", "Only an admin may manage Connections.");
+      }
       const body = (await boundedJson(request.body)) as { integrationId?: unknown } & Record<string, unknown>;
       if (typeof body.integrationId !== "string") {
         throw new Fault(400, "UNKNOWN_INTEGRATION", "A Connection write needs an integrationId.");
@@ -2605,6 +2618,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     if (connOne?.[1] && request.method === "PUT") {
       requireJson(request);
+      // Same admin rule as create above (issue #346).
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CONNECTION_FORBIDDEN", "Only an admin may manage Connections.");
+      }
       const body = (await boundedJson(request.body)) as Record<string, unknown>;
       const updated = await updateConnection(
         env.DB,
@@ -2621,6 +2638,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       return json(scrubConnectionPayload({ connection: updated }, env));
     }
     if (connOne?.[1] && request.method === "DELETE") {
+      // Same admin rule as create above (issue #346).
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CONNECTION_FORBIDDEN", "Only an admin may manage Connections.");
+      }
       await deleteConnection(env.DB, caller, connOne[1]);
       return json({ deleted: true });
     }
@@ -2737,12 +2758,17 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         throw new Fault(400, "OPENAPI_UNKNOWN_OPERATION", "Provide an operationId from the pinned contract.");
       }
       const params = (body.params ?? {}) as Record<string, unknown>;
-      const { result, provenance } = await runCodeModeExecute(env, caller, {
-        operationId: body.operationId,
-        ...(params.path === undefined ? {} : { path: params.path as Record<string, string> }),
-        ...(params.query === undefined ? {} : { query: params.query as Record<string, string> }),
-        ...(body.input === undefined ? {} : { body: body.input }),
-      });
+      const { result, provenance } = await runCodeModeExecute(
+        env,
+        caller,
+        {
+          operationId: body.operationId,
+          ...(params.path === undefined ? {} : { path: params.path as Record<string, string> }),
+          ...(params.query === undefined ? {} : { query: params.query as Record<string, string> }),
+          ...(body.input === undefined ? {} : { body: body.input }),
+        },
+        ctx,
+      );
       return json(scrubConnectionPayload({ result, provenance }, env));
     }
     // TOOL-01 inbound MCP gateway (issue #170, ADR 022): JSON-RPC 2.0 over
@@ -2853,12 +2879,17 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         }
         try {
           const params = (args.params ?? {}) as Record<string, unknown>;
-          const { result, provenance } = await runCodeModeExecute(env, caller, {
-            operationId: args.operationId,
-            ...(params.path === undefined ? {} : { path: params.path as Record<string, string> }),
-            ...(params.query === undefined ? {} : { query: params.query as Record<string, string> }),
-            ...(args.input === undefined ? {} : { body: args.input }),
-          });
+          const { result, provenance } = await runCodeModeExecute(
+            env,
+            caller,
+            {
+              operationId: args.operationId,
+              ...(params.path === undefined ? {} : { path: params.path as Record<string, string> }),
+              ...(params.query === undefined ? {} : { query: params.query as Record<string, string> }),
+              ...(args.input === undefined ? {} : { body: args.input }),
+            },
+            ctx,
+          );
           return json(scrubConnectionPayload(mcpResult(envelope.id, { result, provenance }), env));
         } catch (error) {
           // Call-level denial: runCodeModeExecute already recorded the
@@ -3146,6 +3177,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (!TABLE_NAME.test(tableOne[1])) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
       const table = await loadTable(env.DB, caller.orgId, tableOne[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+      // Same visibility rule as listTables (issue #353): owner or any
+      // grant. Non-grantees answer 404, never owner identity metadata.
+      try {
+        await requireVisibleTable(env.DB, caller, table);
+      } catch {
+        return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+      }
       return json({ table });
     }
     if (tableOne?.[1] && request.method === "DELETE") {
