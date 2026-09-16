@@ -70,8 +70,32 @@ function authToken() {
 }
 
 function baseUrl() {
-  const base = arg("base", process.env.WRANGNAROK_BASE ?? "http://127.0.0.1:8787").replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(base)) fail("USAGE", `--base must be an http(s) URL, got ${JSON.stringify(base)}.`);
+  const raw = arg("base", process.env.WRANGNAROK_BASE ?? "http://127.0.0.1:8787");
+  return checkBaseUrl(raw);
+}
+
+/** Fail-closed --base validation (issue #357): bearer and Cloudflare Access
+ * credentials ride every request, so plaintext HTTP is loopback-only,
+ * embedded userinfo is rejected, and only http(s) schemes are accepted. */
+export function checkBaseUrl(raw) {
+  const base = String(raw ?? "").replace(/\/+$/, "");
+  let url;
+  try {
+    url = new URL(base);
+  } catch {
+    fail("USAGE", `--base must be an http(s) URL, got ${JSON.stringify(base)}.`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    fail("USAGE", `--base must be an http(s) URL, got ${JSON.stringify(base)}.`);
+  }
+  if (url.username !== "" || url.password !== "") {
+    fail("USAGE", "--base must not embed credentials (use --token / --access-client-*).");
+  }
+  const host = url.hostname.toLowerCase();
+  const loopback = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  if (url.protocol === "http:" && !loopback) {
+    fail("USAGE", `--base over plaintext http is loopback-only (got ${JSON.stringify(url.hostname)}); use https.`);
+  }
   return base;
 }
 
@@ -593,6 +617,9 @@ Commands:
                                           values preserve the reference)
   config-delete --id UUID                 Delete one config row (exact ID only)
   contract                                Show the versioned SDK contract (GET /api/sdk)
+  saga-policy --saga NAME|UUID            Read the effective Saga policy
+  saga-policy-set --saga NAME|UUID --policy JSON|@FILE
+                                          Update the Saga policy (admin-gated server-side)
   selftest                                Offline selftest (stub fetch, no network)
 
   Bulk user operations are intentionally omitted in this slice: repeat the
@@ -615,9 +642,20 @@ export function parseContext(argv = process.argv) {
 export async function runCommand(ctx, deps = {}) {
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
   const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  // Issue #357: CF Access headers are custom headers that a redirect target
+  // would receive, so authenticated fetches never follow redirects. Any 3xx
+  // fails closed instead of re-sending credentials elsewhere.
+  const checkedFetch = async (url, init = {}) => {
+    const response = await fetchImpl(url, { redirect: "manual", ...init });
+    const status = response.status;
+    if (status >= 300 && status < 400) {
+      fail("SERVER_MISMATCH", `refusing redirect (HTTP ${status}) from ${JSON.stringify(String(url))}: re-run against the canonical --base.`);
+    }
+    return response;
+  };
   const full = {
     ...ctx,
-    fetchImpl,
+    fetchImpl: checkedFetch,
     headers: {
       Authorization: `Bearer ${ctx.token}`,
       "Content-Type": "application/json",
@@ -1595,7 +1633,7 @@ async function main() {
     fail("ORG_RESERVED", "--org is reserved for future multi-tenancy; organization comes from the auth context.");
   }
   const parsed = parseContext();
-  if (!/^https?:\/\//.test(parsed.base)) fail("USAGE", "--base must be an http(s) URL.");
+  if (!checkBaseUrl(parsed.base)) fail("USAGE", "--base must be an http(s) URL.");
   const limit = arg("limit");
   const limitMax = parsed.command === "notifications" ? 100 : 50;
   if (limit !== undefined && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > limitMax)) {
@@ -1652,6 +1690,13 @@ async function main() {
         : {},
     sagaFilter:
       command === "history" || command === "log-search" || command === "org-executions" ? arg("saga") : undefined,
+    policySaga: command === "saga-policy" || command === "saga-policy-set" ? arg("saga") : undefined,
+    policyBody: command === "saga-policy-set" ? arg("policy") : undefined,
+    configKey: command === "config-set" || command === "config-update" ? arg("key") : undefined,
+    configType: command === "config-set" || command === "config-update" ? arg("type") : undefined,
+    configValue: command === "config-set" || command === "config-update" ? arg("value") : undefined,
+    configDescription:
+      command === "config-set" || command === "config-update" ? arg("description") : undefined,
     sagaNameFilter: command === "log-search" ? arg("saga-name") : undefined,
     id:
       command === "detail" ||
@@ -1790,6 +1835,10 @@ async function main() {
   } else if (command === "config-delete") {
     if (asJson()) console.log(JSON.stringify(result));
     else console.log("deleted");
+    return;
+  } else if (command === "saga-policy" || command === "saga-policy-set") {
+    if (asJson()) console.log(JSON.stringify(result));
+    else console.log(JSON.stringify(result.policy ?? result, null, 2));
     return;
   } else if (command === "detail") printDetail(result);
   else if (command === "cancel") printCancel(result);
@@ -2179,6 +2228,130 @@ async function selftest() {
       process.exit = exit;
     }
     check("saga-policy-set shape gate", /exit:2/.test(String(error)) && stub.calls.length === 1);
+  }
+
+  // Issue #357: plaintext http --base is loopback-only, embedded userinfo is
+  // rejected, and only http(s) schemes are accepted (fail = exit 2, no fetch).
+  for (const [name, raw, ok] of [
+    ["loopback http", "http://127.0.0.1:8787", true],
+    ["localhost http", "http://localhost:8903", true],
+    ["https any host", "https://worker.example.com", true],
+    ["plaintext lan", "http://192.168.1.10:8787", false],
+    ["plaintext host", "http://worker.example.com", false],
+    ["userinfo", "https://user:pass@worker.example.com", false],
+    ["gopher", "gopher://worker.example.com", false],
+    ["bare host", "worker.example.com", false],
+  ]) {
+    let error = null;
+    const exit = process.exit;
+    process.exit = (code) => {
+      throw new Error(`exit:${code}`);
+    };
+    try {
+      checkBaseUrl(raw);
+    } catch (e) {
+      error = e;
+    } finally {
+      process.exit = exit;
+    }
+    check(`base ${name} ${ok ? "accepted" : "rejected"}`, ok ? error === null : /exit:2/.test(String(error)));
+  }
+
+  // Issue #357: authenticated fetches never follow redirects; a 3xx fails
+  // closed before any credential is re-sent, and redirect:manual is set.
+  {
+    const seen = [];
+    const redirectFetch = async (url, init) => {
+      seen.push({ url, init });
+      return new Response("", { status: 307, headers: { Location: "https://evil.example/" } });
+    };
+    let error = null;
+    const exit = process.exit;
+    process.exit = (code) => {
+      throw new Error(`exit:${code}`);
+    };
+    try {
+      await runCommand({ ...base, command: "sagas" }, { fetchImpl: redirectFetch, ...noSleep });
+    } catch (e) {
+      error = e;
+    } finally {
+      process.exit = exit;
+    }
+    check("redirect fails closed", /exit:1/.test(String(error)) && seen.length === 1);
+    check("redirect manual", seen[0]?.init?.redirect === "manual");
+  }
+
+  // Issue #363: main() argv wiring reaches the policy and config handlers.
+  // End-to-end: spawn the core CLI as a child with stub --base routing and
+  // assert --saga/--policy (and --key/--type/--value) arrive at runCommand
+  // instead of failing with USAGE. The child talks to a local stub server,
+  // so no network or credentials leave the machine.
+  {
+    const { createServer } = await import("node:http");
+    const seen = [];
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        seen.push({ method: req.method, url: req.url, body });
+        res.setHeader("Content-Type", "application/json");
+        if (req.url === "/api/sagas") {
+          res.end(JSON.stringify({ sagas: [{ id: "395e15f0-3627-41f6-8922-008ce37e3b35", name: "hello", revision: "hello-v1" }] }));
+        } else if (req.url === "/api/sagas/395e15f0-3627-41f6-8922-008ce37e3b35/policy") {
+          res.end(JSON.stringify({ policy: { sagaId: "395e15f0-3627-41f6-8922-008ce37e3b35", version: 3 } }));
+        } else if (req.url === "/api/config" && req.method === "POST") {
+          res.end(JSON.stringify({ config: { key: "K", type: "string", value: "V" } }));
+        } else {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ error: { code: "NOT_FOUND", message: "stub" } }));
+        }
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    // Async spawn (not spawnSync): synchronous spawning hangs on this box
+    // when the child performs network I/O while the parent holds a server.
+    const { spawn } = await import("node:child_process");
+    const { fileURLToPath } = await import("node:url");
+    const corePath = fileURLToPath(new URL("./wrangnarok-core.mjs", import.meta.url));
+    const run = (args) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [corePath, ...args], {
+          env: { ...process.env, WRANGNAROK_TOKEN: "e2e-token", WRANGNAROK_BASE: `http://127.0.0.1:${port}` },
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (chunk) => {
+          stdout += chunk;
+        });
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk;
+        });
+        child.on("error", reject);
+        child.on("close", (status) => resolve({ status, stdout, stderr }));
+      });
+    const policy = await run(["saga-policy", "--saga", "hello", "--json"]);
+    check("e2e saga-policy exit", policy.status === 0);
+    check("e2e saga-policy version", JSON.parse(policy.stdout).policy.version === 3);
+    const set = await run(["saga-policy-set", "--saga", "hello", "--policy", '{"a":1}', "--json"]);
+    check("e2e saga-policy-set exit", set.status === 0);
+    check(
+      "e2e saga-policy-set body",
+      seen.some((r) => r.method === "PUT" && r.body === '{"a":1}'),
+    );
+    const cfg = await run(["config-set", "--key", "K", "--type", "string", "--value", "V", "--json"]);
+    check("e2e config-set exit", cfg.status === 0);
+    check("e2e config-set key", JSON.parse(cfg.stdout).config.key === "K");
+    const noSaga = await run(["saga-policy", "--json"]);
+    check("e2e saga-policy usage", noSaga.status === 2 && /needs --saga/.test(noSaga.stderr));
+    const badBase = await run(["sagas", "--base", "http://192.168.1.10:8787", "--json"]);
+    check("e2e plaintext base rejected", badBase.status === 2 && /loopback-only/.test(badBase.stderr));
+    // Undici keep-alive connections from the children otherwise hold
+    // server.close() open forever; drop them before closing.
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
   }
 
   // logs tails one Execution with level/limit filters; --follow polls from
