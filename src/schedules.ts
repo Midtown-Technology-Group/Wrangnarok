@@ -701,13 +701,16 @@ export async function promoteDueSchedules(
       .all<{ orgId: string }>();
     const perOrg: ScheduleRow[][] = [];
     for (const org of orgs.results) {
+      // The DISTINCT scan above only names Organizations with due rows,
+      // so the detail scan always returns at least one row; empty arrays
+      // would flatten away harmlessly in any case.
       const rows = await db
         .prepare(
           "SELECT * FROM schedules WHERE org_id=? AND enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=? ORDER BY next_due_at LIMIT ?",
         )
         .bind(org.orgId, now.toISOString(), SCHEDULE_TICK_PER_ORG_LIMIT)
         .all<ScheduleRow>();
-      if (rows.results.length > 0) perOrg.push(rows.results);
+      perOrg.push(rows.results);
     }
     due = perOrg.flat().sort((a, b) => ((a.next_due_at as string) < (b.next_due_at as string) ? -1 : 1));
   } catch (error) {
