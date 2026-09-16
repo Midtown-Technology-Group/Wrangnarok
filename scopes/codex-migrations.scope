@@ -1,0 +1,20 @@
+# Codex migration-replay lane (issues #381, #367, #368, #369, #370, #371).
+# D1 migrations that fail or double-apply on existing populated databases.
+migrations/0002_cancelling.sql
+migrations/0010_solutions_activation.sql
+migrations/0018_ops.sql
+migrations/0019_files.sql
+migrations/0020_artifacts.sql
+migrations/0021_endpoints.sql
+docs/migration-ledger.md
+src/migration.ts
+test/resilience.test.ts
+test/files.test.ts
+test/artifacts.test.ts
+test/artifact-retention.test.ts
+test/endpoints.test.ts
+test/ops.test.ts
+test/executions.test.ts
+test/cancel-confirmation.test.ts
+test/cancel-race.test.ts
+scopes/codex-migrations.scope
