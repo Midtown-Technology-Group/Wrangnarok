@@ -105,9 +105,11 @@ jobs:
       - name: Lane scope and migration ledger
         shell: bash
         run: |
-          # Fail-closed scope review (issue #373) needs the base ref, which
-          # the default shallow checkout may lack: establish it first.
-          git fetch origin main --depth=1 --update-head-ok || git fetch origin main --update-head-ok
+          # Fail-closed scope review (issue #373) needs the base ref with a
+          # merge base to HEAD, which the default shallow checkout lacks.
+          git fetch origin main --unshallow --update-head-ok 2>/dev/null \
+            || git fetch origin main --depth=50 --update-head-ok \
+            || git fetch origin main --update-head-ok
           node scripts/lane-scope.mjs --self-check
           dupes="$(ls migrations/*.sql | sed 's|.*/||' | cut -c1-4 | sort | uniq -d)"
           if [[ -n "$dupes" ]]; then
