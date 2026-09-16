@@ -4,20 +4,38 @@
 // session identity) send, read, and own an alias in the same JSONL stores.
 // Poll-only: nothing here can push into a live session; opencode recipients
 // still get their normal push path via their own hooks.
-// Identity: --as <session> or $MAILBOX_SESSION. Store: --store <dir> or
-// $MAILBOX_STORE, else the stable key derived from the git common dir so all
-// worktrees of this repo resolve the same store as main-checkout sessions.
+//
+// Repo scoping (issue #380): every command operates ONLY inside the resolved
+// store (explicit --store, $MAILBOX_STORE, or the git-derived default for
+// this repository). The CLI never enumerates, resolves, reads, or writes
+// other repositories' stores, so one checkout cannot disclose or steer
+// another project's sessions.
+// Identity caveat: --as / $MAILBOX_SESSION is caller-asserted (there is no
+// opencode session to authenticate against), so it is meaningful only inside
+// this repo store. Alias claims still reject hijacks: an alias owned by a
+// different session cannot be taken over (issue #382).
 
 import { createHash, randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import {
   INBOX_MAX,
   MailboxFault,
   buildMessage,
+  claimAlias,
   findReply,
+  formatHead,
   formatLine,
   isRecentlyActive,
   markStatus,
@@ -35,10 +53,19 @@ function mailboxRoots() {
   return join(homedir(), ".local", "share", "opencode", "mailbox");
 }
 
+// Repo-scoped store key: resolve the git common dir (shared by every
+// worktree of this repo) to an absolute path and strip the trailing .git, so
+// all worktrees of one repo share one store while distinct repos get
+// distinct stores. The previous code applied dirname() to the raw,
+// usually relative ".git" value, collapsing every normal checkout to the
+// constant "." and a single shared store hash.
 function stableKey() {
   try {
     const common = execSync("git rev-parse --git-common-dir", { encoding: "utf-8" }).trim();
-    return dirname(common.replace(/\/.git$/, ""));
+    const abs = isAbsolute(common) ? common : join(process.cwd(), common);
+    const match = abs.match(/^(.*)[/\\]\.git(?:[/\\].*)?$/);
+    if (match && match[1]) return match[1];
+    return abs;
   } catch {
     return process.cwd();
   }
@@ -72,22 +99,6 @@ function readAliases(root) {
   return {};
 }
 
-function allStores() {
-  try {
-    return readdirSync(mailboxRoots(), { withFileTypes: true })
-      .filter((e) => e.isDirectory())
-      .map((e) => join(mailboxRoots(), e.name));
-  } catch {
-    return [];
-  }
-}
-
-/** Everywhere a recipient or inbox may live: the resolved store plus all known ones. */
-function searchRoots(defaultRoot) {
-  const roots = new Set([defaultRoot, ...allStores()]);
-  return [...roots];
-}
-
 function loadInbox(root, sessionId) {
   try {
     const raw = readFileSync(join(root, safeFile(sessionId)), "utf-8");
@@ -117,18 +128,25 @@ function aliasFor(root, sessionId) {
   return undefined;
 }
 
-/** Resolve a recipient (alias or session id) across every known store. */
-function resolveRecipient(to, defaultRoot) {
+/** Inboxes known in THIS repo store only. Never other repositories' stores. */
+function listInboxes(store) {
+  try {
+    return readdirSync(store)
+      .filter((n) => n.endsWith(".jsonl"))
+      .map((n) => n.slice(0, -6));
+  } catch {
+    return [];
+  }
+}
+
+/** Resolve a recipient (alias or session id) inside THIS repo store only. */
+function resolveRecipient(to, store) {
   const trimmed = to.trim();
-  if (trimmed === "*") return { store: null, session: "*" };
-  for (const root of searchRoots(defaultRoot)) {
-    const aliases = readAliases(root);
-    if (aliases[trimmed] !== undefined) return { store: root, session: aliases[trimmed] };
-  }
-  for (const root of searchRoots(defaultRoot)) {
-    if (existsSync(join(root, safeFile(trimmed)))) return { store: root, session: trimmed };
-  }
-  fail("VALIDATION", `unknown recipient ${JSON.stringify(to)} (no alias or inbox in any store).`);
+  if (trimmed === "*") return { store, session: "*" };
+  const aliases = readAliases(store);
+  if (aliases[trimmed] !== undefined) return { store, session: aliases[trimmed] };
+  if (existsSync(join(store, safeFile(trimmed)))) return { store, session: trimmed };
+  fail("VALIDATION", `unknown recipient ${JSON.stringify(to)} (no alias or inbox in this repo store).`);
 }
 
 function cmdSend(args, rest) {
@@ -152,13 +170,7 @@ function cmdSend(args, rest) {
   );
   const targets =
     target.session === "*"
-      ? searchRoots(args.store)
-          .filter((root) => existsSync(root))
-          .flatMap((root) =>
-            readdirSync(root)
-              .filter((n) => n.endsWith(".jsonl"))
-              .map((n) => ({ root, session: n.slice(0, -6) })),
-          )
+      ? listInboxes(args.store).map((session) => ({ root: args.store, session }))
       : [{ root: target.store ?? args.store, session: target.session }];
   if (targets.length === 0) fail("VALIDATION", "broadcast has no known inboxes yet.");
   for (const t of targets) {
@@ -166,7 +178,7 @@ function cmdSend(args, rest) {
       fail("VALIDATION", `recipient inbox is full (${INBOX_MAX} unread).`);
     }
   }
-  const fromAlias = target.session === "*" ? aliasFor(defaultStore(), from) : aliasFor(targets[0].root, from);
+  const fromAlias = aliasFor(args.store, from);
   for (const t of targets) {
     mkdirSync(t.root, { recursive: true });
     appendFileSync(
@@ -178,31 +190,27 @@ function cmdSend(args, rest) {
 }
 
 function printMessage(m) {
-  const head = `[${m.kind}/${m.priority}] from ${m.fromAlias ?? m.from} id=${m.id}${m.replyTo ? ` replyTo=${m.replyTo}` : ""}${m.subject ? ` subj=${JSON.stringify(m.subject)}` : ""}`;
-  return `${head}\n${m.body}`;
+  return `${formatHead(m)}\n${m.body}`;
 }
 
-function cmdRead(args, rest) {
+function cmdRead(args) {
   const from = identity(args);
-  const roots = rest["all"] ? allStores() : [args.store];
-  let shown = 0;
-  for (const root of roots) {
-    const messages = loadInbox(root, from);
-    const pending = unread(messages).slice(0, 20);
-    if (pending.length === 0) continue;
-    saveInbox(
-      root,
-      from,
-      markStatus(
-        messages,
-        pending.map((m) => m.id),
-        "read",
-      ),
-    );
-    console.log(pending.map(printMessage).join("\n---\n"));
-    shown += pending.length;
+  const messages = loadInbox(args.store, from);
+  const pending = unread(messages).slice(0, 20);
+  if (pending.length === 0) {
+    console.log("Mailbox: empty.");
+    return;
   }
-  if (shown === 0) console.log("Mailbox: empty.");
+  saveInbox(
+    args.store,
+    from,
+    markStatus(
+      messages,
+      pending.map((m) => m.id),
+      "read",
+    ),
+  );
+  console.log(pending.map(printMessage).join("\n---\n"));
 }
 
 function cmdAlias(args, positional) {
@@ -210,38 +218,38 @@ function cmdAlias(args, positional) {
   if (!validAlias(alias)) fail("VALIDATION", "use [a-z0-9_-], max 32 chars, start alnum.");
   const from = identity(args);
   mkdirSync(args.store, { recursive: true });
-  const all = readAliases(args.store);
-  all[alias] = from;
-  writeFileSync(join(args.store, "aliases.json"), JSON.stringify(all, null, 2));
+  const claimed = claimAlias(readAliases(args.store), alias, from);
+  if (!claimed.ok) {
+    fail("VALIDATION", `alias ${JSON.stringify(alias)} is owned by another session and cannot be claimed.`);
+  }
+  writeFileSync(join(args.store, "aliases.json"), JSON.stringify(claimed.aliases, null, 2));
   console.log(`alias ${JSON.stringify(alias)} -> ${from}`);
 }
 
 function cmdSessions(args) {
-  for (const root of searchRoots(args.store)) {
-    const now = Date.now();
-    let entries;
+  const root = args.store;
+  const entries = listInboxes(root);
+  const now = Date.now();
+  const aliases = readAliases(root);
+  const names = new Map(Object.entries(aliases).map(([a, id]) => [id, a]));
+  console.log(`store ${root}:`);
+  for (const id of entries) {
+    let fresh = false;
     try {
-      entries = readdirSync(root).filter((n) => n.endsWith(".jsonl"));
+      fresh = isRecentlyActive(statSync(join(root, `${id}.jsonl`)).mtimeMs, now);
     } catch {
-      continue;
+      // Unreadable: stale.
     }
-    const aliases = readAliases(root);
-    const names = new Map(Object.entries(aliases).map(([a, id]) => [id, a]));
-    console.log(`store ${root}:`);
-    for (const file of entries) {
-      const id = file.slice(0, -".jsonl".length);
-      let fresh = false;
-      try {
-        fresh = isRecentlyActive(statSync(join(root, file)).mtimeMs, now);
-      } catch {
-        // Unreadable: stale.
-      }
-      const pending = unread(loadInbox(root, id)).length;
-      console.log(
-        `  ${id}${names.get(id) ? ` (alias: ${names.get(id)})` : ""} unread=${pending}${fresh ? " active" : ""}`,
-      );
-    }
+    const pending = unread(loadInbox(root, id)).length;
+    console.log(`  ${id}${names.get(id) ? ` (alias: ${names.get(id)})` : ""} unread=${pending}${fresh ? " active" : ""}`);
   }
+}
+
+function childOutput(error) {
+  if (error === null || typeof error !== "object") return "";
+  const out = error.stdout ?? "";
+  const err = error.stderr ?? "";
+  return String(out) + String(err);
 }
 
 function cmdSelftest() {
@@ -270,6 +278,55 @@ function cmdSelftest() {
   const env = { ...process.env, MAILBOX_STORE: root, MAILBOX_SESSION: "a" };
   const out = execSync(`node "${process.argv[1]}" read`, { encoding: "utf-8", env });
   if (!out.includes("a!")) fail("INTERNAL", "CLI read path broken.");
+  // Issue #380: stores are isolated. An alias registered in another store is
+  // invisible here: resolving, sending, reading, and listing stay inside the
+  // repo-scoped store.
+  const other = join(tmpdir(), `mailbox-selftest-other-${randomUUID()}`);
+  mkdirSync(other, { recursive: true });
+  execSync(`node "${process.argv[1]}" alias intruder`, {
+    encoding: "utf-8",
+    env: { ...process.env, MAILBOX_STORE: other, MAILBOX_SESSION: "spy" },
+  });
+  try {
+    execSync(`node "${process.argv[1]}" send --to intruder --body probe`, { encoding: "utf-8", env });
+    fail("INTERNAL", "cross-store send succeeded; stores are not isolated.");
+  } catch (error) {
+    if (!/unknown recipient/.test(childOutput(error))) fail("INTERNAL", "cross-store send failed for the wrong reason.");
+  }
+  const listing = execSync(`node "${process.argv[1]}" sessions`, { encoding: "utf-8", env });
+  if (listing.includes(other) || listing.includes("spy")) fail("INTERNAL", "sessions leaks other stores.");
+  // Issue #380: the default store key is repo-specific. Two fresh repos must
+  // resolve different stores (the old dirname(".git") collapse shared one).
+  const cleanEnv = { ...process.env };
+  delete cleanEnv.MAILBOX_STORE;
+  try {
+    execSync("git --version", { stdio: "ignore" });
+  } catch {
+    fail("INTERNAL", "selftest needs git for the repo-isolation check.");
+  }
+  const repoA = mkdtempSync(join(tmpdir(), "mailbox-repo-a-"));
+  const repoB = mkdtempSync(join(tmpdir(), "mailbox-repo-b-"));
+  execSync("git init -q", { cwd: repoA });
+  execSync("git init -q", { cwd: repoB });
+  const storeA = execSync(`node "${process.argv[1]}" store`, { encoding: "utf-8", cwd: repoA, env: cleanEnv }).trim();
+  const storeB = execSync(`node "${process.argv[1]}" store`, { encoding: "utf-8", cwd: repoB, env: cleanEnv }).trim();
+  if (storeA === storeB) fail("INTERNAL", "default store is not repo-specific.");
+  // Issue #382: alias claims reject hijacks within the same store.
+  execSync(`node "${process.argv[1]}" alias owner`, {
+    encoding: "utf-8",
+    env: { ...process.env, MAILBOX_STORE: root, MAILBOX_SESSION: "owner" },
+  });
+  try {
+    execSync(`node "${process.argv[1]}" alias owner`, {
+      encoding: "utf-8",
+      env: { ...process.env, MAILBOX_STORE: root, MAILBOX_SESSION: "spy" },
+    });
+    fail("INTERNAL", "alias hijack succeeded.");
+  } catch (error) {
+    if (!/owned by another session/.test(childOutput(error))) {
+      fail("INTERNAL", "alias hijack failed for the wrong reason.");
+    }
+  }
   console.log("selftest OK");
 }
 
@@ -296,7 +353,7 @@ const [command, ...argv] = process.argv.slice(2);
 try {
   const { args, positional, rest } = parseArgv(argv);
   if (command === "send") cmdSend(args, rest);
-  else if (command === "read") cmdRead(args, rest);
+  else if (command === "read") cmdRead(args);
   else if (command === "alias") cmdAlias(args, positional);
   else if (command === "sessions") cmdSessions(args);
   else if (command === "selftest") cmdSelftest();
@@ -304,12 +361,12 @@ try {
   else {
     console.log(`usage: mailbox-cli [--store DIR] [--as SESSION] <send|read|alias|sessions|selftest|store> [options]
   send --to <alias|session|*> --body <text> [--kind note|steer|request|reply] [--priority standard|high] [--subject S] [--reply-to ID]
-  read [--all]            unread oldest-first, marks read
-  alias <name>            register alias for your session
-  sessions                known inboxes across all stores
-  selftest                temp-dir roundtrip for CI
+  read [--all]            unread oldest-first, marks read (repo-scoped; --all stays in this store)
+  alias <name>            register alias for your session (rejects aliases owned by another session)
+  sessions                known inboxes in this repo store
+  selftest                temp-dir roundtrip for CI (incl. store-isolation checks)
   store                   print resolved default store
-identity: --as or $MAILBOX_SESSION. store: --store or $MAILBOX_STORE, else stable git-derived key.
+identity: --as or $MAILBOX_SESSION (caller-asserted, repo-store-local). store: --store or $MAILBOX_STORE, else stable git-derived key.
 needs Node 22.18+ (imports erasable-syntax .ts directly).`);
     process.exit(command === undefined ? 0 : 2);
   }
