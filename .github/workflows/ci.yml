@@ -105,7 +105,7 @@ jobs:
       - name: Lane scope and migration ledger
         shell: bash
         run: |
-          node scripts/lane-scope.mjs --self-check || true
+          node scripts/lane-scope.mjs --self-check
           dupes="$(ls migrations/*.sql | sed 's|.*/||' | cut -c1-4 | sort | uniq -d)"
           if [[ -n "$dupes" ]]; then
             echo "Duplicate migration numbers (see docs/migration-ledger.md):"
@@ -132,6 +132,16 @@ jobs:
       # payload). No credentials, no network, no live store.
       - name: Preview helper selftests
         run: npm run preview:smoke:selftest && npm run preview:token:selftest
+
+      # Security selftests for the ops-infra trust slice (issues #357, #363,
+      # #373, #375): CLI base/redirect gates plus argv wiring, scope prefix
+      # matching plus fail-closed contract, per-segment guard decisions.
+      # All stub-local: loopback stub server, stub fetch, stub hook env.
+      - name: Ops-infra trust selftests
+        run: |
+          node scripts/wrangnarok-core.mjs selftest
+          node scripts/lane-scope.mjs --selftest
+          printf '%s' probe | node .jcode/hooks/pre-tool-guard.mjs --selftest
 
       - name: Validate repository contract
         shell: bash
@@ -192,7 +202,10 @@ jobs:
         # and keep fail-closed behavior where the token is present. Step
         # `if:` cannot read secrets, so this reads the job-level flag above.
         if: ${{ env.HAS_CODECOV_TOKEN == 'true' }}
-        uses: codecov/codecov-action@v5 # v5
+        # Pinned to the reviewed v5.5.5 commit (issue #379): the mutable @v5
+        # tag would execute whatever the tag points at on every run while
+        # receiving CODECOV_TOKEN. Update via controlled dependency review.
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
@@ -228,9 +241,16 @@ jobs:
   validate:
     name: Validate
     needs: [static, runtime]
+    # Issue #359: without if:always(), a failed static/runtime SKIPS this
+    # job — and branch protection accepts skipped required checks. Run
+    # always and fail unless BOTH gates succeeded.
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
       - name: Gates green
-        run: echo "static and runtime checks passed."
+        run: |
+          test "${{ needs.static.result }}" == "success"
+          test "${{ needs.runtime.result }}" == "success"
+          echo "static and runtime checks passed."

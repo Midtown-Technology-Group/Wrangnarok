@@ -3,6 +3,17 @@ name: Preview
 # PR preview: deploy the branch to the shared disposable preview Worker and
 # smoke system.smoke against it. Skips gracefully without secrets (forks):
 # credential-free CI on the PR itself stays the merge gate.
+#
+# Issue #376 (trust boundary): every step below runs the PR's checked-out
+# code (checkout takes the merge revision; npm ci / npx execute the PR's
+# dependency tree) while CLOUDFLARE_PREVIEW_TOKEN is in the environment, so
+# a malicious same-repo PR could exfiltrate it. Mitigations in this file:
+# (a) checkout pins the merge revision explicitly (no ref ambiguity);
+# (b) the minted token defaults to a 30-day expiry and least-privilege
+# groups (see mint-preview-token.mjs), bounding theft blast radius;
+# (c) the token must live in a DEDICATED preview-only Cloudflare account
+# (documented in the mint script). A manual approval gate before deploy
+# remains a steward follow-up.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -28,6 +39,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # Explicit merge revision (issue #376): no ref ambiguity about
+          # which code runs alongside the preview token below.
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

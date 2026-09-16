@@ -62,12 +62,16 @@ Invoke-RestMethod http://127.0.0.1:8903/api/executions -Headers $H
 
 Thin wrapper over the same HTTP API — no Saga logic. Auth defaults to
 `.dev.vars` `LAB_TOKEN`; `--json` switches every command to raw JSON.
+The demo Worker above listens on port 8903, so every CLI invocation pins
+`--base http://127.0.0.1:8903` (issue #357): without it the CLI default
+port 8787 would receive the LAB token, and any local listener there could
+collect it.
 
 ```bash
-node scripts/wrangnarok.mjs sagas
-node scripts/wrangnarok.mjs submit --saga system.smoke --key my-run-0001
-node scripts/wrangnarok.mjs history --status Succeeded --limit 5
-node scripts/wrangnarok.mjs cancel --id <64-hex-execution-id>
+node scripts/wrangnarok.mjs sagas --base http://127.0.0.1:8903
+node scripts/wrangnarok.mjs submit --saga system.smoke --key my-run-0001 --base http://127.0.0.1:8903
+node scripts/wrangnarok.mjs history --status Succeeded --limit 5 --base http://127.0.0.1:8903
+node scripts/wrangnarok.mjs cancel --id <64-hex-execution-id> --base http://127.0.0.1:8903
 node scripts/wrangnarok.mjs selftest
 ```
 
