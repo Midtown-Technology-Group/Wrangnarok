@@ -2571,9 +2571,8 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     if (url.pathname === "/api/connections" && request.method === "POST") {
       requireJson(request);
-      // Issue #346: a Connection selects the provider-global vendor identity
-      // for the Organization, so only an authorized caller may create or
-      // replace that routing. Non-admins answer 403, never a mapping.
+      // Issue #346: a Connection selects the provider-global vendor identity,
+      // so only an admin may create or replace that routing.
       if (!isAdminCaller(ctx)) {
         throw new Fault(403, "CONNECTION_FORBIDDEN", "Only an admin may manage Connections.");
       }
@@ -2619,8 +2618,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     if (connOne?.[1] && request.method === "PUT") {
       requireJson(request);
-      // Same admin rule as create above (issue #346): remapping or
-      // enabling a Connection re-selects the vendor identity.
+      // Same admin rule as create above (issue #346).
       if (!isAdminCaller(ctx)) {
         throw new Fault(403, "CONNECTION_FORBIDDEN", "Only an admin may manage Connections.");
       }

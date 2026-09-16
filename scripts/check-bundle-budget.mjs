@@ -254,7 +254,15 @@ import { join } from "node:path";
 // locally against the 640 KiB line: ~837 bytes of hand-written
 // identity-lineage code, no new dependencies (package.json unchanged versus
 // main); deliberate feature headroom only.
-const BUDGET_BYTES = 645 * 1024;
+// 2026-09-16 (data-authz + limits-fences, codex findings): 670 KiB. The
+// data-authz authorization fences (artifact/audit/repair creator-owner
+// fences, table detail visibility, Halo mutation and Connection admin
+// gates, audit-retention migration notes) add ~4.4 KiB over main, and the
+// limits-fences slice adds ~10 KiB; the union measures ~670.6 KiB locally
+// (CI number governs). Hand-written security-boundary code, no new
+// dependencies (package.json unchanged versus main); deliberate feature
+// headroom only.
+const BUDGET_BYTES = 670 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");
