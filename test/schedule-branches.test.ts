@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { helloSaga } from "../src/domain";
 import {
   currentWindow,
+  deliveryForWindow,
   nextCronDue,
   parseCron,
   parseRunAt,
@@ -13,6 +14,7 @@ import {
   parseScheduleInput,
   parseScheduleName,
   parseScheduleTimezone,
+  promoteDueSchedules,
   promoteWindow,
 } from "../src/schedules";
 import type { ScheduleRow } from "../src/schedules";
@@ -319,6 +321,30 @@ describe("TRG-01 pre-dispatch fence (fake D1, no workerd)", () => {
     ).rejects.toMatchObject({ code: "ORG_STORE_NOT_MIGRATED" });
     expect(stub.calls()).toBe(0);
   });
+  it("rethrows tick-scan and delivery-lookup backend faults (issue #137)", async () => {
+    // The due-scan rethrow branch: a broken tick scan fails the tick
+    // instead of reporting an empty schedule set.
+    const brokenDb = {
+      prepare() {
+        throw new Error("D1 backend failure: connection reset");
+      },
+    } as unknown as D1Database;
+    await expect(
+      promoteDueSchedules(
+        brokenDb,
+        { DB: brokenDb, HELLO_WORKFLOW: {} } as never,
+        SAGA_DEFINITIONS,
+        (async () => {
+          throw new Error("must not dispatch");
+        }) as never,
+        new Date(),
+      ),
+    ).rejects.toThrow("D1 backend failure");
+    // The delivery-lookup rethrow branch: a broken read fails loud
+    // instead of answering a missing delivery.
+    await expect(deliveryForWindow(brokenDb, "sched", "2026-09-12T10:00")).rejects.toThrow("D1 backend failure");
+  });
+
   it("rethrows non-table authority failures instead of masking them", async () => {
     const stub = stubSubmit();
     await expect(
