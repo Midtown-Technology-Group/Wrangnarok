@@ -27,6 +27,7 @@ import {
   resolveChildSaga,
 } from "../src/children";
 import type { ChildEnv } from "../src/children";
+import { storeSagaPolicy } from "../src/executions";
 import { executionId, Fault, helloParentSaga, helloSaga } from "../src/domain";
 import { parseHelloParentInput } from "../src/domain";
 import { bindSagaStep } from "../src/saga";
@@ -355,6 +356,68 @@ describe("RUN-02 nested invocation (issue #136)", () => {
     await expect(
       invokeChild(childEnv, "child-dispatch-invoke-v1", helloSaga.id, { name: "Bo" }, { key: "sib" }),
     ).rejects.toMatchObject({ code: "CHILD_DISPATCH_CONFLICT" });
+  });
+
+  it("fences child dispatch on RUN-01 admission exactly like top-level submit (issue #136)", async () => {
+    // Pause the child Saga: child dispatch must refuse with SAGA_PAUSED
+    // through the shared admitExecution gate, never dispatch the Workflow.
+    await storeSagaPolicy(bindings.DB, principal.orgId, helloSaga.id, { admission: { enabled: false } });
+    const parentId = "4d".repeat(32);
+    await bindings.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        parentId,
+        helloParentSaga.id,
+        helloParentSaga.name,
+        helloParentSaga.revision,
+        principal.orgId,
+        principal.userId,
+        JSON.stringify({ name: "Ada" }),
+        1,
+        "Running",
+        new Date().toISOString(),
+      )
+      .run();
+    const org: OrgCtx = {
+      orgId: principal.orgId,
+      userId: principal.userId,
+      executionId: parentId,
+      sagaId: helloParentSaga.id,
+      sagaRevision: helloParentSaga.revision,
+      attemptToken: `${parentId}:0`,
+    };
+    let created = 0;
+    const live = {
+      ...bindings,
+      HELLO_WORKFLOW: {
+        createBatch: async () => {
+          created += 1;
+        },
+      } as unknown as Bindings["HELLO_WORKFLOW"],
+    };
+    const childEnv: ChildEnv = {
+      env: live,
+      catalog: { sagas: [{ ...helloSaga, parse: (v: unknown) => v }] },
+      parentOrg: org,
+      parentExecutionId: parentId,
+      parentSagaId: helloParentSaga.id,
+    };
+    await expect(
+      invokeChild(childEnv, "child-dispatch-invoke-v1", helloSaga.id, { name: "Ada" }, { key: "adm" }),
+    ).rejects.toMatchObject({ code: "SAGA_PAUSED" });
+    expect(created).toBe(0);
+    // Resume: the same key dispatches exactly once through the same gate.
+    await storeSagaPolicy(bindings.DB, principal.orgId, helloSaga.id, { admission: { enabled: true } });
+    const receipt = await invokeChild(
+      childEnv,
+      "child-dispatch-invoke-v1",
+      helloSaga.id,
+      { name: "Ada" },
+      { key: "adm" },
+    );
+    expect(receipt.replayed).toBe(false);
+    expect(created).toBe(1);
   });
 
   it("maps dispatch ambiguity to CHILD_DISPATCH_UNCONFIRMED with the reservation intact", async () => {

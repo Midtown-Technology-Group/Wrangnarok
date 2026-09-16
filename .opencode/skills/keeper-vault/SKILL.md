@@ -30,8 +30,9 @@ verify by metadata (length, format class, downstream auth success) only.
 - Response envelope: `{status, command, data}`. Record fields live at
   `.data.fields[]` with `{type, label, value}` where `value` is a
   single-element array — unwrap `[0]`.
-- Verify shape without leaking: report `type`, char-length, first-4/last-2
-  chars, and character class only. Then use immediately (Authorization
+- Verify shape without leaking: report `type`, char-length, and
+  character class only. Never report substrings of a credential value —
+  not even first/last characters. Then use immediately (Authorization
   header, secret-put stdin) and drop the variable. Never write values to
   repo files, issue bodies, chat-visible logs, or temp files you leave behind.
 
