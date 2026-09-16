@@ -39,7 +39,7 @@ import type { ExecutionStatus, Principal, SagaDef } from "./domain";
 import { EXECUTION_ID } from "./domain";
 import type { OrgCtx } from "./saga";
 import { assertJsonSerializable, currentOperationName } from "./saga";
-import { cancelExecution, visibleExecution, workflowForSaga } from "./executions";
+import { admitExecution, cancelExecution, visibleExecution, workflowForSaga } from "./executions";
 import { requireActiveInstall } from "./solutions";
 import type { ExecutionRow } from "./executions";
 import type { Bindings } from "./bindings";
@@ -270,6 +270,11 @@ export async function invokeChild(
     throw new Fault(409, "CHILD_FAILED", "The child Execution was cancelled and will not dispatch.");
   }
   if (!reserved.dispatched) {
+    // RUN-01 admission (ADR 018, issue #136 finding): child dispatch runs
+    // the same admitExecution gate as top-level submit, so a paused Saga or
+    // a maxConcurrent fence applies identically whichever path dispatches.
+    const gate = await admitExecution(childEnv.env.DB, caller.orgId, child.id, id);
+    if (gate.refusal) throw gate.refusal;
     const acknowledged = await dispatchChildInstance(childEnv.env, child.id, id, dispatchKey);
     if (!acknowledged) {
       throw new Fault(503, "CHILD_DISPATCH_UNCONFIRMED", "Work may have started. Retry the parent under the same key.");
