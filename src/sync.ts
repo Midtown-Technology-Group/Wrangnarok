@@ -35,6 +35,7 @@ import type { Principal, SagaDef } from "./domain";
 import type { Bindings } from "./bindings";
 import {
   beginOperation,
+  enforceAdmissionLimit,
   executionIdForProvider,
   failExecution,
   finishOperation,
@@ -184,6 +185,12 @@ export async function runProvider(
   if (!effective.policy.admission.enabled) {
     throw new Fault(409, "SAGA_PAUSED", "This Saga is paused for this Organization; new Executions do not dispatch.");
   }
+  // Codex #344/#360: the provider path admitted any distinct key while the
+  // async path fences maxConcurrent. Same shared fence, so a saturated Saga
+  // answers 429 before any token fetch or vendor call on either route. Sagas
+  // with no dispatch protocol are eligible-only; the tick path calls submit
+  // directly, which applies the same fence.
+  await enforceAdmissionLimit(env.DB, caller.orgId, saga.id, id, effective.policy);
   // A racing owner cancel still wins below: the Running-mark write is
   // conditional on Pending, so a Cancelling row no-ops into the cancelled
   // fence instead of dispatching inline.

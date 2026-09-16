@@ -316,3 +316,58 @@ it("fails fast with 503 when the cert endpoint hangs, errors, or is malformed", 
 it("pins the default cert fetch budget at five seconds", () => {
   expect(ACCESS_CERT_FETCH_TIMEOUT_MS).toBe(5000);
 });
+
+it("codex #358: coalesces, negatively caches, and bounds cert fetches", async () => {
+  const { publicKey, privateKey } = await keypair();
+  const pub = await crypto.subtle.exportKey("jwk", publicKey);
+  let fetches = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    if (String(input) === `${TEAM}/cdn-cgi/access/certs`) {
+      fetches += 1;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return Response.json({ keys: [{ ...pub, kid: "k1", alg: "RS256" }] });
+    }
+    throw new Error("access-auth tests must not fetch");
+  });
+  try {
+    // Concurrent unknown-kid misses share one subrequest (in-flight
+    // coalescing), and the valid kid resolves for all waiters.
+    const tokens = await Promise.all([
+      mint(privateKey, "k1", validPayload()),
+      mint(privateKey, "k1", validPayload()),
+      mint(privateKey, "k1", validPayload()),
+    ]);
+    const principals = await Promise.all(tokens.map((token) => verifyAccess(token, accessEnv)));
+    expect(fetches).toBe(1);
+    for (const p of principals) expect(p).toEqual({ userId: EMAIL, orgId: ORG.toLowerCase() });
+    // Unknown kids fetch once, then fail closed with no further subrequest
+    // (negative cache): ten distinct random kids cost at most ten fetches
+    // total, and a repeat of a seen kid costs zero.
+    const before = fetches;
+    const kids: string[] = [];
+    for (let n = 0; n < 10; n += 1) {
+      kids.push(`random-kid-${n}-${Date.now()}`);
+      const bad = await mint(privateKey, kids[n] as string, validPayload());
+      await expect(verifyAccess(bad, accessEnv)).rejects.toMatchObject({ status: 401 });
+    }
+    expect(fetches - before).toBeLessThanOrEqual(10);
+    const repeatBad = await mint(privateKey, kids[0] as string, validPayload());
+    const repeatBefore = fetches;
+    await expect(verifyAccess(repeatBad, accessEnv)).rejects.toMatchObject({ status: 401 });
+    // The repeat hits the negative cache: zero new subrequests.
+    expect(fetches).toBe(repeatBefore);
+  } finally {
+    vi.restoreAllMocks();
+  }
+  // Oversized assertions and kids fail closed before any cert fetch.
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("must not fetch"));
+  try {
+    await expect(verifyAccess("x".repeat(9000), accessEnv)).rejects.toMatchObject({ status: 401 });
+    const { privateKey: priv2 } = await keypair();
+    const bigKid = await mint(priv2, "k".repeat(300), validPayload());
+    await expect(verifyAccess(bigKid, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  } finally {
+    vi.restoreAllMocks();
+  }
+});

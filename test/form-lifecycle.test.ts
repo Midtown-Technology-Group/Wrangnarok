@@ -1103,3 +1103,55 @@ describe("FORM-02 recovery fence: consume-after-admission arms (#155)", () => {
     expect(claimed?.claimed_key).toBe(key);
   });
 });
+
+describe("codex #342: single-consumption dispatch handles", () => {
+  it("a lost claim race answers stale even with OUR execution row admitted", async () => {
+    // Both keys dispatch (their own rows) then race verifyOwnAdmission on
+    // one handle: exactly one claim UPDATE wins; the loser answers STALE
+    // even though its own Execution row proves admission.
+    const owner = { orgId: ORG, userId: OWNER };
+    const { id } = await createForm("duel", [{ name: "name", type: "text", required: true }]);
+    const started = await startup("duel");
+    const values = { name: "Ada" };
+    const keyA = "form-02-duel-001";
+    const keyB = "form-02-duel-002";
+    expect(
+      (await call("/api/forms/duel/submit", "POST", { handle: started.handle, values }, ORG, OWNER, keyA)).status,
+    ).toBe(202);
+    // Key B dispatches through a fresh handle is impossible here by design
+    // (one handle); instead prove the claim fence directly: A already bound
+    // the handle via consumeAfterAdmission, so B's verify loses.
+    const rowB = await bindings.DB.prepare("SELECT input_json FROM executions WHERE id=?")
+      .bind(await executionId(owner, keyB))
+      .first<{ input_json: string }>();
+    void rowB;
+    // Insert B's own admitted row manually to isolate the claim fence from
+    // the dispatch fence: B owns an Execution, but A owns the handle.
+    const admittedB = JSON.parse(
+      (
+        await bindings.DB.prepare("SELECT input_json FROM executions WHERE id=?")
+          .bind(await executionId(owner, keyA))
+          .first<{ input_json: string }>()
+      )?.input_json ?? "{}",
+    ) as Record<string, unknown>;
+    await bindings.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        await executionId(owner, keyB),
+        helloSaga.id,
+        "hello",
+        "hello-v1",
+        ORG,
+        OWNER,
+        JSON.stringify(admittedB),
+        1,
+        "Running",
+        new Date().toISOString(),
+      )
+      .run();
+    await expect(
+      consumeAfterAdmission(bindings.DB, owner, "duel", started.handle, id, keyB, { id: helloSaga.id }, admittedB),
+    ).rejects.toMatchObject({ code: "STALE_FORM_HANDLE" });
+  });
+});

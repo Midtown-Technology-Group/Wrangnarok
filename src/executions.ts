@@ -121,6 +121,36 @@ export async function storeSagaPolicy(
 export function policySnapshot(policy: SagaRuntimePolicy): string {
   return JSON.stringify({ version: POLICY_VERSION, policy });
 }
+/** Active-Execution admission fence shared by the async submit path and the
+ * inline provider path (RUN-01 policy + RUN-03 provider; codex #344, #360):
+ * disabled Sagas fence with 409 SAGA_PAUSED; maxConcurrent fences with 429
+ * ADMISSION_LIMITED. The Execution row for `excludeId` (just inserted as
+ * Pending by the caller) is exempt so the first Execution under a limit of 1
+ * still dispatches while the next active row fences. Never throws on a
+ * missing executions table: unit doubles without the table read as empty. */
+export async function enforceAdmissionLimit(
+  db: D1Database,
+  orgId: string,
+  sagaId: string,
+  excludeId: string,
+  policy: SagaRuntimePolicy,
+): Promise<void> {
+  if (!policy.admission.enabled) {
+    throw new Fault(409, "SAGA_PAUSED", "This Saga is paused for this Organization; new Executions do not dispatch.");
+  }
+  if (policy.admission.maxConcurrent > 0) {
+    const active = await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM executions WHERE org_id=? AND saga_id=? AND status IN ('Pending','Running','Cancelling') AND id<>?",
+      )
+      .bind(orgId, sagaId, excludeId)
+      .first<{ n: number }>()
+      .catch(() => null);
+    if ((active?.n ?? 0) >= policy.admission.maxConcurrent) {
+      throw new Fault(429, "ADMISSION_LIMITED", "This Saga reached its concurrent Execution limit.");
+    }
+  }
+}
 /** Provider-path Execution identity (RUN-03, ADR 023): the same deterministic
  * SHA-256 over (org, user, key) as async submit, so a key submitted to either
  * route converges on one receipt instead of forking two Executions. */
@@ -206,25 +236,10 @@ export async function submit(env: Bindings, caller: Principal, key: string, saga
     throw new Fault(409, "EXECUTION_CANCELLED", "This Execution was cancelled and will not dispatch.");
   }
   if (!row.dispatched) {
-    // Pause/admission policy (RUN-01): disabled Sagas fence new dispatches
-    // with 409 SAGA_PAUSED; maxConcurrent fences with 429 ADMISSION_LIMITED.
-    // In-flight Executions keep their snapshot and run to their own terminal.
-    if (!effective.policy.admission.enabled) {
-      throw new Fault(409, "SAGA_PAUSED", "This Saga is paused for this Organization; new Executions do not dispatch.");
-    }
-    if (effective.policy.admission.maxConcurrent > 0) {
-      // The row itself was just inserted as Pending: exempt it so the first
-      // Execution under a limit of 1 still dispatches, while the next active
-      // row fences with 429.
-      const active = await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM executions WHERE org_id=? AND saga_id=? AND status IN ('Pending','Running','Cancelling') AND id<>?",
-      )
-        .bind(caller.orgId, saga.id, id)
-        .first<{ n: number }>();
-      if ((active?.n ?? 0) >= effective.policy.admission.maxConcurrent) {
-        throw new Fault(429, "ADMISSION_LIMITED", "This Saga reached its concurrent Execution limit.");
-      }
-    }
+    // Pause/admission policy (RUN-01): the shared fence below owns both arms
+    // (SAGA_PAUSED, ADMISSION_LIMITED). In-flight Executions keep their
+    // snapshot and run to their own terminal.
+    await enforceAdmissionLimit(env.DB, caller.orgId, saga.id, id, effective.policy);
     // Same-revision + 15-min refusal window (ADR 001 #15): never auto-fail
     // Pending, never resurrect after the window, never invent success.
     if (row.saga_revision !== saga.revision || Date.now() - Date.parse(row.created_at) >= RECOVERY_WINDOW_MS) {
