@@ -20,7 +20,7 @@ import type { Principal } from "./domain";
 import { assertSafeEndpoint, integrationById, validateConnectionConfig } from "./integrations";
 import type { ConnectionView } from "./integrations";
 import { scrubValueWithDeploymentSecrets } from "./secrets";
-import type { HaloCredentials, NinjaCredentials } from "./bindings";
+import type { CloudflareCredentials, HaloCredentials, NinjaCredentials } from "./bindings";
 
 /** Deployment credential surface read by the management test path (CON-01).
  * Required-secret values are presence-checked only — never persisted,
@@ -28,7 +28,7 @@ import type { HaloCredentials, NinjaCredentials } from "./bindings";
  * (Bindings extends NinjaCredentials); test doubles pass plain records.
  * No index signature: Bindings has none, and required-secret env vars are
  * read through the narrow accessor below. */
-export interface SecretEnv extends NinjaCredentials, HaloCredentials {}
+export interface SecretEnv extends NinjaCredentials, HaloCredentials, CloudflareCredentials {}
 
 function secretValue(env: SecretEnv, name: string): string | undefined {
   const value: unknown = (env as Record<string, unknown>)[name];
@@ -385,25 +385,44 @@ export async function testConnection(
     // NinjaOne: token-endpoint probe only. No org listing, no persistence —
     // a 200/401 from the token host proves reachability either way (401
     // means the host answered; credential validity is the submit path).
-    const tokenUrl = new URL("/oauth/token", row.endpoint).toString();
-    const clientId = env.NINJA_CLIENT_ID ?? "";
-    const response = await fetchImpl(tokenUrl, {
-      method: "POST",
+    if (def.name === "ninjaone") {
+      const tokenUrl = new URL("/oauth/token", row.endpoint).toString();
+      const clientId = env.NINJA_CLIENT_ID ?? "";
+      const response = await fetchImpl(tokenUrl, {
+        method: "POST",
+        redirect: "manual",
+        signal: AbortSignal.timeout(5000),
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+        body: new URLSearchParams({
+          grant_type: "client_credentials",
+          client_id: clientId,
+          client_secret: "probe",
+          scope: "monitoring",
+        }).toString(),
+      });
+      await response.body?.cancel();
+      if (response.status >= 500) {
+        return { ok: false, checkedAt, code: "CONNECTION_TEST_FAILED", detail: def.health.remediation };
+      }
+      return { ok: true, checkedAt, detail: "The token endpoint answered." };
+    }
+    // Cloudflare (MIG-02): token-verify probe only, mirroring the NinjaOne
+    // posture. No zone listing, no persistence — a sub-500 from the verify
+    // endpoint proves reachability either way (credential validity is the
+    // submit path). The probe authenticates with the deployment credential
+    // and drops it after the call; it never persists, logs, or returns.
+    const verifyUrl = new URL("/user/tokens/verify", row.endpoint).toString();
+    const response = await fetchImpl(verifyUrl, {
+      method: "GET",
       redirect: "manual",
       signal: AbortSignal.timeout(5000),
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-      body: new URLSearchParams({
-        grant_type: "client_credentials",
-        client_id: clientId,
-        client_secret: "probe",
-        scope: "monitoring",
-      }).toString(),
+      headers: { Authorization: `Bearer ${secretValue(env, "CLOUDFLARE_API_TOKEN") ?? "probe"}` },
     });
     await response.body?.cancel();
     if (response.status >= 500) {
       return { ok: false, checkedAt, code: "CONNECTION_TEST_FAILED", detail: def.health.remediation };
     }
-    return { ok: true, checkedAt, detail: "The token endpoint answered." };
+    return { ok: true, checkedAt, detail: "The token verify endpoint answered." };
   } catch {
     return { ok: false, checkedAt, code: "CONNECTION_TEST_FAILED", detail: def.health.remediation };
   }

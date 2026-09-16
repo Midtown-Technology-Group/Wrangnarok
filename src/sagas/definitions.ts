@@ -4,6 +4,7 @@
 // cycle: saga modules import shared.ts, shared.ts imports this list, and
 // index.ts re-exports everything for the Worker entrypoint.
 import type { SagaDefinition } from "../saga";
+import { cloudflareInventorySagaDef, cloudflareVerifySagaDef } from "./cloudflare";
 import { digestSagaDef } from "./digest";
 import { helloParentSagaDef } from "./hello-parent";
 import { helloSagaDef } from "./hello";
@@ -20,4 +21,6 @@ export const SAGA_DEFINITIONS: readonly SagaDefinition<unknown>[] = [
   smokeSagaDef,
   helloSagaDef,
   helloParentSagaDef,
+  cloudflareVerifySagaDef,
+  cloudflareInventorySagaDef,
 ];

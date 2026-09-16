@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "inventory-missing-mapping",
+  "workflow": {"id": "a5160896-d1de-55cc-b1af-71e57b670f44", "input": {}},
+  "binding": {
+    "integration": "Cloudflare",
+    "entity_id": null,
+    "entity_name": null,
+    "config": {"api_token": {"secret_ref": "cloudflare_api_token"}}
+  },
+  "http": [],
+  "expected": {"outcome": "failed", "error": {"type": "RuntimeError", "message": "Cloudflare integration is missing account mapping."}},
+  "invariants": ["fail before any network request", "resolve the integration in the execution organization"]
+}

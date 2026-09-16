@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "inventory-invalid-limit",
+  "workflow": {"id": "a5160896-d1de-55cc-b1af-71e57b670f44", "input": {"max_zones": 251}},
+  "binding": {
+    "integration": "Cloudflare",
+    "entity_id": "0123456789abcdef0123456789abcdef",
+    "entity_name": "Example MSP",
+    "config": {"api_token": {"secret_ref": "cloudflare_api_token"}}
+  },
+  "http": [],
+  "expected": {"outcome": "failed", "error": {"type": "ValueError", "message": "max_zones must be an integer between 1 and 250."}},
+  "invariants": ["validate input before integration resolution", "fail before any network request"]
+}

@@ -23,6 +23,15 @@ import { checkpointRetryLimit, stepRetryLimit, UUID, vendorRetryLimit } from "./
 import type { EchoInput, NinjaOrgsResult, SagaRuntimePolicy } from "./domain";
 import type { EchoConnection } from "./integrations/echo";
 import type { NinjaConnection, NinjaSecrets } from "./integrations/ninjaone";
+import type {
+  CloudflareConnection,
+  CloudflareSecrets,
+} from "./integrations/cloudflare";
+import type {
+  CloudflareInventoryInput,
+  CloudflareInventoryResult,
+  CloudflareVerifyResult,
+} from "./domain";
 import type { SagaChildren } from "./children";
 
 /** Durable Operation API surfaced to Saga authors. Deliberately smaller than
@@ -48,9 +57,27 @@ export interface NinjaOneIntegrationHandle {
     timeoutMs?: number,
   ): Promise<NinjaOrgsResult>;
 }
+export interface CloudflareIntegrationHandle {
+  verifyConnection(
+    connection: CloudflareConnection,
+    secrets: CloudflareSecrets,
+    account: { readonly id: unknown; readonly name: unknown },
+    executionId?: string,
+    timeoutMs?: number,
+  ): Promise<CloudflareVerifyResult>;
+  inventoryZones(
+    connection: CloudflareConnection,
+    secrets: CloudflareSecrets,
+    account: { readonly id: unknown; readonly name: unknown },
+    input: CloudflareInventoryInput,
+    executionId?: string,
+    timeoutMs?: number,
+  ): Promise<CloudflareInventoryResult>;
+}
 export interface SagaIntegrations {
   readonly echo: EchoIntegrationHandle;
   readonly ninjaone: NinjaOneIntegrationHandle;
+  readonly cloudflare: CloudflareIntegrationHandle;
 }
 
 /** Organization-scoped secret handles for the current Execution. Read from the
@@ -59,6 +86,7 @@ export interface SagaIntegrations {
 export interface SagaSecrets {
   readonly clientId?: string;
   readonly clientSecret?: string;
+  readonly apiToken?: string;
 }
 
 /** Organization context for one Execution (ADR 010 section 1, Phase 1b).

@@ -14,7 +14,14 @@ export interface HaloCredentials {
   HALO_CLIENT_ID?: string;
   HALO_CLIENT_SECRET?: string;
 }
-export interface Bindings extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials, HaloCredentials {
+/** Zone Inventory migration (issues #116 MIG-01, #119 MIG-02): deployment
+ * credential surface for the Cloudflare bearer Connection. The account-owned
+ * API token lives in env, never in D1; the account mapping resolves
+ * per-Execution from the scenario/test binding. */
+export interface CloudflareCredentials {
+  CLOUDFLARE_API_TOKEN?: string;
+}
+export interface Bindings extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials, HaloCredentials, CloudflareCredentials {
   DB: D1Database;
   FILES: R2Bucket;
   ARTIFACTS?: R2Bucket;
@@ -30,6 +37,8 @@ export interface Bindings extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials
   SMOKE_WORKFLOW: Workflow<ExecutionParams>;
   HELLO_WORKFLOW: Workflow<ExecutionParams>;
   HELLO_PARENT_WORKFLOW: Workflow<ExecutionParams>;
+  CLOUDFLARE_VERIFY_WORKFLOW: Workflow<ExecutionParams>;
+  CLOUDFLARE_INVENTORY_WORKFLOW: Workflow<ExecutionParams>;
   ASSETS?: Fetcher;
   /** TRG-02 (issue #138, ADR 018): JSON object mapping endpoint ID to its
    * raw webhook HMAC secret. Populated from the deployment secret store in

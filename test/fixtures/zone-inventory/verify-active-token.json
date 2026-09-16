@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "name": "verify-active-token",
+  "workflow": {
+    "id": "2fcb2d31-091a-583f-a980-38c4de3da9ab",
+    "input": {}
+  },
+  "binding": {
+    "integration": "Cloudflare",
+    "entity_id": "0123456789abcdef0123456789abcdef",
+    "entity_name": "Example MSP",
+    "config": {"api_token": {"secret_ref": "cloudflare_api_token"}}
+  },
+  "http": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://api.cloudflare.com/client/v4/user/tokens/verify",
+        "headers": {"Authorization": "Bearer {{ secret.cloudflare_api_token }}"}
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "success": true,
+          "errors": [],
+          "result": {"id": "fixture-token-id", "status": "active", "expires_on": null}
+        }
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "succeeded",
+    "result": {
+      "status": "healthy",
+      "read_only": true,
+      "integration": "Cloudflare",
+      "account": {"id": "0123456789abcdef0123456789abcdef", "name": "Example MSP"},
+      "token": {"status": "active", "expires_on": null, "not_before": null},
+      "api_calls": 1
+    }
+  },
+  "invariants": [
+    "resolve the integration in the execution organization",
+    "do not include the secret value in output or execution logs",
+    "record one external read call"
+  ]
+}

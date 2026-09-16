@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "verify-malformed-json",
+  "workflow": {"id": "2fcb2d31-091a-583f-a980-38c4de3da9ab", "input": {}},
+  "binding": {
+    "integration": "Cloudflare",
+    "entity_id": "0123456789abcdef0123456789abcdef",
+    "entity_name": "Example MSP",
+    "config": {"api_token": {"secret_ref": "cloudflare_api_token"}}
+  },
+  "http": [
+    {
+      "request": {"method": "GET", "url": "https://api.cloudflare.com/client/v4/user/tokens/verify", "headers": {"Authorization": "Bearer {{ secret.cloudflare_api_token }}"}},
+      "response": {"status": 502, "body": "upstream response was not JSON", "content_type": "text/plain"}
+    }
+  ],
+  "expected": {"outcome": "failed", "error": {"type": "RuntimeError", "message": "Cloudflare returned HTTP 502 with invalid JSON."}},
+  "invariants": ["convert JSON decoding failure into the workflow's stable error contract", "do not include response content in the error"]
+}

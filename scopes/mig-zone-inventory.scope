@@ -1,0 +1,30 @@
+# MIG zone-inventory lane scope (issues #116 MIG-01, #119 MIG-02).
+# Cloudflare Zone Inventory bundle migration: two read-only Sagas plus the
+# Cloudflare bearer Integration, six vendored replay scenarios, bridge
+# conversion, mapping appendix. Wiring files approved by coordinator herb
+# (DM 2026-09-16): every Saga needs dispatch/binding/registry/manifest
+# entries. No migration: accountId resolves test-locally, apiToken from the
+# CLOUDFLARE_API_TOKEN test binding (follow-up issue if generally needed).
+# Shared with int-01 (cricket): src/domain.ts + src/integrations/index.ts —
+# stay in cloudflare regions only, merge origin/main on conflict.
+src/domain.ts
+src/saga.ts
+src/sagas/cloudflare.ts
+src/sagas/definitions.ts
+src/sagas/index.ts
+src/sagas/shared.ts
+src/integrations/cloudflare.ts
+src/integrations/index.ts
+src/executions.ts
+src/bindings.ts
+src/index.ts
+src/connections.ts
+sagas.manifest.json
+wrangler.jsonc
+vitest.config.ts
+test/cloudflare-inventory.test.ts
+test/saga-contract.test.ts
+test/migration-bridge.test.ts
+test/fixtures/zone-inventory/
+docs/migration-pilot.md
+scopes/mig-zone-inventory.scope
