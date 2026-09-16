@@ -1,0 +1,4 @@
+# codex scheduler wrap-up (issue #364 second review): rotation wraparound.
+scopes/codex-364-wrap.scope
+src/schedules.ts
+test/schedule-tick.test.ts

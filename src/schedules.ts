@@ -713,12 +713,33 @@ export async function promoteDueSchedules(
           .first<{ n: number }>()
       )?.n ?? 0;
     const rotationOffset = dueOrgCount > 0 ? Math.floor(now.getTime() / 60_000) % dueOrgCount : 0;
-    const orgs = await db
+    // Wraparound (second review on #399): a bare LIMIT/OFFSET window
+    // truncates at the end of the ordered set, so the first orgs would be
+    // admitted far less often than the last ones. Fill the window
+    // circularly: tail from the rotation offset, then head-fill the
+    // remaining slots, so every tick admits a full window (or every due
+    // org when fewer remain) and each org is omitted exactly once per
+    // count cycle.
+    const tailOrgs = await db
       .prepare(
         "SELECT DISTINCT org_id AS orgId FROM schedules WHERE enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=? ORDER BY org_id LIMIT ? OFFSET ?",
       )
       .bind(now.toISOString(), SCHEDULE_TICK_MAX_ORGS, rotationOffset)
       .all<{ orgId: string }>();
+    const admitted: { orgId: string }[] = [...tailOrgs.results];
+    if (admitted.length < SCHEDULE_TICK_MAX_ORGS && rotationOffset > 0) {
+      const headOrgs = await db
+        .prepare(
+          "SELECT DISTINCT org_id AS orgId FROM schedules WHERE enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=? ORDER BY org_id LIMIT ?",
+        )
+        .bind(now.toISOString(), SCHEDULE_TICK_MAX_ORGS - admitted.length)
+        .all<{ orgId: string }>();
+      for (const org of headOrgs.results) {
+        if (admitted.length >= SCHEDULE_TICK_MAX_ORGS) break;
+        if (!admitted.some((entry) => entry.orgId === org.orgId)) admitted.push(org);
+      }
+    }
+    const orgs = { results: admitted };
     const perOrg: ScheduleRow[][] = [];
     for (const org of orgs.results) {
       // The DISTINCT scan above only names Organizations with due rows,
