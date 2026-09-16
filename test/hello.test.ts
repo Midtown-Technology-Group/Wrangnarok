@@ -6,7 +6,7 @@ import { env } from "cloudflare:workers";
 import { expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
-import { executionId, helloSaga } from "../src/domain";
+import { executionId, helloSaga, parseHelloInput } from "../src/domain";
 import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
@@ -75,5 +75,25 @@ it("rejects empty and non-string hello names", async () => {
     const res = await worker.fetch(request("/api/executions", "POST", helloSaga.id, body, k), bindings);
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ error: { code: "INVALID_INPUT" } });
+  }
+});
+it("rejects names that would overflow downstream bounds before persisting anything (issues #377, #372)", async () => {
+  // Issue #377: 1024 quotes were accepted, then the escaped/duplicated
+  // HelloResult overflowed the 4096 result CHECK and failed the Execution.
+  // Issue #372: a 1006-char name was accepted, then the prefixed INFO log
+  // line overflowed the 1024 log bound and failed the Execution. Both must
+  // now fail closed at validation with no Execution row written.
+  for (const [body, k] of [
+    [{ name: '"'.repeat(1024) }, "hello-pilot-bound-001"],
+    [{ name: "x".repeat(1006) }, "hello-pilot-bound-002"],
+    [{ name: "x".repeat(513) }, "hello-pilot-bound-003"],
+  ] as const) {
+    expect(() => parseHelloInput(body)).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+    const res = await worker.fetch(request("/api/executions", "POST", helloSaga.id, body, k), bindings);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: { code: "INVALID_INPUT" } });
+    const id = await executionId(principal, k);
+    const detail = await worker.fetch(request(`/api/executions/${id}`), bindings);
+    expect(detail.status).toBe(404);
   }
 });

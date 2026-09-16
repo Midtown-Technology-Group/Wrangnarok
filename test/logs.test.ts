@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
-import { echoSaga, executionId, helloSaga } from "../src/domain";
+import { echoSaga, executionId, helloSaga, parseHelloInput } from "../src/domain";
 import {
   appendAuthorLog,
   decodeLogCursor,
@@ -117,6 +117,37 @@ describe("OBS-02 hello pilot emission (issue #153)", () => {
     }
     expect(page.hasMore).toBe(false);
     expect(page.nextCursor).not.toBeNull();
+  });
+  it("emits both hello lines for the worst accepted name (issues #377, #372)", async () => {
+    // The tightest downstream fit is the prefixed INFO line: a 1006-char
+    // name was valid input but overflowed it at 1025 chars. The longest
+    // accepted name (512 quotes, the max that keeps the escaped/duplicated
+    // HelloResult under the 4096 CHECK) must still emit both log rows.
+    const worst = '"'.repeat(511);
+    expect(parseHelloInput({ name: worst })).toEqual({ name: worst });
+    const key = "obs02-hello-worst-01";
+    const id = await executionId(principal, key);
+    const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, id);
+    const accepted = await worker.fetch(
+      new Request("https://local.test/api/executions", {
+        method: "POST",
+        headers: authHeaders({ "Idempotency-Key": key }),
+        body: JSON.stringify({ sagaId: helloSaga.id, input: { name: worst } }),
+      }),
+      bindings,
+    );
+    expect(accepted.status).toBe(202);
+    await instance.waitForStatus("complete");
+    const detail = await worker.fetch(
+      new Request(`https://local.test/api/executions/${id}`, { headers: authHeaders() }),
+      bindings,
+    );
+    expect(await detail.json()).toMatchObject({ status: "Succeeded" });
+    const tail = await worker.fetch(tailRequest(id), bindings);
+    const page = parseLogPage(await tail.json());
+    expect(page.logs.map((entry) => entry.level)).toEqual(["PROGRESS", "INFO"]);
+    expect(page.logs[1]?.message).toBe(`Hello Saga greeted ${worst}`);
+    expect(page.logs[1]?.data).toEqual({ name: worst });
   });
 });
 
