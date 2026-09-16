@@ -1,0 +1,9 @@
+# codex-364-reopen lane scope (issue #364 reopen): scheduler selection fairness.
+# The global LIMIT scan must become per-org fair selection before the limit.
+scopes/codex-364.scope
+src/schedules.ts
+src/index.ts
+test/schedules.test.ts
+test/schedule-tick.test.ts
+test/schedule-branches.test.ts
+test/schedule-lifecycle.test.ts

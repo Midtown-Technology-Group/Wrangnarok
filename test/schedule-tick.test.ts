@@ -123,6 +123,85 @@ describe("TRG-01 scheduled tick (workerd)", () => {
 });
 
 describe("codex #364: per-org fairness and skip quarantine (workerd)", () => {
+  it("admits another org's due row despite a larger older backlog (#364 reopen)", async () => {
+    const tick = worker as unknown as { scheduled: (event: unknown, env: Bindings) => Promise<void> };
+    const ORG_A = "00000000-0000-4000-8000-000000000001";
+    const ORG_B = "00000000-0000-4000-8000-000000000002";
+    const USER = "00000000-0000-4000-8000-000000000002";
+    await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?) ON CONFLICT(id) DO NOTHING")
+      .bind(ORG_B, "Second")
+      .run();
+    // Promotion revalidates run-as authority: the fixture user needs an
+    // active user row plus active membership in both orgs. (The API path
+    // bootstraps this; direct inserts must declare it explicitly.)
+    await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?, 'active', ?) ON CONFLICT(user_id) DO NOTHING")
+      .bind(USER, new Date().toISOString())
+      .run();
+    for (const org of [ORG_A, ORG_B]) {
+      await bindings.DB.prepare(
+        "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,'admin','active','ordinary',?,?) ON CONFLICT(org_id,user_id) DO UPDATE SET status='active'",
+      )
+        .bind(org, USER, new Date().toISOString(), new Date().toISOString())
+        .run();
+    }
+    // Org A: SCHEDULE_TICK_LIMIT + 5 due rows, all older than Org B's row.
+    // Direct inserts (same shape the create route writes): this test pins
+    // selection fairness, not the membership-gated create path.
+    const ancient = new Date(Date.now() - 3_600_000).toISOString();
+    const now = new Date().toISOString();
+    for (let n = 0; n < 55; n += 1) {
+      await bindings.DB.prepare(
+        "INSERT INTO schedules(id,org_id,name,saga_id,kind,cron,timezone,enabled,input_json,run_as_user_id,run_at,next_due_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      )
+        .bind(
+          `00000000-0000-4000-8000-000001${String(n).padStart(6, "0")}`,
+          ORG_A,
+          `backlog-${n}`,
+          helloSaga.id,
+          "one-off",
+          "",
+          "UTC",
+          1,
+          '{"name":"sched"}',
+          "00000000-0000-4000-8000-000000000002",
+          ancient,
+          ancient,
+          now,
+          now,
+        )
+        .run();
+    }
+    const recent = new Date(Date.now() - 30_000).toISOString();
+    await bindings.DB.prepare(
+      "INSERT INTO schedules(id,org_id,name,saga_id,kind,cron,timezone,enabled,input_json,run_as_user_id,run_at,next_due_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        "00000000-0000-4000-8000-000002000000",
+        ORG_B,
+        "second-org-due",
+        helloSaga.id,
+        "one-off",
+        "",
+        "UTC",
+        1,
+        '{"name":"sched"}',
+        "00000000-0000-4000-8000-000000000002",
+        recent,
+        recent,
+        now,
+        now,
+      )
+      .run();
+    await tick.scheduled({ cron: "* * * * *" }, bindings);
+    // Org B's single eligible row promotes in the same tick despite Org A's
+    // 55 older rows exceeding the old global LIMIT of 50.
+    const promotedB = await bindings.DB.prepare(
+      "SELECT COUNT(*) AS n FROM schedule_deliveries WHERE schedule_id IN (SELECT id FROM schedules WHERE org_id=? AND name=?)",
+    )
+      .bind(ORG_B, "second-org-due")
+      .first<{ n: number }>();
+    expect(promotedB?.n).toBe(1);
+  }, 60000);
   it("caps one org's promotions per tick so other orgs still promote", async () => {
     const tick = worker as unknown as { scheduled: (event: unknown, env: Bindings) => Promise<void> };
     // Seed six due one-off rows via the API (membership-gated create keeps
