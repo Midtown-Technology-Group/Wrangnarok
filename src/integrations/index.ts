@@ -443,7 +443,7 @@ export const haloIntegrationDef = defineIntegration({
 export const cloudflareIntegrationDef = defineIntegration({
   id: CLOUDFLARE_INTEGRATION_ID,
   name: "cloudflare",
-  description: "Read-only Cloudflare zone inventory over bearer API tokens.",
+  description: "Read-only Cloudflare zone inventory over bearer API credentials.",
   secretFields: ["apiToken"],
   configSchema: [
     {
@@ -465,7 +465,7 @@ export const cloudflareIntegrationDef = defineIntegration({
   requiredSecrets: ["apiToken"],
   secretEnvVars: { apiToken: "CLOUDFLARE_API_TOKEN" },
   health: {
-    testHint: "Verify the token, then submit a bounded read-only zone inventory.",
+    testHint: "Verify the credential, then submit a bounded read-only zone inventory.",
     remediation: "Confirm the API base URL and the deployment credential, then re-test before submitting work.",
   },
 });

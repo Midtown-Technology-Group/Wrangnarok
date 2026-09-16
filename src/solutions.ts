@@ -36,6 +36,8 @@
 // definitions are built from; test/solutions-install.test.ts asserts they
 // stay in agreement with the static code Catalog.
 import {
+  cloudflareInventorySaga,
+  cloudflareVerifySaga,
   digestSaga,
   echoSaga,
   Fault,
@@ -58,7 +60,16 @@ interface CatalogSaga {
 
 /** Static code Catalog as seen by the installer: the same stable IDs and
  * revision pins the Saga definitions are built from (ADR 002). */
-const CODE_SAGAS: readonly CatalogSaga[] = [echoSaga, ninjaSaga, digestSaga, smokeSaga, helloSaga, helloParentSaga];
+const CODE_SAGAS: readonly CatalogSaga[] = [
+  echoSaga,
+  ninjaSaga,
+  digestSaga,
+  smokeSaga,
+  helloSaga,
+  helloParentSaga,
+  cloudflareVerifySaga,
+  cloudflareInventorySaga,
+];
 
 export interface ManifestSagaPin {
   readonly id: string;

@@ -225,7 +225,7 @@ export async function verifyConnection(
     readOnly: true,
     integration: "Cloudflare",
     account: { id: accountId, name: accountName },
-    token: {
+    credential: {
       status,
       expiresOn: optionalText(result.expires_on),
       notBefore: optionalText(result.not_before),

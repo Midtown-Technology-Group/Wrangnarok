@@ -59,3 +59,78 @@ explicitly (never derived):
 - Manifest bridge (M1, #116): the pilot is hand-pinned, not converted.
 - Second pilot with a real Integration call (read-only NinjaOne workflow) once M1 lands.
 
+
+## Second migration: Cloudflare Zone Inventory (issues #116, #119)
+
+First migration beyond hello-world: the `cloudflare-zone-inventory` 0.1.0
+bundle (two read-only workflows, bearer Integration, six replay scenarios).
+
+### Registered-ID mapping
+
+Bifrost workflow UUIDs are source identity only (never derived): the
+operator sagaMap records the mapping explicitly.
+
+- `2fcb2d31-091a-583f-a980-38c4de3da9ab` (`verify_cloudflare_connection`)
+  → registered Saga UUID `9d2f4a6c-3b1e-4f5a-9c2d-6e8f0a1b2c3d`
+  (`cloudflare-verify-connection`, `cloudflare-verify-connection-v1`).
+- `a5160896-d1de-55cc-b1af-71e57b670f44` (`inventory_cloudflare_zones`)
+  → registered Saga UUID `7c1e3b5a-2d4f-4e6b-8a1c-5d7f9e0a1b2c`
+  (`cloudflare-inventory-zones`, `cloudflare-inventory-zones-v1`).
+- Integration `Cloudflare` → `6b0d2a48-1c3e-4d5a-7b9a-4c6e8d0f2a1b`
+  (`cloudflare`), bearer `apiToken` secret.
+
+The UUIDs live in `src/domain.ts`, the definitions in
+`src/sagas/cloudflare.ts`, catalog entries via `src/sagas/index.ts`, the
+installer pins in `src/solutions.ts` CODE_SAGAS, the source-catalog pins in
+`src/solution-export.ts` CODE_SAGAS, and the churn snapshot in
+`sagas.manifest.json`. `test/saga-contract.test.ts` fails closed on drift.
+
+### Construct mapping
+
+| Bundle (`functions/cloudflare_inventory.py`) | Wrangnarok |
+| --- | --- |
+| `@workflow(name=..., category="Cloudflare", tags=[...])` | Stable Saga UUID + revision in `src/domain.ts`; tags verbatim on the definition |
+| `integrations.get("Cloudflare")` + `config["api_token"]` | `resolveConnection` (declared required, 424 on miss) + `apiToken` secret handle; presence enforced inside the Action, never branched on in Saga steps |
+| `entity_id`/`entity_name` account mapping | Optional `account` envelope in the parsed Saga input (validated shape, carried through submit); strict 32-hex ID check at the Integration boundary |
+| `httpx.AsyncClient(base_url, Bearer)` | `fetch` with `Authorization: Bearer <token>`, `redirect: "manual"`, 20s `AbortSignal.timeout` deadline |
+| `_get_json` success/error shaping | `getJson`: bounded body, `success !== true` or non-2xx → `CLOUDFLARE_REQUEST_FAILED` with the first vendor message, secrets scrubbed |
+| Pagination loop (`page`, `per_page=50`, `total_pages`) | Same loop, `max_zones` 1..250 validated (400 `INVALID_INPUT`); stops on empty batch or `page >= total_pages` |
+| `_zone_summary` shaping | `zoneSummary`: same fields, camelCase contract (`accountId`, `nameServers` sorted, `developmentModeActive`) |
+| `Counter` summaries | `statusCounts`/`typeCounts` (sorted keys), `paused`, `developmentModeActive` counts |
+| `enforced_bounds` (1 or 5 external calls) | Reads execute under Connection authority; no mutation surface exists |
+| `compatibility/wrangnarok/scenarios/*.json` | `test/fixtures/zone-inventory/*.json` (provenance in `PROVENANCE.md`); all 6 replay as regression tests in `test/cloudflare-inventory.test.ts` with ordered request matching and exact terminal comparisons |
+
+### Deliberate divergences
+
+- Result key `token` → `credential`: the platform secret-word tripwire
+  (`test/echo-secretfields.test.ts`) bans the substring `token` on API
+  surfaces; the bundle's `token: {status, ...}` becomes
+  `credential: {status, expiresOn, notBefore}`. Recorded here, not silent.
+- Termination follows advertised `total_pages`, not the Python's
+  `len(batch) < PAGE_SIZE` shortcut: a non-final page may carry fewer rows
+  than the page size, and stopping early drops trailing pages (the
+  inventory-two-pages scenario pins 2-of-50 rows on page 1 of 2 and
+  requires fetching page 2 — the Python shortcut yields 1 call where the
+  contract requires 2).
+- Base-path joining: `new URL("/path", "https://host/client/v4")` discards
+  `/client/v4`; the Integration joins against the base directory so the
+  version prefix survives.
+- Parsers accept both `max_zones` (submission) and `maxZones` (persisted):
+  submit persists parsed input and prepareExecution re-parses it, so the
+  parser must be idempotent over its own output (like every other Saga).
+- Descriptions avoid the substrings `secret`/`token` (same tripwire);
+  "credential" reads fine and changes no behavior.
+- No migration for the account mapping: Connection rows persist endpoint
+  only, so `accountId` resolves test-locally per Execution input; a general
+  per-tenant mapping store is a follow-up, not this lane.
+
+### Acceptance proof
+
+- `test/cloudflare-inventory.test.ts` replays all 6 vendored scenarios on
+  the real local runtime (workerd + D1 + Workflows); only outbound vendor
+  HTTP is mocked at the Integration boundary. Ordered exchange matching,
+  exact terminal results/errors, invariant enforcement, secret-sentinel
+  audits on responses and persisted rows.
+- `test/migration-bridge.test.ts` converts the real bundle descriptor
+  through `convertWorkspaceToBundle` (sagaMap + Cloudflare integrationMap)
+  and proves the output parses as an installable manifest with zero gaps.

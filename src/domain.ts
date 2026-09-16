@@ -60,7 +60,7 @@ export const cloudflareVerifySaga = Object.freeze({
   id: "9d2f4a6c-3b1e-4f5a-9c2d-6e8f0a1b2c3d",
   name: "cloudflare-verify-connection",
   revision: "cloudflare-verify-connection-v1",
-  description: "Zone Inventory migration: verify the Cloudflare API token and account mapping read-only",
+  description: "Zone Inventory migration: verify the Cloudflare API credential and account mapping read-only",
 });
 export const cloudflareInventorySaga = Object.freeze({
   id: "7c1e3b5a-2d4f-4e6b-8a1c-5d7f9e0a1b2c",
@@ -566,7 +566,7 @@ export interface CloudflareAccountRef {
   readonly id: string;
   readonly name: string;
 }
-export interface CloudflareTokenStatus {
+export interface CloudflareCredentialStatus {
   readonly status: string;
   readonly expiresOn: string | null;
   readonly notBefore: string | null;
@@ -576,7 +576,7 @@ export interface CloudflareVerifyResult {
   readonly readOnly: true;
   readonly integration: "Cloudflare";
   readonly account: CloudflareAccountRef;
-  readonly token: CloudflareTokenStatus;
+  readonly credential: CloudflareCredentialStatus;
   readonly apiCalls: 1;
 }
 export interface CloudflareZoneSummary {

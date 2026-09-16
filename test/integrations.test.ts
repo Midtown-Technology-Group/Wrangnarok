@@ -30,7 +30,7 @@ const BASE = {
 
 describe("Integration registry (ADR 003)", () => {
   it("registers the built-in Integrations with stable identity", () => {
-    expect(INTEGRATION_DEFINITIONS).toHaveLength(3);
+    expect(INTEGRATION_DEFINITIONS).toHaveLength(4);
     expect(echoIntegrationDef).toMatchObject({ id: ECHO_INTEGRATION_ID, name: "echo", secretFields: [] });
     expect(ninjaIntegrationDef).toMatchObject({
       id: NINJA_INTEGRATION_ID,

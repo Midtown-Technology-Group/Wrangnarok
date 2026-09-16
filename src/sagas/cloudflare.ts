@@ -56,10 +56,10 @@ const verifyOutputSchema = Object.freeze({
     readOnly: Object.freeze({ type: "boolean" }),
     integration: Object.freeze({ type: "string" }),
     account: Object.freeze({ type: "object" }),
-    token: Object.freeze({ type: "object" }),
+    credential: Object.freeze({ type: "object" }),
     apiCalls: Object.freeze({ type: "number" }),
   }),
-  required: Object.freeze(["status", "readOnly", "integration", "account", "token", "apiCalls"]),
+  required: Object.freeze(["status", "readOnly", "integration", "account", "credential", "apiCalls"]),
   additionalProperties: false,
 });
 

@@ -146,7 +146,7 @@ it("replays verify-active-token: one ordered GET, exact healthy result", async (
     readOnly: true,
     integration: "Cloudflare",
     account: { id: ACCOUNT_ID, name: ACCOUNT_NAME },
-    token: { status: "active", expiresOn: null, notBefore: null },
+    credential: { status: "active", expiresOn: null, notBefore: null },
     apiCalls: 1,
   });
   // Invariants: org-scoped resolution, no secret in output/logs, one read call.
@@ -367,3 +367,68 @@ it("keeps the token sentinel out of every persisted row", async () => {
   expect(dumped).not.toContain(TOKEN_SENTINEL);
   expect(dumped).toContain("api.cloudflare.com");
 });
+
+it("fails a declared verify without a Connection row before any network request", async () => {
+  // No seeded Connection for a fresh org: declared-required fails loud with
+  // 424 without touching the network (covers the !vendor.ok arm).
+  await bindings.DB.prepare("DELETE FROM connections WHERE org_id=?").bind(principal.orgId).run();
+  const mock = mockVendor([]);
+  const key = "cf-verify-noconn-0001";
+  const id = await executionId(principal, key);
+  const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_VERIFY_WORKFLOW, id);
+  const body = accountBinding(ACCOUNT_ID, ACCOUNT_NAME);
+  expect((await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings)).status).toBe(
+    202,
+  );
+  await instance.waitForStatus("errored");
+  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key), bindings);
+  const payload = (await detail.json()) as { status: string; error: { code: string } };
+  expect(payload.status).toBe("Failed");
+  expect(mock).not.toHaveBeenCalled();
+  await seedConnection();
+});
+
+it("accepts a bare verify input and fails on the missing mapping", async () => {
+  // Input without the account envelope: the parser admits it, the prepared
+  // input carries no account, and the Integration boundary fails closed
+  // (covers the binding-fallback arm).
+  mockVendor([]);
+  const key = "cf-verify-bare-00001";
+  const id = await executionId(principal, key);
+  const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_VERIFY_WORKFLOW, id);
+  expect((await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, {}, key), bindings)).status).toBe(
+    202,
+  );
+  await instance.waitForStatus("errored");
+  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key), bindings);
+  const payload = (await detail.json()) as { status: string; error: { code: string; message: string } };
+  expect(payload.status).toBe("Failed");
+  expect(payload.error.message).toBe("Cloudflare integration is missing account mapping.");
+});
+
+it("surfaces a slow vendor as TimedOut through the policy snapshot deadline", async () => {
+  // A stored runtime policy with a 1s vendor deadline overrides the 20s
+  // code default (covers the snapshot deadline arm); the 3s vendor delay
+  // trips it and the Saga routes CLOUDFLARE_VENDOR_TIMEOUT to timeout-mark.
+  const { storeSagaPolicy } = await import("../src/executions");
+  await storeSagaPolicy(bindings.DB, principal.orgId, cloudflareVerifySaga.id, {
+    timeout: { vendorTimeoutMs: 1000 },
+  });
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    return Response.json({ success: true, result: { status: "active" } });
+  });
+  const key = "cf-verify-timeout-001";
+  const id = await executionId(principal, key);
+  const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_VERIFY_WORKFLOW, id);
+  const body = accountBinding(ACCOUNT_ID, ACCOUNT_NAME);
+  expect((await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings)).status).toBe(
+    202,
+  );
+  await instance.waitForStatus("errored");
+  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key), bindings);
+  expect(await detail.json()).toMatchObject({ status: "TimedOut", error: { code: "CLOUDFLARE_VENDOR_TIMEOUT" } });
+  await bindings.DB.prepare("DELETE FROM saga_policies WHERE org_id=? AND saga_id=?")
+    .bind(principal.orgId, cloudflareVerifySaga.id)
+    .run();
+}, 30000);

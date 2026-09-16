@@ -7,6 +7,17 @@
 # CLOUDFLARE_API_TOKEN test binding (follow-up issue if generally needed).
 # Shared with int-01 (cricket): src/domain.ts + src/integrations/index.ts —
 # stay in cloudflare regions only, merge origin/main on conflict.
+# Coordinator amendment (takeover): src/solutions.ts for the installer
+# CODE_SAGAS catalog pins only (installs fail UNKNOWN_SAGA without them).
+# src/solution-export.ts likewise for the source-catalog CODE_SAGAS pins.
+# test/connections.test.ts + test/integrations.test.ts: hardcoded inventory
+# counts/names updated for the new member (no behavior changes).
+# test/cloudflare-unit.test.ts: new fast unit coverage for the new files.
+src/solutions.ts
+src/solution-export.ts
+test/connections.test.ts
+test/integrations.test.ts
+test/cloudflare-unit.test.ts
 src/domain.ts
 src/saga.ts
 src/sagas/cloudflare.ts
