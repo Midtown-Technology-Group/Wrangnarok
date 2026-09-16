@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 
 const [, , csvPath, flag] = process.argv;
 const DRY = flag === "--dry-run";
-if (!csvPath) {
+if (!csvPath || (flag !== undefined && !DRY)) {
   console.error('USAGE: node scripts/triage-codex-findings.mjs "<csv path>" [--dry-run]');
   process.exit(2);
 }
@@ -91,9 +91,25 @@ function labelsFor(sev, title) {
   return INFO_LABELS[title] ?? ["codex", "priority-low"];
 }
 
+const REQUIRED_COLUMNS = [
+  "finding_url",
+  "title",
+  "description",
+  "severity",
+  "status",
+  "detected_at",
+  "committed_at",
+  "commit_hash",
+  "relevant_paths",
+];
 const text = fs.readFileSync(csvPath, "utf8");
 const rows = parseCSV(text);
-const header = rows[0];
+const header = rows[0] ?? [];
+const missing = REQUIRED_COLUMNS.filter((c) => !header.includes(c));
+if (header.length === 0 || missing.length > 0) {
+  console.error(`Invalid Codex CSV: missing columns: ${missing.join(", ") || "(empty header)"}`);
+  process.exit(2);
+}
 const idx = Object.fromEntries(header.map((h, i) => [h, i]));
 const findings = rows.slice(1).filter((r) => r.length > 1 && r[idx.title]);
 
@@ -116,6 +132,10 @@ try {
   ]);
   existing = JSON.parse(out);
 } catch {
+  if (!DRY) {
+    console.error("error: could not list existing issues; refusing live creation without dedupe");
+    process.exit(1);
+  }
   console.error("warn: could not list existing issues, proceeding without dedupe");
 }
 const have = new Set(
@@ -129,6 +149,7 @@ const have = new Set(
 
 const created = [];
 const skipped = [];
+const failures = [];
 for (const r of findings) {
   const title = r[idx.title].trim();
   const key = title.toLowerCase();
@@ -137,6 +158,7 @@ for (const r of findings) {
     skipped.push(title);
     continue;
   }
+  have.add(key);
   const sev = r[idx.severity];
   const body = [
     `Codex Security finding triaged from CSV export (${path.basename(csvPath)}).`,
@@ -168,7 +190,12 @@ for (const r of findings) {
     console.log(`created: ${out.trim()} :: ${issueTitle}`);
   } catch (e) {
     console.error(`FAILED: ${issueTitle}\n${e.stderr ?? e.message}`);
+    failures.push(title);
   }
 }
-console.log(`done: created=${created.length} skipped=${skipped.length}`);
+console.log(`done: created=${created.length} skipped=${skipped.length} failed=${failures.length}`);
 if (skipped.length) console.log("skipped:\n- " + skipped.join("\n- "));
+if (failures.length) {
+  console.log("failed:\n- " + failures.join("\n- "));
+  process.exitCode = 1;
+}
