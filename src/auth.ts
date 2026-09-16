@@ -16,11 +16,15 @@ export interface LabAuth {
   LAB_FIXTURE_USER_ID?: string;
 }
 /** Local fixture only. Organization and user never come from request headers or JSON.
- * A present Cf-Access-Jwt-Assertion routes exclusively to Access verification
- * (ADR 014); unconfigured Access fails closed, never falls through to LAB. */
+ * A non-empty Cf-Access-Jwt-Assertion routes exclusively to Access verification
+ * (ADR 014); unconfigured Access fails closed, never falls through to LAB. An
+ * empty or whitespace-only header is the same as absent. */
 export async function authenticate(request: Request, env: LabAuth & AccessEnv): Promise<Principal> {
-  const assertion = request.headers.get("Cf-Access-Jwt-Assertion");
-  if (assertion) return verifyAccess(assertion, env);
+  const assertion = request.headers.get("Cf-Access-Jwt-Assertion") ?? "";
+  // Only a non-empty value routes to Access verification (#365): otherwise a
+  // fixture caller could send an empty header and reach LAB while the
+  // identity view below reads the header as present.
+  if (assertion.trim()) return verifyAccess(assertion, env);
   if (env.LAB_ENABLED !== "true") throw new Fault(404, "NOT_FOUND", "Not found.");
   if (
     !env.LAB_TOKEN ||
@@ -81,7 +85,11 @@ export interface CallerIdentity {
  * the caller proves authentication first (authenticate above), then the
  * membership gate in the route proves authorization. */
 export function describeCaller(principal: Principal, request: Request): CallerIdentity {
-  const viaAccess = request.headers.has("Cf-Access-Jwt-Assertion");
+  // An empty or whitespace-only header is not Access authentication (#365):
+  // match authenticate() above, which routes only non-empty values to Access
+  // verification, so `viaAccess` can never be true for a fixture caller.
+  const assertion = request.headers.get("Cf-Access-Jwt-Assertion") ?? "";
+  const viaAccess = assertion.trim().length > 0;
   const credentialClass = credentialClassFor(principal.userId, viaAccess);
   return {
     userId: principal.userId,
