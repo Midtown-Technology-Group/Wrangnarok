@@ -23,7 +23,7 @@ compatibility with upstream Bifrost is not promised; see
 Authenticated like every other `/api/*` route: `Authorization: Bearer
 <token>` (local fixture token or Access service identity). Only
 `GET /api/executions`, `GET /api/orgs/:id/executions`,
-`GET /api/schedules/:id/preview`, `GET /api/executions/:id/logs`, and
+`GET /api/schedules/:name/deliveries`, `GET /api/executions/:id/logs`, and
 `GET /api/logs` accept a query string, and only each route's allowlisted
 keys.
 
@@ -62,12 +62,11 @@ transport:
 | `POST` | `/api/forms/:name/submit` | Validate then submit the bound Saga (FORM-02: consume a startup handle, 422 `STALE_FORM_HANDLE`) |
 | `POST` | `/api/schedules` | Create a one-off (`runAt`) or recurring (`cron`) schedule (TRG-01; 201) |
 | `GET` | `/api/schedules` | Schedule summaries for this Organization |
-| `GET` | `/api/schedules/:id` | Schedule detail (policy, windows, receipts) |
-| `GET` | `/api/schedules/:id/preview` | Next UTC windows (`count` 1-20, default 5) |
-| `POST` | `/api/schedules/:id/disable` | Disable (ticks skip; receipts retained) |
-| `POST` | `/api/schedules/:id/enable` | Re-enable (due index recomputed) |
-| `DELETE` | `/api/schedules/:id` | Soft-delete (ticks ignore; history retained) |
-| `POST` | `/api/schedules/executions/:id/cancel` | Cancel a `Scheduled` intent row only |
+| `GET` | `/api/schedules/:name` | Schedule detail (policy, windows, receipts) |
+| `GET` | `/api/schedules/:name/deliveries` | Window-to-Execution delivery mapping (`?window=` single window value) |
+| `POST` | `/api/schedules/:name/disable` | Disable (ticks skip; receipts retained) |
+| `POST` | `/api/schedules/:name/enable` | Re-enable (due index recomputed) |
+| `DELETE` | `/api/schedules/:name` | Soft-delete (ticks ignore; history retained) |
 | `GET` | `/api/forms` | Org-scoped form summaries (FORM-02 designer list) |
 | `POST` | `/api/forms` | Create a form declaration (400 `INVALID_FORM` on bad fields) |
 | `PUT` | `/api/forms/:name` | Replace a form declaration wholesale (FORM-02 designer edit) |
