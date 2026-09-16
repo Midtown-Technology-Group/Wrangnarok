@@ -1,0 +1,12 @@
+# codex/hello-domain lane scope (issues #377, #372): hello name handling.
+# Keep validation, domain limits, and log-emission limits consistent so an
+# accepted name never fails downstream.
+src/domain.ts
+src/sagas/hello.ts
+src/sagas/
+src/executions.ts
+src/logs.ts
+test/hello.test.ts
+test/domain.test.ts
+test/logs.test.ts
+scopes/codex-hello.scope
