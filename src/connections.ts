@@ -411,16 +411,16 @@ export async function testConnection(
     // endpoint proves reachability either way (credential validity is the
     // submit path). The probe authenticates with the deployment credential
     // and drops it after the call; it never persists, logs, or returns.
-    // Root-relative join would discard the `/client/v4` base path, so join
-    // against the base directory explicitly (same posture as the Action).
-    // Probe rows carry validated endpoints (no trailing slash), so no
-    // conditional is needed here.
+    // The requiredSecrets gate above guarantees the deployment credential
+    // is present; read it directly (no probe sentinel: a half-credentialed
+    // test refuses loudly instead of probing with invented auth).
+    const probeToken = secretValue(env, "CLOUDFLARE_API_TOKEN") as string;
     const verifyUrl = new URL("user/tokens/verify", `${row.endpoint}/`).toString();
     const response = await fetchImpl(verifyUrl, {
       method: "GET",
       redirect: "manual",
       signal: AbortSignal.timeout(5000),
-      headers: { Authorization: `Bearer ${secretValue(env, "CLOUDFLARE_API_TOKEN") ?? "probe"}` },
+      headers: { Authorization: `Bearer ${probeToken}` },
     });
     await response.body?.cancel();
     if (response.status >= 500) {

@@ -432,3 +432,57 @@ it("surfaces a slow vendor as TimedOut through the policy snapshot deadline", as
     .bind(principal.orgId, cloudflareVerifySaga.id)
     .run();
 }, 30000);
+
+it("fails a declared inventory without a Connection row before any network request", async () => {
+  await bindings.DB.prepare("DELETE FROM connections WHERE org_id=?").bind(principal.orgId).run();
+  const mock = mockVendor([]);
+  const key = "cf-inventory-noconn-01";
+  const id = await executionId(principal, key);
+  const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_INVENTORY_WORKFLOW, id);
+  const body = { max_zones: 10, ...accountBinding(ACCOUNT_ID, ACCOUNT_NAME) };
+  expect((await worker.fetch(request("/api/executions", "POST", cloudflareInventorySaga.id, body, key), bindings)).status).toBe(
+    202,
+  );
+  await instance.waitForStatus("errored");
+  expect(mock).not.toHaveBeenCalled();
+  await seedConnection();
+});
+
+it("accepts a bare inventory input and fails on the missing mapping", async () => {
+  mockVendor([]);
+  const key = "cf-inventory-bare-001";
+  const id = await executionId(principal, key);
+  const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_INVENTORY_WORKFLOW, id);
+  expect((await worker.fetch(request("/api/executions", "POST", cloudflareInventorySaga.id, {}, key), bindings)).status).toBe(
+    202,
+  );
+  await instance.waitForStatus("errored");
+  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareInventorySaga.id, {}, key), bindings);
+  const payload = (await detail.json()) as { status: string; error: { code: string; message: string } };
+  expect(payload.status).toBe("Failed");
+  expect(payload.error.message).toBe("Cloudflare integration is missing account mapping.");
+});
+
+it("surfaces a slow inventory vendor as TimedOut through the policy snapshot deadline", async () => {
+  const { storeSagaPolicy } = await import("../src/executions");
+  await storeSagaPolicy(bindings.DB, principal.orgId, cloudflareInventorySaga.id, {
+    timeout: { vendorTimeoutMs: 1000 },
+  });
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    return Response.json({ success: true, result: [], result_info: { total_pages: 1, total_count: 0 } });
+  });
+  const key = "cf-inventory-timeout1";
+  const id = await executionId(principal, key);
+  const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_INVENTORY_WORKFLOW, id);
+  const body = { max_zones: 10, ...accountBinding(ACCOUNT_ID, ACCOUNT_NAME) };
+  expect((await worker.fetch(request("/api/executions", "POST", cloudflareInventorySaga.id, body, key), bindings)).status).toBe(
+    202,
+  );
+  await instance.waitForStatus("errored");
+  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareInventorySaga.id, {}, key), bindings);
+  expect(await detail.json()).toMatchObject({ status: "TimedOut", error: { code: "CLOUDFLARE_VENDOR_TIMEOUT" } });
+  await bindings.DB.prepare("DELETE FROM saga_policies WHERE org_id=? AND saga_id=?")
+    .bind(principal.orgId, cloudflareInventorySaga.id)
+    .run();
+}, 30000);
