@@ -350,3 +350,39 @@ it("0027 converges rename-split objects without losing rows (#367-371)", async (
   expect(artifact).toMatchObject({ name: "notes", mime: "text/plain" });
   await resetCloudflare();
 });
+
+it("resolutionRow tolerates the 0001 narrow connections schema deterministically", async () => {
+  // The execution-path connection fallback rungs (pre-activation schemas)
+  // were covered only incidentally by full-suite ordering; this pins them
+  // deterministically so the branch gate never hinges on run scheduling.
+  const { resolveConnection } = await import("../src/executions");
+  const { ECHO_INTEGRATION_ID } = await import("../src/domain");
+  await replayBaseline();
+  await bindings.DB.exec(
+    `INSERT INTO connections(id, org_id, integration_id, endpoint) VALUES ('res-conn-1', '${REPLAY_ORG}', '${ECHO_INTEGRATION_ID}', 'http://127.0.0.1:8788/echo')`,
+  );
+  const org = {
+    orgId: REPLAY_ORG,
+    userId: "user-1",
+    executionId: "exec-1",
+    sagaId: "saga",
+    sagaRevision: "r1",
+    attemptToken: "tok",
+  };
+  const noRequirement = await resolveConnection(bindings.DB, org, ECHO_INTEGRATION_ID, []);
+  expect(noRequirement.connection).toMatchObject({ endpoint: "http://127.0.0.1:8788/echo" });
+  // A declared requirement against the narrow row still resolves (loose,
+  // enabled by default); absence resolves to None for optional access.
+  const declared = await resolveConnection(bindings.DB, org, ECHO_INTEGRATION_ID, ["api_token"]);
+  expect(declared.connection?.endpoint).toBe("http://127.0.0.1:8788/echo");
+  const GHOST = "00000000-0000-4000-8000-000000000099";
+  const absentNarrow = await resolveConnection(bindings.DB, org, GHOST, []);
+  expect(absentNarrow.connection).toBeUndefined();
+  // Mid-chain schema (0004 adds managed_by, display_name/enabled arrive in
+  // 0011): the second rung succeeds, so a missing row returns None there.
+  await bindings.DB.exec(migration0002);
+  await bindings.DB.exec(migration0004);
+  const absentMid = await resolveConnection(bindings.DB, org, GHOST, []);
+  expect(absentMid.connection).toBeUndefined();
+  await resetCloudflare();
+});
