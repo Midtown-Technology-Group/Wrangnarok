@@ -134,6 +134,26 @@ it("answers unknown apps 404 on every lookup and mutation route", async () => {
   expect((await call(`/api/apps/${UNKNOWN}/swap`, "POST", { otherAppId: UNKNOWN_OTHER })).status).toBe(404);
 });
 
+it("rejects cross-origin form posts on app builds (codex #355)", async () => {
+  // Codex #355: starting a build mutates deploy state behind the JSON-write
+  // gate, so a cross-origin form post (simple content type, no preflight)
+  // answers 415 JSON_REQUIRED and no deploy job is created.
+  const id = await createApp("csrf-build", "csrf-build");
+  expect((await call(`/api/apps/${id}/source`, "PUT", GOOD_SOURCE)).status).toBe(200);
+  const formBuild = await worker.fetch(
+    new Request(`https://local.test/api/apps/${id}/builds`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/x-www-form-urlencoded" },
+      body: "confirm=yes",
+    }),
+    { ...bindings, LAB_ORG_ID: ORG },
+  );
+  expect(formBuild.status).toBe(415);
+  expect(await formBuild.json()).toMatchObject({ error: { code: "JSON_REQUIRED" } });
+  const jobs = (await (await call(`/api/apps/${id}/builds`)).json()) as { jobs: unknown[] };
+  expect(jobs.jobs).toEqual([]);
+});
+
 it("rejects non-object bodies and unknown swap/job targets fail-closed", async () => {
   const nullCreate = await call("/api/apps", "POST", null);
   expect(nullCreate.status).toBe(400);

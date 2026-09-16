@@ -191,13 +191,9 @@ describe("CON-02 operator routes", () => {
   it("provisions secret references only against available deployment secrets", async () => {
     const unknown = await call("/api/config", "POST", { key: "k1", type: "secret", value: { ref: "nope" } });
     expect(unknown.status).toBe(400);
-    const missing = await call(
-      "/api/config",
-      "POST",
-      { key: "k2", type: "secret", value: { ref: "clientSecret" } },
-      ORG,
-      OTHER_USER,
-    );
+    // Config writes need org admin (codex #348): the fixture OWNER holds
+    // admin of ORG, so the reference provisions here.
+    const missing = await call("/api/config", "POST", { key: "k2", type: "secret", value: { ref: "clientSecret" } });
     expect(missing.status).toBe(201);
     // The vitest binding carries NINJA_CLIENT_SECRET, so wait: prove the
     // fail-closed arm by pointing at a declared-but-absent env name through
@@ -223,8 +219,9 @@ describe("CON-02 operator routes", () => {
   it("scopes rows to the Organization: foreign rows are invisible", async () => {
     const created = await call("/api/config", "POST", { key: "timeout", type: "int", value: "30" });
     const id = ((await created.json()) as { config: { id: string } }).config.id;
-    // OTHER_USER is a member of ORG: same-org reads work.
-    expect((await call("/api/config", "GET", undefined, ORG, OTHER_USER)).status).toBe(200);
+    // OTHER_USER holds an ordinary membership: config administration needs
+    // requireManageOrg (codex #348), so same-org reads answer 403.
+    expect((await call("/api/config", "GET", undefined, ORG, OTHER_USER)).status).toBe(403);
     // OTHER_ORG boots as its own empty org: the ORG row never leaks across
     // (empty list), and the exact ID 404s there instead of resolving.
     const foreignList = await call("/api/config", "GET", undefined, OTHER_ORG);
@@ -235,6 +232,24 @@ describe("CON-02 operator routes", () => {
     expect(await call("/api/config").then((res) => res.json())).toMatchObject({
       configs: [{ key: "timeout", value: 30 }],
     });
+  });
+
+  it("denies config administration to ordinary members (codex #348)", async () => {
+    // Ordinary members reach no config route: reads and all three write
+    // shapes answer 403 ADMIN_ONLY, never leaking row existence.
+    expect((await call("/api/config", "GET", undefined, ORG, OTHER_USER)).status).toBe(403);
+    expect(
+      (await call("/api/config", "POST", { key: "k_other", type: "string", value: "x" }, ORG, OTHER_USER)).status,
+    ).toBe(403);
+    const created = await call("/api/config", "POST", { key: "guarded", type: "string", value: "v" });
+    const id = ((await created.json()) as { config: { id: string } }).config.id;
+    expect(
+      (await call(`/api/config/${id}`, "PUT", { description: "nope" }, ORG, OTHER_USER)).status,
+    ).toBe(403);
+    expect((await call(`/api/config/${id}`, "DELETE", undefined, ORG, OTHER_USER)).status).toBe(403);
+    // Admins keep full access on the same rows.
+    expect((await call("/api/config", "GET")).status).toBe(200);
+    expect((await call(`/api/config/${id}`, "DELETE")).status).toBe(200);
   });
 
   it("rejects query strings and malformed bodies", async () => {
