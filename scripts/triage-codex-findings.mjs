@@ -16,23 +16,41 @@ if (!csvPath) {
 
 function parseCSV(t) {
   const rows = [];
-  let row = [], field = "", q = false;
+  let row = [],
+    field = "",
+    q = false;
   for (let i = 0; i < t.length; i++) {
     const c = t[i];
     if (q) {
       if (c === '"') {
-        if (t[i + 1] === '"') { field += '"'; i++; }
-        else q = false;
+        if (t[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else q = false;
       } else field += c;
     } else {
       if (c === '"') q = true;
-      else if (c === ",") { row.push(field); field = ""; }
-      else if (c === "\r") { if (t[i + 1] === "\n") i++; row.push(field); field = ""; rows.push(row); row = []; }
-      else if (c === "\n") { row.push(field); field = ""; rows.push(row); row = []; }
-      else field += c;
+      else if (c === ",") {
+        row.push(field);
+        field = "";
+      } else if (c === "\r") {
+        if (t[i + 1] === "\n") i++;
+        row.push(field);
+        field = "";
+        rows.push(row);
+        row = [];
+      } else if (c === "\n") {
+        row.push(field);
+        field = "";
+        rows.push(row);
+        row = [];
+      } else field += c;
     }
   }
-  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  if (field !== "" || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
   return rows;
 }
 
@@ -84,12 +102,30 @@ console.log(`findings=${findings.length}`);
 // Existing codex issues for dedupe.
 let existing = [];
 try {
-  const out = sh("gh", ["issue", "list", "--search", "label:codex", "--state", "all", "--limit", "200", "--json", "number,title"]);
+  const out = sh("gh", [
+    "issue",
+    "list",
+    "--search",
+    "label:codex",
+    "--state",
+    "all",
+    "--limit",
+    "200",
+    "--json",
+    "number,title",
+  ]);
   existing = JSON.parse(out);
-} catch (e) {
+} catch {
   console.error("warn: could not list existing issues, proceeding without dedupe");
 }
-const have = new Set(existing.map((i) => i.title.replace(/^\[codex\]\s*/i, "").trim().toLowerCase()));
+const have = new Set(
+  existing.map((i) =>
+    i.title
+      .replace(/^\[codex\]\s*/i, "")
+      .trim()
+      .toLowerCase(),
+  ),
+);
 
 const created = [];
 const skipped = [];
@@ -97,7 +133,10 @@ for (const r of findings) {
   const title = r[idx.title].trim();
   const key = title.toLowerCase();
   const issueTitle = `[codex] ${title}`;
-  if (have.has(key)) { skipped.push(title); continue; }
+  if (have.has(key)) {
+    skipped.push(title);
+    continue;
+  }
   const sev = r[idx.severity];
   const body = [
     `Codex Security finding triaged from CSV export (${path.basename(csvPath)}).`,
@@ -117,7 +156,10 @@ for (const r of findings) {
     `Verify against current \`main\`. If already fixed, close with the fixing commit. If accepted risk or false positive, close with rationale. Otherwise fix in a lane with a regression test.`,
   ].join("\n");
   const labels = labelsFor(sev, title);
-  if (DRY) { console.log(`DRY ${issueTitle} [${labels.join(",")}]`); continue; }
+  if (DRY) {
+    console.log(`DRY ${issueTitle} [${labels.join(",")}]`);
+    continue;
+  }
   const tmp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codex-issue-")), "body.md");
   fs.writeFileSync(tmp, body);
   try {
