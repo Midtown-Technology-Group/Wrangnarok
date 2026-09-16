@@ -154,9 +154,12 @@ async function keyFor(teamDomain: string, kid: string, fetchFn: typeof fetch): P
   if (deniedAt !== undefined) {
     if (now - deniedAt < negativeKidTtlMs) return null;
     unknownKids.delete(kid);
-  }
-  for (const [miss, at] of unknownKids) {
-    if (now - at >= negativeKidTtlMs) unknownKids.delete(miss);
+  } else {
+    // Sweep stale negatives only on a fresh miss: keeps the hot path (hit
+    // or live negative) branch-free while expiry still converges.
+    for (const [miss, at] of unknownKids) {
+      if (now - at >= negativeKidTtlMs) unknownKids.delete(miss);
+    }
   }
   const certs = await fetchCertSetCoalesced(teamDomain, fetchFn);
   const seen = Date.now();
@@ -177,13 +180,12 @@ async function keyFor(teamDomain: string, kid: string, fetchFn: typeof fetch): P
     unknownKids.delete(kid);
   } else {
     // Remember the miss briefly: random-kid floods converge to zero
-    // subrequests until the entry expires. Bounded like the cert cache
-    // (oldest-first eviction on overflow).
+    // subrequests until the entry expires. Bounded like the cert cache:
+    // insertion order is oldest-first, so drop the head on overflow.
     unknownKids.set(kid, seen);
-    while (unknownKids.size > MAX_CERT_KEYS) {
-      const oldest = unknownKids.keys().next();
-      if (oldest.done === true) break;
-      unknownKids.delete(oldest.value);
+    if (unknownKids.size > MAX_CERT_KEYS) {
+      const oldest = unknownKids.keys().next().value as string;
+      unknownKids.delete(oldest);
     }
   }
   return certCache.get(kid)?.key ?? null;
