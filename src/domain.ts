@@ -16,6 +16,23 @@ export const NINJA_INTEGRATION_ID = "0606e237-137b-4629-8346-85468e1c2df6";
 // TOOL-01 HaloPSA Code Mode provider (issue #170, ADR 022): stable identity
 // for the OpenAPI proof Integration. Never changes across source edits.
 export const HALO_INTEGRATION_ID = "a1b2c3d4-0000-4111-8111-000000000001";
+// AI-01 provider kinds (issue #164, ADR 032): the five upstream provider
+// kinds as Integration-definition names. Stable slugs; the definitions land
+// in src/integrations/index.ts in the build slice.
+export const AI_PROVIDER_KINDS = ["openai", "anthropic", "google", "openrouter", "openai-compatible"] as const;
+export type AiProviderKind = (typeof AI_PROVIDER_KINDS)[number];
+/** Upstream default-assignment keys (issue #164): the six fixed routing keys
+ * profiles resolve through. Org-scoped rows in the build slice; no
+ * platform-global tier in v1 (ADR 032). */
+export const AI_ASSIGNMENT_KEYS = [
+  "primary",
+  "summarization",
+  "tuning",
+  "image_generation",
+  "video_generation",
+  "chat_default",
+] as const;
+export type AiAssignmentKey = (typeof AI_ASSIGNMENT_KEYS)[number];
 // Phase 2 multi-Integration Saga: NinjaOne census digested through the echo
 // Integration. Stable identity per ADR 002 (UUID + revision).
 export const digestSaga = Object.freeze({

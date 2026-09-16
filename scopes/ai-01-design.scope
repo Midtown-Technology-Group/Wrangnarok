@@ -1,0 +1,10 @@
+# AI-01 design lane scope (issue #164): provider Connection kinds, model
+# profiles, capability assignments. Design-first slice: ADR + migration
+# ledger entry + scoped surface; no vendor HTTP, no per-tenant secrets.
+scopes/ai-01-design.scope
+src/integrations/index.ts
+src/domain.ts
+docs/architecture/032-ai-provider-model.md
+docs/migration-ledger.md
+docs/upstream-parity.md
+test/ai-01-design.test.ts

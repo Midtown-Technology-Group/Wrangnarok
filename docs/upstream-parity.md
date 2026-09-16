@@ -947,6 +947,8 @@ Phase 6; **Missing**; existing issue: new
 
 Local status: No model/provider/embedding configuration or verification surface exists.
 
+AI-01 design slice (issue #164, ADR 032, landed incrementally on main): provider kinds (`openai | anthropic | google | openrouter | openai-compatible`) and the six default-assignment keys pinned as stable vocabulary; credentials stay deployment-global in v0 (SEC-02 tripwire shut, no per-tenant keys); profiles/assignments/embedding/behavior scoped as separate entities with lifecycle guards; capability state resets on transport change. Build slices (registry definitions, migration 0028 DDL, routes, probes) follow.
+
 Depends: SEC-01, CON-01, AUTH-02
 
 Acceptance:
