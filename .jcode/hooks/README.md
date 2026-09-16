@@ -30,13 +30,15 @@
 
 #
 
-# - pre-tool-guard.mjs (gate, fails open on error): blocks production-touching
+# - pre-tool-guard.mjs (gate, fails closed on error): splits each bash
 
-# Wrangler commands from agent sessions — `wrangler deploy` without
+# command on shell operators and validates EVERY wrangler invocation own
 
-# `--dry-run`, `wrangler d1` without `--local`, `wrangler secret put` — and
+# argv. Selftest: node .jcode/hooks/pre-tool-guard.mjs --selftest.
 
-# blocks agent writes to `.dev.vars` local secret files.
+# Also blocks agent writes to local secret files.
+
+#
 
 # - session-end-checkpoint.mjs (observer, fire-and-forget): appends one terse
 

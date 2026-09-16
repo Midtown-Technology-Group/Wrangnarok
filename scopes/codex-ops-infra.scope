@@ -1,0 +1,16 @@
+# Lane scope: codex/ops-infra-trust
+# Covers codex security findings: #357, #363, #362, #373, #375, #359, #379, #376
+scopes/codex-ops-infra.scope
+scripts/wrangnarok.mjs
+scripts/wrangnarok.d.mts
+scripts/wrangnarok-core.mjs
+scripts/lane-scope.mjs
+scripts/mint-preview-token.mjs
+scripts/smoke-preview.mjs
+.jcode/hooks/pre-tool-guard.mjs
+.jcode/hooks/README.md
+.github/workflows/ci.yml
+.github/workflows/preview.yml
+docs/demo.md
+test/sync-provider.test.ts
+scripts/test-group.mjs

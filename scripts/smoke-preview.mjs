@@ -30,9 +30,29 @@ export async function runSmoke({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   keyPrefix = "preview-smoke",
 }) {
+  // Issue #357: the bearer token rides every probe request, so the target
+  // must be https (loopback http is allowed for local runs). Fail closed
+  // before the token leaves the machine.
+  let target;
+  try {
+    target = new URL(baseUrl);
+  } catch {
+    throw new Error(`Preview base must be an https URL, got ${JSON.stringify(baseUrl)}.`);
+  }
+  if (target.protocol !== "https:" && target.protocol !== "http:") {
+    throw new Error(`Preview base must be an http(s) URL, got ${JSON.stringify(baseUrl)}.`);
+  }
+  if (target.protocol === "http:") {
+    const host = target.hostname.toLowerCase();
+    const loopback = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+    if (!loopback) throw new Error(`Preview base over plaintext http is loopback-only; use https.`);
+  }
+  if (target.username !== "" || target.password !== "") {
+    throw new Error("Preview base must not embed credentials (pass --token).");
+  }
   const base = baseUrl.replace(/\/+$/, "");
   const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
-  const catalogRes = await fetchImpl(`${base}/api/sagas`, { headers });
+  const catalogRes = await fetchImpl(`${base}/api/sagas`, { headers, redirect: "manual" });
   if (!catalogRes.ok) throw new Error(`Saga catalog fetch failed: HTTP ${catalogRes.status}`);
   const catalog = await readJson(catalogRes);
   const saga = (catalog.sagas ?? []).find((entry) => entry.name === "system.smoke");
@@ -40,6 +60,7 @@ export async function runSmoke({
 
   const submitRes = await fetchImpl(`${base}/api/executions`, {
     method: "POST",
+    redirect: "manual",
     headers: { ...headers, "Idempotency-Key": `${keyPrefix}-${crypto.randomUUID()}` },
     body: JSON.stringify({ sagaId: saga.id, input: {} }),
   });
@@ -53,7 +74,7 @@ export async function runSmoke({
 
   const deadline = now() + timeoutMs;
   for (;;) {
-    const detailRes = await fetchImpl(`${base}/api/executions/${executionId}`, { headers });
+    const detailRes = await fetchImpl(`${base}/api/executions/${executionId}`, { headers, redirect: "manual" });
     if (!detailRes.ok) throw new Error(`Execution detail fetch failed: HTTP ${detailRes.status}`);
     const detail = await readJson(detailRes);
     if (TERMINAL.includes(detail.status)) {
@@ -204,6 +225,38 @@ async function selftest() {
       error = e;
     }
     check("deadline throws", /Timed out/.test(String(error)));
+  }
+
+  // Issue #357: plaintext non-loopback bases fail before any fetch; the
+  // bearer token never leaves the machine. Loopback http stays usable.
+  {
+    const stub = stubFetch([]);
+    let error = null;
+    try {
+      await runSmoke({ baseUrl: "http://192.168.1.10:8787", token: "tok", fetchImpl: stub.fetch });
+    } catch (e) {
+      error = e;
+    }
+    check("plaintext base throws", /loopback-only/.test(String(error)) && stub.calls.length === 0);
+  }
+  {
+    const stub = stubFetch([
+      jsonResponse({ sagas: [{ id: "saga-id", name: "system.smoke" }] }),
+      jsonResponse({ executionId: "exec-5" }, 202),
+      jsonResponse({ status: "Succeeded", operations: [] }),
+    ]);
+    const result = await runSmoke({
+      baseUrl: "http://127.0.0.1:8903",
+      token: "tok",
+      fetchImpl: stub.fetch,
+      pollMs: 0,
+      sleep: async () => {},
+    });
+    check("loopback http ok", result.executionId === "exec-5");
+    check(
+      "redirect manual",
+      stub.calls.every((call) => call.init?.redirect === "manual"),
+    );
   }
 
   console.log(`preview smoke selftest: ${passed} passed.`);
