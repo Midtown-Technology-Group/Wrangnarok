@@ -2081,7 +2081,10 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
   async function pollDetail(executionId: string, wait: boolean): Promise<SdkExecutionDetail> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const response = await guard(() => credentialedFetch(`${base}/api/executions/${executionId}`, { headers }), "detail");
+      const response = await guard(
+        () => credentialedFetch(`${base}/api/executions/${executionId}`, { headers }),
+        "detail",
+      );
       const detail = parseExecutionDetail(await readJson(response, "execution detail"));
       if ((SDK_TERMINAL_STATUSES as readonly string[]).includes(detail.status) || !wait) return detail;
       if (Date.now() >= deadline) {
@@ -2117,7 +2120,10 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     },
     async getSagaPolicy(ref: string): Promise<SdkRuntimePolicy> {
       const sagaId = await resolveSagaId(ref);
-      const response = await guard(() => credentialedFetch(`${base}/api/sagas/${sagaId}/policy`, { headers }), "saga policy");
+      const response = await guard(
+        () => credentialedFetch(`${base}/api/sagas/${sagaId}/policy`, { headers }),
+        "saga policy",
+      );
       return parseRuntimePolicy(await readJson(response, "saga policy"));
     },
     async updateSagaPolicy(ref: string, policy: unknown): Promise<SdkRuntimePolicy> {
@@ -2280,12 +2286,18 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       const params = new URLSearchParams();
       if (limit !== undefined) params.set("limit", String(limit));
       const suffix = params.size > 0 ? `?${params.toString()}` : "";
-      const response = await guard(() => credentialedFetch(`${base}/api/notifications${suffix}`, { headers }), "notifications");
+      const response = await guard(
+        () => credentialedFetch(`${base}/api/notifications${suffix}`, { headers }),
+        "notifications",
+      );
       return parseNotifications(await readJson(response, "notifications"));
     },
     async getNotification(id: string): Promise<SdkNotification> {
       checkNotificationId(id);
-      const response = await guard(() => credentialedFetch(`${base}/api/notifications/${id}`, { headers }), "notification");
+      const response = await guard(
+        () => credentialedFetch(`${base}/api/notifications/${id}`, { headers }),
+        "notification",
+      );
       return parseNotification(await readJson(response, "notification"));
     },
     async dismissNotification(id: string): Promise<void> {
@@ -2309,7 +2321,10 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
         throw new SdkError("SDK_INVALID_REF", "Recent must be an integer from 1 to 50.");
       }
       const suffix = recent === undefined ? "" : `?recent=${recent}`;
-      const response = await guard(() => credentialedFetch(`${base}/api/ops/metrics${suffix}`, { headers }), "ops metrics");
+      const response = await guard(
+        () => credentialedFetch(`${base}/api/ops/metrics${suffix}`, { headers }),
+        "ops metrics",
+      );
       return parseOpsMetrics(await readJson(response, "ops metrics"));
     },
     async listOpsScheduledTasks(): Promise<readonly SdkOpsScheduledTask[]> {
@@ -2509,7 +2524,10 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     },
     async getSchedule(name: string): Promise<SdkScheduleSummary> {
       checkScheduleName(name);
-      const response = await guard(() => credentialedFetch(`${base}/api/schedules/${name}`, { headers }), "schedule detail");
+      const response = await guard(
+        () => credentialedFetch(`${base}/api/schedules/${name}`, { headers }),
+        "schedule detail",
+      );
       return parseScheduleDetail(await readJson(response, "schedule detail"));
     },
     async createSchedule(options: SdkSaveScheduleOptions): Promise<SdkScheduleSummary> {
@@ -2545,7 +2563,11 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     async setScheduleEnabled(name: string, enabled: boolean): Promise<SdkScheduleSummary> {
       checkScheduleName(name);
       const response = await guard(
-        () => credentialedFetch(`${base}/api/schedules/${name}/${enabled ? "enable" : "disable"}`, { method: "POST", headers }),
+        () =>
+          credentialedFetch(`${base}/api/schedules/${name}/${enabled ? "enable" : "disable"}`, {
+            method: "POST",
+            headers,
+          }),
         "schedule enablement",
       );
       return parseScheduleDetail(await readJson(response, "schedule enablement"));
@@ -2553,7 +2575,10 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     async getScheduleDelivery(name: string, window: string): Promise<SdkScheduleDelivery> {
       checkScheduleName(name);
       const response = await guard(
-        () => credentialedFetch(`${base}/api/schedules/${name}/deliveries?window=${encodeURIComponent(window)}`, { headers }),
+        () =>
+          credentialedFetch(`${base}/api/schedules/${name}/deliveries?window=${encodeURIComponent(window)}`, {
+            headers,
+          }),
         "schedule delivery",
       );
       return parseScheduleDelivery(await readJson(response, "schedule delivery"));
