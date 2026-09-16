@@ -36,6 +36,7 @@ must update every importing test in the same commit.
 | 0025   | 0025_audit_retention.sql        | OPS-01  | audit_events without org FK (issue #350) |
 | 0026   | 0026_cancelling_repair.sql      | codex-migration-replay | cancelling FK repair: child-preserving executions rebuild (issue #381) |
 | 0027   | 0027_rename_replay_repair.sql   | codex-migration-replay | rename-replay convergence, IF NOT EXISTS (issues #367-371) |
+| 0028   | 0028_ai_profiles.sql            | AI-01  | model profiles, assignments, embedding config, behavior rows (issue #164) |
 
 ## Stuck-database recovery (codex findings #381, #367-371)
 

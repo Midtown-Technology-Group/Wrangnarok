@@ -14,7 +14,18 @@ export interface HaloCredentials {
   HALO_CLIENT_ID?: string;
   HALO_CLIENT_SECRET?: string;
 }
-export interface Bindings extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials, HaloCredentials {
+/** AI-01 provider credentials (issue #164, ADR 032): deployment-global API
+ * keys, one per provider kind. Presence-checked at test/execution time,
+ * never persisted, never returned through discovery. */
+export interface AiProviderCredentials {
+  OPENAI_API_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
+  GOOGLE_API_KEY?: string;
+  OPENROUTER_API_KEY?: string;
+  OPENAI_COMPATIBLE_API_KEY?: string;
+}
+export interface Bindings
+  extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials, HaloCredentials, AiProviderCredentials {
   DB: D1Database;
   FILES: R2Bucket;
   ARTIFACTS?: R2Bucket;

@@ -1,0 +1,15 @@
+# AI-01 build lane scope (issue #164): five provider Integration
+# definitions, migration 0028 profile/assignment DDL, registry tests.
+# No routes, no vendor probes, no per-tenant secrets (ADR 032 v0).
+scopes/ai-01-build.scope
+src/integrations/index.ts
+src/domain.ts
+src/connections.ts
+src/bindings.ts
+migrations/0028_ai_profiles.sql
+docs/migration-ledger.md
+docs/upstream-parity.md
+test/ai-01-build.test.ts
+test/ai-01-design.test.ts
+test/integrations.test.ts
+test/connections.test.ts

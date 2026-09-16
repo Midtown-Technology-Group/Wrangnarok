@@ -20,7 +20,7 @@ import type { Principal } from "./domain";
 import { assertSafeEndpoint, integrationById, validateConnectionConfig } from "./integrations";
 import type { ConnectionView } from "./integrations";
 import { scrubValueWithDeploymentSecrets } from "./secrets";
-import type { HaloCredentials, NinjaCredentials } from "./bindings";
+import type { AiProviderCredentials, HaloCredentials, NinjaCredentials } from "./bindings";
 
 /** Deployment credential surface read by the management test path (CON-01).
  * Required-secret values are presence-checked only — never persisted,
@@ -28,7 +28,7 @@ import type { HaloCredentials, NinjaCredentials } from "./bindings";
  * (Bindings extends NinjaCredentials); test doubles pass plain records.
  * No index signature: Bindings has none, and required-secret env vars are
  * read through the narrow accessor below. */
-export interface SecretEnv extends NinjaCredentials, HaloCredentials {}
+export interface SecretEnv extends NinjaCredentials, HaloCredentials, AiProviderCredentials {}
 
 function secretValue(env: SecretEnv, name: string): string | undefined {
   const value: unknown = (env as Record<string, unknown>)[name];
@@ -381,6 +381,29 @@ export async function testConnection(
         return { ok: false, checkedAt, code: "CONNECTION_TEST_FAILED", detail: def.health.remediation };
       }
       return { ok: true, checkedAt, detail: "The Halo origin answered." };
+    }
+    // AI-01 providers (issue #164, ADR 032): origin-reachability probe only.
+    // The deployment API key is presence-checked above (SECRET_NOT_CONFIGURED
+    // fails loud); the key itself never rides the probe — credential validity
+    // is the verify path in the build slice. Any non-5xx proves reachability.
+    if (
+      def.name === "openai" ||
+      def.name === "anthropic" ||
+      def.name === "google" ||
+      def.name === "openrouter" ||
+      def.name === "openai-compatible"
+    ) {
+      const response = await fetchImpl(row.endpoint, {
+        method: "HEAD",
+        redirect: "manual",
+        signal: AbortSignal.timeout(5000),
+        headers: { Accept: "application/json" },
+      });
+      await response.body?.cancel();
+      if (response.status >= 500) {
+        return { ok: false, checkedAt, code: "CONNECTION_TEST_FAILED", detail: def.health.remediation };
+      }
+      return { ok: true, checkedAt, detail: "The provider origin answered." };
     }
     // NinjaOne: token-endpoint probe only. No org listing, no persistence —
     // a 200/401 from the token host proves reachability either way (401
