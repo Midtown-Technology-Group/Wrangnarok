@@ -76,11 +76,23 @@ export async function createOrg(name: string): Promise<OrgSummary> {
 }
 
 export async function disableOrg(id: string): Promise<OrgSummary> {
-  return (await read(await fetch(`/api/orgs/${id}/disable`, { method: "POST", headers: headers() }))) as OrgSummary;
+  return (await read(
+    await fetch(`/api/orgs/${id}/disable`, {
+      method: "POST",
+      headers: headers(true),
+      body: JSON.stringify({}),
+    }),
+  )) as OrgSummary;
 }
 
 export async function enableOrg(id: string): Promise<OrgSummary> {
-  return (await read(await fetch(`/api/orgs/${id}/enable`, { method: "POST", headers: headers() }))) as OrgSummary;
+  return (await read(
+    await fetch(`/api/orgs/${id}/enable`, {
+      method: "POST",
+      headers: headers(true),
+      body: JSON.stringify({}),
+    }),
+  )) as OrgSummary;
 }
 
 export async function deletePreview(id: string): Promise<DeletePreview> {
@@ -121,12 +133,20 @@ export async function updateMember(orgId: string, userId: string, update: Record
 
 export async function disableUser(userId: string): Promise<{ userId: string }> {
   return (await read(
-    await fetch(`/api/users/${encodeURIComponent(userId)}/disable`, { method: "POST", headers: headers() }),
+    await fetch(`/api/users/${encodeURIComponent(userId)}/disable`, {
+      method: "POST",
+      headers: headers(true),
+      body: JSON.stringify({}),
+    }),
   )) as { userId: string };
 }
 
 export async function enableUser(userId: string): Promise<{ userId: string }> {
   return (await read(
-    await fetch(`/api/users/${encodeURIComponent(userId)}/enable`, { method: "POST", headers: headers() }),
+    await fetch(`/api/users/${encodeURIComponent(userId)}/enable`, {
+      method: "POST",
+      headers: headers(true),
+      body: JSON.stringify({}),
+    }),
   )) as { userId: string };
 }

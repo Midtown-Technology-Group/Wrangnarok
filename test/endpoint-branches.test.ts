@@ -542,6 +542,20 @@ it("answers route-level fallbacks: bad bodies, bad names, cross-kind, and unknow
   const rotateQuery = await worker.fetch(authed("/api/endpoints/route-key/rotate", "POST", {}, "?x=1"), bindings);
   expect(rotateQuery.status).toBe(400);
 
+  // Codex #352: rotate is a state change behind the JSON-write gate, so a
+  // cross-origin form post (simple content type, no preflight) answers 415
+  // JSON_REQUIRED and the credential digest is untouched.
+  const formRotate = await worker.fetch(
+    new Request("https://local.test/api/endpoints/route-key/rotate", {
+      method: "POST",
+      headers: { Authorization: LAB.Authorization, "Content-Type": "application/x-www-form-urlencoded" },
+      body: "confirm=yes",
+    }),
+    bindings,
+  );
+  expect(formRotate.status).toBe(415);
+  expect(await formRotate.json()).toMatchObject({ error: { code: "JSON_REQUIRED" } });
+
   // Cross-kind: api-key credential against a webhook-only name has no
   // api-key candidates, so it answers 404 (never a cross-kind leak).
   await worker.fetch(
