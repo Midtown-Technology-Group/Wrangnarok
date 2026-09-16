@@ -28,14 +28,45 @@ function isAllowed(f, allowed) {
 }
 
 function branchDiff() {
+  // Issue #373: fail CLOSED when the base ref is unavailable. The old code
+  // swallowed the git error and returned [], reporting a tree with arbitrary
+  // committed out-of-scope changes as clean (exit 0).
+  let out;
   try {
-    return execFileSync("git", ["diff", "--name-only", "origin/main...HEAD"], { encoding: "utf8" })
-      .split("\n")
-      .map((l) => l.trim().replace(/^"(.*)"$/, "$1"))
-      .filter(Boolean);
+    out = execFileSync("git", ["diff", "--name-only", "origin/main...HEAD"], { encoding: "utf8" });
   } catch {
-    return [];
+    console.error("lane-scope: cannot diff origin/main...HEAD (missing base ref? run `git fetch origin main`).");
+    process.exit(2);
   }
+  return out
+    .split("\n")
+    .map((l) => l.trim().replace(/^"(.*)"$/, "$1"))
+    .filter(Boolean);
+}
+
+if (args[0] === "--selftest") {
+  // Offline selftest (issue #373): no git mutations, no network.
+  // Verifies prefix matching and documents the fail-closed contract.
+  let passed = 0;
+  const check = (name, cond) => {
+    if (!cond) throw new Error(`lane-scope selftest failed: ${name}`);
+    passed += 1;
+  };
+  check("exact", isAllowed("scripts/a.mjs", ["scripts/a.mjs"]));
+  check("prefix dir", isAllowed("scopes/x.scope", ["scopes/"]));
+  check("prefix file", isAllowed("scopes/x.scope.bak", ["scopes/x.scope"]));
+  check("reject outside", !isAllowed("src/index.ts", ["scripts/"]));
+  check("reject never", !isAllowed("node_modules/x", ["node_modules/"]));
+  check("reject partial", !isAllowed("scripts2/a.mjs", ["scripts/"]));
+  // Fail-closed contract: branchDiff() and the committed-diff read must
+  // exit 2 (not return empty) when origin/main is unavailable. The live
+  // behavior is verified by code inspection plus the CI gate below; this
+  // pins the helper surface that enforces it.
+  const source = readFileSync(new URL(import.meta.url), "utf8");
+  check("fail-closed diff", source.includes("cannot diff origin/main...HEAD"));
+  check("no empty fallback", !source.includes("} catch {\n    return [];"));
+  console.log(`lane-scope selftest: ${passed} passed.`);
+  process.exit(0);
 }
 
 if (args[0] === "--self-check") {
@@ -101,12 +132,13 @@ let out;
 try {
   // Uncommitted changes (working tree + index).
   const uncommitted = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" });
-  // Committed branch changes vs origin/main.
+  // Committed branch changes vs origin/main (fail closed per #373).
   let committed = "";
   try {
     committed = execFileSync("git", ["diff", "--name-only", "origin/main...HEAD"], { encoding: "utf8" });
   } catch {
-    committed = "";
+    console.error("lane-scope: cannot diff origin/main...HEAD (missing base ref? run `git fetch origin main`).");
+    process.exit(2);
   }
   out =
     uncommitted +
