@@ -2020,6 +2020,26 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     headers["CF-Access-Client-Secret"] = options.access.clientSecret;
   }
 
+  /** Credential-bearing fetch (#374): never follow redirects automatically.
+   * The default fetch redirect mode replays Authorization (and Access)
+   * headers to wherever the server points, so any 3xx that lands on plain
+   * HTTP or an attacker host would leak both credential mechanisms. Fail
+   * closed with SDK_CLIENT_NETWORK on any redirect instead; the operator
+   * fixes the base URL (trailing path, http-vs-https, moved host) and
+   * retries. Same-origin 3xx are rejected too: the SDK base is an origin,
+   * never a path, so a redirect always means misconfiguration. */
+  async function credentialedFetch(url: string, init?: RequestInit): Promise<Response> {
+    const response = await fetchImpl(url, { ...init, redirect: "manual" });
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location") ?? "(no location)";
+      throw new SdkError(
+        "SDK_CLIENT_NETWORK",
+        `Refusing to follow a redirect to ${location}; fix the SDK base URL and retry.`,
+      );
+    }
+    return response;
+  }
+
   async function readJson(response: Response, what: string): Promise<unknown> {
     let data: unknown;
     try {
@@ -2042,7 +2062,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
   }
 
   async function fetchSagas(): Promise<readonly SdkSaga[]> {
-    const response = await guard(() => fetchImpl(`${base}/api/sagas`, { headers }), "saga catalog");
+    const response = await guard(() => credentialedFetch(`${base}/api/sagas`, { headers }), "saga catalog");
     return parseSagaCatalog(await readJson(response, "saga catalog"));
   }
 
@@ -2061,7 +2081,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
   async function pollDetail(executionId: string, wait: boolean): Promise<SdkExecutionDetail> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const response = await guard(() => fetchImpl(`${base}/api/executions/${executionId}`, { headers }), "detail");
+      const response = await guard(() => credentialedFetch(`${base}/api/executions/${executionId}`, { headers }), "detail");
       const detail = parseExecutionDetail(await readJson(response, "execution detail"));
       if ((SDK_TERMINAL_STATUSES as readonly string[]).includes(detail.status) || !wait) return detail;
       if (Date.now() >= deadline) {
@@ -2097,14 +2117,14 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     },
     async getSagaPolicy(ref: string): Promise<SdkRuntimePolicy> {
       const sagaId = await resolveSagaId(ref);
-      const response = await guard(() => fetchImpl(`${base}/api/sagas/${sagaId}/policy`, { headers }), "saga policy");
+      const response = await guard(() => credentialedFetch(`${base}/api/sagas/${sagaId}/policy`, { headers }), "saga policy");
       return parseRuntimePolicy(await readJson(response, "saga policy"));
     },
     async updateSagaPolicy(ref: string, policy: unknown): Promise<SdkRuntimePolicy> {
       const sagaId = await resolveSagaId(ref);
       const response = await guard(
         () =>
-          fetchImpl(`${base}/api/sagas/${sagaId}/policy`, {
+          credentialedFetch(`${base}/api/sagas/${sagaId}/policy`, {
             method: "PUT",
             headers: { ...headers, "Content-Type": "application/json" },
             body: JSON.stringify(policy ?? {}),
@@ -2117,7 +2137,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       const sagaId = await resolveSagaId(preview.saga);
       const response = await guard(
         () =>
-          fetchImpl(`${base}/api/dev/preview`, {
+          credentialedFetch(`${base}/api/dev/preview`, {
             method: "POST",
             headers,
             body: JSON.stringify({
@@ -2138,7 +2158,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       const sagaId = await resolveSagaId(submit.saga);
       const response = await guard(
         () =>
-          fetchImpl(`${base}/api/executions`, {
+          credentialedFetch(`${base}/api/executions`, {
             method: "POST",
             headers: { ...headers, "Idempotency-Key": key },
             body: JSON.stringify({ sagaId, input: submit.input ?? {} }),
@@ -2166,7 +2186,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       const sagaId = await resolveSagaId(options.saga);
       const response = await guard(
         () =>
-          fetchImpl(`${base}/api/executions/provider`, {
+          credentialedFetch(`${base}/api/executions/provider`, {
             method: "POST",
             headers: { ...headers, "Idempotency-Key": key },
             body: JSON.stringify({ sagaId, input: options.input ?? {} }),
@@ -2182,7 +2202,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     async cancelExecution(id: string): Promise<SdkCancelReceipt> {
       checkExecutionId(id);
       const response = await guard(
-        () => fetchImpl(`${base}/api/executions/${id}/cancel`, { method: "POST", headers }),
+        () => credentialedFetch(`${base}/api/executions/${id}/cancel`, { method: "POST", headers }),
         "execution cancel",
       );
       const data: unknown = await readJson(response, "execution cancel");
@@ -2200,7 +2220,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       if (query.limit !== undefined) params.set("limit", String(query.limit));
       if (query.cursor !== undefined) params.set("cursor", query.cursor);
       const suffix = params.size > 0 ? `?${params.toString()}` : "";
-      const response = await guard(() => fetchImpl(`${base}/api/executions${suffix}`, { headers }), "history");
+      const response = await guard(() => credentialedFetch(`${base}/api/executions${suffix}`, { headers }), "history");
       return parseHistoryPage(await readJson(response, "history"));
     },
     async tailLogs(id: string, query: SdkLogTailQuery = {}): Promise<SdkLogPage> {
@@ -2211,7 +2231,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       if (query.cursor !== undefined) params.set("cursor", query.cursor);
       const suffix = params.size > 0 ? `?${params.toString()}` : "";
       const response = await guard(
-        () => fetchImpl(`${base}/api/executions/${id}/logs${suffix}`, { headers }),
+        () => credentialedFetch(`${base}/api/executions/${id}/logs${suffix}`, { headers }),
         "log tail",
       );
       return parseLogPage(await readJson(response, "log tail"));
@@ -2226,7 +2246,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       if (query.limit !== undefined) params.set("limit", String(query.limit));
       if (query.cursor !== undefined) params.set("cursor", query.cursor);
       const suffix = params.size > 0 ? `?${params.toString()}` : "";
-      const response = await guard(() => fetchImpl(`${base}/api/logs${suffix}`, { headers }), "log search");
+      const response = await guard(() => credentialedFetch(`${base}/api/logs${suffix}`, { headers }), "log search");
       return parseLogPage(await readJson(response, "log search"));
     },
     async diagnoseExecution(id: string): Promise<SdkDiagnosis> {
@@ -2253,35 +2273,35 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       if (query.limit !== undefined) params.set("limit", String(query.limit));
       if (query.cursor !== undefined) params.set("cursor", query.cursor);
       const suffix = params.size > 0 ? `?${params.toString()}` : "";
-      const response = await guard(() => fetchImpl(`${base}/api/audit${suffix}`, { headers }), "audit trail");
+      const response = await guard(() => credentialedFetch(`${base}/api/audit${suffix}`, { headers }), "audit trail");
       return parseAuditPage(await readJson(response, "audit trail"));
     },
     async listNotifications(limit?: number): Promise<readonly SdkNotification[]> {
       const params = new URLSearchParams();
       if (limit !== undefined) params.set("limit", String(limit));
       const suffix = params.size > 0 ? `?${params.toString()}` : "";
-      const response = await guard(() => fetchImpl(`${base}/api/notifications${suffix}`, { headers }), "notifications");
+      const response = await guard(() => credentialedFetch(`${base}/api/notifications${suffix}`, { headers }), "notifications");
       return parseNotifications(await readJson(response, "notifications"));
     },
     async getNotification(id: string): Promise<SdkNotification> {
       checkNotificationId(id);
-      const response = await guard(() => fetchImpl(`${base}/api/notifications/${id}`, { headers }), "notification");
+      const response = await guard(() => credentialedFetch(`${base}/api/notifications/${id}`, { headers }), "notification");
       return parseNotification(await readJson(response, "notification"));
     },
     async dismissNotification(id: string): Promise<void> {
       checkNotificationId(id);
       const response = await guard(
-        () => fetchImpl(`${base}/api/notifications/${id}`, { method: "DELETE", headers }),
+        () => credentialedFetch(`${base}/api/notifications/${id}`, { method: "DELETE", headers }),
         "notification dismissal",
       );
       await readJson(response, "notification dismissal");
     },
     async getOpsVersion(): Promise<SdkOpsVersion> {
-      const response = await guard(() => fetchImpl(`${base}/api/ops/version`, { headers }), "ops version");
+      const response = await guard(() => credentialedFetch(`${base}/api/ops/version`, { headers }), "ops version");
       return parseOpsVersion(await readJson(response, "ops version"));
     },
     async getOpsHealth(): Promise<SdkOpsHealth> {
-      const response = await guard(() => fetchImpl(`${base}/api/ops/health`, { headers }), "ops health");
+      const response = await guard(() => credentialedFetch(`${base}/api/ops/health`, { headers }), "ops health");
       return parseOpsHealth(await readJson(response, "ops health"));
     },
     async getOpsMetrics(recent?: number): Promise<SdkOpsMetrics> {
@@ -2289,27 +2309,27 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
         throw new SdkError("SDK_INVALID_REF", "Recent must be an integer from 1 to 50.");
       }
       const suffix = recent === undefined ? "" : `?recent=${recent}`;
-      const response = await guard(() => fetchImpl(`${base}/api/ops/metrics${suffix}`, { headers }), "ops metrics");
+      const response = await guard(() => credentialedFetch(`${base}/api/ops/metrics${suffix}`, { headers }), "ops metrics");
       return parseOpsMetrics(await readJson(response, "ops metrics"));
     },
     async listOpsScheduledTasks(): Promise<readonly SdkOpsScheduledTask[]> {
       const response = await guard(
-        () => fetchImpl(`${base}/api/ops/scheduled-tasks`, { headers }),
+        () => credentialedFetch(`${base}/api/ops/scheduled-tasks`, { headers }),
         "ops scheduled tasks",
       );
       return parseOpsScheduledTasks(await readJson(response, "ops scheduled tasks"));
     },
     async getOpsJobs(): Promise<SdkOpsJobs> {
-      const response = await guard(() => fetchImpl(`${base}/api/ops/jobs`, { headers }), "ops jobs");
+      const response = await guard(() => credentialedFetch(`${base}/api/ops/jobs`, { headers }), "ops jobs");
       return parseOpsJobs(await readJson(response, "ops jobs"));
     },
     async getOpsPreflight(): Promise<SdkOpsPreflight> {
-      const response = await guard(() => fetchImpl(`${base}/api/ops/preflight`, { headers }), "ops preflight");
+      const response = await guard(() => credentialedFetch(`${base}/api/ops/preflight`, { headers }), "ops preflight");
       return parseOpsPreflight(await readJson(response, "ops preflight"));
     },
     async getOpsConnectionHealth(): Promise<SdkOpsConnectionHealth> {
       const response = await guard(
-        () => fetchImpl(`${base}/api/ops/connections`, { headers }),
+        () => credentialedFetch(`${base}/api/ops/connections`, { headers }),
         "ops connection health",
       );
       return parseOpsConnectionHealth(await readJson(response, "ops connection health"));
@@ -2317,7 +2337,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     async runOpsRepair(options: SdkOpsRepairOptions): Promise<SdkOpsRepairOutcome> {
       const response = await guard(
         () =>
-          fetchImpl(`${base}/api/ops/repairs`, {
+          credentialedFetch(`${base}/api/ops/repairs`, {
             method: "POST",
             headers,
             body: JSON.stringify({
@@ -2332,13 +2352,13 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       return parseOpsRepairOutcome(await readJson(response, "ops repair"));
     },
     async listConfigs(): Promise<readonly SdkConfigEntry[]> {
-      const response = await guard(() => fetchImpl(`${base}/api/config`, { headers }), "config list");
+      const response = await guard(() => credentialedFetch(`${base}/api/config`, { headers }), "config list");
       return parseConfigList(await readJson(response, "config list"));
     },
     async setConfig(options: SdkSetConfigOptions): Promise<SdkConfigEntry> {
       const response = await guard(
         () =>
-          fetchImpl(`${base}/api/config`, {
+          credentialedFetch(`${base}/api/config`, {
             method: "POST",
             headers,
             body: JSON.stringify({
@@ -2358,7 +2378,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       }
       const response = await guard(
         () =>
-          fetchImpl(`${base}/api/config/${options.id}`, {
+          credentialedFetch(`${base}/api/config/${options.id}`, {
             method: "PUT",
             headers,
             body: JSON.stringify({
@@ -2377,25 +2397,25 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
         throw new SdkError("SDK_INVALID_REF", "Config deletes need the exact config UUID.");
       }
       const response = await guard(
-        () => fetchImpl(`${base}/api/config/${id}`, { method: "DELETE", headers }),
+        () => credentialedFetch(`${base}/api/config/${id}`, { method: "DELETE", headers }),
         "config delete",
       );
       await readJson(response, "config delete");
     },
     async listForms(): Promise<readonly SdkFormSummary[]> {
-      const response = await guard(() => fetchImpl(`${base}/api/forms`, { headers }), "form list");
+      const response = await guard(() => credentialedFetch(`${base}/api/forms`, { headers }), "form list");
       return parseFormList(await readJson(response, "form list"));
     },
     async getForm(name: string): Promise<SdkFormDetail> {
       checkFormName(name);
-      const response = await guard(() => fetchImpl(`${base}/api/forms/${name}`, { headers }), "form detail");
+      const response = await guard(() => credentialedFetch(`${base}/api/forms/${name}`, { headers }), "form detail");
       return parseFormDetail(await readJson(response, "form detail"));
     },
     async createForm(options: SdkSaveFormOptions): Promise<SdkFormDetail> {
       checkFormName(options.name);
       const response = await guard(
         () =>
-          fetchImpl(`${base}/api/forms`, {
+          credentialedFetch(`${base}/api/forms`, {
             method: "POST",
             headers,
             body: JSON.stringify({
@@ -2415,7 +2435,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       checkFormName(name);
       const response = await guard(
         () =>
-          fetchImpl(`${base}/api/forms/${name}`, {
+          credentialedFetch(`${base}/api/forms/${name}`, {
             method: "PUT",
             headers,
             body: JSON.stringify({
@@ -2433,7 +2453,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     async deleteForm(name: string): Promise<void> {
       checkFormName(name);
       const response = await guard(
-        () => fetchImpl(`${base}/api/forms/${name}`, { method: "DELETE", headers }),
+        () => credentialedFetch(`${base}/api/forms/${name}`, { method: "DELETE", headers }),
         "form delete",
       );
       await readJson(response, "form delete");
@@ -2442,7 +2462,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       checkFormName(name);
       const response = await guard(
         () =>
-          fetchImpl(`${base}/api/forms/${name}/startup`, {
+          credentialedFetch(`${base}/api/forms/${name}/startup`, {
             method: "POST",
             headers,
             body: JSON.stringify(prefill === undefined ? {} : { prefill }),
@@ -2454,7 +2474,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     async getFormProviders(name: string): Promise<SdkFormProviders> {
       checkFormName(name);
       const response = await guard(
-        () => fetchImpl(`${base}/api/forms/${name}/providers`, { headers }),
+        () => credentialedFetch(`${base}/api/forms/${name}/providers`, { headers }),
         "form providers",
       );
       return parseFormProviders(await readJson(response, "form providers"));
@@ -2470,7 +2490,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       }
       const response = await guard(
         () =>
-          fetchImpl(`${base}/api/forms/${options.form}/submit`, {
+          credentialedFetch(`${base}/api/forms/${options.form}/submit`, {
             method: "POST",
             headers: { ...headers, "Idempotency-Key": key },
             body: JSON.stringify({
@@ -2484,19 +2504,19 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
       return parseFormSubmit(await readJson(response, "form submit"));
     },
     async listSchedules(): Promise<readonly SdkScheduleSummary[]> {
-      const response = await guard(() => fetchImpl(`${base}/api/schedules`, { headers }), "schedule list");
+      const response = await guard(() => credentialedFetch(`${base}/api/schedules`, { headers }), "schedule list");
       return parseScheduleList(await readJson(response, "schedule list"));
     },
     async getSchedule(name: string): Promise<SdkScheduleSummary> {
       checkScheduleName(name);
-      const response = await guard(() => fetchImpl(`${base}/api/schedules/${name}`, { headers }), "schedule detail");
+      const response = await guard(() => credentialedFetch(`${base}/api/schedules/${name}`, { headers }), "schedule detail");
       return parseScheduleDetail(await readJson(response, "schedule detail"));
     },
     async createSchedule(options: SdkSaveScheduleOptions): Promise<SdkScheduleSummary> {
       checkScheduleName(options.name);
       const response = await guard(
         () =>
-          fetchImpl(`${base}/api/schedules`, {
+          credentialedFetch(`${base}/api/schedules`, {
             method: "POST",
             headers,
             body: JSON.stringify({
@@ -2517,7 +2537,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     async deleteSchedule(name: string): Promise<void> {
       checkScheduleName(name);
       const response = await guard(
-        () => fetchImpl(`${base}/api/schedules/${name}`, { method: "DELETE", headers }),
+        () => credentialedFetch(`${base}/api/schedules/${name}`, { method: "DELETE", headers }),
         "schedule delete",
       );
       await readJson(response, "schedule delete");
@@ -2525,7 +2545,7 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     async setScheduleEnabled(name: string, enabled: boolean): Promise<SdkScheduleSummary> {
       checkScheduleName(name);
       const response = await guard(
-        () => fetchImpl(`${base}/api/schedules/${name}/${enabled ? "enable" : "disable"}`, { method: "POST", headers }),
+        () => credentialedFetch(`${base}/api/schedules/${name}/${enabled ? "enable" : "disable"}`, { method: "POST", headers }),
         "schedule enablement",
       );
       return parseScheduleDetail(await readJson(response, "schedule enablement"));
@@ -2533,17 +2553,17 @@ export function createSdkClient(options: SdkClientOptions): SdkClient {
     async getScheduleDelivery(name: string, window: string): Promise<SdkScheduleDelivery> {
       checkScheduleName(name);
       const response = await guard(
-        () => fetchImpl(`${base}/api/schedules/${name}/deliveries?window=${encodeURIComponent(window)}`, { headers }),
+        () => credentialedFetch(`${base}/api/schedules/${name}/deliveries?window=${encodeURIComponent(window)}`, { headers }),
         "schedule delivery",
       );
       return parseScheduleDelivery(await readJson(response, "schedule delivery"));
     },
     async whoAmI(): Promise<SdkCallerIdentity> {
-      const response = await guard(() => fetchImpl(`${base}/api/auth/me`, { headers }), "caller identity");
+      const response = await guard(() => credentialedFetch(`${base}/api/auth/me`, { headers }), "caller identity");
       return parseCallerIdentity(await readJson(response, "caller identity"));
     },
     async getContract(): Promise<SdkContractDescriptor> {
-      const response = await guard(() => fetchImpl(`${base}${SDK_DOC_PATH}`, { headers }), "sdk contract");
+      const response = await guard(() => credentialedFetch(`${base}${SDK_DOC_PATH}`, { headers }), "sdk contract");
       const data: unknown = await readJson(response, "sdk contract");
       if (!isRecord(data) || data.version !== SDK_VERSION) {
         throw new SdkError("SDK_CLIENT_MISMATCH", "The server SDK contract version does not match this SDK.");

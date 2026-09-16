@@ -504,6 +504,38 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     expect(() => createSdkClient({ base: "http://127.0.0.1:8788", token: "tok" })).not.toThrow();
   });
 
+  it("refuses credentialed calls over plain HTTP redirects and Access on HTTP (#374)", async () => {
+    // A 301 from the configured origin must fail closed with
+    // SDK_CLIENT_NETWORK instead of replaying the bearer token to the
+    // redirect target (default fetch follows 3xx with headers intact).
+    const moved = new Response(null, {
+      status: 301,
+      headers: { location: "http://evil.test/api/sagas" },
+    });
+    const viaRedirect = stub([moved]);
+    const redirected = createSdkClient({ base: "https://local.test", token: "tok", fetchImpl: viaRedirect.fetchImpl });
+    await expect(redirected.listSagas()).rejects.toMatchObject({
+      code: "SDK_CLIENT_NETWORK",
+      message: expect.stringContaining("redirect"),
+    });
+    expect(viaRedirect.calls).toHaveLength(1);
+    expect(viaRedirect.calls[0]?.init.redirect).toBe("manual");
+    // Access client credentials ride only HTTPS: a loopback HTTP client
+    // sends the bearer alone, never the Access pair.
+    const looped = stub([json(catalog)]);
+    const loopClient = createSdkClient({
+      base: "http://127.0.0.1:8788",
+      token: "tok",
+      access: { clientId: "id", clientSecret: "secret" },
+      fetchImpl: looped.fetchImpl,
+    });
+    await loopClient.listSagas();
+    const loopHeaders = looped.calls[0]?.init.headers as Record<string, string>;
+    expect(loopHeaders.Authorization).toBe("Bearer tok");
+    expect(loopHeaders["CF-Access-Client-Id"]).toBeUndefined();
+    expect(loopHeaders["CF-Access-Client-Secret"]).toBeUndefined();
+  });
+
   it("forwards Access credentials and resolves sagas by UUID without listing", async () => {
     const { calls, fetchImpl } = stub([json(detail({ status: "Running" }))]);
     const client = createSdkClient({
