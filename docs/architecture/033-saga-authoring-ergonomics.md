@@ -95,9 +95,18 @@ repeated interiors while `run` keeps calling `step.do` visibly:
 - `schemaOf(properties, required)` — one-line frozen `IoSchema` builder
   replacing ~15 lines of nested `Object.freeze` literals.
 - `makeSagaWorkflow(def)` — factory returning the `WorkflowEntrypoint`
-  subclass, replacing the per-file adapter class (~5 lines) with one line.
-  `src/bindings.ts` and `wrangler.jsonc` entries remain explicit (native
-  binding names are Cloudflare's, not ours to abstract).
+  subclass, replacing the per-file adapter class body (~5 lines) with a
+  one-line named subclass (`export class EchoWorkflow extends
+  makeSagaWorkflow(echoSagaDef) {}`). The named export per Saga file stays:
+  `wrangler.jsonc` `class_name` entries and the `src/index.ts` re-export
+  require statically exported classes, so an anonymous factory product alone
+  cannot serve as the binding target. Typing verified 2026-09-16 with a
+  throwaway probe (removed after): the factory's return type must preserve
+  the native `(ctx: ExecutionContext, env: Bindings)` construct signature —
+  a `new () => ...` return type fails with TS2322 because the native
+  constructor takes 2 arguments. `src/bindings.ts` and `wrangler.jsonc`
+  entries remain explicit (native binding names are Cloudflare's, not ours
+  to abstract).
 - `prepareInput(ctx, step, saga, parse)` — one-line `prepare-input-v1`.
 - `doVendor(ctx, step, prepared, { op, integrationId, required, timeoutMs, call })`
   — owns the ~25-line vendor-step interior (begin, deadline, resolution,
@@ -134,6 +143,9 @@ export const echoSagaDef = defineSaga<EchoInput>({
 });
 
 export class EchoWorkflow extends makeSagaWorkflow(echoSagaDef) {}
+// Named subclass (not `export const X = makeSagaWorkflow(def)`): the
+// wrangler.jsonc class_name target and src/index.ts re-export need a
+// statically exported class.
 ```
 
 Estimated effect: single-vendor Saga drops from ~140 lines to ~40, of which
