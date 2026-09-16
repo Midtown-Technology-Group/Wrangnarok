@@ -1,0 +1,22 @@
+# codex/generator-trust lane scope (issues #343, #366, #356): generator trust.
+# Allowed: OpenAPI validation/emitter, generator, CLI generator commands only,
+# solution export/install/activation, and their tests. Nothing else.
+scopes/codex-generator-trust.scope
+src/openapi.ts
+src/generate-integration.ts
+src/generate-integration-source.mjs
+src/generate-integration-source.d.mts
+src/solution-export.ts
+src/solutions.ts
+src/executions.ts
+scripts/wrangnarok.mjs
+scripts/wrangnarok.d.mts
+test/generate-integration.test.ts
+test/tool-01-openapi.test.ts
+test/postman.test.ts
+test/postman-parity.test.ts
+test/solution-export.test.ts
+test/solutions-activation.test.ts
+test/solutions-install.test.ts
+test/solutions-validation.test.ts
+test/migration-bridge.test.ts
