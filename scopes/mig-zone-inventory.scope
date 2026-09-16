@@ -12,12 +12,14 @@
 # src/solution-export.ts likewise for the source-catalog CODE_SAGAS pins.
 # test/connections.test.ts + test/integrations.test.ts: hardcoded inventory
 # counts/names updated for the new member (no behavior changes).
-# test/cloudflare-unit.test.ts: new fast unit coverage for the new files.
+# test/cloudflare-unit.test.ts
+scripts/check-bundle-budget.mjs: new fast unit coverage for the new files.
 src/solutions.ts
 src/solution-export.ts
 test/connections.test.ts
 test/integrations.test.ts
 test/cloudflare-unit.test.ts
+scripts/check-bundle-budget.mjs
 src/domain.ts
 src/saga.ts
 src/sagas/cloudflare.ts
