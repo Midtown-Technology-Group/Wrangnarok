@@ -407,15 +407,23 @@ export async function listArtifacts(
   db: D1Database,
   caller: Principal,
   query: { limit?: number; includeDeleted?: boolean },
+  admin = false,
 ): Promise<{ artifacts: ArtifactSummary[]; hasMore: boolean }> {
   const limit = query.limit ?? ARTIFACT_LIST_LIMIT_DEFAULT;
   if (!Number.isInteger(limit) || limit < 1 || limit > ARTIFACT_LIST_LIMIT_MAX) {
     throw invalid("INVALID_LIMIT", `Limit must be an integer from 1 to ${ARTIFACT_LIST_LIMIT_MAX}.`);
   }
   const statusFilter = query.includeDeleted === true ? "" : "AND status='active'";
+  // Canonical visibility (ADR 019 section 3, issue #354): creators list
+  // their own rows; admins list the Organization. Non-admins never see
+  // another user's names, MIME types, sizes, or versions through the list.
+  const ownerFilter = admin ? "" : "AND creator_user_id=?";
+  const binds: (string | number)[] = admin ? [caller.orgId, limit + 1] : [caller.orgId, caller.userId, limit + 1];
   const rows = await db
-    .prepare(`SELECT * FROM artifacts WHERE org_id=? ${statusFilter} ORDER BY created_at DESC, id DESC LIMIT ?`)
-    .bind(caller.orgId, limit + 1)
+    .prepare(
+      `SELECT * FROM artifacts WHERE org_id=? ${ownerFilter} ${statusFilter} ORDER BY created_at DESC, id DESC LIMIT ?`,
+    )
+    .bind(...binds)
     .all<ArtifactRow>();
   const page = rows.results.slice(0, limit);
   return { artifacts: page.map(toSummary), hasMore: rows.results.length > limit };

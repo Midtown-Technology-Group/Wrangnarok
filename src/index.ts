@@ -2189,7 +2189,9 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           throw new Fault(400, "UNSUPPORTED_QUERY", "Only limit is supported here.");
         }
       }
-      return json(await listArtifacts(env.DB, caller, limit === undefined ? {} : { limit }));
+      return json(
+        await listArtifacts(env.DB, caller, limit === undefined ? {} : { limit }, artifactAdmin),
+      );
     }
     if (url.pathname === "/api/artifacts" && request.method === "PUT") {
       // Upload: bytes arrive as the raw octet-stream body; name and mime ride
