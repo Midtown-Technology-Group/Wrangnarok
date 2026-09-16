@@ -755,6 +755,9 @@ describe("cross-instance refresh fence (issue #149 follow-up)", () => {
       release();
       const [first, second, third] = await Promise.all(pending);
       expect(vendorCalls.slice().sort()).toEqual(["token-A", "token-B"]);
+      if (first === undefined || second === undefined || third === undefined) {
+        throw new Error("fence test expected three responses");
+      }
       expect(first.status).toBe(200);
       expect(second.status).toBe(200);
       expect(third.status).toBe(200);
