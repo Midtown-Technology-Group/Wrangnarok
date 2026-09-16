@@ -7,7 +7,15 @@ import { env } from "cloudflare:workers";
 import { reset } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Bindings } from "../src/bindings";
-import { digestSaga, ECHO_INTEGRATION_ID, echoSaga, Fault, helloSaga, NINJA_INTEGRATION_ID, ninjaSaga } from "../src/domain";
+import {
+  digestSaga,
+  ECHO_INTEGRATION_ID,
+  echoSaga,
+  Fault,
+  helloSaga,
+  NINJA_INTEGRATION_ID,
+  ninjaSaga,
+} from "../src/domain";
 import { SAGA_DEFINITIONS } from "../src/sagas";
 import { installBundle } from "../src/solutions";
 import type { BundleManifest } from "../src/solutions";
