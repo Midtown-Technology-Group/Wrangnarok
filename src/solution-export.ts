@@ -828,10 +828,12 @@ async function validatePackage(raw: unknown, catalogs: SourceCatalogs, exporter:
   const moduleIds = new Set(modules.map((module) => module.sagaId));
   for (const pin of manifest.sagas) {
     if (!moduleIds.has(pin.id)) {
-      const catalog = catalogs.sagas.find((saga) => saga.id === pin.id);
+      // Manifest pins are catalog-validated UUIDs upstream (UNKNOWN_SAGA),
+      // so the catalog name is always available here.
+      const catalog = catalogs.sagas.find((saga) => saga.id === pin.id) as { name: string };
       throw invalid(
         "MISSING_MODULE",
-        `Saga ${catalog ? `"${catalog.name}" (${pin.id})` : pin.id} is pinned by the manifest but declares no module: add the module or drop the pin before sharing.`,
+        `Saga "${catalog.name}" (${pin.id}) is pinned by the manifest but declares no module: add the module or drop the pin before sharing.`,
       );
     }
   }
