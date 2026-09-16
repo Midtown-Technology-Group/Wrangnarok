@@ -6,6 +6,8 @@ migrations/0018_ops.sql
 migrations/0019_files.sql
 migrations/0020_artifacts.sql
 migrations/0021_endpoints.sql
+migrations/0026_cancelling_repair.sql
+migrations/0027_rename_replay_repair.sql
 docs/migration-ledger.md
 src/migration.ts
 test/resilience.test.ts
