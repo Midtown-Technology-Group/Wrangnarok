@@ -243,9 +243,7 @@ describe("CON-02 operator routes", () => {
     ).toBe(403);
     const created = await call("/api/config", "POST", { key: "guarded", type: "string", value: "v" });
     const id = ((await created.json()) as { config: { id: string } }).config.id;
-    expect(
-      (await call(`/api/config/${id}`, "PUT", { description: "nope" }, ORG, OTHER_USER)).status,
-    ).toBe(403);
+    expect((await call(`/api/config/${id}`, "PUT", { description: "nope" }, ORG, OTHER_USER)).status).toBe(403);
     expect((await call(`/api/config/${id}`, "DELETE", undefined, ORG, OTHER_USER)).status).toBe(403);
     // Admins keep full access on the same rows.
     expect((await call("/api/config", "GET")).status).toBe(200);
