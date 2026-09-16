@@ -7,6 +7,8 @@ import { helloSaga } from "../src/domain";
 import {
   currentWindow,
   deliveryForWindow,
+  listSchedules,
+  loadSchedule,
   nextCronDue,
   parseCron,
   parseRunAt,
@@ -321,6 +323,37 @@ describe("TRG-01 pre-dispatch fence (fake D1, no workerd)", () => {
     ).rejects.toMatchObject({ code: "ORG_STORE_NOT_MIGRATED" });
     expect(stub.calls()).toBe(0);
   });
+  it("reads pre-migration absence on missing tables, never on backend faults (issue #137)", async () => {
+    // The isMissingTable-true branches: a store predating the schedules
+    // tables reads as absence (null / empty), preserving the pre-migration
+    // contract. Real faults rethrow (covered by the sibling test above).
+    const missingDb = {
+      prepare() {
+        throw new Error("D1_ERROR: no such table: schedules: SQLITE_ERROR");
+      },
+    } as unknown as D1Database;
+    await expect(loadSchedule(missingDb, "00000000-0000-4000-8000-000000000001", "nope")).resolves.toBeNull();
+    await expect(
+      listSchedules(
+        missingDb,
+        { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" },
+        SAGA_DEFINITIONS,
+      ),
+    ).resolves.toEqual([]);
+    await expect(deliveryForWindow(missingDb, "sched", "2026-09-12T10:00")).resolves.toBeNull();
+    await expect(
+      promoteDueSchedules(
+        missingDb,
+        { DB: missingDb, HELLO_WORKFLOW: {} } as never,
+        SAGA_DEFINITIONS,
+        (async () => {
+          throw new Error("must not dispatch");
+        }) as never,
+        new Date(),
+      ),
+    ).resolves.toEqual({ promoted: [], skipped: [] });
+  });
+
   it("rethrows tick-scan and delivery-lookup backend faults (issue #137)", async () => {
     // The due-scan rethrow branch: a broken tick scan fails the tick
     // instead of reporting an empty schedule set.
