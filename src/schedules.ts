@@ -664,8 +664,8 @@ export interface TickReport {
  * pre-dispatch fence inside promoteWindow (skip, zero dispatch).
  *
  * Fairness (codex #364, reopened): selection itself is per-org fair —
- * the tick scans oldest-first per Organization (bounded) and merges
- * oldest-first globally, so one tenant's stale head-of-line rows can never
+ * the tick scans oldest-first per Organization (bounded) and processes
+ * every admitted row, so one tenant's stale head-of-line rows can never
  * occupy the whole scan and starve other tenants. Each Organization still
  * promotes at most SCHEDULE_TICK_PER_ORG_LIMIT rows per tick.
  * Persistently non-promotable rows
@@ -692,7 +692,10 @@ export async function promoteDueSchedules(
     // from the tick. The global work stays bounded at
     // MAX_ORGS * PER_ORG rows (the old global LIMIT); the promotion loop
     // still enforces the per-org cap, and persistently non-promotable rows
-    // accrue quarantine across ticks until parked.
+    // accrue quarantine across ticks until parked. Rows stay grouped by
+    // Organization (org_id order) with oldest-first inside each group: the
+    // loop processes every admitted row, so cross-org merge order carries
+    // no fairness meaning and no comparator is needed.
     const orgs = await db
       .prepare(
         "SELECT DISTINCT org_id AS orgId FROM schedules WHERE enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=? ORDER BY org_id LIMIT ?",
@@ -712,7 +715,7 @@ export async function promoteDueSchedules(
         .all<ScheduleRow>();
       perOrg.push(rows.results);
     }
-    due = perOrg.flat().sort((a, b) => ((a.next_due_at as string) < (b.next_due_at as string) ? -1 : 1));
+    due = perOrg.flat();
   } catch (error) {
     // A backend fault on the tick scan is a failed tick, not an empty
     // schedule set: rethrow so the Cron reports failure instead of
