@@ -27,13 +27,16 @@ import {
   MailboxMessage,
   RECENT_WINDOW_MS,
   buildMessage,
+  claimAlias,
   findReply,
+  formatHead,
   formatLine,
   formatPushBlock,
   isRecentlyActive,
   markStatus,
   parseLine,
   peekPushable,
+  senderLine,
   unread,
   unreadSummary,
   validAlias,
@@ -111,9 +114,14 @@ class FileStore {
 
   setAlias(alias: string, sessionId: string): void {
     mkdirSync(this.root, { recursive: true });
-    const all = this.aliases();
-    all[alias] = sessionId;
-    writeFileSync(this.aliasesPath(), JSON.stringify(all, null, 2));
+    const claimed = claimAlias(this.aliases(), alias, sessionId);
+    if (!claimed.ok) {
+      throw new MailboxFault(
+        "ALIAS_TAKEN",
+        `Alias ${JSON.stringify(alias)} is owned by another session and cannot be claimed.`,
+      );
+    }
+    writeFileSync(this.aliasesPath(), JSON.stringify(claimed.aliases, null, 2));
   }
 
   resolveRecipient(to: string): string {
@@ -263,7 +271,7 @@ const MailboxPlugin = (async ({ client, worktree, directory }) => {
       );
       return pending
         .map((m) => {
-          const head = `[${m.kind}/${m.priority}] from ${m.fromAlias ?? m.from} id=${m.id}${m.replyTo ? ` replyTo=${m.replyTo}` : ""}${m.subject ? ` subj=${JSON.stringify(m.subject)}` : ""}`;
+          const head = formatHead(m);
           return `${head}\n${m.body}`;
         })
         .join("\n---\n");
@@ -314,7 +322,7 @@ const MailboxPlugin = (async ({ client, worktree, directory }) => {
           const reply = findReply(unread(store.load(context.sessionID)), request.id);
           if (reply !== null) {
             store.save(context.sessionID, markStatus(store.load(context.sessionID), [reply.id], "read"));
-            return `reply from ${reply.fromAlias ?? reply.from}:\n${reply.body}`;
+            return `reply from ${senderLine(reply)}:\n${reply.body}`;
           }
           if (Date.now() >= deadline) throw new MailboxFault("MAILBOX_TIMEOUT", `No reply to ${request.id} within ${timeout}ms.`);
           await sleep(Math.min(ASK_POLL_MS, Math.max(0, deadline - Date.now())), context.abort);
