@@ -211,7 +211,9 @@ describe("codex #364: per-org fairness and skip quarantine (workerd)", () => {
     const USER = "00000000-0000-4000-8000-000000000002";
     const now = new Date().toISOString();
     const ancient = new Date(Date.now() - 3_600_000).toISOString();
-    await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?, 'active', ?) ON CONFLICT(user_id) DO NOTHING")
+    await bindings.DB.prepare(
+      "INSERT INTO users(user_id,status,created_at) VALUES (?, 'active', ?) ON CONFLICT(user_id) DO NOTHING",
+    )
       .bind(USER, now)
       .run();
     // 11 orgs with REPLENISHED backlog: before every tick each org is

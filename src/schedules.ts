@@ -712,8 +712,7 @@ export async function promoteDueSchedules(
           .bind(now.toISOString())
           .first<{ n: number }>()
       )?.n ?? 0;
-    const rotationOffset =
-      dueOrgCount > 0 ? Math.floor(now.getTime() / 60_000) % dueOrgCount : 0;
+    const rotationOffset = dueOrgCount > 0 ? Math.floor(now.getTime() / 60_000) % dueOrgCount : 0;
     const orgs = await db
       .prepare(
         "SELECT DISTINCT org_id AS orgId FROM schedules WHERE enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=? ORDER BY org_id LIMIT ? OFFSET ?",
