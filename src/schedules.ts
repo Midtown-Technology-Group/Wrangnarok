@@ -36,13 +36,18 @@ const SAFE_WINDOW_CHAR = /^[a-zA-Z0-9._:-]+$/;
  * reserve `wep-`: a caller squatting it could replay against a scheduled
  * Execution, so the submit route must reject caller keys with this prefix. */
 export const SCHEDULE_KEY_PREFIX = "sch-";
-/** Bounded scan/admission cost per Cron tick (Free-tier posture): the tick
- * reads at most this many due rows per Organization scan. */
+/** Bounded scan/admission cost per Cron tick (Free-tier posture): one
+ * Organization's scan considers at most this many due rows, and the tick
+ * admits at most SCHEDULE_TICK_MAX_ORGS Organizations. */
 export const SCHEDULE_TICK_LIMIT = 50;
+/** Maximum Organizations admitted to one tick scan (codex #364 reopen):
+ * bounds the per-org scan fan-out so the global work stays explicit. */
+export const SCHEDULE_TICK_MAX_ORGS = 10;
 /** Per-Organization promotion cap per tick (codex #364): one tenant's stale
- * head-of-line rows can never occupy the whole batch. The global scan still
- * costs at most SCHEDULE_TICK_LIMIT rows; the per-org cap partitions that
- * budget fairly instead of first-come-first-served. */
+ * head-of-line rows can never occupy the whole batch. Selection itself is
+ * per-org fair (bounded oldest-first scan per Organization, merged
+ * oldest-first globally), so fairness applies before any global limit
+ * instead of only capping an already-truncated global result. */
 export const SCHEDULE_TICK_PER_ORG_LIMIT = 5;
 /** Skip-streak quarantine (codex #364): a row that skips this many
  * consecutive ticks stops occupying the head of the global scan. The tick
@@ -658,10 +663,12 @@ export interface TickReport {
  * row disabled, deleted, or de-authorized after the scan still loses at the
  * pre-dispatch fence inside promoteWindow (skip, zero dispatch).
  *
- * Fairness (codex #364): the scan batches oldest-first globally, but each
- * Organization promotes at most SCHEDULE_TICK_PER_ORG_LIMIT rows per tick —
- * one tenant's 50 stale head-of-line rows can no longer starve every other
- * tenant's due rows out of the batch. Persistently non-promotable rows
+ * Fairness (codex #364, reopened): selection itself is per-org fair —
+ * the tick scans oldest-first per Organization (bounded) and processes
+ * every admitted row, so one tenant's stale head-of-line rows can never
+ * occupy the whole scan and starve other tenants. Each Organization still
+ * promotes at most SCHEDULE_TICK_PER_ORG_LIMIT rows per tick.
+ * Persistently non-promotable rows
  * (SAGA_PAUSED, disabled, de-authorized) accrue a consecutive-skip streak in
  * `last_window` (`quarantine:<n>`); at SCHEDULE_SKIP_QUARANTINE_AFTER the
  * tick parks the row (disabled) so it leaves the global head-of-line. The
@@ -676,13 +683,56 @@ export async function promoteDueSchedules(
 ): Promise<TickReport> {
   let due: ScheduleRow[];
   try {
-    const result = await db
+    // Codex #364 reopen: fairness must apply at selection, not after a
+    // global LIMIT. Scan per Organization (oldest-first, bounded) over the
+    // existing (org_id, enabled, next_due_at) index, admit at most
+    // SCHEDULE_TICK_MAX_ORGS Organizations, and take only the per-org
+    // promotion cap of rows per Organization. One tenant's backlog can no
+    // longer occupy the entire scan and exclude every other Organization
+    // from the tick. The global work stays bounded at
+    // MAX_ORGS * PER_ORG rows (the old global LIMIT); the promotion loop
+    // still enforces the per-org cap, and persistently non-promotable rows
+    // accrue quarantine across ticks until parked. Rows stay grouped by
+    // Organization (org_id order) with oldest-first inside each group: the
+    // loop processes every admitted row, so cross-org merge order carries
+    // no fairness meaning and no comparator is needed.
+    //
+    // Rotation (review on #399): admitting the first MAX_ORGS orgs by ID
+    // order would starve an 11th due Organization indefinitely under
+    // sustained backlog. Admission rotates statelessly: the offset derives
+    // from the current tick minute modulo the due-org count, so every due
+    // Organization is admitted at least once per count cycle with no
+    // cursor state to persist.
+    const dueOrgCount =
+      (
+        await db
+          .prepare(
+            "SELECT COUNT(DISTINCT org_id) AS n FROM schedules WHERE enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=?",
+          )
+          .bind(now.toISOString())
+          .first<{ n: number }>()
+      )?.n ?? 0;
+    const rotationOffset = dueOrgCount > 0 ? Math.floor(now.getTime() / 60_000) % dueOrgCount : 0;
+    const orgs = await db
       .prepare(
-        "SELECT * FROM schedules WHERE enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=? ORDER BY next_due_at LIMIT ?",
+        "SELECT DISTINCT org_id AS orgId FROM schedules WHERE enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=? ORDER BY org_id LIMIT ? OFFSET ?",
       )
-      .bind(now.toISOString(), SCHEDULE_TICK_LIMIT)
-      .all<ScheduleRow>();
-    due = result.results;
+      .bind(now.toISOString(), SCHEDULE_TICK_MAX_ORGS, rotationOffset)
+      .all<{ orgId: string }>();
+    const perOrg: ScheduleRow[][] = [];
+    for (const org of orgs.results) {
+      // The DISTINCT scan above only names Organizations with due rows,
+      // so the detail scan always returns at least one row; empty arrays
+      // would flatten away harmlessly in any case.
+      const rows = await db
+        .prepare(
+          "SELECT * FROM schedules WHERE org_id=? AND enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=? ORDER BY next_due_at LIMIT ?",
+        )
+        .bind(org.orgId, now.toISOString(), SCHEDULE_TICK_PER_ORG_LIMIT)
+        .all<ScheduleRow>();
+      perOrg.push(rows.results);
+    }
+    due = perOrg.flat();
   } catch (error) {
     // A backend fault on the tick scan is a failed tick, not an empty
     // schedule set: rethrow so the Cron reports failure instead of
@@ -692,27 +742,21 @@ export async function promoteDueSchedules(
   }
   const promoted: PromotionResult[] = [];
   const skipped: string[] = [];
-  const promotedPerOrg = new Map<string, number>();
   for (const schedule of due) {
     const saga = sagas.find((entry) => entry.id === schedule.saga_id);
     if (!saga) {
       skipped.push(schedule.name);
       continue;
     }
-    // Per-Organization fairness cap: defer this tenant's excess rows to the
-    // next tick so other tenants' due rows still enter this batch. Deferred
-    // rows are not skips: no quarantine accrual, no marker change.
-    if ((promotedPerOrg.get(schedule.org_id) ?? 0) >= SCHEDULE_TICK_PER_ORG_LIMIT) {
-      skipped.push(schedule.name);
-      continue;
-    }
+    // Per-Organization fairness cap lives in the selection scan above
+    // (at most SCHEDULE_TICK_PER_ORG_LIMIT rows admitted per
+    // Organization), so this loop needs no second cap.
     // next_due_at is non-null here: the tick query selects enabled rows
     // with next_due_at <= now, and only the one-off branch below nulls it.
     const dueAt = schedule.next_due_at as string;
     const window = schedule.kind === "one-off" ? `once-${schedule.id.slice(0, 16)}` : currentWindow(new Date(dueAt));
     try {
       promoted.push(await promoteWindow(db, env, schedule, window, sagas, submitFn));
-      promotedPerOrg.set(schedule.org_id, (promotedPerOrg.get(schedule.org_id) ?? 0) + 1);
       await clearSkipStreak(db, schedule);
     } catch (error) {
       // Owner-cancel-wins, admission, liveness, and authority fences surface

@@ -1,0 +1,14 @@
+# codex-364-reopen lane scope (issue #364 reopen): scheduler selection fairness.
+# The global LIMIT scan must become per-org fair selection before the limit.
+# Coordinator amendment: test/resilience.test.ts added for one deterministic
+# test pinning the execution-path connection fallback rungs, which the branch
+# gate otherwise covers only incidentally by suite ordering. No prod code
+# touched outside src/schedules.ts.
+scopes/codex-364.scope
+src/schedules.ts
+src/index.ts
+test/schedules.test.ts
+test/schedule-tick.test.ts
+test/schedule-branches.test.ts
+test/schedule-lifecycle.test.ts
+test/resilience.test.ts
