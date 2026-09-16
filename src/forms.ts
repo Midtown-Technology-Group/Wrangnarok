@@ -171,6 +171,17 @@ const LOCATION_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const FORM_MAX_FIELDS = 50;
 export const FORM_MAX_KEYS = 200;
 export const FORM_FIELD_MAX_LENGTH = 1024;
+/** Declared-pattern bound (codex #345): member-controlled patterns compile
+ * then run synchronously in the Worker. Length alone cannot fence
+ * exponential backtracking (`^(a+)+$` fits in 256 chars), so declarations
+ * additionally pass assertSafePattern below: no nested/overlapping
+ * quantified constructs, no backreferences or lookaround, counted
+ * repetitions within budget. No new dependencies; pure static check. */
+export const FORM_PATTERN_MAX = 256;
+/** Total quantified-cost budget: quantified atoms plus pattern length stay
+ * small so stacked (non-nested) repetition cannot spin the engine across a
+ * 1024-byte submission value. */
+export const FORM_PATTERN_BUDGET = 64;
 /** Startup handle TTL: 30 minutes, session-bound (org + user + form). */
 export const FORM_STARTUP_TTL_MS = 30 * 60 * 1000;
 export const FORM_STARTUP_HANDLE_RE = /^[a-f0-9]{64}$/;
@@ -436,14 +447,13 @@ export function parseFormFields(value: unknown): FormField[] {
       throw new Error(`Form field "${entry.name}" min cannot exceed max.`);
     }
     if (entry.pattern !== undefined) {
-      if (typeof entry.pattern !== "string" || entry.pattern.length === 0 || entry.pattern.length > 256) {
+      if (typeof entry.pattern !== "string" || entry.pattern.length === 0 || entry.pattern.length > FORM_PATTERN_MAX) {
         throw new Error(`Form field "${entry.name}" pattern must be 1-256 chars.`);
       }
-      try {
-        new RegExp(entry.pattern as string);
-      } catch {
-        throw new Error(`Form field "${entry.name}" pattern is not a valid regular expression.`);
-      }
+      // Codex #345: compilable is not safe (`^(a+)+$` compiles). The static
+      // gate rejects nested/overlapping quantified constructs before the
+      // pattern can reach the synchronous RegExp.test() sink.
+      assertSafePattern(entry.name, entry.pattern as string);
       if (!["text", "textarea", "email", "url", "tel", "hidden"].includes(type)) {
         throw new Error(`Only text-like fields carry a pattern (field "${entry.name}").`);
       }
@@ -721,6 +731,232 @@ function byteLength(value: string): number {
   return new TextEncoder().encode(value).length;
 }
 
+/** Static safety gate for member-declared patterns (codex #345). Compilable
+ * is not safe: `^(a+)+$` compiles then backtracks exponentially in V8. The
+ * gate rejects the constructs whose match cost can grow faster than the
+ * input, without running the engine and without new dependencies:
+ * - nested quantification: a quantified atom inside a quantified group span
+ *   (`(a+)+`, `(a*)*`, `(ab+)+`, `(a+b+)+`);
+ * - overlapping quantified alternation: branches sharing a leading atom
+ *   under one quantifier (`(a|a)+`, `(ab|ac)+`);
+ * - backreferences (`\1`) and lookaround (`(?=`, `(?!`, `(?<`), whose
+ *   evaluation is not linear and which field patterns never need;
+ * - counted repetitions with either bound above FORM_PATTERN_BUDGET.
+ * Everything else — literals, classes, anchors, disjoint alternation,
+ * bounded `{m,n}` within budget — passes unchanged. Throws a declaration
+ * Error naming the field; callers surface it as INVALID_FORM. */
+export function assertSafePattern(fieldName: string, pattern: string): void {
+  try {
+    void new RegExp(pattern);
+  } catch {
+    throw new Error(`Form field "${fieldName}" pattern is not a valid regular expression.`);
+  }
+  const structural = skeletonPattern(pattern, fieldName);
+  forbidPatternExtensions(fieldName, structural);
+  forbidNestedQuantifiers(fieldName, structural);
+  forbidOverlappingAlternation(fieldName, structural);
+  // Total quantified-cost budget: stacked (non-nested) repetition plus
+  // pattern length stays small across a 1024-byte submission value.
+  let quantified = 0;
+  for (let index = 0; index < structural.length; index += 1) {
+    if (structural[index] === "*" || structural[index] === "+") quantified += 1;
+  }
+  if (quantified + pattern.length > FORM_PATTERN_BUDGET + FORM_PATTERN_MAX / 4) {
+    throw new Error(`Form field "${fieldName}" pattern exceeds the safe repetition budget.`);
+  }
+}
+
+/** Skeleton of a pattern: escapes collapse to a per-class token (`E` for a
+ * literal escape, `D` for a class shorthand like `\d`, `B` for a numeric
+ * backreference), class bodies to `C`, so the structural scan never mistakes
+ * `[(+` literal text for grouping or quantification. Throws a declaration
+ * Error on dangling escapes or unterminated classes. */
+function skeletonPattern(pattern: string, fieldName: string): string {
+  let out = "";
+  let index = 0;
+  while (index < pattern.length) {
+    const char = pattern[index] as string;
+    if (char === "\\") {
+      if (index + 1 >= pattern.length) {
+        throw new Error(`Form field "${fieldName}" pattern is not a valid regular expression.`);
+      }
+      const escaped = pattern[index + 1] as string;
+      if (escaped >= "1" && escaped <= "9") {
+        throw new Error(`Form field "${fieldName}" pattern uses an unsafe construct.`);
+      }
+      out +=
+        escaped === "d" || escaped === "D" || escaped === "w" || escaped === "W" || escaped === "s" || escaped === "S"
+          ? "D"
+          : "E";
+      index += 2;
+      continue;
+    }
+    if (char === "[") {
+      const close = pattern.indexOf("]", index + 1);
+      if (close === -1) {
+        throw new Error(`Form field "${fieldName}" pattern is not a valid regular expression.`);
+      }
+      out += "C";
+      index = close + 1;
+      continue;
+    }
+    out += char;
+    index += 1;
+  }
+  return out;
+}
+
+/** Reject `(?` extensions except plain non-capturing `(?:`, plus numeric
+ * backreferences: lookaround and backreference evaluation is not linear. */
+function forbidPatternExtensions(fieldName: string, structural: string): void {
+  for (let index = 0; index < structural.length; index += 1) {
+    if (structural[index] === "(" && structural[index + 1] === "?") {
+      if (structural[index + 2] !== ":") {
+        throw new Error(`Form field "${fieldName}" pattern uses an unsafe construct.`);
+      }
+    }
+  }
+}
+
+/** Consume a `{m,n}` repetition at `open` (index of `{`): both bounds must
+ * be integers within FORM_PATTERN_BUDGET. Returns the index just past `}`. */
+function consumeCountedRepetition(fieldName: string, structural: string, open: number): number {
+  const close = structural.indexOf("}", open + 1);
+  if (close === -1) return open + 1;
+  for (const part of structural.slice(open + 1, close).split(",")) {
+    if (part === "") continue;
+    const count = Number(part);
+    if (!Number.isInteger(count) || count < 0 || count > FORM_PATTERN_BUDGET) {
+      throw new Error(`Form field "${fieldName}" pattern exceeds the safe repetition budget.`);
+    }
+  }
+  return close + 1;
+}
+
+/** Reject quantified atoms nested inside a quantified group's span — the
+ * exponential-backtracking shape (`(a+)+`, `(a+)*`, `(ab+)+`). A group
+ * close followed by a quantifier marks the group quantified; any quantified
+ * atom at a deeper depth fails the declaration. */
+function forbidNestedQuantifiers(fieldName: string, structural: string): void {
+  interface Frame {
+    quantified: boolean;
+  }
+  const stack: Frame[] = [];
+  let index = 0;
+  while (index < structural.length) {
+    const char = structural[index] as string;
+    if (char === "(") {
+      // Skip the `(?:` prefix; the frame opens at the group body.
+      if (structural[index + 1] === "?") index += 3;
+      else index += 1;
+      stack.push({ quantified: false });
+      continue;
+    }
+    if (char === ")") {
+      const next = structural[index + 1];
+      const optionalOnly = next === "?";
+      let quantified = optionalOnly || next === "*" || next === "+";
+      if (next === "{") {
+        index = consumeCountedRepetition(fieldName, structural, index + 1) - 1;
+        quantified = true;
+      } else if (quantified) {
+        index += 1;
+      }
+      const frame = stack.pop();
+      // A lone trailing `?` over a span is at most one extra match attempt
+      // (`(a+)?`, `(ab)?`): it cannot loop, so it never nests. Heavier
+      // quantifiers (`*`, `+`, `{m,n}`) over a span holding a quantified
+      // atom are the exponential shape. Propagate the quantified mark
+      // outward in both cases so an outer `*`/`+` still sees the inner
+      // repetition (`((a+))`, `(a+(b+))+` fail at the outer close).
+      const nests = quantified && !optionalOnly && frame?.quantified === true;
+      if (nests) {
+        throw new Error(`Form field "${fieldName}" pattern nests quantified expressions.`);
+      }
+      if (frame?.quantified === true || quantified) {
+        const outer = stack[stack.length - 1];
+        if (outer !== undefined) outer.quantified = true;
+      }
+      index += 1;
+      continue;
+    }
+    // Quantified atom: `X*`, `X+`, `X?`, `X{m,n}`.
+    const next = structural[index + 1];
+    let atomQuantified = next === "*" || next === "+" || next === "?";
+    let advance = 1;
+    if (atomQuantified) advance = 2;
+    else if (next === "{") {
+      const after = consumeCountedRepetition(fieldName, structural, index + 1);
+      atomQuantified = after > index + 2;
+      advance = after - index;
+    }
+    if (atomQuantified && stack.some((frame) => frame.quantified)) {
+      throw new Error(`Form field "${fieldName}" pattern nests quantified expressions.`);
+    }
+    if (atomQuantified) {
+      const frame = stack[stack.length - 1];
+      if (frame !== undefined) frame.quantified = true;
+    }
+    index += advance;
+  }
+}
+
+/** Reject quantified groups whose top-level alternation branches overlap on
+ * a leading atom (`(a|a)+`, `(ab|ac)+`): either branch can match the same
+ * input, so the engine explores both. Non-quantified alternation (TLD lists,
+ * kind enums) is untouched. */
+function forbidOverlappingAlternation(fieldName: string, structural: string): void {
+  let index = 0;
+  while (index < structural.length) {
+    if (structural[index] !== "(" || structural[index + 1] === "?") {
+      index += 1;
+      continue;
+    }
+    let depth = 0;
+    let end = -1;
+    for (let scan = index; scan < structural.length; scan += 1) {
+      if (structural[scan] === "(") depth += 1;
+      else if (structural[scan] === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          end = scan;
+          break;
+        }
+      }
+    }
+    if (end === -1) {
+      index += 1;
+      continue;
+    }
+    const next = structural[end + 1];
+    let quantified = next === "*" || next === "+" || next === "?";
+    if (next === "{") {
+      consumeCountedRepetition(fieldName, structural, end + 1);
+      quantified = true;
+    }
+    const inner = structural.slice(index + 1, end);
+    const branches: string[] = [];
+    let innerDepth = 0;
+    let start = 0;
+    for (let scan = 0; scan < inner.length; scan += 1) {
+      if (inner[scan] === "(") innerDepth += 1;
+      else if (inner[scan] === ")") innerDepth -= 1;
+      else if (inner[scan] === "|" && innerDepth === 0) {
+        branches.push(inner.slice(start, scan));
+        start = scan + 1;
+      }
+    }
+    branches.push(inner.slice(start));
+    if (quantified && branches.length > 1) {
+      const heads = branches.map((branch) => branch.charAt(0));
+      if (new Set(heads).size !== heads.length) {
+        throw new Error(`Form field "${fieldName}" pattern has overlapping quantified alternation.`);
+      }
+    }
+    index = end + 1;
+  }
+}
+
 function checkStringField(field: FormField, entry: unknown, failures: FieldFailure[]): string | undefined {
   if (typeof entry !== "string") {
     failures.push(fail(field.name, "NOT_STRING", "This field must be a string."));
@@ -780,8 +1016,13 @@ function checkStringField(field: FormField, entry: unknown, failures: FieldFailu
       break;
   }
   if (field.pattern !== undefined && entry.length > 0) {
+    // Defense in depth (codex #345): declarations pass assertSafePattern,
+    // but rows persisted before the gate (or written out of band) reach
+    // this sink unchecked. Re-run the static gate first so a legacy evil
+    // pattern answers PATTERN_MISMATCH instead of spinning the engine.
     let matches: boolean;
     try {
+      assertSafePattern(field.name, field.pattern);
       matches = new RegExp(field.pattern).test(entry);
     } catch {
       matches = false;
@@ -1431,15 +1672,22 @@ export async function mayStartForm(db: D1Database, ctx: CallerCtx, orgId: string
   return can(db, ctx, { orgId, resourceKind: "form", resourceId: formName, action: "submit" });
 }
 
-/** FORM-02 recovery fence (#155): after dispatch succeeds but the
- * handle-consume loses a race (used_at set by a concurrent submit), decide
- * whether the caller owns the admission. Two proofs are required: the
- * deterministic execution id for (org, user, key) plus the exact persisted
- * input must match THIS submission, AND the durable handle-to-key binding
- * must name THIS key. A foreign submission that won the consume race binds
- * the handle to its own key, so the caller's handle is spent: answer
- * stale, never a replay of foreign work. A legacy row with no binding is
- * claimed on proof (same key), preserving same-key recovery. */
+/** FORM-02 recovery fence (#155; codex #342 follow-up): after dispatch
+ * succeeds but the handle-consume loses a race (used_at set by a concurrent
+ * submit), decide whether the caller owns the admission. Two proofs are
+ * required: the deterministic execution id for (org, user, key) plus the
+ * exact persisted input must match THIS submission, AND the durable
+ * handle-to-key binding must name THIS key. A foreign submission that won
+ * the consume race binds the handle to its own key, so the caller's handle
+ * is spent: answer stale, never a replay of foreign work.
+ *
+ * No legacy unbound branch: rows written before the claimed_key column
+ * existed bind on first proof (same key) inside one conditional UPDATE —
+ * and only when the UPDATE wins. A lost claim race answers stale even when
+ * the Execution row proves OUR admission, because another key owns the
+ * handle. Claiming without the conditional win would let two different keys
+ * both verify against their own rows and both dispatch: the duplicate
+ * Execution the single-use fence exists to prevent. */
 export async function verifyOwnAdmission(
   db: D1Database,
   caller: Principal,
@@ -1459,20 +1707,18 @@ export async function verifyOwnAdmission(
     throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
   }
   const handleHash = await hashHandle(handle);
-  const binding = await db
-    .prepare("SELECT claimed_key FROM form_startups WHERE handle_hash=?")
-    .bind(handleHash)
-    .first<{ claimed_key: string | null }>()
+  // Bind-or-verify in one conditional write: unbound rows bind to THIS key
+  // only when no concurrent claim won first (claimed_key IS NULL arm); bound
+  // rows verify the binding names THIS key (claimed_key=? arm). Either arm
+  // winning proves single-ownership; losing both arms means another key owns
+  // the handle — stale, even though OUR Execution row admitted.
+  const claimed = await db
+    .prepare("UPDATE form_startups SET claimed_key=? WHERE handle_hash=? AND (claimed_key=? OR claimed_key IS NULL)")
+    .bind(key, handleHash, key)
+    .run()
     .catch(() => null);
-  if (!binding || (binding.claimed_key !== null && binding.claimed_key !== key)) {
+  if (!claimed || claimed.meta.changes === 0) {
     throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
-  }
-  if (binding.claimed_key === null) {
-    await db
-      .prepare("UPDATE form_startups SET claimed_key=? WHERE handle_hash=? AND claimed_key IS NULL")
-      .bind(key, handleHash)
-      .run()
-      .catch(() => null);
   }
 }
 

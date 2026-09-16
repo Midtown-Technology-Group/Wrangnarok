@@ -354,10 +354,147 @@ it("fails fast with 503 when the cert endpoint hangs, errors, or is malformed", 
   await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({ status: 503 });
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ keys: "garbage" }));
   await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({ status: 503 });
+  // A body that throws on .json() (not just a missing keys array) takes
+  // the catch arm: same 503, no leak.
+  vi.spyOn(globalThis, "fetch").mockImplementation(
+    async () =>
+      new Response("ok", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+  );
+  vi.spyOn(Response.prototype, "json").mockRejectedValueOnce(new Error("truncated body"));
+  await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({ status: 503 });
 });
 
 it("pins the default cert fetch budget at five seconds", () => {
   expect(ACCESS_CERT_FETCH_TIMEOUT_MS).toBe(5000);
+});
+
+it("codex #358: coalesces, negatively caches, and bounds cert fetches", async () => {
+  const { publicKey, privateKey } = await keypair();
+  const pub = await crypto.subtle.exportKey("jwk", publicKey);
+  let fetches = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    if (String(input) === `${TEAM}/cdn-cgi/access/certs`) {
+      fetches += 1;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return Response.json({ keys: [{ ...pub, kid: "k1", alg: "RS256" }] });
+    }
+    throw new Error("access-auth tests must not fetch");
+  });
+  try {
+    // Concurrent unknown-kid misses share one subrequest (in-flight
+    // coalescing), and the valid kid resolves for all waiters.
+    const tokens = await Promise.all([
+      mint(privateKey, "k1", validPayload()),
+      mint(privateKey, "k1", validPayload()),
+      mint(privateKey, "k1", validPayload()),
+    ]);
+    const principals = await Promise.all(tokens.map((token) => verifyAccess(token, accessEnv)));
+    expect(fetches).toBe(1);
+    for (const p of principals) expect(p).toEqual({ userId: EMAIL, orgId: ORG.toLowerCase() });
+    // Unknown kids fetch once, then fail closed with no further subrequest
+    // (negative cache): ten distinct random kids cost at most ten fetches
+    // total, and a repeat of a seen kid costs zero.
+    const before = fetches;
+    const kids: string[] = [];
+    for (let n = 0; n < 10; n += 1) {
+      kids.push(`random-kid-${n}-${Date.now()}`);
+      const bad = await mint(privateKey, kids[n] as string, validPayload());
+      await expect(verifyAccess(bad, accessEnv)).rejects.toMatchObject({ status: 401 });
+    }
+    expect(fetches - before).toBeLessThanOrEqual(10);
+    const repeatBad = await mint(privateKey, kids[0] as string, validPayload());
+    const repeatBefore = fetches;
+    await expect(verifyAccess(repeatBad, accessEnv)).rejects.toMatchObject({ status: 401 });
+    // The repeat hits the negative cache: zero new subrequests.
+    expect(fetches).toBe(repeatBefore);
+  } finally {
+    vi.restoreAllMocks();
+  }
+  // Oversized assertions and kids fail closed before any cert fetch.
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("must not fetch"));
+  try {
+    await expect(verifyAccess("x".repeat(9000), accessEnv)).rejects.toMatchObject({ status: 401 });
+    const { privateKey: priv2 } = await keypair();
+    const bigKid = await mint(priv2, "k".repeat(300), validPayload());
+    await expect(verifyAccess(bigKid, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+
+it("codex #358: expires negative entries and rejects empty segments", async () => {
+  // Expired negative entries refetch (rotation converges); empty JWT
+  // segments fail closed. Covers the expiry-evict and null-segment arms.
+  const { setAccessNegativeKidTtlMs } = await import("../src/access");
+  const { publicKey, privateKey } = await keypair();
+  const pub = await crypto.subtle.exportKey("jwk", publicKey);
+  let fetches = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    if (String(input) === `${TEAM}/cdn-cgi/access/certs`) {
+      fetches += 1;
+      return Response.json({ keys: [{ ...pub, kid: "k1", alg: "RS256" }] });
+    }
+    throw new Error("access-auth tests must not fetch");
+  });
+  try {
+    const bad = await mint(privateKey, "gone-kid", validPayload());
+    await expect(verifyAccess(bad, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetches).toBe(1);
+    // Repeat hits the negative cache: zero new fetches.
+    await expect(verifyAccess(bad, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetches).toBe(1);
+    // Expire the entry: the next attempt refetches (rotation converges).
+    setAccessNegativeKidTtlMs(0);
+    await expect(verifyAccess(bad, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetches).toBe(2);
+  } finally {
+    vi.restoreAllMocks();
+  }
+  await expect(verifyAccess("..", accessEnv)).rejects.toMatchObject({ status: 401 });
+  await expect(verifyAccess("", accessEnv)).rejects.toMatchObject({ status: 401 });
+  // A JWT whose payload segment is literally `null` keeps a 3-part shape
+  // with all segments present: the header parse (not the segment guard)
+  // rejects it. Covers the null-segment guard's taken arm on `..` above.
+  await expect(verifyAccess("e30.e30.e30", accessEnv)).rejects.toMatchObject({ status: 401 });
+});
+
+it("codex #358: evicts oldest negative entries past the bound", async () => {
+  // Fill the negative cache past MAX_CERT_KEYS (32): the oldest entry
+  // evicts, so its repeat refetches while a fresh entry stays cached.
+  const { publicKey, privateKey } = await keypair();
+  const pub = await crypto.subtle.exportKey("jwk", publicKey);
+  let fetches = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    if (String(input) === `${TEAM}/cdn-cgi/access/certs`) {
+      fetches += 1;
+      return Response.json({ keys: [{ ...pub, kid: "k1", alg: "RS256" }] });
+    }
+    throw new Error("access-auth tests must not fetch");
+  });
+  try {
+    const first = await mint(privateKey, "evict-kid-000", validPayload());
+    await expect(verifyAccess(first, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetches).toBe(1);
+    for (let n = 1; n <= 32; n += 1) {
+      const bad = await mint(privateKey, `evict-kid-${String(n).padStart(3, "0")}`, validPayload());
+      await expect(verifyAccess(bad, accessEnv)).rejects.toMatchObject({ status: 401 });
+    }
+    // The first entry evicted: its repeat refetches.
+    const before = fetches;
+    await expect(verifyAccess(first, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetches).toBe(before + 1);
+    // The newest entry is still negatively cached: zero new fetches.
+    const newest = await mint(privateKey, "evict-kid-032", validPayload());
+    const newestBefore = fetches;
+    await expect(verifyAccess(newest, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetches).toBe(newestBefore);
+  } finally {
+    vi.restoreAllMocks();
+  }
 });
 
 it("rejects cross-origin form posts on Access-authenticated admin POSTs (codex #349)", async () => {

@@ -375,6 +375,66 @@ describe("provider eligibility (ADR 023 closed allowlist)", () => {
 });
 
 describe("inline provider execution (POST /api/executions/provider)", () => {
+  it("codex #344/#360: fences maxConcurrent before any vendor call", async () => {
+    // One active Execution holds the single slot: the next distinct key
+    // must answer 429 ADMISSION_LIMITED without touching the vendor.
+    const holderKey = "limits-provider-holder-001";
+    const holderId = await executionId(principal, holderKey);
+    await bindings.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        holderId,
+        ninjaSaga.id,
+        "ninjaone-orgs",
+        "ninjaone-orgs-v1",
+        principal.orgId,
+        principal.userId,
+        JSON.stringify({}),
+        1,
+        "Running",
+        new Date().toISOString(),
+      )
+      .run();
+    await bindings.DB.prepare(
+      "INSERT INTO saga_policies(org_id,saga_id,policy_json,version,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(org_id,saga_id) DO UPDATE SET policy_json=excluded.policy_json",
+    )
+      .bind(
+        principal.orgId,
+        ninjaSaga.id,
+        JSON.stringify({
+          version: 1,
+          policy: {
+            timeout: { vendorTimeoutMs: 0, stepTimeout: "10 seconds" },
+            retry: { checkpointRetries: 2, vendorRetries: 0 },
+            admission: { enabled: true, maxConcurrent: 1 },
+          },
+        }),
+        1,
+        new Date().toISOString(),
+      )
+      .run();
+    const fetchSpy = mockNinjaCensus([{ id: 1, name: "Acme" }]);
+    const limited = await worker.fetch(providerRequest(ninjaSaga.id, {}, "limits-provider-fenced-001"), bindings);
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toMatchObject({ error: { code: "ADMISSION_LIMITED" } });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // The 429 names the fence without persisting a new receipt: only the
+    // holder row plus the refused key's own Pending receipt exist, and the
+    // refused receipt never dispatched.
+    const receipts = await bindings.DB.prepare(
+      "SELECT id,dispatched,status FROM executions WHERE org_id=? AND saga_id=?",
+    )
+      .bind(principal.orgId, ninjaSaga.id)
+      .all<{ id: string; dispatched: number; status: string }>();
+    const refusedId = await executionId(principal, "limits-provider-fenced-001");
+    const refused = receipts.results.find((row) => row.id === refusedId);
+    expect(refused).toMatchObject({ dispatched: 0, status: "Pending" });
+    await bindings.DB.prepare("DELETE FROM saga_policies WHERE org_id=? AND saga_id=?")
+      .bind(principal.orgId, ninjaSaga.id)
+      .run();
+  });
+
   it("returns an authorized read-only census inline with the durable receipt", async () => {
     mockNinjaCensus([
       { id: 1, name: "Acme" },

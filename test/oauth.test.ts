@@ -696,6 +696,82 @@ describe("cross-instance refresh fence (issue #149 follow-up)", () => {
     }
   });
 
+  it("codex #361: isolates concurrent rotations with different tokens", async () => {
+    // Same fence key, different refresh bodies: the flights must NOT share
+    // one vendor response, or caller B would receive tokens minted from
+    // caller A's one-time token. Same body still coalesces (one POST).
+    // Exercised at the fence object (the cross-instance unit): the
+    // module-local single-flight in oauth.ts already keys on the full
+    // (endpoint, tenant, generation, scope) identity, while the fence key
+    // carries only (tenant, generation, scope-hash) — so two rotations with
+    // different tokens converge on one fence key with different bodies.
+    const vendorCalls: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fence = new OAuthRefreshFence();
+    const origFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = input instanceof Request ? input.url : String(input);
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (url.startsWith("https://oauth-in-test.invalid/")) {
+        const seenToken = new URLSearchParams(body).get("refresh_token") ?? "";
+        vendorCalls.push(seenToken);
+        await gate;
+        return tokenJson({ access_token: `access-for-${seenToken}`, refresh_token: `next-${seenToken}` });
+      }
+      throw new Error(`Unexpected fenced vendor call: ${url}`);
+    }) as typeof fetch;
+    const envelopeFor = (refreshToken: string): string =>
+      new URLSearchParams({
+        token_url: "https://oauth-in-test.invalid/oauth/token",
+        form: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken }).toString(),
+        faults: JSON.stringify({
+          authFailed: FAULTS.authFailed,
+          badResponse: FAULTS.badResponse,
+          vendorTimeout: FAULTS.vendorTimeout,
+        }),
+        timeout_ms: "5000",
+      }).toString();
+    try {
+      const pending = [
+        fence.fetch(
+          new Request("https://fence/refresh/t.v1.00000000", { method: "POST", body: envelopeFor("token-A") }),
+        ),
+        fence.fetch(
+          new Request("https://fence/refresh/t.v1.00000000", { method: "POST", body: envelopeFor("token-B") }),
+        ),
+        fence.fetch(
+          new Request("https://fence/refresh/t.v1.00000000", { method: "POST", body: envelopeFor("token-A") }),
+        ),
+      ];
+      // Let all three racers register their flights before releasing the
+      // vendor gate; otherwise the first settles before the others start.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      release();
+      const [first, second, third] = await Promise.all(pending);
+      expect(vendorCalls.slice().sort()).toEqual(["token-A", "token-B"]);
+      if (first === undefined || second === undefined || third === undefined) {
+        throw new Error("fence test expected three responses");
+      }
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(third.status).toBe(200);
+      const firstBody = (await first.json()) as { access_token: string };
+      const secondBody = (await second.json()) as { access_token: string };
+      const thirdBody = (await third.json()) as { access_token: string };
+      expect(firstBody.access_token).toBe("access-for-token-A");
+      expect(secondBody.access_token).toBe("access-for-token-B");
+      expect(thirdBody.access_token).toBe("access-for-token-A");
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = origFetch;
+    }
+  });
+
   it("rejects malformed fence requests without touching the vendor", async () => {
     const fence = new OAuthRefreshFence();
     const vendorSpy = vi.spyOn(globalThis, "fetch");

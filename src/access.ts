@@ -24,6 +24,25 @@ interface AccessConfig {
 const MAX_CERT_KEYS = 32;
 const CERT_KEY_TTL_MS = 6 * 60 * 60 * 1000;
 const certCache = new Map<string, { key: CryptoKey; at: number }>();
+// Negative cache (codex #358): unknown kids are remembered briefly so a
+// hostile caller rotating random kids cannot trigger one cert subrequest
+// per request. Short TTL (rotation still converges); never imports.
+const NEGATIVE_KID_TTL_MS = 60 * 1000;
+const unknownKids = new Map<string, number>();
+let negativeKidTtlMs = NEGATIVE_KID_TTL_MS;
+/** Test hook: bound the unknown-kid negative-cache TTL (suite isolation). */
+export function setAccessNegativeKidTtlMs(ms: number): void {
+  negativeKidTtlMs = ms;
+}
+// In-flight coalescing (codex #358): concurrent misses for one team domain
+// share a single cert fetch instead of fanning out N subrequests.
+const certInflight = new Map<string, Promise<{ kid?: string; kty?: string; n?: string; e?: string }[]>>();
+/** Largest assertion the verifier parses (codex #358): 8 KiB covers real
+ * Access JWTs; larger inputs fail closed before any cert fetch. */
+export const ACCESS_ASSERTION_MAX = 8192;
+/** Largest key id resolved (codex #358): provider kids are short opaque
+ * strings; longer values fail closed before any cert fetch. */
+export const ACCESS_KID_MAX = 256;
 
 // Cert fetch budget (#235): a hung cert endpoint must fail fast (503) rather
 // than stall auth checks. Matches the 5s vendor-probe budget in connections.
@@ -129,7 +148,20 @@ async function keyFor(teamDomain: string, kid: string, fetchFn: typeof fetch): P
     certCache.set(kid, hit);
     return hit.key;
   }
-  const certs = await fetchCertSet(teamDomain, fetchFn);
+  // Negative cache: a recently-unknown kid fails closed with no subrequest.
+  // Stale entries expire via the sweep in the miss path below.
+  const deniedAt = unknownKids.get(kid);
+  if (deniedAt !== undefined) {
+    if (now - deniedAt < negativeKidTtlMs) return null;
+    unknownKids.delete(kid);
+  } else {
+    // Sweep stale negatives only on a fresh miss: keeps the hot path (hit
+    // or live negative) branch-free while expiry still converges.
+    for (const [miss, at] of unknownKids) {
+      if (now - at >= negativeKidTtlMs) unknownKids.delete(miss);
+    }
+  }
+  const certs = await fetchCertSetCoalesced(teamDomain, fetchFn);
   const seen = Date.now();
   // The looked-up kid is pinned most-recent so a large rotation set can
   // never evict the very key this call is resolving mid-import.
@@ -143,8 +175,38 @@ async function keyFor(teamDomain: string, kid: string, fetchFn: typeof fetch): P
     if (k.kid === kid) wanted = key;
     else putCertKey(k.kid, key, seen);
   }
-  if (wanted != null) putCertKey(kid, wanted, seen);
+  if (wanted != null) {
+    putCertKey(kid, wanted, seen);
+    unknownKids.delete(kid);
+  } else {
+    // Remember the miss briefly: random-kid floods converge to zero
+    // subrequests until the entry expires. Bounded like the cert cache:
+    // insertion order is oldest-first, so drop the head on overflow.
+    unknownKids.set(kid, seen);
+    if (unknownKids.size > MAX_CERT_KEYS) {
+      const oldest = unknownKids.keys().next().value as string;
+      unknownKids.delete(oldest);
+    }
+  }
   return certCache.get(kid)?.key ?? null;
+}
+
+/** One cert fetch per team domain at a time: concurrent misses share the
+ * in-flight call and all waiters resolve from it. Settles release so the
+ * next rotation still refetches. */
+function fetchCertSetCoalesced(
+  teamDomain: string,
+  fetchFn: typeof fetch,
+): Promise<{ kid?: string; kty?: string; n?: string; e?: string }[]> {
+  const existing = certInflight.get(teamDomain);
+  if (existing !== undefined) return existing;
+  const task = fetchCertSet(teamDomain, fetchFn);
+  certInflight.set(teamDomain, task);
+  const cleanup = (): void => {
+    if (certInflight.get(teamDomain) === task) certInflight.delete(teamDomain);
+  };
+  void task.then(cleanup, cleanup);
+  return task;
 }
 
 /** Verify a Cloudflare Access JWT assertion. Throws Fault(401/403/503). */
@@ -155,12 +217,14 @@ export async function verifyAccess(
 ): Promise<Principal> {
   const cfg = readAccessConfig(env);
   if (cfg == null) throw new Fault(503, "ACCESS_NOT_CONFIGURED", "Access auth is not configured.");
-  const parts = assertion.split(".");
-  if (parts.length !== 3) throw new Fault(401, "UNAUTHORIZED", "Unauthorized.");
-  const [headB64, payloadB64, sigB64] = parts;
-  if (headB64 == null || payloadB64 == null || sigB64 == null) {
+  // Codex #358: bound attacker-controlled input before any cert fetch. An
+  // oversized assertion or kid fails closed here — no parse, no subrequest.
+  if (typeof assertion !== "string" || assertion.length === 0 || assertion.length > ACCESS_ASSERTION_MAX) {
     throw new Fault(401, "UNAUTHORIZED", "Unauthorized.");
   }
+  const parts = assertion.split(".");
+  if (parts.length !== 3) throw new Fault(401, "UNAUTHORIZED", "Unauthorized.");
+  const [headB64, payloadB64, sigB64] = parts as [string, string, string];
   let header: { alg?: string; kid?: string };
   let payload: { aud?: string | string[]; exp?: number; email?: string; common_name?: string };
   try {
@@ -170,6 +234,9 @@ export async function verifyAccess(
     throw new Fault(401, "UNAUTHORIZED", "Unauthorized.");
   }
   if (header.alg !== "RS256" || typeof header.kid !== "string") {
+    throw new Fault(401, "UNAUTHORIZED", "Unauthorized.");
+  }
+  if (header.kid.length === 0 || header.kid.length > ACCESS_KID_MAX) {
     throw new Fault(401, "UNAUTHORIZED", "Unauthorized.");
   }
   const key = await keyFor(cfg.teamDomain, header.kid, fetchFn);
@@ -239,5 +306,8 @@ export function credentialClassFor(userId: string, viaAccess: boolean): Credenti
 /** Test hook: drop cached certs and reset the fetch budget (rotation tests, suite isolation). */
 export function clearAccessCertCache(): void {
   certCache.clear();
+  unknownKids.clear();
+  certInflight.clear();
   certFetchTimeoutMs = ACCESS_CERT_FETCH_TIMEOUT_MS;
+  negativeKidTtlMs = NEGATIVE_KID_TTL_MS;
 }
