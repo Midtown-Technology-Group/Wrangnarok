@@ -402,4 +402,43 @@ it("codex #358: expires negative entries and rejects empty segments", async () =
   }
   await expect(verifyAccess("..", accessEnv)).rejects.toMatchObject({ status: 401 });
   await expect(verifyAccess("", accessEnv)).rejects.toMatchObject({ status: 401 });
+  // A JWT whose payload segment is literally `null` keeps a 3-part shape
+  // with all segments present: the header parse (not the segment guard)
+  // rejects it. Covers the null-segment guard's taken arm on `..` above.
+  await expect(verifyAccess("e30.e30.e30", accessEnv)).rejects.toMatchObject({ status: 401 });
+});
+
+it("codex #358: evicts oldest negative entries past the bound", async () => {
+  // Fill the negative cache past MAX_CERT_KEYS (32): the oldest entry
+  // evicts, so its repeat refetches while a fresh entry stays cached.
+  const { publicKey, privateKey } = await keypair();
+  const pub = await crypto.subtle.exportKey("jwk", publicKey);
+  let fetches = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    if (String(input) === `${TEAM}/cdn-cgi/access/certs`) {
+      fetches += 1;
+      return Response.json({ keys: [{ ...pub, kid: "k1", alg: "RS256" }] });
+    }
+    throw new Error("access-auth tests must not fetch");
+  });
+  try {
+    const first = await mint(privateKey, "evict-kid-000", validPayload());
+    await expect(verifyAccess(first, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetches).toBe(1);
+    for (let n = 1; n <= 32; n += 1) {
+      const bad = await mint(privateKey, `evict-kid-${String(n).padStart(3, "0")}`, validPayload());
+      await expect(verifyAccess(bad, accessEnv)).rejects.toMatchObject({ status: 401 });
+    }
+    // The first entry evicted: its repeat refetches.
+    const before = fetches;
+    await expect(verifyAccess(first, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetches).toBe(before + 1);
+    // The newest entry is still negatively cached: zero new fetches.
+    const newest = await mint(privateKey, "evict-kid-032", validPayload());
+    const newestBefore = fetches;
+    await expect(verifyAccess(newest, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetches).toBe(newestBefore);
+  } finally {
+    vi.restoreAllMocks();
+  }
 });

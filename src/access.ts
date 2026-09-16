@@ -157,7 +157,6 @@ async function keyFor(teamDomain: string, kid: string, fetchFn: typeof fetch): P
   }
   for (const [miss, at] of unknownKids) {
     if (now - at >= negativeKidTtlMs) unknownKids.delete(miss);
-    if (unknownKids.size <= MAX_CERT_KEYS) break;
   }
   const certs = await fetchCertSetCoalesced(teamDomain, fetchFn);
   const seen = Date.now();
@@ -178,11 +177,13 @@ async function keyFor(teamDomain: string, kid: string, fetchFn: typeof fetch): P
     unknownKids.delete(kid);
   } else {
     // Remember the miss briefly: random-kid floods converge to zero
-    // subrequests until the entry expires. Bounded like the cert cache.
+    // subrequests until the entry expires. Bounded like the cert cache
+    // (oldest-first eviction on overflow).
     unknownKids.set(kid, seen);
-    for (const oldest of unknownKids.keys()) {
-      if (unknownKids.size <= MAX_CERT_KEYS) break;
-      unknownKids.delete(oldest);
+    while (unknownKids.size > MAX_CERT_KEYS) {
+      const oldest = unknownKids.keys().next();
+      if (oldest.done === true) break;
+      unknownKids.delete(oldest.value);
     }
   }
   return certCache.get(kid)?.key ?? null;
