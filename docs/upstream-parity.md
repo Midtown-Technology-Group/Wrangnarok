@@ -1092,6 +1092,8 @@ Phase 6; **Missing**; existing issue: new
 
 Local status: No tool registry or MCP server exists. The static Saga catalog does not imply tool exposure.
 
+Halo Code Mode auth (issue #170, landed incrementally on main): the Halo host exchanges the deployment pair at the Connection endpoint origin's `/auth/token` (OAuth2 client-credentials via the shared OAUTH-01 primitive) and sends only the returned access token as the Bearer credential — never the `clientId:clientSecret` pseudo-Bearer. The shared generator emitter copies the same contract with explicit per-provider `tokenPath`/`scope`/`timeoutMs` options, and the vendor harness models the token endpoint (validates the pair, issues a sentinel token, rejects raw-pair resource calls).
+
 Depends: AUTH-03, DEV-01, SEC-01
 
 Acceptance:

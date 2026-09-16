@@ -20,13 +20,30 @@ function safeCommentFragment(text) {
   return String(text).replace(/[\r\n\u2028\u2029]+/g, " ");
 }
 
-export function emitIntegrationSource({ doc, operations, id, name, allowedOrigins, envPrefix, digestHex, version }) {
+export function emitIntegrationSource({
+  doc,
+  operations,
+  id,
+  name,
+  allowedOrigins,
+  envPrefix,
+  digestHex,
+  version,
+  tokenPath = "/auth/token",
+  scope = "all",
+  timeoutMs = 5000,
+}) {
   const prefix = id
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
   const cleanVersion = safeCommentFragment(version).slice(0, 64);
   const cleanDigest = digestHex.replace(/[^a-f0-9]/g, "").slice(0, 64);
+  const tokenPathLiteral = JSON.stringify(String(tokenPath).slice(0, 128));
+  const scopeLiteral = JSON.stringify(String(scope).slice(0, 128));
+  const timeoutMsLiteral = JSON.stringify(
+    Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 30000 ? timeoutMs : 5000,
+  );
   const opsLiteral = operations
     .map(
       (op) =>
@@ -59,6 +76,8 @@ import {
 } from "../openapi";
 import type { CodeModeProvenance, ContractOperation, OpenApiDocument, OperationPolicy, OperationRisk } from "../openapi";
 import { getConnection } from "../connections";
+import { requestClientCredentialsToken } from "../oauth";
+import type { OAuthFaultTable } from "../oauth";
 import { scrubTextWithSecrets, scrubValueWithSecrets } from "../secrets";
 
 /** Stable Integration identity for this generated provider. */
@@ -76,6 +95,30 @@ export const ${prefix}_DEFAULT_POLICY: OperationPolicy = {
   enabledOperations: [],
   deniedOperations: [],
   enabledRisks: [],
+};
+
+/** OAuth token endpoint path for this provider's client-credentials flow,
+ * resolved against the Connection endpoint origin (never a spec servers
+ * entry). The operator overrides it per provider at generation time when the
+ * vendor documents a different token path; HaloPSA uses /auth/token. */
+export const ${prefix}_TOKEN_PATH = ${tokenPathLiteral};
+
+/** Vendor token-deadline for this provider (matches the hand-written Halo
+ * host posture): one shared bound over token acquisition plus the resource
+ * call, so the whole vendor interaction stays inside a single deadline. */
+export const ${prefix}_TIMEOUT_MS = ${timeoutMsLiteral};
+
+/** Token Fault taxonomy for this provider: provider-owned codes/messages, so
+ * centralizing mechanics never renames the observable errors. The operator
+ * renames the PREFIX per provider when forking this template. */
+const ${prefix}_TOKEN_FAULTS: OAuthFaultTable = {
+  notConfigured: { status: 502, code: "${prefix}_NOT_CONFIGURED", message: "Integration credentials are not configured." },
+  redirected: { status: 502, code: "${prefix}_AUTH_FAILED", message: "The vendor redirected the token request." },
+  unauthorized: { status: 502, code: "${prefix}_UNAUTHORIZED", message: "The vendor rejected the credentials." },
+  rateLimited: { status: 502, code: "${prefix}_RATE_LIMITED", message: "The vendor rate-limited the token request." },
+  authFailed: { status: 502, code: "${prefix}_AUTH_FAILED", message: "The vendor did not issue a token." },
+  badResponse: { status: 502, code: "${prefix}_BAD_RESPONSE", message: "The vendor returned an unexpected token response." },
+  vendorTimeout: { status: 504, code: "${prefix}_VENDOR_TIMEOUT", message: "The vendor exceeded its deadline." },
 };
 
 /** Risk classification per operationId (method defaults refined here). */
@@ -157,25 +200,66 @@ export async function execute${typeName}Operation(
   }
   const url = resolveRequestUrl({ ...pinned, allowedOrigins: [endpointOrigin] }, operation, { path: call.path, query: call.query });
   const fetchImpl = vendor.fetchImpl ?? globalThis.fetch;
+  // Provider client-credentials flow (TOOL-01): exchange the deployment pair
+  // for a transient access token at the Connection endpoint origin's token
+  // path, then send ONLY that token as the Bearer credential. The token stays
+  // transient — fetched, used, dropped, scrubbed — never persisted, never
+  // model-visible. One shared deadline covers token plus resource call.
+  const started = Date.now();
+  const timedOut = () => Date.now() - started >= ${prefix}_TIMEOUT_MS;
+  let token;
+  try {
+    const issued = await requestClientCredentialsToken({
+      endpoint: view.endpoint,
+      tokenPath: ${prefix}_TOKEN_PATH,
+      scope: ${scopeLiteral},
+      credentials: { clientId, clientSecret },
+      faults: ${prefix}_TOKEN_FAULTS,
+      timeoutMs: ${prefix}_TIMEOUT_MS,
+      fetchImpl,
+    });
+    token = issued.accessToken;
+  } catch (error) {
+    if (error instanceof Fault)
+      throw new Fault(error.status, error.code, scrubTextWithSecrets(error.message, [clientId, clientSecret]));
+    throw error;
+  }
+  const withToken = [clientId, clientSecret, token];
+  const cleanToken = (message) => scrubTextWithSecrets(message, withToken);
+  const remaining = ${prefix}_TIMEOUT_MS - (Date.now() - started);
+  if (remaining <= 0 || timedOut()) {
+    throw new Fault(504, "${prefix}_VENDOR_TIMEOUT", "The vendor exceeded its deadline.");
+  }
   const hasBody = call.body !== undefined;
   let response: Response;
   try {
-    response = await fetchImpl(url, {
-      method: operation.method.toUpperCase(),
-      redirect: "manual",
-      signal: AbortSignal.timeout(5000),
-      headers: {
-        Accept: "application/json",
-        Authorization: \`Bearer \${clientId}:\${clientSecret}\`,
-        ...(hasBody ? { "Content-Type": "application/json" } : {}),
-      },
-      ...(hasBody ? { body: JSON.stringify(call.body) } : {}),
-    });
+    try {
+      response = await fetchImpl(url, {
+        method: operation.method.toUpperCase(),
+        redirect: "manual",
+        signal: AbortSignal.timeout(remaining),
+        headers: {
+          Accept: "application/json",
+          Authorization: \`Bearer \${token}\`,
+          ...(hasBody ? { "Content-Type": "application/json" } : {}),
+        },
+        ...(hasBody ? { body: JSON.stringify(call.body) } : {}),
+      });
+    } catch (error) {
+      if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
+        throw new Fault(504, "${prefix}_VENDOR_TIMEOUT", "The vendor exceeded its deadline.");
+      }
+      throw error;
+    }
+    if (timedOut()) {
+      await response.body?.cancel();
+      throw new Fault(504, "${prefix}_VENDOR_TIMEOUT", "The vendor exceeded its deadline.");
+    }
   } catch (error) {
-    if (error instanceof Fault) throw error;
+    if (error instanceof Fault) throw new Fault(error.status, error.code, cleanToken(error.message));
     throw new Fault(502, "OPENAPI_EXECUTION_FAILED", "The vendor API did not answer.");
   }
-  const clean = (message: string): string => scrubTextWithSecrets(message, [clientId, clientSecret]);
+  const clean = cleanToken;
   if (response.status >= 300 && response.status < 400) {
     await response.body?.cancel();
     throw new Fault(502, "OPENAPI_EXECUTION_FAILED", clean("The vendor API redirected the request."));
@@ -186,8 +270,9 @@ export async function execute${typeName}Operation(
   }
   // Bounded host read: oversized or unreadable vendor bodies fail closed
   // before full buffering; partial unsanitized bytes never reach the caller.
+  // The transient access token joins the scrub set with the deployment pair.
   const result = await readBoundedVendorBody(response);
-  const scrubbed = scrubValueWithSecrets(result, [clientId, clientSecret]);
+  const scrubbed = scrubValueWithSecrets(result, withToken);
   const provenance = buildProvenance({
     callerUserId: caller.userId,
     orgId: caller.orgId,

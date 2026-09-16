@@ -74,6 +74,13 @@ describe("INT-01 generator (issue #229)", () => {
     expect(out.source).not.toContain(".catch(() => null)");
     expect(out.source).not.toMatch(/clientSecret\s*[:=]\s*["'][^"']+["']/);
     expect(out.source).not.toContain("halo-lab.example.com/api");
+    // TOOL-01 (issue #170) auth contract: generated hosts exchange the
+    // deployment pair at an explicit token path and send only the access
+    // token as Bearer — never the pseudo-Bearer `id:secret` shape.
+    expect(out.source).toContain("requestClientCredentialsToken");
+    expect(out.source).toContain('export const HALO_TOKEN_PATH = "/auth/token";');
+    expect(out.source).toContain("Authorization: `Bearer ${token}`");
+    expect(out.source).not.toContain("Bearer ${clientId}:${clientSecret}");
   });
 
   it("is deterministic: same spec plus same options yields identical source", () => {
@@ -99,6 +106,31 @@ describe("INT-01 generator (issue #229)", () => {
     expect(cli.generated.content).toContain("await fetchImpl(url");
     expect(cli.generated.content).toContain("resolveRequestUrl({ ...pinned");
     expect(cli.generated.content).not.toContain("return { result: null, provenance: {} as CodeModeProvenance }");
+  });
+
+  it("keeps the CLI auth flags on the canonical typed output", async () => {
+    const spec = haloShaped();
+    const digest = await sha256Hex(spec);
+    const typed = generateIntegrationModule(
+      spec,
+      { ...opts(), tokenPath: "/oauth2/token", scope: "monitoring", timeoutMs: 8000 },
+      digest,
+    );
+    const cli = (await runCommand({
+      command: "generate-integration",
+      genId: "halo",
+      genName: "halo",
+      genSpec: spec,
+      genOrigins: ["https://halo-lab.example.com"],
+      genClassifications: { Ticket_Delete: "destructive" },
+      genTokenPath: "/oauth2/token",
+      genScope: "monitoring",
+      genTimeoutMs: 8000,
+    })) as GeneratedCliResult;
+
+    expect(cli.generated.content).toBe(typed.source);
+    expect(cli.generated.content).toContain('export const HALO_TOKEN_PATH = "/oauth2/token";');
+    expect(cli.generated.content).toContain("export const HALO_TIMEOUT_MS = 8000;");
   });
 
   it("fails loudly on structural defects and bad options", () => {
@@ -223,6 +255,39 @@ describe("INT-01 generator (issue #229)", () => {
     );
     expect(out.source).toContain(`"Ticket_Get": "mutation"`);
     expect(out.operationCount).toBe(3);
+  });
+
+  it("emits explicit provider auth strategy with safe defaults", () => {
+    const out = generateIntegrationModule(haloShaped(), opts(), DIGEST);
+    expect(out.source).toContain('export const HALO_TOKEN_PATH = "/auth/token";');
+    expect(out.source).toContain("export const HALO_TIMEOUT_MS = 5000;");
+    expect(out.source).toContain("HALO_TOKEN_FAULTS");
+    expect(out.source).toContain('"HALO_UNAUTHORIZED"');
+    const custom = generateIntegrationModule(
+      haloShaped(),
+      { ...opts(), tokenPath: "/oauth2/token", scope: "monitoring", timeoutMs: 8000 },
+      DIGEST,
+    );
+    expect(custom.source).toContain('export const HALO_TOKEN_PATH = "/oauth2/token";');
+    expect(custom.source).toContain('scope: "monitoring"');
+    expect(custom.source).toContain("export const HALO_TIMEOUT_MS = 8000;");
+    expect(custom.source).not.toBe(out.source);
+  });
+
+  it("rejects bad auth options loudly", () => {
+    for (const bad of [
+      { ...opts(), tokenPath: "https://evil.example.com/token" },
+      { ...opts(), tokenPath: "auth/token" },
+      { ...opts(), scope: "" },
+      { ...opts(), scope: "x".repeat(129) },
+      { ...opts(), timeoutMs: 0 },
+      { ...opts(), timeoutMs: 30001 },
+      { ...opts(), timeoutMs: Number.NaN },
+    ]) {
+      expect(() => generateIntegrationModule(haloShaped(), bad, DIGEST)).toThrow(
+        expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }),
+      );
+    }
   });
 
   it("rejects classification typos, bad prefixes, http origins, and line breaks", () => {

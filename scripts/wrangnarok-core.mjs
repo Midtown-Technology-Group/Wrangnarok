@@ -539,6 +539,8 @@ Commands:
                                           Emit a new defineSaga module (offline)
   generate-integration --id ID --spec JSON|@FILE --origin URL [--origin URL2]
                                           [--name NAME] [--classify op=CLASS]
+                                          [--token-path PATH] [--scope SCOPE]
+                                          [--timeout-ms MS]
                                           Emit a typed Integration module from
                                           OpenAPI 3.x JSON (offline)
   submit --saga NAME|UUID [--input JSON|@FILE] [--key KEY] [--no-wait]

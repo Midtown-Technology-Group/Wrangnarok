@@ -22,6 +22,7 @@ import { HALO_INTEGRATION_ID } from "../src/domain";
 import {
   HALO_ALLOWED_ORIGIN,
   HALO_SPEC_VERSION,
+  HALO_TIMEOUT_MS,
   executeHaloOperation,
   inspectHaloOperation,
   requireHaloSecrets,
@@ -41,22 +42,44 @@ const OTHER_USER = "00000000-0000-4000-8000-000000000003";
 const OTHER_ORG = "00000000-0000-4000-8000-000000000004";
 const HALO_SECRET = "halo-lab-secret-sentinel";
 const HALO_ID = "halo-lab-client-sentinel";
+const HALO_ACCESS_TOKEN = "halo-lab-access-token-sentinel";
 
 function headers(extra: Record<string, string> = {}): Record<string, string> {
   return { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", ...extra };
 }
 
-/** Vendor harness: the lab Halo origin answers canned payloads; the secret
- * sentinel rides the Authorization expectation so a credential leak into the
- * URL or body would fail the assertion, not just the scrub. */
+/** Vendor harness: the lab Halo origin models the documented OAuth2
+ * client-credentials flow. POST /auth/token validates the deployment pair and
+ * issues a sentinel access token; /api/... accepts ONLY that access token
+ * and rejects the raw client id/secret — so a host that sends
+ * `Bearer clientId:clientSecret` fails closed with 401 instead of passing.
+ * The harness counts token exchanges so tests pin the single-flight
+ * contract (exactly one vendor token call per execution). */
 function mockHalo() {
-  return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+  let tokenCalls = 0;
+  const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
     const request = input instanceof Request ? input : new Request(url, init);
     if (!url.startsWith(HALO_ALLOWED_ORIGIN)) throw new Error(`Escape attempt: ${url}`);
     if (url.includes(HALO_SECRET) || url.includes(HALO_ID)) throw new Error("Credential leaked into URL");
+    if (url.endsWith("/auth/token")) {
+      tokenCalls += 1;
+      if (request.method !== "POST") return Response.json({ error: "method not allowed" }, { status: 405 });
+      const body = typeof init?.body === "string" ? init.body : "";
+      const form = new URLSearchParams(body);
+      const ok =
+        form.get("grant_type") === "client_credentials" &&
+        form.get("client_id") === HALO_ID &&
+        form.get("client_secret") === HALO_SECRET &&
+        typeof form.get("scope") === "string" &&
+        (form.get("scope") as string).length > 0;
+      if (!ok) return Response.json({ error: "invalid_client" }, { status: 401 });
+      return Response.json({ access_token: HALO_ACCESS_TOKEN, token_type: "Bearer", expires_in: 3600 });
+    }
     const auth = request.headers.get("Authorization") ?? "";
-    if (!auth.includes(HALO_SECRET)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    // Only the exchanged access token authorizes resource calls: the raw
+    // deployment pair (or a pseudo-Bearer of id:secret) is rejected.
+    if (auth !== `Bearer ${HALO_ACCESS_TOKEN}`) return Response.json({ error: "unauthorized" }, { status: 401 });
     if (request.method === "GET" && url.includes("/api/Tickets?")) {
       return Response.json({
         tickets: [{ id: 7, title: "Firewall replacement", team: "networking", status: "open" }],
@@ -70,6 +93,7 @@ function mockHalo() {
     }
     return Response.json({ error: "not found" }, { status: 404 });
   });
+  return { spy, tokenCalls: () => tokenCalls };
 }
 
 async function createHaloConnection(org: string = ORG, endpoint: string = HALO_ALLOWED_ORIGIN): Promise<string> {
@@ -129,7 +153,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
 
   it("executes an authorized read and an authorized mutation through the host", async () => {
     const connectionId = await createHaloConnection();
-    mockHalo();
+    const halo = mockHalo();
     const env = haloEnv();
     const read = await worker.fetch(
       new Request("https://local.test/api/openapi/execute", {
@@ -177,6 +201,28 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     expect(mutateBody.result.noted).toBe(true);
     expect(mutateBody.provenance.operationId).toBe("Ticket_AddNote");
     expect(JSON.stringify(mutateBody)).not.toContain(HALO_SECRET);
+    // Exactly one token exchange per execution: read plus mutation issue two
+    // vendor token calls total (single-flight shares concurrent callers, never
+    // repeats within one execution). The transient access token never reaches
+    // tool results either — scrubbed like the deployment pair.
+    expect(halo.tokenCalls()).toBe(2);
+    expect(JSON.stringify(readBody)).not.toContain(HALO_ACCESS_TOKEN);
+    expect(JSON.stringify(mutateBody)).not.toContain(HALO_ACCESS_TOKEN);
+    // Wire proof: every non-token vendor call carried exactly the exchanged
+    // access token — the raw deployment pair never rode a resource
+    // Authorization header (the old pseudo-Bearer shape is gone).
+    const resourceAuths = halo.spy.mock.calls
+      .filter(([input]) => {
+        const url = input instanceof Request ? input.url : String(input);
+        return !url.endsWith("/auth/token");
+      })
+      .map(([, init]) => {
+        const headers =
+          init?.headers instanceof Headers ? init.headers : new Headers((init?.headers ?? {}) as HeadersInit);
+        return headers.get("Authorization");
+      });
+    expect(resourceAuths).toHaveLength(2);
+    for (const auth of resourceAuths) expect(auth).toBe(`Bearer ${HALO_ACCESS_TOKEN}`);
   });
 
   it("denies Halo mutations to non-admin members on REST and MCP (issue #346)", async () => {
@@ -399,11 +445,18 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     const env = haloEnv();
     // A provider answering above the response bound fails closed on the
     // direct REST path before full buffering — no partial unsanitized bytes.
-    const hugeFetch = (async () =>
-      new Response("x".repeat(300 * 1024), {
+    // The token exchange answers first (the bound under test is the resource
+    // hop, not the token hop).
+    const hugeFetch = (async (input: unknown) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/auth/token")) {
+        return Response.json({ access_token: HALO_ACCESS_TOKEN, token_type: "Bearer", expires_in: 3600 });
+      }
+      return new Response("x".repeat(300 * 1024), {
         status: 200,
         headers: { "Content-Type": "application/json" },
-      })) as typeof fetch;
+      });
+    }) as typeof fetch;
     const caller = { orgId: ORG, userId: "00000000-0000-4000-8000-000000000002" };
     await expect(
       executeHaloOperation(
@@ -504,6 +557,17 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     mockHalo();
     const env = haloEnv();
     const caller = { orgId: ORG, userId: "00000000-0000-4000-8000-000000000002" };
+    // Pre-authenticated stubs: these vendor faults live on the resource hop,
+    // so the stubs answer the token exchange first, then fail the resource
+    // call. A stub that never exchanges still proves the pre-vendor denials.
+    const withToken = (resource: typeof fetch): typeof fetch =>
+      (async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.endsWith("/auth/token")) {
+          return Response.json({ access_token: HALO_ACCESS_TOKEN, token_type: "Bearer", expires_in: 3600 });
+        }
+        return resource(input, init);
+      }) as typeof fetch;
     // Missing Connection answers OPENAPI_CONNECTION_MISSING.
     await expect(
       executeHaloOperation(
@@ -561,7 +625,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
         caller,
         { clientId: HALO_ID, clientSecret: HALO_SECRET },
         { operationId: "Ticket_Get", path: { id: "7" } },
-        { fetchImpl: redirectFetch },
+        { fetchImpl: withToken(redirectFetch) },
       ),
     ).rejects.toMatchObject({ code: "OPENAPI_EXECUTION_FAILED" });
     const errorFetch = (async () => Response.json({ e: 1 }, { status: 500 })) as typeof fetch;
@@ -571,7 +635,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
         caller,
         { clientId: HALO_ID, clientSecret: HALO_SECRET },
         { operationId: "Ticket_Get", path: { id: "7" } },
-        { fetchImpl: errorFetch },
+        { fetchImpl: withToken(errorFetch) },
       ),
     ).rejects.toMatchObject({ code: "OPENAPI_EXECUTION_FAILED" });
     const garbageFetch = (async () => new Response("not-json{{{", { status: 200 })) as typeof fetch;
@@ -581,7 +645,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
         caller,
         { clientId: HALO_ID, clientSecret: HALO_SECRET },
         { operationId: "Ticket_Get", path: { id: "7" } },
-        { fetchImpl: garbageFetch },
+        { fetchImpl: withToken(garbageFetch) },
       ),
     ).rejects.toMatchObject({ code: "OPENAPI_EXECUTION_FAILED" });
     const throwFetch = (async () => {
@@ -593,7 +657,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
         caller,
         { clientId: HALO_ID, clientSecret: HALO_SECRET },
         { operationId: "Ticket_Get", path: { id: "7" } },
-        { fetchImpl: throwFetch },
+        { fetchImpl: withToken(throwFetch) },
       ),
     ).rejects.toMatchObject({ code: "OPENAPI_EXECUTION_FAILED" });
     // Empty body resolves to null result.
@@ -603,7 +667,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
       caller,
       { clientId: HALO_ID, clientSecret: HALO_SECRET },
       { operationId: "Ticket_Get", path: { id: "7" } },
-      { fetchImpl: emptyFetch },
+      { fetchImpl: withToken(emptyFetch) },
     );
     expect(empty.result).toBe(null);
     // A Fault thrown by the transport propagates unchanged (not wrapped).
@@ -617,7 +681,7 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
         caller,
         { clientId: HALO_ID, clientSecret: HALO_SECRET },
         { operationId: "Ticket_Get", path: { id: "7" } },
-        { fetchImpl: faultFetch },
+        { fetchImpl: withToken(faultFetch) },
       ),
     ).rejects.toMatchObject({ code: "DISPATCH_UNCONFIRMED" });
     // Search/inspect helpers: unknown operation fails closed.
@@ -626,5 +690,232 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     // Secret presence helper: partial credentials fail.
     expect(() => requireHaloSecrets({})).toThrow();
     void env;
+  });
+
+  it("rejects the raw deployment pair on resource calls (no pseudo-Bearer)", async () => {
+    await createHaloConnection();
+    const halo = mockHalo();
+    const caller = { orgId: ORG, userId: "00000000-0000-4000-8000-000000000002" };
+    // A stale host that never exchanges and sends the raw deployment pair as
+    // the Bearer credential fails closed at the token endpoint first
+    // (HALO_UNAUTHORIZED) — the vendor never sees a pseudo-Bearer resource
+    // call succeed, and no credential material escapes in the Fault.
+    const rawPairFetch = (async (input: unknown) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/auth/token")) {
+        return Response.json({ error: "invalid_client" }, { status: 401 });
+      }
+      return Response.json({ error: "unauthorized" }, { status: 401 });
+    }) as typeof fetch;
+    const denied = await executeHaloOperation(
+      bindings.DB,
+      caller,
+      { clientId: HALO_ID, clientSecret: HALO_SECRET },
+      { operationId: "Ticket_Get", path: { id: "7" } },
+      { fetchImpl: rawPairFetch },
+    ).then(
+      () => "resolved",
+      (error: unknown) => error,
+    );
+    expect(denied).toMatchObject({ code: "HALO_UNAUTHORIZED", status: 502 });
+    expect(JSON.stringify(denied)).not.toContain(HALO_SECRET);
+    expect(JSON.stringify(denied)).not.toContain(HALO_ID);
+    void halo;
+  });
+
+  it("maps token endpoint failures without leaking secrets", async () => {
+    await createHaloConnection();
+    mockHalo();
+    const caller = { orgId: ORG, userId: "00000000-0000-4000-8000-000000000002" };
+    const secrets = { clientId: HALO_ID, clientSecret: HALO_SECRET };
+    // Rejected credentials at the token endpoint surface HALO_UNAUTHORIZED.
+    const rejectedFetch = (async (input: unknown) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/auth/token")) return Response.json({ error: "invalid_client" }, { status: 401 });
+      throw new Error("resource must not be contacted after a token denial");
+    }) as typeof fetch;
+    const rejected = await executeHaloOperation(
+      bindings.DB,
+      caller,
+      secrets,
+      { operationId: "Ticket_Get", path: { id: "7" } },
+      { fetchImpl: rejectedFetch },
+    ).then(
+      () => "resolved",
+      (error: unknown) => error,
+    );
+    expect(rejected).toMatchObject({ code: "HALO_UNAUTHORIZED", status: 502 });
+    expect(JSON.stringify(rejected)).not.toContain(HALO_SECRET);
+    expect(JSON.stringify(rejected)).not.toContain(HALO_ID);
+    // Rate-limited token endpoint: exactly one vendor call, never retried.
+    let tokenRateCalls = 0;
+    const rateFetch = (async (input: unknown) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/auth/token")) {
+        tokenRateCalls += 1;
+        return Response.json({ error: "slow down" }, { status: 429 });
+      }
+      throw new Error("resource must not be contacted after a token denial");
+    }) as typeof fetch;
+    await expect(
+      executeHaloOperation(
+        bindings.DB,
+        caller,
+        secrets,
+        { operationId: "Ticket_Get", path: { id: "7" } },
+        { fetchImpl: rateFetch },
+      ),
+    ).rejects.toMatchObject({ code: "HALO_RATE_LIMITED", status: 502 });
+    expect(tokenRateCalls).toBe(1);
+    // Malformed token body fails closed without echoing vendor bytes.
+    const garbageTokenFetch = (async (input: unknown) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/auth/token")) return new Response("not-json{{{", { status: 200 });
+      throw new Error("resource must not be contacted after a token denial");
+    }) as typeof fetch;
+    const garbage = await executeHaloOperation(
+      bindings.DB,
+      caller,
+      secrets,
+      { operationId: "Ticket_Get", path: { id: "7" } },
+      { fetchImpl: garbageTokenFetch },
+    ).then(
+      () => "resolved",
+      (error: unknown) => error,
+    );
+    expect(garbage).toMatchObject({ code: "HALO_BAD_RESPONSE", status: 502 });
+    expect(JSON.stringify(garbage)).not.toContain("not-json");
+    // Token timeout maps to the actionable deadline, and the resource hop is
+    // never issued after it.
+    const timeoutFetch = (async (input: unknown) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/auth/token")) throw new DOMException("The operation timed out.", "TimeoutError");
+      throw new Error("resource must not be contacted after a token timeout");
+    }) as typeof fetch;
+    await expect(
+      executeHaloOperation(
+        bindings.DB,
+        caller,
+        secrets,
+        { operationId: "Ticket_Get", path: { id: "7" } },
+        { fetchImpl: timeoutFetch },
+      ),
+    ).rejects.toMatchObject({ code: "HALO_VENDOR_TIMEOUT", status: 504 });
+    // Merely-late token failure (transport ignores the abort, then fails
+    // past the deadline) reads the same deadline through the clock.
+    const lateTokenFetch = (async (input: unknown) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/auth/token")) {
+        await new Promise((resolve) => setTimeout(resolve, HALO_TIMEOUT_MS + 50));
+        throw new Error("late token failure");
+      }
+      throw new Error("resource must not be contacted after a token timeout");
+    }) as typeof fetch;
+    await expect(
+      executeHaloOperation(
+        bindings.DB,
+        caller,
+        secrets,
+        { operationId: "Ticket_Get", path: { id: "7" } },
+        { fetchImpl: lateTokenFetch },
+      ),
+    ).rejects.toMatchObject({ code: "HALO_VENDOR_TIMEOUT", status: 504 });
+    // Merely-late token success (valid token past the deadline) never issues
+    // the resource hop: the shared budget is already spent.
+    let lateResourceCalls = 0;
+    const slowTokenFetch = (async (input: unknown) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/auth/token")) {
+        await new Promise((resolve) => setTimeout(resolve, HALO_TIMEOUT_MS + 50));
+        return Response.json({ access_token: HALO_ACCESS_TOKEN, token_type: "Bearer", expires_in: 3600 });
+      }
+      lateResourceCalls += 1;
+      return Response.json({ id: 7 });
+    }) as typeof fetch;
+    await expect(
+      executeHaloOperation(
+        bindings.DB,
+        caller,
+        secrets,
+        { operationId: "Ticket_Get", path: { id: "7" } },
+        { fetchImpl: slowTokenFetch },
+      ),
+    ).rejects.toMatchObject({ code: "HALO_VENDOR_TIMEOUT", status: 504 });
+    expect(lateResourceCalls).toBe(0);
+  }, 30000);
+
+  it("holds the shared deadline on the resource hop", async () => {
+    await createHaloConnection();
+    mockHalo();
+    const caller = { orgId: ORG, userId: "00000000-0000-4000-8000-000000000002" };
+    const secrets = { clientId: HALO_ID, clientSecret: HALO_SECRET };
+    const call = { operationId: "Ticket_Get", path: { id: "7" } };
+    const tokenFirst = (resource: (url: string) => Promise<Response> | Response): typeof fetch =>
+      (async (input: unknown) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.endsWith("/auth/token")) {
+          return Response.json({ access_token: HALO_ACCESS_TOKEN, token_type: "Bearer", expires_in: 3600 });
+        }
+        return resource(url);
+      }) as typeof fetch;
+    // Aborted resource call maps to the actionable deadline with the token in
+    // the scrub set (never leaked through the Fault message). Both abort
+    // names count: TimeoutError from AbortSignal.timeout, AbortError from a
+    // transport that surfaces the abort directly.
+    for (const name of ["TimeoutError", "AbortError"]) {
+      const aborted = await executeHaloOperation(bindings.DB, caller, secrets, call, {
+        fetchImpl: tokenFirst(() => {
+          throw new DOMException("The operation timed out.", name);
+        }),
+      }).then(
+        () => "resolved",
+        (error: unknown) => error,
+      );
+      expect(aborted).toMatchObject({ code: "HALO_VENDOR_TIMEOUT", status: 504 });
+      expect(JSON.stringify(aborted)).not.toContain(HALO_ACCESS_TOKEN);
+    }
+    // Merely-late resource resolve (transport ignores the abort) still reads
+    // as a timeout, never a success: the host checks the clock after resolve.
+    const late = await executeHaloOperation(bindings.DB, caller, secrets, call, {
+      fetchImpl: tokenFirst(async () => {
+        await new Promise((resolve) => setTimeout(resolve, HALO_TIMEOUT_MS + 50));
+        return Response.json({ id: 7 });
+      }),
+    }).then(
+      () => "resolved",
+      (error: unknown) => error,
+    );
+    expect(late).toMatchObject({ code: "HALO_VENDOR_TIMEOUT", status: 504 });
+    // Raw transport failure on the resource hop reads as the vendor not
+    // answering (the token-hop mapping already proved above stays distinct).
+    await expect(
+      executeHaloOperation(bindings.DB, caller, secrets, call, {
+        fetchImpl: tokenFirst(() => {
+          throw new Error("connection reset");
+        }),
+      }),
+    ).rejects.toMatchObject({ code: "OPENAPI_EXECUTION_FAILED", status: 502 });
+  }, 20000);
+
+  it("clears the halo proof audit of token and credential material", async () => {
+    await createHaloConnection();
+    const halo = mockHalo();
+    const read = await worker.fetch(
+      new Request("https://local.test/api/openapi/execute", {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ integration: "halo", operationId: "Ticket_Get", params: { path: { id: "7" } } }),
+      }),
+      haloEnv(),
+    );
+    expect(read.status).toBe(200);
+    expect(halo.tokenCalls()).toBe(1);
+    const audit = await worker.fetch(new Request("https://local.test/api/audit", { headers: headers() }), bindings);
+    expect(audit.status).toBe(200);
+    const events = (await audit.json()) as { events: { action: string; detail: Record<string, unknown> }[] };
+    const dumped = JSON.stringify(events.events.filter((event) => event.action === "codemode.execute"));
+    expect(dumped).not.toContain(HALO_SECRET);
+    expect(dumped).not.toContain(HALO_ID);
+    expect(dumped).not.toContain(HALO_ACCESS_TOKEN);
   });
 });

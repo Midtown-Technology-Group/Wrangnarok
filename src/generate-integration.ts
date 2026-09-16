@@ -24,6 +24,13 @@ export interface GenerateIntegrationOptions {
   readonly allowedOrigins: readonly string[];
   readonly classifications?: Readonly<Record<string, OperationRisk>>;
   readonly secretEnvPrefix?: string;
+  /** OAuth token endpoint path, resolved against the Connection endpoint
+   * origin (HaloPSA default /auth/token). Must start with / when provided. */
+  readonly tokenPath?: string;
+  /** OAuth scope requested at the token endpoint (default all). */
+  readonly scope?: string;
+  /** Shared vendor deadline ms over token plus resource call (1-30000). */
+  readonly timeoutMs?: number;
 }
 
 export interface GeneratedIntegration {
@@ -129,6 +136,28 @@ export function generateIntegrationModule(
     );
   }
 
+  // Auth strategy is explicit, never silently assumed: the generated host
+  // exchanges the deployment pair at this token path (resolved against the
+  // Connection endpoint origin) and sends only the access token as Bearer.
+  // A provider with a different token shape overrides it here; the default
+  // matches HaloPSA's documented /auth/token client-credentials flow.
+  const tokenPath = options.tokenPath ?? "/auth/token";
+  if (!tokenPath.startsWith("/") || tokenPath.length > 128) {
+    throw new Fault(
+      400,
+      "GENERATOR_INVALID_OPTIONS",
+      "tokenPath must be a same-origin absolute path starting with / (1-128 chars).",
+    );
+  }
+  const scope = options.scope ?? "all";
+  if (scope.length === 0 || scope.length > 128) {
+    throw new Fault(400, "GENERATOR_INVALID_OPTIONS", "scope must be 1-128 chars.");
+  }
+  const timeoutMs = options.timeoutMs ?? 5000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 30000) {
+    throw new Fault(400, "GENERATOR_INVALID_OPTIONS", "timeoutMs must be an integer 1 to 30000.");
+  }
+
   for (const origin of options.allowedOrigins) {
     const url = new URL(origin);
     const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
@@ -154,6 +183,9 @@ export function generateIntegrationModule(
     envPrefix,
     digestHex,
     version,
+    tokenPath,
+    scope,
+    timeoutMs,
   });
 
   return {
