@@ -45,7 +45,8 @@ function toolFilePath(raw) {
   }
 }
 
-// Split a shell command line into segments on unquoted | & ; operators.
+// Split a shell command line into segments on unquoted | & ; operators and
+// newlines (a newline always ends a shell command, even unquoted).
 // Returns null when quoting cannot be resolved (fail closed by the caller).
 export function splitSegments(cmd) {
   const segments = [];
@@ -72,7 +73,7 @@ export function splitSegments(cmd) {
       i += 1;
       continue;
     }
-    if (ch === "|" || ch === "&" || ch === ";") {
+    if (ch === "|" || ch === "&" || ch === ";" || ch === "\n") {
       segments.push(current);
       current = "";
       // Collapse && and || into one boundary.
@@ -173,6 +174,14 @@ function checkWranglerArgv(argv) {
   }
   if (lower === "versions" && rest[0] !== undefined && String(rest[0]).toLowerCase() === "deploy") {
     block("wrangler versions deploy from agent sessions (production deploy needs explicit human approval).");
+    return;
+  }
+  if (lower === "pages" && rest.some((t) => String(t).toLowerCase() === "deploy")) {
+    block("wrangler pages deploy from agent sessions (production deploy needs explicit human approval).");
+    return;
+  }
+  if (lower === "deployment" || lower === "deployments") {
+    block(`wrangler ${lower} from agent sessions (production deploy needs explicit human approval).`);
     return;
   }
   if (lower === "delete" || lower === "rollback" || lower === "triggers") {
@@ -276,6 +285,10 @@ if (process.argv[2] === "--selftest") {
   blocked("npm run indirection", "npm run deploy:preview");
   blocked("dynamic argv", "wrangler deploy $(echo --env dev)");
   blocked("rollback", "wrangler rollback --env dev");
+  blocked("multiline deploy", "echo hi\nwrangler deploy --env dev");
+  blocked("pages deploy", "wrangler pages deploy dist --branch main");
+  allowed("pages list", "wrangler pages project list");
+  allowed("multiline dry-run", "echo hi\nwrangler deploy --dry-run --env dev");
   console.log(`guard selftest: ${passed} passed.`);
   process.exit(0);
 }
