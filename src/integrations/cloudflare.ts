@@ -99,7 +99,10 @@ async function getJson(
   started: number,
 ): Promise<Record<string, unknown>> {
   const timedOut = () => Date.now() - started >= deadline;
-  const url = new URL(path, base);
+  // Root-relative paths would discard the base path (`/client/v4`): join
+  // against the base directory explicitly so the version prefix survives.
+  const baseDir = base.endsWith("/") ? base : `${base}/`;
+  const url = new URL(path.replace(/^\//, ""), baseDir);
   if (params !== undefined) {
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
   }
@@ -278,7 +281,17 @@ export async function inventoryZones(
       totalAvailable = info.total_count;
     }
     const totalPages = info.total_pages;
-    if (batch.length === 0 || (typeof totalPages === "number" && page >= totalPages) || batch.length < CLOUDFLARE_PAGE_SIZE) {
+    // Termination follows the ADVERTISED page count, not the short-page
+    // heuristic: a non-final page may legitimately carry fewer rows than
+    // the page size (filters, vendor packing), and stopping early would
+    // silently drop trailing pages. The bundle scenario
+    // inventory-two-pages pins this: page 1 carries 2 of 50 rows with
+    // total_pages=2, and the contract requires fetching page 2. The loop
+    // still terminates: empty batches break, page>=totalPages breaks, and
+    // every non-empty batch grows zones toward maxZones. Deliberate
+    // divergence from the Python's `len(batch) < PAGE_SIZE` shortcut,
+    // recorded in docs/migration-pilot.md.
+    if (batch.length === 0 || (typeof totalPages === "number" && page >= totalPages)) {
       break;
     }
     page += 1;

@@ -311,7 +311,7 @@ it("replays inventory-missing-mapping: fails before any network request", async 
     binding: { entity_id: null; entity_name: null };
   };
   // Empty http array: the run must make no network request.
-  expect(scenario).not.toHaveProperty("http");
+  expect(scenario.http ?? []).toEqual([]);
   const mock = mockVendor([]);
   const key = "cf-inventory-missing-0001";
   const id = await executionId(principal, key);

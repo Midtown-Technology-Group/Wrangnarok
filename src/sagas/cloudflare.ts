@@ -32,9 +32,19 @@ import { scrubExecutionError, scrubExecutionValue } from "../secrets";
 import { beginOperation, failExecution, finishOperation, prepareExecution, resolveConnection } from "../executions";
 import { executeSaga } from "./shared";
 
+const accountSchema = Object.freeze({
+  type: "object" as const,
+  properties: Object.freeze({
+    id: Object.freeze({}),
+    name: Object.freeze({}),
+  }),
+  required: Object.freeze([]),
+  additionalProperties: false,
+});
+
 const verifyInputSchema = Object.freeze({
   type: "object" as const,
-  properties: Object.freeze({}),
+  properties: Object.freeze({ account: accountSchema }),
   required: Object.freeze([]),
   additionalProperties: false,
 });
@@ -55,7 +65,7 @@ const verifyOutputSchema = Object.freeze({
 
 const inventoryInputSchema = Object.freeze({
   type: "object" as const,
-  properties: Object.freeze({ max_zones: Object.freeze({ type: "number" }) }),
+  properties: Object.freeze({ max_zones: Object.freeze({ type: "number" }), account: accountSchema }),
   required: Object.freeze([]),
   additionalProperties: false,
 });
@@ -145,24 +155,12 @@ export const cloudflareVerifySagaDef = defineSaga<CloudflareVerifyResult>({
           CLOUDFLARE_TIMEOUT_MS,
         );
         const stepOrg = withOperation(prepared.orgCtx, "cloudflare-verify-v1");
-        // The account mapping rides the Execution input binding (scenario
-        // `binding.entity_id/entity_name`): read it from the immutable D1
-        // Execution row, never from Workflow params or caller input. The
-        // input schemas carry no account fields; the raw row input is the
-        // only carrier that survives parse.
-        const raw = await ctx.db
-          .prepare("SELECT input_json FROM executions WHERE id=?")
-          .bind(id)
-          .first<{ input_json: string }>();
-        let binding: { readonly id: unknown; readonly name: unknown } = { id: null, name: null };
-        try {
-          const parsed = JSON.parse(raw?.input_json ?? "{}") as { account?: { id?: unknown; name?: unknown } };
-          if (parsed && typeof parsed === "object" && parsed.account && typeof parsed.account === "object") {
-            binding = { id: parsed.account.id ?? null, name: parsed.account.name ?? null };
-          }
-        } catch {
-          binding = { id: null, name: null };
-        }
+        // The account mapping rides the parsed Execution input (scenario
+        // `binding.entity_id/entity_name`, validated by the input parser and
+        // persisted through submit): read it from the prepared input, never
+        // from Workflow params. The Integration boundary owns the strict
+        // account-ID check.
+        const binding = prepared.input.account ?? { id: null, name: null };
         const vendor = await resolveCloudflareVendor(
           ctx.db,
           stepOrg,
@@ -262,19 +260,7 @@ export const cloudflareInventorySagaDef = defineSaga<CloudflareInventoryResult>(
           CLOUDFLARE_TIMEOUT_MS,
         );
         const stepOrg = withOperation(prepared.orgCtx, "cloudflare-inventory-v1");
-        const raw = await ctx.db
-          .prepare("SELECT input_json FROM executions WHERE id=?")
-          .bind(id)
-          .first<{ input_json: string }>();
-        let binding: { readonly id: unknown; readonly name: unknown } = { id: null, name: null };
-        try {
-          const parsed = JSON.parse(raw?.input_json ?? "{}") as { account?: { id?: unknown; name?: unknown } };
-          if (parsed && typeof parsed === "object" && parsed.account && typeof parsed.account === "object") {
-            binding = { id: parsed.account.id ?? null, name: parsed.account.name ?? null };
-          }
-        } catch {
-          binding = { id: null, name: null };
-        }
+        const binding = prepared.input.account ?? { id: null, name: null };
         const vendor = await resolveCloudflareVendor(
           ctx.db,
           stepOrg,

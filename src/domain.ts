@@ -497,15 +497,41 @@ export const CLOUDFLARE_MAX_ZONES = 250;
 export const CLOUDFLARE_PAGE_SIZE = 50;
 export const CLOUDFLARE_TIMEOUT_MS = 20000;
 export const CLOUDFLARE_ACCOUNT_ID_PATTERN = /^[a-f0-9]{32}$/;
-export interface CloudflareVerifyInput {}
+export interface CloudflareAccountBinding {
+  readonly id: unknown;
+  readonly name: unknown;
+}
+export interface CloudflareVerifyInput {
+  readonly account?: CloudflareAccountBinding;
+}
 export interface CloudflareInventoryInput {
   readonly maxZones: number;
+  readonly account?: CloudflareAccountBinding;
+}
+/** Optional account envelope (migration binding `entity_id/entity_name`):
+ * accepted and carried through the parsed input so the Saga can resolve
+ * the account mapping without scraping the raw persisted body. Validated
+ * as an object when present; the Integration boundary owns the strict
+ * account-ID check. */
+function parseCloudflareAccountBinding(value: unknown): CloudflareAccountBinding | undefined {
+  if (value === undefined) return undefined;
+  if (!object(value)) {
+    throw new Fault(400, "INVALID_INPUT", "The account binding must be an object with id and name.");
+  }
+  const record = value as Record<string, unknown>;
+  return { id: record.id ?? null, name: record.name ?? null };
 }
 export function parseCloudflareVerifyInput(value: unknown): CloudflareVerifyInput {
-  if (!object(value) || Object.keys(value).length !== 0) {
+  if (!object(value)) {
     throw new Fault(400, "INVALID_INPUT", "The cloudflare-verify-connection Saga takes an empty input object.");
   }
-  return {};
+  for (const key of Object.keys(value)) {
+    if (key !== "account") {
+      throw new Fault(400, "INVALID_INPUT", "The cloudflare-verify-connection Saga takes an empty input object.");
+    }
+  }
+  const account = parseCloudflareAccountBinding((value as Record<string, unknown>).account);
+  return account === undefined ? {} : { account };
 }
 export function parseCloudflareInventoryInput(value: unknown): CloudflareInventoryInput {
   if (!object(value)) {
@@ -513,20 +539,28 @@ export function parseCloudflareInventoryInput(value: unknown): CloudflareInvento
   }
   const record = value as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (key !== "max_zones") {
+    if (key !== "max_zones" && key !== "maxZones" && key !== "account") {
       throw new Fault(400, "INVALID_INPUT", `max_zones must be an integer between 1 and ${CLOUDFLARE_MAX_ZONES}.`);
     }
   }
   // The bundle default (Python `max_zones: int = MAX_ZONES`) is preserved:
-  // an omitted key inventories the full bound.
-  const raw = record.max_zones === undefined ? CLOUDFLARE_MAX_ZONES : record.max_zones;
+  // an omitted key inventories the full bound. The parsed camelCase form is
+  // accepted too: submit persists parsed input and prepareExecution
+  // re-parses it, so the parser must be idempotent over its own output.
+  const raw =
+    record.maxZones === undefined
+      ? record.max_zones === undefined
+        ? CLOUDFLARE_MAX_ZONES
+        : record.max_zones
+      : record.maxZones;
   if (typeof raw === "boolean" || typeof raw !== "number" || !Number.isInteger(raw)) {
     throw new Fault(400, "INVALID_INPUT", `max_zones must be an integer between 1 and ${CLOUDFLARE_MAX_ZONES}.`);
   }
   if (raw < 1 || raw > CLOUDFLARE_MAX_ZONES) {
     throw new Fault(400, "INVALID_INPUT", `max_zones must be an integer between 1 and ${CLOUDFLARE_MAX_ZONES}.`);
   }
-  return { maxZones: raw };
+  const account = parseCloudflareAccountBinding(record.account);
+  return account === undefined ? { maxZones: raw } : { maxZones: raw, account };
 }
 export interface CloudflareAccountRef {
   readonly id: string;
