@@ -316,6 +316,18 @@ async function requireAct(
   }
 }
 
+/** Detail-route visibility (issue #353): the same rule listTables applies —
+ * owner or any grant. Strangers answer 404 (never an existence leak);
+ * same-org non-grantees answer 404 as well, matching the list's omission. */
+export async function requireVisibleTable(db: D1Database, caller: Principal, table: TableDefinition): Promise<void> {
+  if (caller.userId === table.ownerUserId) return;
+  const grant = await db
+    .prepare("SELECT id FROM table_grants WHERE table_id=? AND grantee_user_id=? LIMIT 1")
+    .bind(table.id, caller.userId)
+    .first<{ id: string }>();
+  if (!grant) throw invalid("TABLE_NOT_FOUND", "Table not found.", 404);
+}
+
 function toDocument(row: DocRow): TableDocument {
   return {
     id: row.doc_id,

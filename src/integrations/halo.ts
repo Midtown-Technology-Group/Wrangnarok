@@ -124,6 +124,19 @@ export interface CodeModeResult {
   readonly provenance: CodeModeProvenance;
 }
 
+/** Caller authorization for Code Mode execution (issue #346): the route's
+ * resolved CallerCtx answer. Reads execute under any active membership (the
+ * route already gated that); mutations additionally require an admin caller
+ * (instance or org admin). Deny-by-absence: no admin flag, no mutation. */
+export interface HaloAuthCtx {
+  readonly isInstanceAdmin: boolean;
+  readonly isOrgAdmin: boolean;
+}
+
+export function isHaloAdminCaller(ctx: HaloAuthCtx): boolean {
+  return ctx.isInstanceAdmin || ctx.isOrgAdmin;
+}
+
 /** Host-mediated Code Mode execution for Halo (ADR 022 section: the host
  * request path). Resolves the caller's own Organization Connection (never
  * cross-org), validates against the pinned contract, applies policy,
@@ -138,6 +151,7 @@ export async function executeHaloOperation(
   secrets: HaloSecrets,
   call: CodeModeCall,
   vendor: { readonly fetchImpl?: typeof fetch } = {},
+  auth: HaloAuthCtx = { isInstanceAdmin: false, isOrgAdmin: false },
 ): Promise<CodeModeResult> {
   const { clientId, clientSecret } = requireHaloSecrets(secrets);
   // Only genuine absence maps to the 424 operator diagnosis. getConnection
@@ -162,6 +176,13 @@ export async function executeHaloOperation(
   const operations = indexOperations(spec, HALO_CLASSIFICATIONS);
   const operation: ContractOperation = inspectOperation(operations, call.operationId);
   authorizeOperation(operation, HALO_DEFAULT_POLICY);
+  // Issue #346: the deployment credential is provider-global, so the
+  // mutation risk class additionally requires an authorized caller. Reads
+  // stay under membership + Connection authority; mutations without an
+  // admin caller fail closed before any vendor contact.
+  if (operation.risk === "mutation" && !isHaloAdminCaller(auth)) {
+    throw new Fault(403, "OPENAPI_OPERATION_FORBIDDEN", "Only an admin may execute Halo mutations.");
+  }
   const url = resolveRequestUrl(pinned, operation, { path: call.path, query: call.query });
   // Belt and braces: the Connection endpoint origin must equal the pinned
   // allowlist origin, so a remapped Connection cannot smuggle egress out.

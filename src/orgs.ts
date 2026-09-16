@@ -803,7 +803,7 @@ export async function deletePreview(db: D1Database, orgId: string): Promise<Dele
     notifications,
     bundleActive,
     bundleOwnedRows,
-    retained: ["executions", "operations"],
+    retained: ["executions", "operations", "audit_events"],
     canDelete: blockedBy.length === 0,
     blockedBy: Object.freeze(blockedBy),
   };
@@ -834,8 +834,9 @@ export interface OrgDeleteResult {
  * Refuses while managed Connections, bundle installs, Solution-owned apps,
  * managed bundle rows, or managed configs exist. ExecutionHistory is retained,
  * never cascaded. Audit events are retained for the same reason (audit of a
- * deleted org must outlive it); notifications are org-scoped inbox rows and
- * are removed.
+ * deleted org must outlive it, and migration 0025 drops the organizations
+ * FK so retention never blocks the delete); notifications are org-scoped
+ * inbox rows and are removed.
  *
  * R2 bytes go first (FILES/FINAL objects, then artifact versions): an
  * interruption between the byte deletes and the D1 batch leaves D1 rows the

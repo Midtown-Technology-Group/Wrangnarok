@@ -235,10 +235,23 @@ export async function recordAudit(
 
 /** Organization-scoped audit listing in (created_at DESC, id DESC) order with
  * action-prefix, outcome, date, and bounded free-text filters plus cursor
- * pagination. Summaries carry the scrubbed detail; no raw bodies ride the list. */
-export async function listAudit(db: D1Database, caller: Principal, query: AuditQuery): Promise<AuditPage> {
+ * pagination. Summaries carry the scrubbed detail; no raw bodies ride the list.
+ *
+ * Owner isolation (issue #351): non-admin callers see only rows they acted
+ * on; admins see the Organization. Admin is the resolved CallerCtx answer
+ * passed by the route (instance or org admin). */
+export async function listAudit(
+  db: D1Database,
+  caller: Principal,
+  query: AuditQuery,
+  admin = false,
+): Promise<AuditPage> {
   const clauses = ["org_id=?"];
   const binds: (string | number)[] = [caller.orgId];
+  if (!admin) {
+    clauses.push("actor_user_id=?");
+    binds.push(caller.userId);
+  }
   if (query.actionPrefix !== undefined) {
     clauses.push("action LIKE ? ESCAPE '\\'");
     binds.push(`${query.actionPrefix.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_")}%`);
@@ -1099,11 +1112,17 @@ export interface OpsRepairDeps {
 /** Inspect a repair without mutating: every kind answers what WOULD happen,
  * including row counts and target state. Dry-run never writes, never
  * dispatches, never deletes — the route enforces this by calling inspect
- * only. */
+ * only.
+ *
+ * Owner isolation (issue #347): retry-execution previews return the original
+ * input only to the execution owner or an admin; other callers answer 404
+ * (never a foreign input). Admin rides the same resolved CallerCtx answer
+ * as every other fence here. */
 export async function inspectRepair(
   db: D1Database,
   caller: Principal,
   input: OpsRepairInput,
+  admin = false,
 ): Promise<OpsRepairOutcome> {
   switch (input.kind) {
     case "retry-execution": {
@@ -1114,17 +1133,28 @@ export async function inspectRepair(
         saga_id: string;
         saga_name: string;
         status: string;
+        user_id: string;
         input_json: string;
       } | null;
       try {
         row = await db
-          .prepare("SELECT id,saga_id,saga_name,status,input_json FROM executions WHERE id=? AND org_id=?")
+          .prepare("SELECT id,saga_id,saga_name,status,user_id,input_json FROM executions WHERE id=? AND org_id=?")
           .bind(id, caller.orgId)
-          .first<{ id: string; saga_id: string; saga_name: string; status: string; input_json: string }>();
+          .first<{
+            id: string;
+            saga_id: string;
+            saga_name: string;
+            status: string;
+            user_id: string;
+            input_json: string;
+          }>();
       } catch {
         row = null;
       }
       if (!row) throw opsFault("EXECUTION_NOT_FOUND", "Execution not found.", 404);
+      if (row.user_id !== caller.userId && !admin) {
+        throw opsFault("EXECUTION_NOT_FOUND", "Execution not found.", 404);
+      }
       if (row.status === "Pending" || row.status === "Running" || row.status === "Cancelling") {
         throw opsFault(
           "EXECUTION_NOT_REPAIRABLE",
@@ -1280,7 +1310,9 @@ export async function runRepair(
   },
 ): Promise<OpsRepairOutcome> {
   if (!deps.admin) throw opsFault("REPAIR_FORBIDDEN", "Only an admin may run operational repairs.", 403);
-  const inspected = await inspectRepair(db, caller, input);
+  // Admin-gated execution implies an admin inspect: the owner fence in
+  // inspectRepair passes through the same admin answer (issue #347).
+  const inspected = await inspectRepair(db, caller, input, deps.admin);
   switch (input.kind) {
     case "retry-execution": {
       if (!deps.retry) throw opsFault("REPAIR_UNAVAILABLE", "Retry dispatch is unavailable on this route.", 503);
