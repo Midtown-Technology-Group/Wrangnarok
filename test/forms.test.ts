@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
+import { assertSafePattern } from "../src/forms";
 import { executionId, helloSaga } from "../src/domain";
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
@@ -338,5 +339,58 @@ describe("codex #345: declared-pattern safety gate (workerd)", () => {
       code: "FORM_VALIDATION_FAILED",
       details: [{ field: "name", code: "PATTERN_MISMATCH" }],
     });
+  });
+});
+
+describe("codex #345: assertSafePattern unit arms (pure)", () => {
+  it("rejects each unsafe construct with its named error", () => {
+    // Nested quantified spans (each tokenizer arm).
+    expect(() => assertSafePattern("f", "(a+)+")).toThrow(/nests quantified/);
+    expect(() => assertSafePattern("f", "(a+)*")).toThrow(/nests quantified/);
+    expect(() => assertSafePattern("f", "(a+){2}")).toThrow(/nests quantified/);
+    expect(() => assertSafePattern("f", "(?:a+)+")).toThrow(/nests quantified/);
+    expect(() => assertSafePattern("f", "((a+))+")).toThrow(/nests quantified/);
+    expect(() => assertSafePattern("f", "(a+(b+))+")).toThrow(/nests quantified/);
+    // Overlapping quantified alternation, including nested-depth arms.
+    expect(() => assertSafePattern("f", "(a|a)+")).toThrow(/overlapping quantified alternation/);
+    expect(() => assertSafePattern("f", "(ab|ac){2}")).toThrow(/overlapping quantified alternation/);
+    expect(() => assertSafePattern("f", "((a)|(a))+")).toThrow(/overlapping quantified alternation/);
+    // Extensions: lookaround, named groups, backreferences.
+    expect(() => assertSafePattern("f", "(?=a)b")).toThrow(/unsafe construct/);
+    expect(() => assertSafePattern("f", "(?!a)b")).toThrow(/unsafe construct/);
+    expect(() => assertSafePattern("f", "(?<n>a)")).toThrow(/unsafe construct/);
+    expect(() => assertSafePattern("f", "(a)\\1")).toThrow(/unsafe construct/);
+    // Budgets: counted repetitions and total quantified cost.
+    expect(() => assertSafePattern("f", "a{100}")).toThrow(/repetition budget/);
+    expect(() => assertSafePattern("f", "a{1,100}")).toThrow(/repetition budget/);
+    expect(() => assertSafePattern("f", "(a){100}")).toThrow(/repetition budget/);
+    // Invalid expressions and skeletons.
+    expect(() => assertSafePattern("f", "(a")).toThrow(/not a valid regular expression/);
+    expect(() => assertSafePattern("f", "a\\")).toThrow(/not a valid regular expression/);
+    expect(() => assertSafePattern("f", "[a")).toThrow(/not a valid regular expression/);
+    // `{2)` is a literal brace (valid, safe): only real counted
+    // repetitions hit the budget arm, covered by the a{100} cases above.
+    expect(() => assertSafePattern("f", "(a{2)")).not.toThrow();
+  });
+
+  it("accepts the safe everyday shapes", () => {
+    for (const pattern of [
+      "^[a-z]{1,64}$",
+      "^\\d{4}-\\d{2}-\\d{2}$",
+      "(a|b)+",
+      "(ab|cd)+",
+      "(a)?",
+      "(a+)?",
+      "(ab)?",
+      "a?",
+      "a*b*",
+      "[a+]+",
+      "\\(a+\\)+",
+      "(a){2}",
+      "a{1,64}",
+      "^(a)?$",
+    ]) {
+      expect(() => assertSafePattern("f", pattern), pattern).not.toThrow();
+    }
   });
 });

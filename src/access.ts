@@ -29,6 +29,11 @@ const certCache = new Map<string, { key: CryptoKey; at: number }>();
 // per request. Short TTL (rotation still converges); never imports.
 const NEGATIVE_KID_TTL_MS = 60 * 1000;
 const unknownKids = new Map<string, number>();
+let negativeKidTtlMs = NEGATIVE_KID_TTL_MS;
+/** Test hook: bound the unknown-kid negative-cache TTL (suite isolation). */
+export function setAccessNegativeKidTtlMs(ms: number): void {
+  negativeKidTtlMs = ms;
+}
 // In-flight coalescing (codex #358): concurrent misses for one team domain
 // share a single cert fetch instead of fanning out N subrequests.
 const certInflight = new Map<string, Promise<{ kid?: string; kty?: string; n?: string; e?: string }[]>>();
@@ -147,11 +152,11 @@ async function keyFor(teamDomain: string, kid: string, fetchFn: typeof fetch): P
   // Stale entries expire via the sweep in the miss path below.
   const deniedAt = unknownKids.get(kid);
   if (deniedAt !== undefined) {
-    if (now - deniedAt < NEGATIVE_KID_TTL_MS) return null;
+    if (now - deniedAt < negativeKidTtlMs) return null;
     unknownKids.delete(kid);
   }
   for (const [miss, at] of unknownKids) {
-    if (now - at >= NEGATIVE_KID_TTL_MS) unknownKids.delete(miss);
+    if (now - at >= negativeKidTtlMs) unknownKids.delete(miss);
     if (unknownKids.size <= MAX_CERT_KEYS) break;
   }
   const certs = await fetchCertSetCoalesced(teamDomain, fetchFn);
@@ -304,4 +309,5 @@ export function clearAccessCertCache(): void {
   unknownKids.clear();
   certInflight.clear();
   certFetchTimeoutMs = ACCESS_CERT_FETCH_TIMEOUT_MS;
+  negativeKidTtlMs = NEGATIVE_KID_TTL_MS;
 }

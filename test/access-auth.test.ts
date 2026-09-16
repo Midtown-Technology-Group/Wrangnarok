@@ -371,3 +371,35 @@ it("codex #358: coalesces, negatively caches, and bounds cert fetches", async ()
     vi.restoreAllMocks();
   }
 });
+
+it("codex #358: expires negative entries and rejects empty segments", async () => {
+  // Expired negative entries refetch (rotation converges); empty JWT
+  // segments fail closed. Covers the expiry-evict and null-segment arms.
+  const { setAccessNegativeKidTtlMs } = await import("../src/access");
+  const { publicKey, privateKey } = await keypair();
+  const pub = await crypto.subtle.exportKey("jwk", publicKey);
+  let fetches = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    if (String(input) === `${TEAM}/cdn-cgi/access/certs`) {
+      fetches += 1;
+      return Response.json({ keys: [{ ...pub, kid: "k1", alg: "RS256" }] });
+    }
+    throw new Error("access-auth tests must not fetch");
+  });
+  try {
+    const bad = await mint(privateKey, "gone-kid", validPayload());
+    await expect(verifyAccess(bad, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetches).toBe(1);
+    // Repeat hits the negative cache: zero new fetches.
+    await expect(verifyAccess(bad, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetches).toBe(1);
+    // Expire the entry: the next attempt refetches (rotation converges).
+    setAccessNegativeKidTtlMs(0);
+    await expect(verifyAccess(bad, accessEnv)).rejects.toMatchObject({ status: 401 });
+    expect(fetches).toBe(2);
+  } finally {
+    vi.restoreAllMocks();
+  }
+  await expect(verifyAccess("..", accessEnv)).rejects.toMatchObject({ status: 401 });
+  await expect(verifyAccess("", accessEnv)).rejects.toMatchObject({ status: 401 });
+});

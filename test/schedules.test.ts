@@ -366,3 +366,16 @@ describe("TRG-01 schedule CRUD (workerd)", () => {
     expect(await client.listSchedules()).toHaveLength(0);
   }, 25000);
 });
+
+describe("codex #364: fairness helpers (pure)", () => {
+  it("parses quarantine streaks and pins the fairness constants", async () => {
+    const { skipStreakFor, SCHEDULE_TICK_PER_ORG_LIMIT, SCHEDULE_SKIP_QUARANTINE_AFTER } =
+      await import("../src/schedules");
+    expect(SCHEDULE_TICK_PER_ORG_LIMIT).toBe(5);
+    expect(SCHEDULE_SKIP_QUARANTINE_AFTER).toBe(10);
+    expect(skipStreakFor({ last_window: null })).toBe(0);
+    expect(skipStreakFor({ last_window: "2026-09-16T10:01" })).toBe(0);
+    expect(skipStreakFor({ last_window: "quarantine:3" })).toBe(3);
+    expect(skipStreakFor({ last_window: "quarantined" })).toBe(0);
+  });
+});
