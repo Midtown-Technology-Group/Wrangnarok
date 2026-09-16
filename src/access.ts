@@ -222,10 +222,7 @@ export async function verifyAccess(
   }
   const parts = assertion.split(".");
   if (parts.length !== 3) throw new Fault(401, "UNAUTHORIZED", "Unauthorized.");
-  const [headB64, payloadB64, sigB64] = parts;
-  if (headB64 == null || payloadB64 == null || sigB64 == null) {
-    throw new Fault(401, "UNAUTHORIZED", "Unauthorized.");
-  }
+  const [headB64, payloadB64, sigB64] = parts as [string, string, string];
   let header: { alg?: string; kid?: string };
   let payload: { aud?: string | string[]; exp?: number; email?: string; common_name?: string };
   try {

@@ -311,6 +311,17 @@ it("fails fast with 503 when the cert endpoint hangs, errors, or is malformed", 
   await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({ status: 503 });
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ keys: "garbage" }));
   await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({ status: 503 });
+  // A body that throws on .json() (not just a missing keys array) takes
+  // the catch arm: same 503, no leak.
+  vi.spyOn(globalThis, "fetch").mockImplementation(
+    async () =>
+      new Response("ok", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+  );
+  vi.spyOn(Response.prototype, "json").mockRejectedValueOnce(new Error("truncated body"));
+  await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({ status: 503 });
 });
 
 it("pins the default cert fetch budget at five seconds", () => {
