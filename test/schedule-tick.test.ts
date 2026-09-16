@@ -204,6 +204,99 @@ describe("codex #364: per-org fairness and skip quarantine (workerd)", () => {
       .first<{ n: number }>();
     expect(promotedB?.n).toBe(1);
   }, 60000);
+  it("rotates admission so an 11th backlogged org is eventually processed (#399 review)", async () => {
+    const { promoteDueSchedules } = await import("../src/schedules");
+    const { submit } = await import("../src/executions");
+    const { SAGA_DEFINITIONS } = await import("../src/sagas");
+    const USER = "00000000-0000-4000-8000-000000000002";
+    const now = new Date().toISOString();
+    const ancient = new Date(Date.now() - 3_600_000).toISOString();
+    await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?, 'active', ?) ON CONFLICT(user_id) DO NOTHING")
+      .bind(USER, now)
+      .run();
+    // 11 orgs with REPLENISHED backlog: before every tick each org is
+    // topped back up to 6 due rows, so no org ever drains on its own.
+    // Each org's rows share a DISTINCT timestamp, ranked oldest (org 0) to
+    // newest (org 10): ties would let SQLite's sorter smuggle the victim
+    // into the old global LIMIT by accident, so strict ranking makes the
+    // reproduction deterministic. (Recurring rows re-arm, but promotion
+    // still consumes the due set faster than re-arming refills it; without
+    // replenishment even the old global scan drains its way to the 11th
+    // org and proves nothing.) Under the old global LIMIT-50 scan the
+    // 11th (newest) org never enters the batch; with rotation it must see
+    // a delivery within 12 ticks.
+    const orgIds: string[] = [];
+    const orgDueAt: string[] = [];
+    let seq = 0;
+    const topUp = async (orgId: string, orgIndex: number) => {
+      const dueAt = orgDueAt[orgIndex] as string;
+      const have = await bindings.DB.prepare(
+        "SELECT COUNT(*) AS n FROM schedules WHERE org_id=? AND enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=?",
+      )
+        .bind(orgId, dueAt)
+        .first<{ n: number }>();
+      for (let n = have?.n ?? 0; n < 6; n += 1) {
+        seq += 1;
+        await bindings.DB.prepare(
+          "INSERT INTO schedules(id,org_id,name,saga_id,kind,cron,timezone,enabled,input_json,run_as_user_id,run_at,next_due_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+          .bind(
+            `00000000-0000-4000-8000-000003${String(orgIndex).padStart(2, "0")}${String(seq).padStart(6, "0")}`,
+            orgId,
+            `rot-${orgIndex}-${seq}`,
+            helloSaga.id,
+            "recurring",
+            "* * * * *",
+            "UTC",
+            1,
+            '{"name":"sched"}',
+            USER,
+            null,
+            dueAt,
+            now,
+            now,
+          )
+          .run();
+      }
+    };
+    for (let o = 0; o < 11; o += 1) {
+      const orgId = `00000000-0000-4000-8000-00000100000${o}`;
+      orgIds.push(orgId);
+      // Strict age rank: org 0 oldest, org 10 newest, one minute apart.
+      orgDueAt.push(new Date(Date.now() - 3_600_000 + o * 60_000).toISOString());
+      await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?) ON CONFLICT(id) DO NOTHING")
+        .bind(orgId, `rot-${o}`)
+        .run();
+      await bindings.DB.prepare(
+        "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,'admin','active','ordinary',?,?) ON CONFLICT(org_id,user_id) DO UPDATE SET status='active'",
+      )
+        .bind(orgId, USER, now, now)
+        .run();
+      await topUp(orgId, o);
+    }
+    const last = orgIds[10] as string;
+    // Drive 12 ticks with an advancing clock: rotation derives its offset
+    // from the tick minute, so distinct minutes admit distinct org windows.
+    // (The wall-clock scheduled handler would need 12 real minutes.)
+    // Replenish before every tick so backlog never drains on its own.
+    const baseMinute = Math.floor(Date.now() / 60_000);
+    for (let t = 0; t < 12; t += 1) {
+      for (let o = 0; o < 11; o += 1) await topUp(orgIds[o] as string, o);
+      await promoteDueSchedules(
+        bindings.DB,
+        { DB: bindings.DB, HELLO_WORKFLOW: bindings.HELLO_WORKFLOW } as never,
+        SAGA_DEFINITIONS,
+        submit,
+        new Date((baseMinute + t) * 60_000),
+      );
+    }
+    const promotedLast = await bindings.DB.prepare(
+      "SELECT COUNT(*) AS n FROM schedule_deliveries WHERE schedule_id IN (SELECT id FROM schedules WHERE org_id=?)",
+    )
+      .bind(last)
+      .first<{ n: number }>();
+    expect(promotedLast?.n).toBeGreaterThan(0);
+  }, 120000);
   it("caps one org's promotions per tick so other orgs still promote", async () => {
     const tick = worker as unknown as { scheduled: (event: unknown, env: Bindings) => Promise<void> };
     // Seed six due one-off rows via the API (membership-gated create keeps

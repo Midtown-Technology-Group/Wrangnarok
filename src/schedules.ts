@@ -696,11 +696,29 @@ export async function promoteDueSchedules(
     // Organization (org_id order) with oldest-first inside each group: the
     // loop processes every admitted row, so cross-org merge order carries
     // no fairness meaning and no comparator is needed.
+    //
+    // Rotation (review on #399): admitting the first MAX_ORGS orgs by ID
+    // order would starve an 11th due Organization indefinitely under
+    // sustained backlog. Admission rotates statelessly: the offset derives
+    // from the current tick minute modulo the due-org count, so every due
+    // Organization is admitted at least once per count cycle with no
+    // cursor state to persist.
+    const dueOrgCount =
+      (
+        await db
+          .prepare(
+            "SELECT COUNT(DISTINCT org_id) AS n FROM schedules WHERE enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=?",
+          )
+          .bind(now.toISOString())
+          .first<{ n: number }>()
+      )?.n ?? 0;
+    const rotationOffset =
+      dueOrgCount > 0 ? Math.floor(now.getTime() / 60_000) % dueOrgCount : 0;
     const orgs = await db
       .prepare(
-        "SELECT DISTINCT org_id AS orgId FROM schedules WHERE enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=? ORDER BY org_id LIMIT ?",
+        "SELECT DISTINCT org_id AS orgId FROM schedules WHERE enabled=1 AND next_due_at IS NOT NULL AND next_due_at<=? ORDER BY org_id LIMIT ? OFFSET ?",
       )
-      .bind(now.toISOString(), SCHEDULE_TICK_MAX_ORGS)
+      .bind(now.toISOString(), SCHEDULE_TICK_MAX_ORGS, rotationOffset)
       .all<{ orgId: string }>();
     const perOrg: ScheduleRow[][] = [];
     for (const org of orgs.results) {
