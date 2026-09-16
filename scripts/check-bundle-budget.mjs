@@ -254,7 +254,16 @@ import { join } from "node:path";
 // locally against the 640 KiB line: ~837 bytes of hand-written
 // identity-lineage code, no new dependencies (package.json unchanged versus
 // main); deliberate feature headroom only.
-const BUDGET_BYTES = 645 * 1024;
+// 2026-09-16 (codex limits-fences, issues #344, #360, #345, #361, #364,
+// #342, #358): 670 KiB. The limits-and-fences hardening (shared
+// admitExecution gate on the provider path; static safe-pattern gate for
+// member regexes; body-aware OAuth refresh fence; per-org scheduler fairness
+// plus skip quarantine; single-consumption handle claims; bounded JWT cert
+// fetches with negative/in-flight caches, plus regression tests) measures
+// 668094 bytes locally against the 645 KiB line: ~10 KiB of hand-written
+// security-fix code, no new dependencies (package.json unchanged versus
+// main); deliberate feature headroom only.
+const BUDGET_BYTES = 670 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");

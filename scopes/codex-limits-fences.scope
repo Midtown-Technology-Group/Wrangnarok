@@ -1,6 +1,7 @@
 # Lane scope: codex/limits-fences
 # Codex findings lane: limits and fences (#360, #344, #345, #361, #364, #342, #358)
 scopes/codex-limits-fences.scope
+scripts/check-bundle-budget.mjs
 src/index.ts
 src/domain.ts
 src/executions.ts
