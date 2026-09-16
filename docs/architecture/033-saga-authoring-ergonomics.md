@@ -11,7 +11,10 @@
 
 TypeScript 5 implements the standardized TC39 decorators proposal: decorators
 apply to **classes and class members** (methods, fields, accessors) — not to
-bare functions. There is no `@workflow`-on-a-function equivalent. Upstream
+bare functions. Verified 2026-09-16: a `@saga(meta)` class decorator
+typechecks clean on the repo's TypeScript 5.9.3 with default config (no
+`experimentalDecorators` flag present anywhere in the repo). There is no
+`@workflow`-on-a-function equivalent. Upstream
 Bifrost's authoring surface (`api/bifrost/decorators.py`, swept in
 upstream-spec §15) is `@workflow`/`@tool` on ordinary async Python functions,
 with identity/discovery-only decorator parameters and runtime policy living in
@@ -172,7 +175,9 @@ Revisit when schema drift actually bites, per ADR 002's own note.
 ## Scanner impact (must-ship-with, not follow-up)
 
 `assertDeterministicRun` blanks literal `.do(` call bodies and requires at
-least one `step.do(` in `run` source. Under option A:
+least one `step.do(` in `run` source (`src/saga.ts:586`, blanking at `:548`).
+Verified 2026-09-16 with a throwaway vitest probe against the real scanner
+(both assertions passed, probe removed after):
 
 - Interior helpers (`doVendor`, `prepareInput`, `schemaOf`) are called
   **inside** visible `step.do` callbacks or outside durable sections without
