@@ -21,7 +21,9 @@
 //
 // Identity: the child Execution ID is deterministic over
 // (caller, parent, step, child, key), so step retries and duplicate
-// dispatches converge on one child row. Lineage persists as
+// dispatches converge on one child row. The step segment is the owning
+// step.do Operation name (bound ambiently by bindSagaStep; options.callerStep
+// overrides for explicit fan-out within one step). Lineage persists as
 // parent_execution_id/parent_step; detail serves parentExecutionId plus a
 // children list.
 //
@@ -36,7 +38,7 @@ import { Fault, hash } from "./domain";
 import type { ExecutionStatus, Principal, SagaDef } from "./domain";
 import { EXECUTION_ID } from "./domain";
 import type { OrgCtx } from "./saga";
-import { assertJsonSerializable } from "./saga";
+import { assertJsonSerializable, currentOperationName } from "./saga";
 import { cancelExecution, visibleExecution, workflowForSaga } from "./executions";
 import { requireActiveInstall } from "./solutions";
 import type { ExecutionRow } from "./executions";
@@ -95,11 +97,11 @@ export async function childExecutionId(
 }
 
 /** Author-facing child options: the caller key disambiguates sibling
- * invocations of one child within a step; callerStep disambiguates same-key
- * invokes from different step.do callbacks (identity is
- * (parent, step, child, key), so two callbacks sharing a key must pass
- * distinct callerStep values); awaitTimeoutMs bounds the poll loop inside
- * awaitChildResult (the child keeps running on expiry). */
+ * invocations of one child within a step; callerStep overrides the ambient
+ * owning Operation (resolved from the enclosing step.do callback) when a
+ * single step must dispatch under distinct identity segments; awaitTimeoutMs
+ * bounds the poll loop inside awaitChildResult (the child keeps running on
+ * expiry). */
 export interface InvokeChildOptions {
   readonly key?: string;
   readonly callerStep?: string;
@@ -158,13 +160,25 @@ export function bindSagaChildren(
   step: { sleep(name: string, duration: string): Promise<void> },
 ): SagaChildren {
   return {
-    // Dispatch identity is (parent, step, child, key): the step segment comes
-    // from options.callerStep at invoke time (default "invoke" preserves the
-    // established identity). Two step.do callbacks invoking the same child
-    // under the same key must pass distinct callerStep values, otherwise the
-    // second invoke converges on or conflicts with the first child's row.
-    invoke: (childRef, input, options) =>
-      invokeChild(childEnv, childDispatchStep(options?.callerStep ?? "invoke"), childRef, input, options),
+    // Dispatch identity is (parent, step, child, key): the step segment
+    // resolves from the owning step.do Operation (ambient, bound by
+    // bindSagaStep) with options.callerStep as an explicit override. Two
+    // distinct step.do callbacks invoking the same child under the same key
+    // therefore produce two child rows with correct parent_step. Invoke
+    // outside a step.do callback (no ambient Operation, no override) fails
+    // loud with CHILD_STEP_MISSING instead of converging on a shared
+    // default row.
+    invoke: (childRef, input, options) => {
+      const owner = options?.callerStep ?? currentOperationName();
+      if (owner === undefined) {
+        throw new Fault(
+          400,
+          "CHILD_STEP_MISSING",
+          "Child invoke must run inside a step.do() callback (or pass callerStep): the owning Operation is part of child identity.",
+        );
+      }
+      return invokeChild(childEnv, childDispatchStep(owner), childRef, input, options);
+    },
     awaitResult: <T>(receipt: ChildReceipt, options?: InvokeChildOptions): Promise<T> =>
       awaitChildResult<T>(childEnv, step, receipt, options),
   };
@@ -206,9 +220,9 @@ export async function invokeChild(
     throw new Fault(400, "CHILD_KEY_INVALID", "The child key must be 1 to 128 safe characters.");
   }
   // The stepName parameter already carries the (parent, step, child, key)
-  // identity segment: bindSagaChildren computes it from options.callerStep
-  // (default "invoke" preserves the established identity). Validate the shape
-  // here so a malformed caller step fails closed before any write.
+  // identity segment: bindSagaChildren resolves it from the owning step.do
+  // Operation (options.callerStep overrides). Validate the shape here so a
+  // malformed caller step fails closed before any write.
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(stepName)) {
     throw new Fault(400, "CHILD_KEY_INVALID", "The caller step must be 1 to 128 safe characters.");
   }

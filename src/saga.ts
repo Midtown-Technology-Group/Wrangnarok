@@ -18,6 +18,7 @@
 // in src/domain.ts with a fixed platform timeout. Saga source carries identity
 // and discovery metadata only — never timeouts, retries, or schedules.
 import type { WorkflowSleepDuration, WorkflowStep } from "cloudflare:workers";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { checkpointRetryLimit, stepRetryLimit, UUID, vendorRetryLimit } from "./domain";
 import type { EchoInput, NinjaOrgsResult, SagaRuntimePolicy } from "./domain";
 import type { EchoConnection } from "./integrations/echo";
@@ -320,14 +321,29 @@ export function buildCatalog(defs: readonly SagaDefinition[]): readonly CatalogE
 /** Thin platform adapter: translate the Saga step contract onto the native
  * WorkflowStep. Every retry limit resolves through stepRetryLimit (vendor
  * steps 0, idempotent D1 checkpoints up to the operator ceiling 2); the
- * 10-second step timeout is fixed platform mapping, not per-Saga policy. */
+ * 10-second step timeout is fixed platform mapping, not per-Saga policy.
+ *
+ * RUN-02 (ADR 018): each step.do callback runs with its Operation name in
+ * ambient storage, so handles invoked inside the callback (notably
+ * ctx.children.invoke) resolve the owning Operation for the
+ * (parent, step, child, key) identity tuple without an explicit callerStep
+ * parameter. Two distinct step.do callbacks invoking the same child under
+ * the same key therefore produce two child rows with correct parent_step. */
+const operationStorage = new AsyncLocalStorage<string>();
+
+/** Name of the step.do Operation enclosing the current call, or undefined
+ * outside a durable Operation. Exported for child-identity resolution. */
+export function currentOperationName(): string | undefined {
+  return operationStorage.getStore();
+}
+
 export function bindSagaStep(native: WorkflowStep, policy?: SagaRuntimePolicy): SagaStep {
   return {
     do<T>(name: string, fn: () => Promise<T>): Promise<T> {
       return native.do(
         name,
         { retries: { limit: retryLimitForStep(name, policy), delay: "1 second" }, timeout: "10 seconds" },
-        () => fn() as unknown as Promise<never>,
+        () => operationStorage.run(name, () => fn()) as unknown as Promise<never>,
       ) as unknown as Promise<T>;
     },
     sleep(name: string, duration: string): Promise<void> {
