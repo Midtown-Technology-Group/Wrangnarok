@@ -113,7 +113,12 @@ async function resolveCloudflareVendor(
   | { ok: true; connection: { endpoint: string }; account: { readonly id: unknown; readonly name: unknown } }
   | { ok: false; error: SafeError }
 > {
-  const resolved = await resolveConnection(db, orgCtx as Parameters<typeof resolveConnection>[1], CLOUDFLARE_INTEGRATION_ID, required);
+  const resolved = await resolveConnection(
+    db,
+    orgCtx as Parameters<typeof resolveConnection>[1],
+    CLOUDFLARE_INTEGRATION_ID,
+    required,
+  );
   if (!resolved.found && !resolved.declared) {
     throw new NonRetryableError("Unexpected optional Integration access.");
   }
@@ -141,7 +146,13 @@ export const cloudflareVerifySagaDef = defineSaga<CloudflareVerifyResult>({
     let timedOut = false;
     try {
       const prepared = await step.do("prepare-input-v1", () =>
-        prepareExecution(ctx.db, id, cloudflareVerifySaga.id, cloudflareVerifySaga.revision, parseCloudflareVerifyInput),
+        prepareExecution(
+          ctx.db,
+          id,
+          cloudflareVerifySaga.id,
+          cloudflareVerifySaga.revision,
+          parseCloudflareVerifyInput,
+        ),
       );
       const outcome = await step.do("cloudflare-verify-v1", async () => {
         await beginOperation(ctx.db, id, "cloudflare-verify-v1", 1);

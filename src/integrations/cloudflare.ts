@@ -83,7 +83,8 @@ function cloudflareErrors(payload: unknown): CloudflareErrorItem[] {
     const record = entry as Record<string, unknown>;
     items.push({
       code: typeof record.code === "number" ? record.code : null,
-      message: typeof record.message === "string" && record.message.length > 0 ? record.message : "Cloudflare request failed",
+      message:
+        typeof record.message === "string" && record.message.length > 0 ? record.message : "Cloudflare request failed",
     });
   }
   return items;
@@ -131,11 +132,7 @@ async function getJson(
   try {
     payload = await boundedJson(response.body);
   } catch {
-    throw new Fault(
-      502,
-      "CLOUDFLARE_BAD_RESPONSE",
-      `Cloudflare returned HTTP ${response.status} with invalid JSON.`,
-    );
+    throw new Fault(502, "CLOUDFLARE_BAD_RESPONSE", `Cloudflare returned HTTP ${response.status} with invalid JSON.`);
   }
   if (!object(payload) || (payload as Record<string, unknown>).success !== true || !response.ok) {
     const errors = cloudflareErrors(payload);

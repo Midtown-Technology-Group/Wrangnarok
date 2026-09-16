@@ -20,9 +20,7 @@ const ACCOUNT = { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" };
 const SECRETS = { apiToken: "unit-test-sentinel" };
 
 function mockJson(payload: unknown, status = 200) {
-  return vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-    Response.json(payload, { status }),
-  );
+  return vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json(payload, { status }));
 }
 
 function mockText(body: string, status = 200) {
@@ -173,9 +171,9 @@ describe("inventoryZones", () => {
     await expect(inventoryZones(CONNECTION, {}, ACCOUNT, { maxZones: 1 })).rejects.toMatchObject({
       code: "CLOUDFLARE_NOT_CONFIGURED",
     });
-    await expect(inventoryZones(CONNECTION, SECRETS, { id: "nope", name: "" }, { maxZones: 1 })).rejects.toMatchObject(
-      { code: "CLOUDFLARE_ACCOUNT_MISSING" },
-    );
+    await expect(inventoryZones(CONNECTION, SECRETS, { id: "nope", name: "" }, { maxZones: 1 })).rejects.toMatchObject({
+      code: "CLOUDFLARE_ACCOUNT_MISSING",
+    });
     await expect(
       inventoryZones({ endpoint: "https://evil.example.com/" }, SECRETS, ACCOUNT, { maxZones: 1 }),
     ).rejects.toMatchObject({ code: "INVALID_CONNECTION" });

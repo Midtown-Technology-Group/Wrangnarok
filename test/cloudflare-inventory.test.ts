@@ -129,11 +129,17 @@ it("replays verify-active-token: one ordered GET, exact healthy result", async (
   const key = "cf-verify-active-0001";
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_VERIFY_WORKFLOW, id);
-  const body = { ...scenario.workflow.input, ...accountBinding(scenario.binding.entity_id, scenario.binding.entity_name) };
+  const body = {
+    ...scenario.workflow.input,
+    ...accountBinding(scenario.binding.entity_id, scenario.binding.entity_name),
+  };
   const accepted = await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings);
   expect(accepted.status).toBe(202);
   await instance.waitForStatus("complete");
-  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key), bindings);
+  const detail = await worker.fetch(
+    request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key),
+    bindings,
+  );
   const payload = (await detail.json()) as {
     status: string;
     result: unknown;
@@ -172,12 +178,18 @@ it("replays verify-authorization-failure: vendor 403 becomes the stable error", 
   const key = "cf-verify-authfail-0001";
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_VERIFY_WORKFLOW, id);
-  const body = { ...scenario.workflow.input, ...accountBinding(scenario.binding.entity_id, scenario.binding.entity_name) };
-  expect((await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings)).status).toBe(
-    202,
-  );
+  const body = {
+    ...scenario.workflow.input,
+    ...accountBinding(scenario.binding.entity_id, scenario.binding.entity_name),
+  };
+  expect(
+    (await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings)).status,
+  ).toBe(202);
   await instance.waitForStatus("errored");
-  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key), bindings);
+  const detail = await worker.fetch(
+    request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key),
+    bindings,
+  );
   const payload = (await detail.json()) as { status: string; error: { code: string; message: string } };
   expect(payload.status).toBe("Failed");
   // Exact error contract: vendor status code plus the safe vendor message.
@@ -200,12 +212,18 @@ it("replays verify-malformed-json: non-JSON vendor body becomes the stable error
   const key = "cf-verify-malformed-0001";
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_VERIFY_WORKFLOW, id);
-  const body = { ...scenario.workflow.input, ...accountBinding(scenario.binding.entity_id, scenario.binding.entity_name) };
-  expect((await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings)).status).toBe(
-    202,
-  );
+  const body = {
+    ...scenario.workflow.input,
+    ...accountBinding(scenario.binding.entity_id, scenario.binding.entity_name),
+  };
+  expect(
+    (await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings)).status,
+  ).toBe(202);
   await instance.waitForStatus("errored");
-  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key), bindings);
+  const detail = await worker.fetch(
+    request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key),
+    bindings,
+  );
   const payload = (await detail.json()) as { status: string; error: { code: string; message: string } };
   expect(payload.status).toBe("Failed");
   expect(payload.error.message).toBe("Cloudflare returned HTTP 502 with invalid JSON.");
@@ -224,7 +242,10 @@ it("replays inventory-two-pages: ordered pagination, exact inventory result", as
   const key = "cf-inventory-twopages-0001";
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_INVENTORY_WORKFLOW, id);
-  const body = { ...scenario.workflow.input, ...accountBinding(scenario.binding.entity_id, scenario.binding.entity_name) };
+  const body = {
+    ...scenario.workflow.input,
+    ...accountBinding(scenario.binding.entity_id, scenario.binding.entity_name),
+  };
   const accepted = await worker.fetch(
     request("/api/executions", "POST", cloudflareInventorySaga.id, body, key),
     bindings,
@@ -309,6 +330,7 @@ it("replays inventory-missing-mapping: fails before any network request", async 
   const scenario = missingMapping as unknown as {
     workflow: { input: Record<string, unknown> };
     binding: { entity_id: null; entity_name: null };
+    http?: ReplayExchange[];
   };
   // Empty http array: the run must make no network request.
   expect(scenario.http ?? []).toEqual([]);
@@ -353,10 +375,13 @@ it("keeps the token sentinel out of every persisted row", async () => {
   const key = "cf-secret-audit-0001";
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_VERIFY_WORKFLOW, id);
-  const body = { ...scenario.workflow.input, ...accountBinding(scenario.binding.entity_id, scenario.binding.entity_name) };
-  expect((await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings)).status).toBe(
-    202,
-  );
+  const body = {
+    ...scenario.workflow.input,
+    ...accountBinding(scenario.binding.entity_id, scenario.binding.entity_name),
+  };
+  expect(
+    (await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings)).status,
+  ).toBe(202);
   await instance.waitForStatus("complete");
   const tables = await bindings.DB.batch([
     bindings.DB.prepare("SELECT input_json,result_json,error_json FROM executions WHERE id=?").bind(id),
@@ -377,11 +402,14 @@ it("fails a declared verify without a Connection row before any network request"
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_VERIFY_WORKFLOW, id);
   const body = accountBinding(ACCOUNT_ID, ACCOUNT_NAME);
-  expect((await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings)).status).toBe(
-    202,
-  );
+  expect(
+    (await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings)).status,
+  ).toBe(202);
   await instance.waitForStatus("errored");
-  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key), bindings);
+  const detail = await worker.fetch(
+    request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key),
+    bindings,
+  );
   const payload = (await detail.json()) as { status: string; error: { code: string } };
   expect(payload.status).toBe("Failed");
   expect(mock).not.toHaveBeenCalled();
@@ -396,11 +424,14 @@ it("accepts a bare verify input and fails on the missing mapping", async () => {
   const key = "cf-verify-bare-00001";
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_VERIFY_WORKFLOW, id);
-  expect((await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, {}, key), bindings)).status).toBe(
-    202,
-  );
+  expect(
+    (await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, {}, key), bindings)).status,
+  ).toBe(202);
   await instance.waitForStatus("errored");
-  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key), bindings);
+  const detail = await worker.fetch(
+    request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key),
+    bindings,
+  );
   const payload = (await detail.json()) as { status: string; error: { code: string; message: string } };
   expect(payload.status).toBe("Failed");
   expect(payload.error.message).toBe("Cloudflare integration is missing account mapping.");
@@ -422,11 +453,14 @@ it("surfaces a slow vendor as TimedOut through the policy snapshot deadline", as
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_VERIFY_WORKFLOW, id);
   const body = accountBinding(ACCOUNT_ID, ACCOUNT_NAME);
-  expect((await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings)).status).toBe(
-    202,
-  );
+  expect(
+    (await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, body, key), bindings)).status,
+  ).toBe(202);
   await instance.waitForStatus("errored");
-  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key), bindings);
+  const detail = await worker.fetch(
+    request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key),
+    bindings,
+  );
   expect(await detail.json()).toMatchObject({ status: "TimedOut", error: { code: "CLOUDFLARE_VENDOR_TIMEOUT" } });
   await bindings.DB.prepare("DELETE FROM saga_policies WHERE org_id=? AND saga_id=?")
     .bind(principal.orgId, cloudflareVerifySaga.id)
@@ -440,9 +474,9 @@ it("fails a declared inventory without a Connection row before any network reque
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_INVENTORY_WORKFLOW, id);
   const body = { max_zones: 10, ...accountBinding(ACCOUNT_ID, ACCOUNT_NAME) };
-  expect((await worker.fetch(request("/api/executions", "POST", cloudflareInventorySaga.id, body, key), bindings)).status).toBe(
-    202,
-  );
+  expect(
+    (await worker.fetch(request("/api/executions", "POST", cloudflareInventorySaga.id, body, key), bindings)).status,
+  ).toBe(202);
   await instance.waitForStatus("errored");
   expect(mock).not.toHaveBeenCalled();
   await seedConnection();
@@ -453,11 +487,14 @@ it("accepts a bare inventory input and fails on the missing mapping", async () =
   const key = "cf-inventory-bare-001";
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_INVENTORY_WORKFLOW, id);
-  expect((await worker.fetch(request("/api/executions", "POST", cloudflareInventorySaga.id, {}, key), bindings)).status).toBe(
-    202,
-  );
+  expect(
+    (await worker.fetch(request("/api/executions", "POST", cloudflareInventorySaga.id, {}, key), bindings)).status,
+  ).toBe(202);
   await instance.waitForStatus("errored");
-  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareInventorySaga.id, {}, key), bindings);
+  const detail = await worker.fetch(
+    request(`/api/executions/${id}`, "GET", cloudflareInventorySaga.id, {}, key),
+    bindings,
+  );
   const payload = (await detail.json()) as { status: string; error: { code: string; message: string } };
   expect(payload.status).toBe("Failed");
   expect(payload.error.message).toBe("Cloudflare integration is missing account mapping.");
@@ -476,11 +513,14 @@ it("surfaces a slow inventory vendor as TimedOut through the policy snapshot dea
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_INVENTORY_WORKFLOW, id);
   const body = { max_zones: 10, ...accountBinding(ACCOUNT_ID, ACCOUNT_NAME) };
-  expect((await worker.fetch(request("/api/executions", "POST", cloudflareInventorySaga.id, body, key), bindings)).status).toBe(
-    202,
-  );
+  expect(
+    (await worker.fetch(request("/api/executions", "POST", cloudflareInventorySaga.id, body, key), bindings)).status,
+  ).toBe(202);
   await instance.waitForStatus("errored");
-  const detail = await worker.fetch(request(`/api/executions/${id}`, "GET", cloudflareInventorySaga.id, {}, key), bindings);
+  const detail = await worker.fetch(
+    request(`/api/executions/${id}`, "GET", cloudflareInventorySaga.id, {}, key),
+    bindings,
+  );
   expect(await detail.json()).toMatchObject({ status: "TimedOut", error: { code: "CLOUDFLARE_VENDOR_TIMEOUT" } });
   await bindings.DB.prepare("DELETE FROM saga_policies WHERE org_id=? AND saga_id=?")
     .bind(principal.orgId, cloudflareInventorySaga.id)

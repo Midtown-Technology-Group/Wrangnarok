@@ -243,9 +243,7 @@ describe("workspace-to-bundle bridge (issue #116)", () => {
 
 describe("zone-inventory bundle conversion (issues #116, #119)", () => {
   it("converts the real cloudflare-zone-inventory descriptor through the bridge", async () => {
-    const { CLOUDFLARE_INTEGRATION_ID, cloudflareInventorySaga, cloudflareVerifySaga } = await import(
-      "../src/domain"
-    );
+    const { CLOUDFLARE_INTEGRATION_ID, cloudflareInventorySaga, cloudflareVerifySaga } = await import("../src/domain");
     // Workspace shape of the real bundle: descriptor fields plus the
     // workflows.yaml entries. The bundle ships no configs.yaml or
     // connections.yaml; the operator binds those at install time.
@@ -261,7 +259,10 @@ describe("zone-inventory bundle conversion (issues #116, #119)", () => {
     const result = convertWorkspaceToBundle(workspace, {
       bundleId: "d4e5f6a7-8b9c-4d1e-8f2a-3b4c5d6e7f81",
       sagas: {
-        "2fcb2d31-091a-583f-a980-38c4de3da9ab": { id: cloudflareVerifySaga.id, revision: cloudflareVerifySaga.revision },
+        "2fcb2d31-091a-583f-a980-38c4de3da9ab": {
+          id: cloudflareVerifySaga.id,
+          revision: cloudflareVerifySaga.revision,
+        },
         "a5160896-d1de-55cc-b1af-71e57b670f44": {
           id: cloudflareInventorySaga.id,
           revision: cloudflareInventorySaga.revision,
