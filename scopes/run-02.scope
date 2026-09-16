@@ -30,3 +30,4 @@ test/saga-contract.test.ts
 test/sdk.test.ts
 test/solutions-install.test.ts
 wrangler.jsonc
+src/worker-node-types.d.ts

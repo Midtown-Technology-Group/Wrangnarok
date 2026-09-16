@@ -32,9 +32,10 @@ Cloudflare-native primitives. There is no inline function-import path (no
 shared-process function passing exists between Workflow instances), and no
 process-pool infrastructure is copied.
 
-- **Author surface:** `ctx.children.invoke(childRef, input, { key, step })`
-  inside `step.do(...)` returns a queued receipt `{ executionId, sagaId,
-  replayed, statusUrl }`; `awaitChildResult(ctx, step, receipt, ...)` polls
+- **Author surface:** `ctx.children.invoke(childRef, input, { key,
+  callerStep })` inside `step.do(...)` returns a queued receipt
+  `{ executionId, sagaId, replayed, statusUrl }`; `awaitChildResult(ctx,
+  step, receipt, ...)` polls
   the child D1 row to terminal through `step.sleep` intervals and returns
   the typed JSON output. Dispatch (async receipt) and completion (sync
   result) stay distinct surfaces, mirroring upstream's `execute`/`get`
@@ -52,7 +53,12 @@ process-pool infrastructure is copied.
   (`sha256(["wrangnarok.child.v1", ...])`, submitted as the child's
   `Idempotency-Key`), so step retries and duplicate dispatches converge on
   one child row via the existing `ON CONFLICT DO NOTHING` + retained-ID +
-  `dispatched` protocol (ADR 001). Lineage persists as
+  `dispatched` protocol (ADR 001). The step segment is the owning `step.do`
+  Operation name (bound ambiently by the adapter; `callerStep` overrides for
+  explicit fan-out within one step), so two distinct Operations invoking the
+  same child under the same key fork two rows; invoke outside a `step.do`
+  fails loud with `CHILD_STEP_MISSING` instead of converging on a shared
+  default. Lineage persists as
   `executions.parent_execution_id` / `parent_step`; detail serves
   `parentExecutionId` plus a `children` list. History summaries are
   unchanged.
