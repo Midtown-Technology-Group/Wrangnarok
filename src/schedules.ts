@@ -39,6 +39,16 @@ export const SCHEDULE_KEY_PREFIX = "sch-";
 /** Bounded scan/admission cost per Cron tick (Free-tier posture): the tick
  * reads at most this many due rows per Organization scan. */
 export const SCHEDULE_TICK_LIMIT = 50;
+/** Per-Organization promotion cap per tick (codex #364): one tenant's stale
+ * head-of-line rows can never occupy the whole batch. The global scan still
+ * costs at most SCHEDULE_TICK_LIMIT rows; the per-org cap partitions that
+ * budget fairly instead of first-come-first-served. */
+export const SCHEDULE_TICK_PER_ORG_LIMIT = 5;
+/** Skip-streak quarantine (codex #364): a row that skips this many
+ * consecutive ticks stops occupying the head of the global scan. The tick
+ * parks it (disabled + quarantine marker in last_window) so other tenants'
+ * due rows enter the batch; the operator re-enables to resume. */
+export const SCHEDULE_SKIP_QUARANTINE_AFTER = 10;
 /** Cron field bounds: standard 5-field cron, each field capped. */
 export const SCHEDULE_CRON_MAX = 64;
 
@@ -637,7 +647,17 @@ export interface TickReport {
  * next_due_at past the promoted window. Overdue rows promote (never silently
  * skipped); future rows wait. Disabled or deleted rows never appear — and a
  * row disabled, deleted, or de-authorized after the scan still loses at the
- * pre-dispatch fence inside promoteWindow (skip, zero dispatch). */
+ * pre-dispatch fence inside promoteWindow (skip, zero dispatch).
+ *
+ * Fairness (codex #364): the scan batches oldest-first globally, but each
+ * Organization promotes at most SCHEDULE_TICK_PER_ORG_LIMIT rows per tick —
+ * one tenant's 50 stale head-of-line rows can no longer starve every other
+ * tenant's due rows out of the batch. Persistently non-promotable rows
+ * (SAGA_PAUSED, disabled, de-authorized) accrue a consecutive-skip streak in
+ * `last_window` (`quarantine:<n>`); at SCHEDULE_SKIP_QUARANTINE_AFTER the
+ * tick parks the row (disabled) so it leaves the global head-of-line. The
+ * operator re-enables to resume; promotion clears the streak. Transient
+ * skips (owner-cancel-wins, same-window replay contention) never accrue. */
 export async function promoteDueSchedules(
   db: D1Database,
   env: Bindings,
@@ -659,9 +679,17 @@ export async function promoteDueSchedules(
   }
   const promoted: PromotionResult[] = [];
   const skipped: string[] = [];
+  const promotedPerOrg = new Map<string, number>();
   for (const schedule of due) {
     const saga = sagas.find((entry) => entry.id === schedule.saga_id);
     if (!saga) {
+      skipped.push(schedule.name);
+      continue;
+    }
+    // Per-Organization fairness cap: defer this tenant's excess rows to the
+    // next tick so other tenants' due rows still enter this batch. Deferred
+    // rows are not skips: no quarantine accrual, no marker change.
+    if ((promotedPerOrg.get(schedule.org_id) ?? 0) >= SCHEDULE_TICK_PER_ORG_LIMIT) {
       skipped.push(schedule.name);
       continue;
     }
@@ -671,6 +699,8 @@ export async function promoteDueSchedules(
     const window = schedule.kind === "one-off" ? `once-${schedule.id.slice(0, 16)}` : currentWindow(new Date(dueAt));
     try {
       promoted.push(await promoteWindow(db, env, schedule, window, sagas, submitFn));
+      promotedPerOrg.set(schedule.org_id, (promotedPerOrg.get(schedule.org_id) ?? 0) + 1);
+      await clearSkipStreak(db, schedule);
     } catch (error) {
       // Owner-cancel-wins, admission, liveness, and authority fences surface
       // as skips, never as tick failures: the next tick retries a live
@@ -679,6 +709,10 @@ export async function promoteDueSchedules(
       // after cancel clears) or restores the run-as authority.
       if (error instanceof Fault && TICK_SKIP_CODES.has(error.code)) {
         skipped.push(schedule.name);
+        // Persistent fences (paused, disabled, de-authorized) accrue toward
+        // quarantine so the row leaves the head-of-line; transient races
+        // (cancel-wins, replay contention) retry clean next tick.
+        if (QUARANTINE_SKIP_CODES.has(error.code)) await accrueSkipStreak(db, schedule, now);
         continue;
       }
       throw error;
@@ -697,6 +731,65 @@ export async function promoteDueSchedules(
     }
   }
   return { promoted, skipped };
+}
+
+/** Skip codes that accrue toward quarantine: persistent fences whose row
+ * would otherwise sit at the head of the global scan forever. Transient
+ * codes (EXECUTION_CANCELLED, ADMISSION_LIMITED, SCHEDULE_GONE) retry clean
+ * and never accrue — a momentary limit or cancel must not park a schedule. */
+const QUARANTINE_SKIP_CODES: ReadonlySet<string> = new Set([
+  "SAGA_PAUSED",
+  "SCHEDULE_DISABLED",
+  "ORG_NOT_FOUND",
+  "ORG_DISABLED",
+  "USER_DISABLED",
+  "MEMBERSHIP_SUSPENDED",
+  "MEMBERSHIP_REVOKED",
+]);
+
+/** Parse the consecutive-skip streak from the quarantine marker
+ * (`quarantine:<n>` in last_window). Unmarked rows read as zero. */
+export function skipStreakFor(schedule: Pick<ScheduleRow, "last_window">): number {
+  const marker = /^quarantine:(\d+)$/.exec(schedule.last_window ?? "");
+  return marker?.[1] === undefined ? 0 : Number(marker[1]);
+}
+
+/** Accrue one consecutive skip: bump the marker, and at
+ * SCHEDULE_SKIP_QUARANTINE_AFTER park the row (disabled) with a terminal
+ * `quarantined` marker so it leaves the enabled scan. Best-effort: a lost
+ * race with an operator edit keeps the tick moving. */
+async function accrueSkipStreak(db: D1Database, schedule: ScheduleRow, now: Date): Promise<void> {
+  const streak = skipStreakFor(schedule) + 1;
+  try {
+    if (streak >= SCHEDULE_SKIP_QUARANTINE_AFTER) {
+      await db
+        .prepare("UPDATE schedules SET enabled=0,last_window=?,updated_at=? WHERE id=?")
+        .bind("quarantined", now.toISOString(), schedule.id)
+        .run();
+    } else {
+      await db
+        .prepare("UPDATE schedules SET last_window=?,updated_at=? WHERE id=? AND enabled=1")
+        .bind(`quarantine:${streak}`, now.toISOString(), schedule.id)
+        .run();
+    }
+  } catch {
+    // Old DB or a lost operator race: the row retries next tick.
+  }
+}
+
+/** Clear the skip streak after a successful promotion. A terminal
+ * `quarantined` marker is operator state (the row was parked disabled, so
+ * promotion implies re-enable): promoteWindow overwrites it. */
+async function clearSkipStreak(db: D1Database, schedule: ScheduleRow): Promise<void> {
+  if (!/^quarantine:/.test(schedule.last_window ?? "")) return;
+  try {
+    await db
+      .prepare("UPDATE schedules SET last_window=?,updated_at=? WHERE id=?")
+      .bind(null, new Date().toISOString(), schedule.id)
+      .run();
+  } catch {
+    // Best-effort: the marker is advisory, never dispatch-critical.
+  }
 }
 
 /** Cancel one future scheduled Execution before dispatch: marks the pending

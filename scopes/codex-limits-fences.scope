@@ -1,0 +1,31 @@
+# Lane scope: codex/limits-fences
+# Codex findings lane: limits and fences (#360, #344, #345, #361, #364, #342, #358)
+scopes/codex-limits-fences.scope
+scripts/check-bundle-budget.mjs
+src/index.ts
+src/domain.ts
+src/executions.ts
+src/sagas/
+src/integrations/ninjaone.ts
+src/sync.ts
+src/forms.ts
+src/oauth.ts
+src/oauth-refresh-fence.ts
+src/auth.ts
+src/access.ts
+src/schedules.ts
+test/ninjaone.test.ts
+test/sync-provider.test.ts
+test/forms.test.ts
+test/form-lifecycle.test.ts
+test/oauth.test.ts
+test/schedules.test.ts
+test/schedule-tick.test.ts
+test/schedule-branches.test.ts
+test/schedule-lifecycle.test.ts
+test/access-auth.test.ts
+test/executions.test.ts
+test/execution-guards.test.ts
+test/domain.test.ts
+test/integrations.test.ts
+test/integration-faults.test.ts

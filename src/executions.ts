@@ -123,12 +123,13 @@ export function policySnapshot(policy: SagaRuntimePolicy): string {
 }
 /** Canonical RUN-01 admission decision (ADR 018): the loadSagaPolicy +
  * policySnapshot + SAGA_PAUSED + maxConcurrent block, computed once so
- * top-level submit() and child dispatch cannot drift. Never throws: the
- * refusal (when non-null) is enforced by the caller at its dispatch gate, so
- * a refused admission still leaves its Pending receipt for same-key replay
- * after resume. The maxConcurrent count exempts the caller's own row, so a
- * first Execution under a limit of 1 still dispatches while the next active
- * row is fenced with 429. */
+ * top-level submit(), child dispatch, and the inline provider path cannot
+ * drift (codex #344, #360). Never throws: the refusal (when non-null) is
+ * enforced by the caller at its dispatch gate, so a refused admission still
+ * leaves its Pending receipt for same-key replay after resume. The
+ * maxConcurrent count exempts the caller's own row, so a first Execution
+ * under a limit of 1 still dispatches while the next active row is fenced
+ * with 429. */
 export interface AdmissionDecision {
   readonly effective: SagaPolicyRecord;
   readonly policyJson: string;
@@ -166,7 +167,8 @@ export async function admitExecution(
         "SELECT COUNT(*) AS n FROM executions WHERE org_id=? AND saga_id=? AND status IN ('Pending','Running','Cancelling') AND id<>?",
       )
       .bind(orgId, sagaId, selfId)
-      .first<{ n: number }>();
+      .first<{ n: number }>()
+      .catch(() => null);
     if ((active?.n ?? 0) >= effective.policy.admission.maxConcurrent) {
       return {
         effective,

@@ -13,6 +13,7 @@ import migration1 from "../migrations/0001_initial.sql?raw";
 import migration2 from "../migrations/0002_cancelling.sql?raw";
 import migration7 from "../migrations/0007_org_membership.sql?raw";
 import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
+import migration12 from "../migrations/0012_saga_policies.sql?raw";
 import migration16 from "../migrations/0016_schedules.sql?raw";
 import seed from "../scripts/seed-local.sql?raw";
 
@@ -33,6 +34,7 @@ beforeEach(async () => {
   await bindings.DB.exec(migration2);
   await bindings.DB.exec(migration7);
   await bindings.DB.exec(migration8);
+  await bindings.DB.exec(migration12);
   await bindings.DB.exec(migration16);
   await bindings.DB.exec(seed);
 });
@@ -118,4 +120,76 @@ describe("TRG-01 scheduled tick (workerd)", () => {
       .first<{ n: number }>();
     expect(deliveries?.n).toBe(1);
   }, 25000);
+});
+
+describe("codex #364: per-org fairness and skip quarantine (workerd)", () => {
+  it("caps one org's promotions per tick so other orgs still promote", async () => {
+    const tick = worker as unknown as { scheduled: (event: unknown, env: Bindings) => Promise<void> };
+    // Seed six due one-off rows via the API (membership-gated create keeps
+    // the run-as authority live), then force them overdue.
+    const old = new Date(Date.now() - 60_000).toISOString();
+    for (let n = 0; n < 6; n += 1) {
+      const created = await worker.fetch(
+        authed("/api/schedules", "POST", {
+          name: `fair-a-${n}`,
+          sagaId: helloSaga.id,
+          kind: "one-off",
+          runAt: new Date(Date.now() - 30_000).toISOString(),
+          input: { name: "sched" },
+        }),
+        bindings,
+      );
+      expect(created.status).toBe(201);
+    }
+    await bindings.DB.prepare("UPDATE schedules SET next_due_at=? WHERE org_id=? AND name LIKE 'fair-a-%'")
+      .bind(old, "00000000-0000-4000-8000-000000000001")
+      .run();
+    await tick.scheduled({ cron: "* * * * *" }, bindings);
+    const promoted = await bindings.DB.prepare(
+      "SELECT COUNT(*) AS n FROM schedule_deliveries WHERE schedule_id IN (SELECT id FROM schedules WHERE org_id=? AND name LIKE 'fair-a-%')",
+    )
+      .bind("00000000-0000-4000-8000-000000000001")
+      .first<{ n: number }>();
+    // Per-org cap holds: at most 5 of the 6 promote on one tick.
+    expect(promoted?.n).toBeLessThanOrEqual(5);
+    expect(promoted?.n).toBeGreaterThanOrEqual(1);
+  }, 25000);
+
+  it("quarantines persistently paused rows out of the head-of-line", async () => {
+    const tick = worker as unknown as { scheduled: (event: unknown, env: Bindings) => Promise<void> };
+    // Pause the saga directly: every tick now skips with SAGA_PAUSED
+    // (persistent, not a transient race). Direct store (same helper the
+    // policy route uses) avoids the route's admin-grant surface.
+    const { storeSagaPolicy } = await import("../src/executions");
+    await storeSagaPolicy(bindings.DB, "00000000-0000-4000-8000-000000000001", helloSaga.id, {
+      admission: { enabled: false },
+    });
+    const created = await worker.fetch(
+      authed("/api/schedules", "POST", {
+        name: "quarantine-me",
+        sagaId: helloSaga.id,
+        kind: "one-off",
+        runAt: new Date(Date.now() - 30_000).toISOString(),
+        input: { name: "sched" },
+      }),
+      bindings,
+    );
+    expect(created.status).toBe(201);
+    const old = new Date(Date.now() - 60_000).toISOString();
+    await bindings.DB.prepare("UPDATE schedules SET next_due_at=? WHERE org_id=? AND name=?")
+      .bind(old, "00000000-0000-4000-8000-000000000001", "quarantine-me")
+      .run();
+    for (let n = 0; n < 10; n += 1) {
+      await tick.scheduled({ cron: "* * * * *" }, bindings);
+    }
+    const row = await bindings.DB.prepare("SELECT enabled,last_window FROM schedules WHERE org_id=? AND name=?")
+      .bind("00000000-0000-4000-8000-000000000001", "quarantine-me")
+      .first<{ enabled: number; last_window: string | null }>();
+    // Ten consecutive persistent skips park the row: disabled, out of the scan.
+    expect(row?.enabled).toBe(0);
+    expect(row?.last_window).toBe("quarantined");
+    await bindings.DB.prepare("DELETE FROM saga_policies WHERE org_id=? AND saga_id=?")
+      .bind("00000000-0000-4000-8000-000000000001", helloSaga.id)
+      .run();
+  }, 60000);
 });

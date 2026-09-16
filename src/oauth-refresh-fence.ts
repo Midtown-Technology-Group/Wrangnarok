@@ -70,9 +70,18 @@ function shapeFaultTable(raw: string): FenceFaultTable {
 }
 
 /** Cross-instance rotating-refresh fence. One stub per (tenant, generation)
- * fence key; concurrent `/refresh/<key>` POSTs share one in-flight vendor
- * call so the provider sees exactly one refresh POST per rotation round.
- * Memory-only: no storage writes, no D1, no persisted token. */
+ * fence key; concurrent `/refresh/<key>` POSTs sharing the same refresh
+ * form share one in-flight vendor call so the provider sees exactly one
+ * refresh POST per rotation round. Memory-only: no storage writes, no D1,
+ * no persisted token.
+ *
+ * Body-aware coalescing (codex #361 follow-up): the flight map keys on
+ * (fence key, refresh-body identity), not the fence key alone. Two rotations
+ * racing under one key with different refresh tokens are different rounds —
+ * sharing one vendor response would hand caller B tokens minted from caller
+ * A's one-time token. Same body shares the flight; a different body starts
+ * its own flight. The body identity is a SHA-256 digest of the posted form:
+ * the token value never becomes a map key and never persists past settle. */
 export class OAuthRefreshFence {
   private readonly flights = new Map<string, Promise<{ status: number; body: Uint8Array }>>();
 
@@ -100,7 +109,7 @@ export class OAuthRefreshFence {
         { status: 400 },
       );
     }
-    const flight = this.flightFor(key, body);
+    const flight = this.flightFor(key, body, await digestBody(body));
     try {
       const shared = await flight;
       // Fresh body per waiter: one Response body can be consumed only once.
@@ -115,8 +124,9 @@ export class OAuthRefreshFence {
     }
   }
 
-  private flightFor(key: string, body: string): Promise<{ status: number; body: Uint8Array }> {
-    const existing = this.flights.get(key);
+  private flightFor(key: string, body: string, digest: string): Promise<{ status: number; body: Uint8Array }> {
+    const flightKey = `${key}|${digest}`;
+    const existing = this.flights.get(flightKey);
     if (existing !== undefined) return existing;
     const task = (async (): Promise<Response> => {
       const fields = new URLSearchParams(body);
@@ -167,9 +177,9 @@ export class OAuthRefreshFence {
       status: response.status,
       body: new Uint8Array(await response.arrayBuffer()),
     }));
-    this.flights.set(key, shared);
+    this.flights.set(flightKey, shared);
     const cleanup = (): void => {
-      if (this.flights.get(key) === shared) this.flights.delete(key);
+      if (this.flights.get(flightKey) === shared) this.flights.delete(flightKey);
     };
     void shared.then(cleanup, cleanup);
     return shared;
@@ -181,4 +191,22 @@ function fenceError(error: unknown): Response {
     return Response.json({ code: error.code, message: error.message }, { status: error.status });
   }
   throw error;
+}
+
+/** Body identity for flight coalescing: SHA-256 over the posted form, hex.
+ * The refresh token itself never becomes a map key; the digest drops with
+ * the flight on settle. Pure and synchronous-safe: falls back to a length-
+ * tagged body hash when SubtleCrypto is unavailable (never throws). */
+async function digestBody(body: string): Promise<string> {
+  try {
+    const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)));
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  } catch {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < body.length; index += 1) {
+      hash ^= body.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return `fnv:${body.length}:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+  }
 }

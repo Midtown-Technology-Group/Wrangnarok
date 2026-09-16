@@ -6,10 +6,11 @@
 // submission against the persisted declaration, and only validated input
 // reaches the Saga. No provider, no publication.
 import { env } from "cloudflare:workers";
-import { expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
+import { assertSafePattern } from "../src/forms";
 import { executionId, helloSaga } from "../src/domain";
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
@@ -246,4 +247,150 @@ it("bounds handle-bound submissions and answers 404 for unknown forms", async ()
     bindings,
   );
   expect(missing.status).toBe(404);
+});
+
+describe("codex #345: declared-pattern safety gate (workerd)", () => {
+  function declareForm(name: string, pattern: string) {
+    return worker.fetch(
+      authed(
+        "/api/forms",
+        "POST",
+        {
+          name,
+          sagaId: helloSaga.id,
+          fields: [{ name: "name", type: "text", required: true, pattern }],
+        },
+        "form-01-pattern-declare",
+      ),
+      bindings,
+    );
+  }
+
+  it("rejects exponential-backtracking patterns at declaration", async () => {
+    for (const [name, pattern] of [
+      ["evil-nested", "^(a+)+$"],
+      ["evil-star", "(a*)*"],
+      ["evil-alt", "(a|a)+"],
+      ["evil-look", "(?=a)b"],
+      ["evil-backref", "(a)\\1"],
+      ["evil-count", "a{100}"],
+    ] as const) {
+      const res = await declareForm(name, pattern);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: { code: "INVALID_FORM" } });
+    }
+  });
+
+  it("keeps ordinary patterns working end to end", async () => {
+    const res = await declareForm("ok-pattern", "^[a-z]{1,64}$");
+    expect(res.status).toBe(201);
+    const started = await worker.fetch(
+      authed("/api/forms/ok-pattern/startup", "POST", {}, "form-01-pattern-ok-startup"),
+      bindings,
+    );
+    expect(started.status).toBe(201);
+    const { handle } = (await started.json()) as { handle: string };
+    const accepted = await worker.fetch(
+      authed("/api/forms/ok-pattern/submit", "POST", submitBody({ name: "hello" }, handle), "form-01-pattern-ok-001"),
+      bindings,
+    );
+    expect(accepted.status).toBe(202);
+    const started2 = await worker.fetch(
+      authed("/api/forms/ok-pattern/startup", "POST", {}, "form-01-pattern-ok-startup-2"),
+      bindings,
+    );
+    const { handle: handle2 } = (await started2.json()) as { handle: string };
+    const refused = await worker.fetch(
+      authed("/api/forms/ok-pattern/submit", "POST", submitBody({ name: "HELLO" }, handle2), "form-01-pattern-ok-002"),
+      bindings,
+    );
+    expect(refused.status).toBe(422);
+  });
+
+  it("fails legacy evil patterns closed at submit time", async () => {
+    // A declaration object built out of band (pre-gate row shape) reaches
+    // the submit sink unchecked: the sink re-runs the static gate so the
+    // evil pattern answers PATTERN_MISMATCH instead of spinning the engine.
+    // Exercised through validateAndMerge (the route's submit gate) rather
+    // than D1, so no raw-SQL fixture shape can drift from the parser.
+    const { validateAndMerge, loadForm } = await import("../src/forms");
+    void loadForm;
+    const def = {
+      id: "b1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
+      orgId: principal.orgId,
+      name: "legacy-evil",
+      sagaId: helloSaga.id,
+      allowPrefill: false,
+      fields: [
+        {
+          name: "name",
+          type: "text",
+          required: true,
+          maxLength: 1024,
+          // Cast: the persisted shape predates the gate, so the static type
+          // (which only newly-declared patterns satisfy) is bypassed here.
+          pattern: "^(a+)+$",
+        },
+      ],
+    } as unknown as Parameters<typeof validateAndMerge>[0];
+    await expect(
+      (async () => validateAndMerge(def, { name: `${"a".repeat(28)}!` }, { allowedOptions: {}, values: {} }))(),
+    ).rejects.toMatchObject({
+      code: "FORM_VALIDATION_FAILED",
+      details: [{ field: "name", code: "PATTERN_MISMATCH" }],
+    });
+  });
+});
+
+describe("codex #345: assertSafePattern unit arms (pure)", () => {
+  it("rejects each unsafe construct with its named error", () => {
+    // Nested quantified spans (each tokenizer arm).
+    expect(() => assertSafePattern("f", "(a+)+")).toThrow(/nests quantified/);
+    expect(() => assertSafePattern("f", "(a+)*")).toThrow(/nests quantified/);
+    expect(() => assertSafePattern("f", "(a+){2}")).toThrow(/nests quantified/);
+    expect(() => assertSafePattern("f", "(?:a+)+")).toThrow(/nests quantified/);
+    expect(() => assertSafePattern("f", "((a+))+")).toThrow(/nests quantified/);
+    expect(() => assertSafePattern("f", "(a+(b+))+")).toThrow(/nests quantified/);
+    // Overlapping quantified alternation, including nested-depth arms.
+    expect(() => assertSafePattern("f", "(a|a)+")).toThrow(/overlapping quantified alternation/);
+    expect(() => assertSafePattern("f", "(ab|ac){2}")).toThrow(/overlapping quantified alternation/);
+    expect(() => assertSafePattern("f", "((a)|(a))+")).toThrow(/overlapping quantified alternation/);
+    // Extensions: lookaround, named groups, backreferences.
+    expect(() => assertSafePattern("f", "(?=a)b")).toThrow(/unsafe construct/);
+    expect(() => assertSafePattern("f", "(?!a)b")).toThrow(/unsafe construct/);
+    expect(() => assertSafePattern("f", "(?<n>a)")).toThrow(/unsafe construct/);
+    expect(() => assertSafePattern("f", "(a)\\1")).toThrow(/unsafe construct/);
+    // Budgets: counted repetitions and total quantified cost.
+    expect(() => assertSafePattern("f", "a{100}")).toThrow(/repetition budget/);
+    expect(() => assertSafePattern("f", "a{1,100}")).toThrow(/repetition budget/);
+    expect(() => assertSafePattern("f", "(a){100}")).toThrow(/repetition budget/);
+    // Invalid expressions and skeletons.
+    expect(() => assertSafePattern("f", "(a")).toThrow(/not a valid regular expression/);
+    expect(() => assertSafePattern("f", "a\\")).toThrow(/not a valid regular expression/);
+    expect(() => assertSafePattern("f", "[a")).toThrow(/not a valid regular expression/);
+    // `{2)` is a literal brace (valid, safe): only real counted
+    // repetitions hit the budget arm, covered by the a{100} cases above.
+    expect(() => assertSafePattern("f", "(a{2)")).not.toThrow();
+  });
+
+  it("accepts the safe everyday shapes", () => {
+    for (const pattern of [
+      "^[a-z]{1,64}$",
+      "^\\d{4}-\\d{2}-\\d{2}$",
+      "(a|b)+",
+      "(ab|cd)+",
+      "(a)?",
+      "(a+)?",
+      "(ab)?",
+      "a?",
+      "a*b*",
+      "[a+]+",
+      "\\(a+\\)+",
+      "(a){2}",
+      "a{1,64}",
+      "^(a)?$",
+    ]) {
+      expect(() => assertSafePattern("f", pattern), pattern).not.toThrow();
+    }
+  });
 });
