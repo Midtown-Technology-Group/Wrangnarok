@@ -103,6 +103,16 @@ describe("verifyConnection", () => {
       code: "CLOUDFLARE_VENDOR_TIMEOUT",
     });
   }, 10000);
+  it("maps an aborted transport to a timeout without leaking the token", async () => {
+    // Immediate DOM abort before the deadline: timedOut() is false, so the
+    // AbortError shape carries the timeout verdict deterministically.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    });
+    const err = await verifyConnection(CONNECTION, SECRETS, ACCOUNT).catch((e: Error) => e);
+    expect(err).toMatchObject({ code: "CLOUDFLARE_VENDOR_TIMEOUT" });
+    expect(String((err as { message: string }).message)).not.toContain("unit-test-sentinel");
+  });
 });
 
 describe("inventoryZones", () => {
