@@ -29,6 +29,7 @@ import {
 import type { ChildEnv } from "../src/children";
 import { executionId, Fault, helloParentSaga, helloSaga } from "../src/domain";
 import { parseHelloParentInput } from "../src/domain";
+import { bindSagaStep } from "../src/saga";
 import type { OrgCtx } from "../src/saga";
 import type { SagaEventContext, SagaStep } from "../src/saga";
 import { helloParentSagaDef } from "../src/sagas/hello-parent";
@@ -91,7 +92,7 @@ describe("RUN-02 nested invocation (issue #136)", () => {
     const child = await detail(parent.result?.childExecutionId as string);
     expect(child.status).toBe("Succeeded");
     expect(child.parentExecutionId).toBe(id);
-    expect(child.parentStep).toBe("child-dispatch-invoke");
+    expect(child.parentStep).toBe("child-dispatch-invoke-v1");
     expect(child.result).toMatchObject({ greeting: "Hello, Ada!", name: "Ada" });
   }, 25000);
 
@@ -917,14 +918,99 @@ describe("RUN-02 child helpers (pure, no bindings)", () => {
         new Date().toISOString(),
       )
       .run();
-    const receipt = await handle.invoke(helloSaga.id, { name: "Ada" });
+    // The handle resolves the identity step from the owning step.do
+    // Operation: the ambient step name (not a hardcoded default) lands in
+    // parent_step, and invoke outside a step.do fails loud.
+    await expect(handle.invoke(helloSaga.id, { name: "Ada" })).rejects.toMatchObject({ code: "CHILD_STEP_MISSING" });
+    const receipt = await handle.invoke(helloSaga.id, { name: "Ada" }, { callerStep: "invoke-v1" });
     expect(receipt.executionId).toMatch(/^[a-f0-9]{64}$/);
+    const lineage = await bindings.DB.prepare("SELECT parent_step FROM executions WHERE id=?")
+      .bind(receipt.executionId)
+      .first<{ parent_step: string }>();
+    expect(lineage?.parent_step).toBe("child-dispatch-invoke-v1");
     // Mark the child Succeeded and read it back through the same handle.
     await bindings.DB.prepare("UPDATE executions SET status='Succeeded',completed_at=?,result_json=? WHERE id=?")
       .bind(new Date().toISOString(), JSON.stringify({ greeting: "Hello, Ada!", name: "Ada" }), receipt.executionId)
       .run();
     await expect(handle.awaitResult(receipt)).resolves.toMatchObject({ greeting: "Hello, Ada!" });
     expect(helloParentSagaDef.id).toBe(helloParentSaga.id);
+  });
+
+  it("produces two child rows when two differently named steps invoke the same child under the same key", async () => {
+    // Regression for the parent-step identity collision (issue #136): the
+    // (parent, step, child, key) tuple must carry the owning Operation, so
+    // two distinct step.do callbacks sharing one key fork two children with
+    // correct parent_step instead of converging on one row.
+    const parentId = "aa".repeat(32);
+    await bindings.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        parentId,
+        helloParentSaga.id,
+        helloParentSaga.name,
+        helloParentSaga.revision,
+        principal.orgId,
+        principal.userId,
+        JSON.stringify({ name: "Ada" }),
+        1,
+        "Running",
+        new Date().toISOString(),
+      )
+      .run();
+    const org: OrgCtx = {
+      orgId: principal.orgId,
+      userId: principal.userId,
+      executionId: parentId,
+      sagaId: helloParentSaga.id,
+      sagaRevision: helloParentSaga.revision,
+      attemptToken: `${parentId}:0`,
+    };
+    const live = {
+      ...bindings,
+      HELLO_WORKFLOW: { createBatch: async () => {} } as unknown as Bindings["HELLO_WORKFLOW"],
+    };
+    const childEnv: ChildEnv = {
+      env: live,
+      catalog: { sagas: [{ ...helloSaga, parse: (v: unknown) => v }] },
+      parentOrg: org,
+      parentExecutionId: parentId,
+      parentSagaId: helloParentSaga.id,
+    };
+    // Ambient Operation binding without a workflow double: each step.do name
+    // scopes invoke identity through AsyncLocalStorage, mirroring the
+    // native adapter path (bindSagaStep).
+    const inlineStep: SagaStep = {
+      do: async (name: string, fn: () => Promise<never>) =>
+        bindSagaStep({ do: async (_n: string, _o: unknown, f: () => Promise<never>) => f() } as never).do(
+          name,
+          fn as () => Promise<never>,
+        ),
+      sleep: async () => {},
+    };
+    const first = await inlineStep.do("fanout-left-v1", () =>
+      bindSagaChildren(childEnv, inlineStep).invoke(helloSaga.id, { name: "Ada" }),
+    );
+    const second = await inlineStep.do("fanout-right-v1", () =>
+      bindSagaChildren(childEnv, inlineStep).invoke(helloSaga.id, { name: "Ada" }),
+    );
+    expect(second.executionId).not.toBe(first.executionId);
+    const rows = await bindings.DB.prepare(
+      "SELECT id,parent_step FROM executions WHERE parent_execution_id=? ORDER BY parent_step",
+    )
+      .bind(parentId)
+      .all<{ id: string; parent_step: string }>();
+    expect(rows.results.map((row) => row.parent_step)).toEqual([
+      "child-dispatch-fanout-left-v1",
+      "child-dispatch-fanout-right-v1",
+    ]);
+    // Same key with same step still converges: a retry of the left Operation
+    // lands on the left child row, not a third row.
+    const replay = await inlineStep.do("fanout-left-v1", () =>
+      bindSagaChildren(childEnv, inlineStep).invoke(helloSaga.id, { name: "Ada" }),
+    );
+    expect(replay.executionId).toBe(first.executionId);
+    expect(replay.replayed).toBe(true);
   });
 
   it("treats a missing lineage column as no children, never a failure", async () => {

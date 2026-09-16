@@ -132,9 +132,15 @@ export interface ChildEnv {
 export const CHILD_POLL_INTERVAL = "1 second";
 
 /** Ampersand-free step names for child dispatch Operations, so position
- * ordering stays greppable in ExecutionHistory. */
+ * ordering stays greppable in ExecutionHistory. Idempotent: callers may pass
+ * either the owning Operation name ("child-dispatch-invoke-v1") or its
+ * already-prefixed form; an already-prefixed name passes through unchanged
+ * so ambient resolution (which sees the full step.do name) never
+ * double-prefixes. */
+const CHILD_DISPATCH_PREFIX = "child-dispatch-";
+
 export function childDispatchStep(stepName: string): string {
-  return `child-dispatch-${stepName}`;
+  return stepName.startsWith(CHILD_DISPATCH_PREFIX) ? stepName : `child-dispatch-${stepName}`;
 }
 
 export function childPollStep(stepName: string): string {
@@ -168,7 +174,7 @@ export function bindSagaChildren(
     // outside a step.do callback (no ambient Operation, no override) fails
     // loud with CHILD_STEP_MISSING instead of converging on a shared
     // default row.
-    invoke: (childRef, input, options) => {
+    invoke: async (childRef, input, options) => {
       const owner = options?.callerStep ?? currentOperationName();
       if (owner === undefined) {
         throw new Fault(
