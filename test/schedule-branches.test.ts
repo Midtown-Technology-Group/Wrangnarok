@@ -199,7 +199,10 @@ describe("TRG-01 pre-dispatch fence (fake D1, no workerd)", () => {
     ).rejects.toMatchObject({ code: "SCHEDULE_GONE" });
     expect(stub.calls()).toBe(0);
   });
-  it("treats a fence re-read failure as a gone row, never a dispatch", async () => {
+  it("rethrows a fence re-read backend failure instead of reporting a gone row (issue #137)", async () => {
+    // A D1 fault on the pre-dispatch re-read is a tick failure, not a
+    // deletion: the tick reports failure so the window retries instead of
+    // being answered as gone. No dispatch happens either way.
     const stub = stubSubmit();
     await expect(
       promoteWindow(
@@ -210,7 +213,7 @@ describe("TRG-01 pre-dispatch fence (fake D1, no workerd)", () => {
         SAGA_DEFINITIONS,
         stub.submit,
       ),
-    ).rejects.toMatchObject({ code: "SCHEDULE_GONE" });
+    ).rejects.toThrow("D1 hiccup");
     expect(stub.calls()).toBe(0);
   });
   it("lets an instance admin dispatch without membership rows", async () => {
