@@ -201,7 +201,13 @@ export const SDK_ERROR_CODES = [
   "OPENAPI_ORIGIN_FORBIDDEN",
   "OPENAPI_CONNECTION_MISSING",
   "OPENAPI_EXECUTION_FAILED",
+  "OPENAPI_RESPONSE_TOO_LARGE",
   "HALO_NOT_CONFIGURED",
+  "HALO_UNAUTHORIZED",
+  "HALO_RATE_LIMITED",
+  "HALO_BAD_RESPONSE",
+  "HALO_AUTH_FAILED",
+  "HALO_VENDOR_TIMEOUT",
   "MCP_INVALID_REQUEST",
   "MCP_UNKNOWN_METHOD",
   "MCP_INVALID_PARAMS",
@@ -1874,10 +1880,15 @@ function hintFor(code: unknown): string | null {
       return "This Saga requires an Integration Connection that is not configured for this Organization.";
     case "ECHO_VENDOR_TIMEOUT":
     case "NINJA_VENDOR_TIMEOUT":
+    case "HALO_VENDOR_TIMEOUT":
       return "The vendor exceeded its deadline; the timeout-mark checkpoint wrote TimedOut. Retry with a fresh key.";
     case "NINJA_UNAUTHORIZED":
     case "NINJA_NOT_CONFIGURED":
       return "NinjaOne credentials are missing or rejected; check the server environment, not the Saga source.";
+    case "HALO_UNAUTHORIZED":
+    case "HALO_NOT_CONFIGURED":
+    case "HALO_AUTH_FAILED":
+      return "Halo credentials are missing or rejected at the token endpoint; check the server environment, not the Saga source.";
     case "EXECUTION_CANCELLED":
       return "The Execution was cancelled; submit a fresh Idempotency-Key to run again.";
     case "SAGA_PAUSED":

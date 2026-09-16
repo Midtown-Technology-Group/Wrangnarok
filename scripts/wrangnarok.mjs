@@ -90,6 +90,25 @@ function validateAndGenerate(ctx) {
     }
   }
 
+  // Auth strategy is explicit, never silently assumed: mirrors the typed
+  // generator's GENERATOR_INVALID_OPTIONS checks so both entry points reject
+  // the same bad inputs (the shared emitter only clamps for safety).
+  const tokenPath = ctx.genTokenPath ?? "/auth/token";
+  if (typeof tokenPath !== "string" || !tokenPath.startsWith("/") || tokenPath.length > 128) {
+    fail(
+      "GENERATOR_INVALID_OPTIONS",
+      "generate-integration --token-path must be a same-origin absolute path starting with / (1-128 chars).",
+    );
+  }
+  const scope = ctx.genScope ?? "all";
+  if (typeof scope !== "string" || scope.length === 0 || scope.length > 128) {
+    fail("GENERATOR_INVALID_OPTIONS", "generate-integration --scope must be 1-128 chars.");
+  }
+  const timeoutMs = ctx.genTimeoutMs ?? 5000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 30000) {
+    fail("GENERATOR_INVALID_OPTIONS", "generate-integration --timeout-ms must be an integer 1 to 30000.");
+  }
+
   let doc;
   try {
     doc = JSON.parse(specText);
@@ -169,6 +188,9 @@ function validateAndGenerate(ctx) {
     envPrefix: `${prefix}_CLIENT`,
     digestHex,
     version,
+    tokenPath,
+    scope,
+    timeoutMs,
   });
   return {
     generated: {
@@ -228,6 +250,9 @@ async function main() {
     genName: arg("name"),
     genOrigins: repeated("origin"),
     genClassifications: classificationsFromArgv(),
+    genTokenPath: arg("token-path"),
+    genScope: arg("scope"),
+    genTimeoutMs: arg("timeout-ms") === undefined ? undefined : Number(arg("timeout-ms")),
   });
   writeGenerated(result, process.argv.includes("--json"));
 }

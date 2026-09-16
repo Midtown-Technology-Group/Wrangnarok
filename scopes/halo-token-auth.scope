@@ -1,0 +1,16 @@
+# TOOL-01 Halo token-auth lane scope (issue #170): authentic HaloPSA OAuth2
+# client-credentials token exchange in the hand-written Halo host, the vendor
+# harness, and the shared generator emitter so generated providers inherit it.
+scopes/halo-token-auth.scope
+src/integrations/halo.ts
+src/sdk.ts
+scripts/wrangnarok.mjs
+scripts/wrangnarok-core.mjs
+src/generate-integration-source.mjs
+src/generate-integration-source.d.mts
+src/generate-integration.ts
+src/domain.ts
+test/tool-01-halo-proof.test.ts
+test/generate-integration.test.ts
+test/sdk.test.ts
+docs/upstream-parity.md
