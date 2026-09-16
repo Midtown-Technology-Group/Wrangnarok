@@ -241,7 +241,9 @@ function cmdSessions(args) {
       // Unreadable: stale.
     }
     const pending = unread(loadInbox(root, id)).length;
-    console.log(`  ${id}${names.get(id) ? ` (alias: ${names.get(id)})` : ""} unread=${pending}${fresh ? " active" : ""}`);
+    console.log(
+      `  ${id}${names.get(id) ? ` (alias: ${names.get(id)})` : ""} unread=${pending}${fresh ? " active" : ""}`,
+    );
   }
 }
 
@@ -291,7 +293,8 @@ function cmdSelftest() {
     execSync(`node "${process.argv[1]}" send --to intruder --body probe`, { encoding: "utf-8", env });
     fail("INTERNAL", "cross-store send succeeded; stores are not isolated.");
   } catch (error) {
-    if (!/unknown recipient/.test(childOutput(error))) fail("INTERNAL", "cross-store send failed for the wrong reason.");
+    if (!/unknown recipient/.test(childOutput(error)))
+      fail("INTERNAL", "cross-store send failed for the wrong reason.");
   }
   const listing = execSync(`node "${process.argv[1]}" sessions`, { encoding: "utf-8", env });
   if (listing.includes(other) || listing.includes("spy")) fail("INTERNAL", "sessions leaks other stores.");
