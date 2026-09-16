@@ -134,7 +134,9 @@ describe("codex #364: per-org fairness and skip quarantine (workerd)", () => {
     // Promotion revalidates run-as authority: the fixture user needs an
     // active user row plus active membership in both orgs. (The API path
     // bootstraps this; direct inserts must declare it explicitly.)
-    await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?, 'active', ?) ON CONFLICT(user_id) DO NOTHING")
+    await bindings.DB.prepare(
+      "INSERT INTO users(user_id,status,created_at) VALUES (?, 'active', ?) ON CONFLICT(user_id) DO NOTHING",
+    )
       .bind(USER, new Date().toISOString())
       .run();
     for (const org of [ORG_A, ORG_B]) {
