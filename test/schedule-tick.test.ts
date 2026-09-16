@@ -298,6 +298,93 @@ describe("codex #364: per-org fairness and skip quarantine (workerd)", () => {
       .first<{ n: number }>();
     expect(promotedLast?.n).toBeGreaterThan(0);
   }, 120000);
+  it("admits a full window every tick with one omission per org per cycle (#364 wraparound)", async () => {
+    const { promoteDueSchedules } = await import("../src/schedules");
+    const { submit } = await import("../src/executions");
+    const { SAGA_DEFINITIONS } = await import("../src/sagas");
+    const USER = "00000000-0000-4000-8000-000000000002";
+    const now = new Date().toISOString();
+    await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?, 'active', ?) ON CONFLICT(user_id) DO NOTHING")
+      .bind(USER, now)
+      .run();
+    // 11 orgs, one promotable row each, all due at the same instant. Over
+    // 11 minute ticks the rotation window must admit a FULL 10-org window
+    // every tick (wraparound: no truncated tail), and every org must be
+    // admitted exactly 10 times (one omission each) — not 1..10 times by
+    // lexical position. Single rows drain on promotion, so top up before
+    // every tick to keep all 11 due throughout the cycle.
+    const orgIds: string[] = [];
+    let seq = 0;
+    const topUp = async (orgId: string, orgIndex: number) => {
+      const have = await bindings.DB.prepare(
+        "SELECT COUNT(*) AS n FROM schedules WHERE org_id=? AND enabled=1 AND next_due_at IS NOT NULL",
+      )
+        .bind(orgId)
+        .first<{ n: number }>();
+      if ((have?.n ?? 0) > 0) return;
+      seq += 1;
+      await bindings.DB.prepare(
+        "INSERT INTO schedules(id,org_id,name,saga_id,kind,cron,timezone,enabled,input_json,run_as_user_id,run_at,next_due_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      )
+        .bind(
+          `00000000-0000-4000-8000-000004${String(orgIndex).padStart(2, "0")}${String(seq).padStart(6, "0")}`,
+          orgId,
+          `wrap-${orgIndex}-${seq}`,
+          helloSaga.id,
+          "one-off",
+          "",
+          "UTC",
+          1,
+          '{"name":"sched"}',
+          USER,
+          null,
+          new Date(Date.now() - 3_600_000).toISOString(),
+          now,
+          now,
+        )
+        .run();
+    };
+    for (let o = 0; o < 11; o += 1) {
+      const orgId = `00000000-0000-4000-8000-00000300000${o}`;
+      orgIds.push(orgId);
+      await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?) ON CONFLICT(id) DO NOTHING")
+        .bind(orgId, `wrap-${o}`)
+        .run();
+      await bindings.DB.prepare(
+        "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,'admin','active','ordinary',?,?) ON CONFLICT(org_id,user_id) DO UPDATE SET status='active'",
+      )
+        .bind(orgId, USER, now, now)
+        .run();
+      await topUp(orgId, o);
+    }
+    const admissions = new Map<string, number>();
+    const baseMinute = Math.floor(Date.now() / 60_000);
+    for (let t = 0; t < 11; t += 1) {
+      for (let o = 0; o < 11; o += 1) await topUp(orgIds[o] as string, o);
+      const before = await bindings.DB.prepare(
+        "SELECT org_id AS orgId, COUNT(*) AS n FROM schedule_deliveries d JOIN schedules s ON s.id=d.schedule_id GROUP BY org_id",
+      ).all<{ orgId: string; n: number }>();
+      const beforeMap = new Map(before.results.map((row) => [row.orgId, row.n]));
+      await promoteDueSchedules(
+        bindings.DB,
+        { DB: bindings.DB, HELLO_WORKFLOW: bindings.HELLO_WORKFLOW } as never,
+        SAGA_DEFINITIONS,
+        submit,
+        new Date((baseMinute + t) * 60_000),
+      );
+      const after = await bindings.DB.prepare(
+        "SELECT org_id AS orgId, COUNT(*) AS n FROM schedule_deliveries d JOIN schedules s ON s.id=d.schedule_id GROUP BY org_id",
+      ).all<{ orgId: string; n: number }>();
+      // A full window admits exactly 10 orgs per tick: every tick must show
+      // deliveries for exactly 10 distinct orgs (one omission).
+      const tickOrgs = after.results.filter((row) => (row.n ?? 0) > (beforeMap.get(row.orgId) ?? 0));
+      expect(tickOrgs).toHaveLength(10);
+      for (const row of tickOrgs) admissions.set(row.orgId, (admissions.get(row.orgId) ?? 0) + 1);
+    }
+    // Uniform omission: every org admitted exactly 10 of 11 ticks.
+    expect([...admissions.keys()].sort()).toEqual([...orgIds].sort());
+    for (const orgId of orgIds) expect(admissions.get(orgId)).toBe(10);
+  }, 120000);
   it("caps one org's promotions per tick so other orgs still promote", async () => {
     const tick = worker as unknown as { scheduled: (event: unknown, env: Bindings) => Promise<void> };
     // Seed six due one-off rows via the API (membership-gated create keeps
