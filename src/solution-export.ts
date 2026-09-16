@@ -821,6 +821,20 @@ async function validatePackage(raw: unknown, catalogs: SourceCatalogs, exporter:
       requiredIntegrations: [...catalog.requiredIntegrations],
     };
   });
+  // Codex #366: every manifest saga pin must have a module declaration.
+  // validatePackage previously checked only supplied modules against the
+  // manifest, so a pin omitted from modules skipped dependency validation
+  // and could install with undeclared Integration requirements.
+  const moduleIds = new Set(modules.map((module) => module.sagaId));
+  for (const pin of manifest.sagas) {
+    if (!moduleIds.has(pin.id)) {
+      const catalog = catalogs.sagas.find((saga) => saga.id === pin.id);
+      throw invalid(
+        "MISSING_MODULE",
+        `Saga ${catalog ? `"${catalog.name}" (${pin.id})` : pin.id} is pinned by the manifest but declares no module: add the module or drop the pin before sharing.`,
+      );
+    }
+  }
   const closure = checkClosure(manifest, modules, catalogs);
   const blocking = closure.filter((gap) => gap.blocking);
   if (blocking.length > 0) {

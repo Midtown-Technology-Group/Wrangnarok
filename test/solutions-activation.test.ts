@@ -187,6 +187,32 @@ it("leaves the pointer on the previous complete version when interrupted, then c
   expect(row?.managed_by).toBe(`${BUNDLE_ID}@2.0.0`);
 });
 
+it("blocks execution while an interrupted install leaves unactivated rows live (#356)", async () => {
+  await installBundle(bindings.DB, manifest("1.0.0", ENDPOINT_V1));
+  const id = (await orgId("default")) as string;
+  const hook = {
+    internals: {
+      afterWrite: (completed: number) => {
+        if (completed >= 3) throw new Error("injected interruption after three writes");
+      },
+    },
+  };
+  await expect(installBundle(bindings.DB, manifest("2.0.0", ENDPOINT_V2), hook)).rejects.toThrow(
+    "injected interruption after three writes",
+  );
+  // The pointer still names v1 while a row already carries v2 content: the
+  // gate must fail closed instead of admitting execution against the mixed
+  // state, and heal once a retry converges rows and pointer.
+  expect(await pointer()).toMatchObject({ version: "1.0.0" });
+  await expect(requireActiveInstall(bindings.DB, echoSaga.id, echoSaga.revision, id)).rejects.toMatchObject({
+    status: 409,
+    code: "INCONSISTENT_INSTALL",
+  });
+  await installBundle(bindings.DB, manifest("2.0.0", ENDPOINT_V2));
+  const gate = await requireActiveInstall(bindings.DB, echoSaga.id, echoSaga.revision, id);
+  expect(gate).toMatchObject({ bundleId: BUNDLE_ID, version: "2.0.0" });
+});
+
 it("lets an interrupted upgrade fall back to the active version without force", async () => {
   await installBundle(bindings.DB, manifest("1.0.0", ENDPOINT_V1));
   const hook = {

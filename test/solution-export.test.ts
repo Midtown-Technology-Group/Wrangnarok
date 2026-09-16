@@ -7,7 +7,7 @@ import { env } from "cloudflare:workers";
 import { reset } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Bindings } from "../src/bindings";
-import { digestSaga, ECHO_INTEGRATION_ID, echoSaga, Fault, helloSaga, NINJA_INTEGRATION_ID } from "../src/domain";
+import { digestSaga, ECHO_INTEGRATION_ID, echoSaga, Fault, helloSaga, NINJA_INTEGRATION_ID, ninjaSaga } from "../src/domain";
 import { SAGA_DEFINITIONS } from "../src/sagas";
 import { installBundle } from "../src/solutions";
 import type { BundleManifest } from "../src/solutions";
@@ -301,6 +301,16 @@ describe("solution source export and import (SOL-03)", () => {
 
   it("fails closed on missing modules and undeclared requirements", async () => {
     const pkg = await capturedPackage();
+    // Codex #366: a manifest pin with no module declaration must fail
+    // closed instead of skipping dependency validation. Craft a package
+    // that pins the NinjaOne saga in the manifest while declaring only the
+    // Echo module, omitting the NinjaOne Integration.
+    const pinGhost = JSON.parse(JSON.stringify(pkg));
+    pinGhost.manifest = {
+      ...pkg.manifest,
+      sagas: [...pkg.manifest.sagas, { id: ninjaSaga.id, revision: ninjaSaga.revision }],
+    };
+    await expect(importSourcePackage(pinGhost)).rejects.toMatchObject({ code: "MISSING_MODULE" });
     const ghost = JSON.parse(JSON.stringify(pkg));
     ghost.modules = [
       {

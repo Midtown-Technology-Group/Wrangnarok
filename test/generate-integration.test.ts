@@ -132,6 +132,58 @@ describe("INT-01 generator (issue #229)", () => {
     expect(out.source).toContain("// GET /api/Split line");
   });
 
+  it("keeps a crafted version/path breakout payload inside comments (#343)", async () => {
+    // Codex finding #343: a provider spec could terminate the `//` comment
+    // and smuggle active TypeScript into the generated module (close the
+    // classifications object, add top-level statements, reopen a filler
+    // object). The payload must stay inert in both emitters.
+    const payload = "\n};\n(globalThis as any).__injected = 1;\nconst __filler = {";
+    const evil = JSON.parse(haloShaped());
+    evil.info.version = `1.0${payload}`;
+    evil.paths[`/api/Break${payload}`] = { get: { operationId: "Break_Get", summary: "Break." } };
+    const specText = JSON.stringify(evil);
+    const out = generateIntegrationModule(specText, opts(), DIGEST);
+    const lines = out.source.split("\n");
+    const versionLine = lines.find((line) => line.startsWith("// Spec version:"));
+    expect(versionLine).toBeDefined();
+    // The payload text may survive inside the comment, but it must stay on
+    // one comment line: no separator may terminate the comment early.
+    expect(versionLine).not.toMatch(/[\r\n\u2028\u2029]/);
+    // No emitted line may start active code from the payload: every injected
+    // statement must remain comment text or escaped string content.
+    for (const line of lines) {
+      const trimmed = line.trimStart();
+      expect(trimmed.startsWith("(globalThis")).toBe(false);
+      expect(trimmed.startsWith("const __filler")).toBe(false);
+    }
+    // The classifications block must stay a well-formed single-line-per-op
+    // object: no injected statements may escape it.
+    const classStart = lines.findIndex((line) => line.includes("_CLASSIFICATIONS"));
+    const classEnd = lines.findIndex((line, index) => index > classStart && line.trim() === "});");
+    expect(classStart).toBeGreaterThanOrEqual(0);
+    expect(classEnd).toBeGreaterThan(classStart);
+    const classLines = lines.slice(classStart + 1, classEnd);
+    expect(classLines.length).toBeGreaterThan(0);
+    for (const line of classLines) {
+      expect(line).not.toMatch(/[\r\n\u2028\u2029]/);
+    }
+    // The CLI shares the canonical emitter, so the same payload stays inert
+    // there too (compared against the CLI's own digest input, which the
+    // CLI derives from the raw spec rather than the pinned test digest).
+    const cliDigest = await sha256Hex(specText);
+    const cliCanonical = generateIntegrationModule(specText, opts(), cliDigest);
+    const cli = (await runCommand({
+      command: "generate-integration",
+      genId: "halo",
+      genName: "halo",
+      genSpec: specText,
+      genOrigins: ["https://halo-lab.example.com"],
+      genClassifications: { Ticket_Delete: "destructive" },
+    })) as GeneratedCliResult;
+    expect(cli.generated.content).toBe(cliCanonical.source);
+    expect(cli.generated.content).not.toContain("__injected\n");
+  });
+
   it("rejects oversized specs before parsing", () => {
     const big = " ".repeat(2 * 1024 * 1024 + 1);
     expect(() => generateIntegrationModule(big, opts(), DIGEST)).toThrow(
