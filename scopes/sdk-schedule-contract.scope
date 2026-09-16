@@ -1,0 +1,8 @@
+# SDK schedule contract fix (issue #137 follow-up): descriptor table plus
+# docs table claimed :id schedule routes (plus a phantom preview and a
+# schedules/executions cancel) the name-based router never implemented.
+# Client methods were already name-based and correct; this aligns the
+# contract documents with the router. Docs-only plus descriptor strings.
+src/sdk.ts
+docs/sdk.md
+scopes/sdk-schedule-contract.scope

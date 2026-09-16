@@ -2716,28 +2716,18 @@ export function describeContract(): SdkContractDescriptor {
       { method: "POST", path: "/api/executions/:id/cancel", description: "Owner-only cancellation (exact ID)." },
       { method: "POST", path: "/api/schedules", description: "Create a one-off or recurring schedule (TRG-01)." },
       { method: "GET", path: "/api/schedules", description: "Schedule summaries for this Organization." },
-      { method: "GET", path: "/api/schedules/:id", description: "Schedule detail with policy and receipts." },
-      {
-        method: "GET",
-        path: "/api/schedules/:id/preview",
-        description: "Next UTC windows for a recurring schedule (count 1-20).",
-      },
+      { method: "GET", path: "/api/schedules/:name", description: "Schedule detail with policy and receipts." },
       {
         method: "POST",
-        path: "/api/schedules/:id/disable",
+        path: "/api/schedules/:name/disable",
         description: "Disable a schedule (ticks skip; receipts retained).",
       },
       {
         method: "POST",
-        path: "/api/schedules/:id/enable",
+        path: "/api/schedules/:name/enable",
         description: "Re-enable a schedule (due index recomputed).",
       },
-      { method: "DELETE", path: "/api/schedules/:id", description: "Soft-delete a schedule." },
-      {
-        method: "POST",
-        path: "/api/schedules/executions/:id/cancel",
-        description: "Cancel a Scheduled intent row (promoted rows use the owner cancel).",
-      },
+      { method: "DELETE", path: "/api/schedules/:name", description: "Soft-delete a schedule." },
       {
         method: "GET",
         path: "/api/forms",
