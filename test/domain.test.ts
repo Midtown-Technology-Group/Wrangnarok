@@ -9,9 +9,14 @@ import {
   echoSaga,
   encodeHistoryCursor,
   executionId,
+  helloSaga,
+  HELLO_NAME_MAX_BYTES,
+  helloNameResultChars,
   HISTORY_LIMIT_DEFAULT,
   ninjaSaga,
   parseDigestInput,
+  parseHelloInput,
+  parseHelloParentInput,
   parseHistoryQuery,
   parseInput,
   parseCallerKey,
@@ -235,5 +240,57 @@ describe("MVP slice contracts", () => {
     expect(decodeHistoryCursor(cursor)).toEqual({ createdAt: "2026-09-05T00:00:00.000Z", id });
     expect(() => decodeHistoryCursor("not-a-cursor!!")).toThrow();
     expect(() => decodeHistoryCursor(encodeHistoryCursor({ createdAt: "", id }))).toThrow();
+  });
+  it("keeps every accepted hello name inside its downstream bounds (issues #377, #372)", () => {
+    const nameError = (value: unknown): string => {
+      try {
+        parseHelloInput(value);
+      } catch (error) {
+        return (error as { code?: string }).code ?? "NO_CODE";
+      }
+      throw new Error(`expected parseHelloInput to throw for ${JSON.stringify(value)?.slice(0, 40)}`);
+    };
+    // Issue #377: 1024 quote characters passed validation but the escaped,
+    // duplicated HelloResult (4129 chars) overflowed the 4096 CHECK.
+    expect(nameError({ name: '"'.repeat(1024) })).toBe("INVALID_INPUT");
+    // Issue #372: a 1006-char name passed validation but the prefixed INFO
+    // line (1025 chars) overflowed the 1024 log bound.
+    expect(nameError({ name: "x".repeat(1006) })).toBe("INVALID_INPUT");
+    expect(nameError({ name: "x".repeat(513) })).toBe("INVALID_INPUT");
+    expect(nameError({ name: "" })).toBe("INVALID_INPUT");
+    expect(nameError({ name: 7 })).toBe("INVALID_INPUT");
+    expect(nameError({ nickname: "Ada" })).toBe("INVALID_INPUT");
+    expect(nameError({ name: "🎃".repeat(129) })).toBe("INVALID_INPUT");
+    // hello-parent shares the same name contract (it forwards into hello).
+    expect(() => parseHelloParentInput({ name: '"'.repeat(1024) })).toThrow(
+      expect.objectContaining({ code: "INVALID_INPUT" }),
+    );
+    expect(() => parseHelloParentInput({ name: "x".repeat(1006) })).toThrow(
+      expect.objectContaining({ code: "INVALID_INPUT" }),
+    );
+    expect(parseHelloParentInput({ name: "Ada", childKey: "child-key-00000001" })).toEqual({
+      name: "Ada",
+      childKey: "child-key-00000001",
+    });
+    // Every accepted name fits the persisted HelloResult, both prefixed log
+    // lines, and the INFO data row, with the worst accepted input probed
+    // explicitly rather than sampled.
+    const accepted = ["Ada", "x".repeat(HELLO_NAME_MAX_BYTES), '"'.repeat(511), "🎃".repeat(128)];
+    for (const name of accepted) {
+      expect(parseHelloInput({ name })).toEqual({ name });
+      expect(helloNameResultChars(name)).toBeLessThanOrEqual(4096);
+      expect(`Greeting ${name}`.length).toBeLessThanOrEqual(1024);
+      expect(`Hello Saga greeted ${name}`.length).toBeLessThanOrEqual(1024);
+      expect(new TextEncoder().encode(JSON.stringify({ name })).length).toBeLessThanOrEqual(2048);
+    }
+    // The bound message names the byte cap so callers can size input.
+    expect(nameError({ name: "x".repeat(513) })).toBe("INVALID_INPUT");
+    try {
+      parseHelloInput({ name: "x".repeat(513) });
+      throw new Error("expected a Fault message");
+    } catch (error) {
+      expect((error as Error).message).toContain(String(HELLO_NAME_MAX_BYTES));
+    }
+    expect(helloSaga.id).toBe("395e15f0-3627-41f6-8922-008ce37e3b35");
   });
 });

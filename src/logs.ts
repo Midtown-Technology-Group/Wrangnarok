@@ -25,7 +25,7 @@
 // (or a set containing it), so diagnostic detail never leaks into a
 // default tail. There is no HTTP write path: logs are Saga-emitted only,
 // which keeps attribution unforgeable.
-import { Fault, parseDateBound } from "./domain";
+import { Fault, LOG_DATA_MAX_BYTES, LOG_MESSAGE_MAX_CHARS, parseDateBound } from "./domain";
 import type { Principal } from "./domain";
 import { assertJsonSerializable } from "./saga";
 import { scrubExecutionText, scrubExecutionValue } from "./secrets";
@@ -34,8 +34,11 @@ export const LOG_LEVELS = ["DEBUG", "INFO", "WARN", "ERROR", "PROGRESS"] as cons
 export type LogLevel = (typeof LOG_LEVELS)[number];
 /** Default read tier: everything except DEBUG diagnostics. */
 export const DEFAULT_VISIBLE_LEVELS: readonly LogLevel[] = ["INFO", "WARN", "ERROR", "PROGRESS"];
-export const LOG_MESSAGE_MAX_CHARS = 1024;
-export const LOG_DATA_MAX_BYTES = 2048;
+// codex/hello-domain (issues #377, #372): the author-log bounds live in
+// domain.ts next to the hello result budget so validation, domain limits,
+// and log-emission limits cannot drift apart. Re-exported here so existing
+// import sites keep working.
+export { LOG_DATA_MAX_BYTES, LOG_MESSAGE_MAX_CHARS };
 export const LOG_RETENTION_PER_EXECUTION = 200;
 export const LOG_TAIL_LIMIT_DEFAULT = 50;
 export const LOG_TAIL_LIMIT_MAX = 100;
