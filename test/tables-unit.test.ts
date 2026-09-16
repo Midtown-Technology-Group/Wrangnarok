@@ -12,6 +12,7 @@ import {
   batchInsert,
   countRows,
   loadTable,
+  requireVisibleTable,
   TABLE_BATCH_MAX,
   TABLE_QUERY_ROW_CAP,
   type TableDefinition,
@@ -121,5 +122,19 @@ describe("tables defensive branches", () => {
         Array.from({ length: TABLE_BATCH_MAX + 1 }, (_, index) => `doc-${index}`),
       ),
     ).rejects.toMatchObject({ code: "INVALID_BATCH" });
+  });
+
+  it("shows the detail to owners and grantees, 404 to non-grantees (issue #353)", async () => {
+    // Owner passes without touching grants.
+    await expect(requireVisibleTable(stubDb(), caller, table)).resolves.toBeUndefined();
+    const stranger = { userId: "stranger-9", orgId: "org-1" };
+    // Grantee passes through the grant row.
+    await expect(
+      requireVisibleTable(stubDb({ firstRow: { id: "grant-1" } }), stranger, table),
+    ).resolves.toBeUndefined();
+    // Non-grantee answers 404, never metadata.
+    await expect(requireVisibleTable(stubDb(), stranger, table)).rejects.toMatchObject({
+      code: "TABLE_NOT_FOUND",
+    });
   });
 });

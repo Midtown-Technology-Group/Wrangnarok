@@ -12,6 +12,7 @@ import {
   ARTIFACT_RETENTION_MAX_DAYS,
   ARTIFACT_RETENTION_MIN_DAYS,
   isAdminCaller,
+  listArtifacts,
   parseArtifactId,
   parseArtifactMime,
   parseArtifactName,
@@ -100,4 +101,76 @@ it("grants the admin bypass to instance and org admins only", () => {
   expect(isAdminCaller({ isInstanceAdmin: true, isOrgAdmin: false })).toBe(true);
   expect(isAdminCaller({ isInstanceAdmin: false, isOrgAdmin: true })).toBe(true);
   expect(isAdminCaller({ isInstanceAdmin: false, isOrgAdmin: false })).toBe(false);
+});
+
+it("fences listArtifacts to the creator for non-admins (issue #354)", async () => {
+  const rows = [
+    {
+      id: "a",
+      org_id: "org-1",
+      creator_user_id: "owner-1",
+      name: "mine.md",
+      mime: "text/markdown",
+      size_bytes: 3,
+      version: 1,
+      status: "active",
+      created_at: "2026-09-16T00:00:00.000Z",
+      updated_at: "2026-09-16T00:00:00.000Z",
+      deleted_at: null,
+    },
+    {
+      id: "b",
+      org_id: "org-1",
+      creator_user_id: "owner-2",
+      name: "theirs.md",
+      mime: "text/markdown",
+      size_bytes: 4,
+      version: 1,
+      status: "active",
+      created_at: "2026-09-16T00:00:01.000Z",
+      updated_at: "2026-09-16T00:00:01.000Z",
+      deleted_at: null,
+    },
+  ];
+  // Minimal D1 double: records the SQL and applies the creator fence the
+  // real query applies, so the branch assertions below prove the parameters.
+  let lastSql = "";
+  let lastBinds: unknown[] = [];
+  const db = {
+    prepare: (sql: string) => ({
+      bind: (...binds: unknown[]) => ({
+        all: async () => {
+          lastSql = sql;
+          lastBinds = binds;
+          const creatorFenced = sql.includes("creator_user_id=?");
+          const filtered = creatorFenced ? rows.filter((row) => row.creator_user_id === binds[1]) : rows;
+          return { results: filtered };
+        },
+      }),
+    }),
+  } as unknown as D1Database;
+  const owner = { orgId: "org-1", userId: "owner-1" };
+  // Admin: no creator fence in SQL, both rows visible.
+  const adminPage = await listArtifacts(db, owner, {}, true);
+  expect(lastSql).not.toContain("creator_user_id=?");
+  expect(adminPage.artifacts.map((entry) => entry.name).sort()).toEqual(["mine.md", "theirs.md"]);
+  expect(adminPage.hasMore).toBe(false);
+  // Non-admin default: creator fence in SQL, only the own row visible.
+  const memberPage = await listArtifacts(db, owner, {});
+  expect(lastSql).toContain("creator_user_id=?");
+  expect(lastBinds[1]).toBe("owner-1");
+  expect(memberPage.artifacts.map((entry) => entry.name)).toEqual(["mine.md"]);
+  // Explicit false behaves like the default (deny-by-absence).
+  await listArtifacts(db, owner, {}, false);
+  expect(lastSql).toContain("creator_user_id=?");
+  // Limits still validate before the fence runs.
+  await expect(listArtifacts(db, owner, { limit: 99 })).rejects.toMatchObject({ code: "INVALID_LIMIT" });
+  // includeDeleted:true drops the status filter (admin path keeps no fence).
+  await listArtifacts(db, owner, { includeDeleted: true }, true);
+  expect(lastSql).not.toContain("status='active'");
+  // includeDeleted:true for a non-admin keeps the creator fence without the
+  // status filter.
+  await listArtifacts(db, owner, { includeDeleted: true }, false);
+  expect(lastSql).toContain("creator_user_id=?");
+  expect(lastSql).not.toContain("status='active'");
 });

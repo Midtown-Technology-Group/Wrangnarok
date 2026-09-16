@@ -175,6 +175,21 @@ it("records audit rows with and without targets and details", async () => {
   expect(rows?.n).toBe(2);
 });
 
+it("fences audit rows to the actor for non-admins (issue #351)", async () => {
+  await recordAudit(bindings.DB, caller, "system.fence", undefined, "success", { by: "owner" });
+  await recordAudit(bindings.DB, other, "system.fence", undefined, "success", { by: "other" });
+  // Explicit admin true: the organization trail (both actors).
+  const explicitAdmin = await listAudit(bindings.DB, caller, { actionPrefix: "system.fence", limit: 10 }, true);
+  expect(explicitAdmin.events.length).toBe(2);
+  // Explicit non-admin: only the caller's own actor rows.
+  const own = await listAudit(bindings.DB, caller, { actionPrefix: "system.fence", limit: 10 }, false);
+  expect(own.events.length).toBe(1);
+  expect(own.events[0]?.actorUserId).toBe(caller.userId);
+  const otherOwn = await listAudit(bindings.DB, other, { actionPrefix: "system.fence", limit: 10 }, false);
+  expect(otherOwn.events.length).toBe(1);
+  expect(otherOwn.events[0]?.actorUserId).toBe(other.userId);
+});
+
 it("reconciles non-terminal job states and tolerates corrupt details", async () => {
   // A running notification whose detail names no job stays running (no
   // invented terminal state); corrupt JSON degrades to null detail.
@@ -344,6 +359,23 @@ it("inspects every repair kind without mutating", async () => {
   });
   expect(retry).toMatchObject({ kind: "retry-execution", dryRun: true, targetId: execId });
   expect((retry.result as { input: unknown }).input).toEqual({ message: "hi" });
+  // Owner isolation (issue #347): a non-owner non-admin answers 404 (never
+  // the input); an admin caller previews the same foreign row.
+  await expect(
+    inspectRepair(
+      bindings.DB,
+      other,
+      { kind: "retry-execution", targetId: execId, idempotencyKey: "ops-branch-retry-002b" },
+      false,
+    ),
+  ).rejects.toMatchObject({ code: "EXECUTION_NOT_FOUND" });
+  const adminPreview = await inspectRepair(
+    bindings.DB,
+    other,
+    { kind: "retry-execution", targetId: execId, idempotencyKey: "ops-branch-retry-002c" },
+    true,
+  );
+  expect((adminPreview.result as { input: unknown }).input).toEqual({ message: "hi" });
   // Corrupt error_json degrades to a null code, never a throw.
   await bindings.DB.prepare("UPDATE executions SET error_json='{{{corrupt' WHERE id=?").bind(execId).run();
   const degraded = await opsMetrics(bindings.DB, caller);
