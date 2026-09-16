@@ -71,6 +71,9 @@ describe("TRG-01 cron and timezone parsing (pure)", () => {
     expect(nextCronDue("* * * * *", "UTC", from)).toBe("2026-09-12T10:01:00.000Z");
     expect(nextCronDue("0 9 * * *", "UTC", new Date("2026-09-12T10:00:00.000Z"))).toBe("2026-09-13T09:00:00.000Z");
     expect(nextCronDue("0 9 * * *", "UTC", new Date("2026-09-12T08:00:00.000Z"))).toBe("2026-09-12T09:00:00.000Z");
+    // February 30th never occurs: the bounded scan fails closed instead of
+    // looping forever (covers the one-year exhaustion arm).
+    expect(() => nextCronDue("0 0 30 2 *", "UTC", from)).toThrow(/never matches/);
   });
   it("derives deterministic schedule-window keys in the sch- namespace", async () => {
     const first = await scheduleWindowKey("schedule-id-1", "2026-09-12T10:01");
