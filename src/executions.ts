@@ -121,6 +121,62 @@ export async function storeSagaPolicy(
 export function policySnapshot(policy: SagaRuntimePolicy): string {
   return JSON.stringify({ version: POLICY_VERSION, policy });
 }
+/** Canonical RUN-01 admission decision (ADR 018): the loadSagaPolicy +
+ * policySnapshot + SAGA_PAUSED + maxConcurrent block, computed once so
+ * top-level submit() and child dispatch cannot drift. Never throws: the
+ * refusal (when non-null) is enforced by the caller at its dispatch gate, so
+ * a refused admission still leaves its Pending receipt for same-key replay
+ * after resume. The maxConcurrent count exempts the caller's own row, so a
+ * first Execution under a limit of 1 still dispatches while the next active
+ * row is fenced with 429. */
+export interface AdmissionDecision {
+  readonly effective: SagaPolicyRecord;
+  readonly policyJson: string;
+  /** Non-null when admission refuses: 409 SAGA_PAUSED or 429 ADMISSION_LIMITED. */
+  readonly refusal: Fault | null;
+}
+export async function admitExecution(
+  db: D1Database,
+  orgId: string,
+  sagaId: string,
+  selfId: string,
+): Promise<AdmissionDecision> {
+  const effective = await loadSagaPolicy(db, orgId, sagaId);
+  const policyJson = policySnapshot(effective.policy);
+  // Pause/admission policy (RUN-01): disabled Sagas fence new dispatches
+  // with 409 SAGA_PAUSED; maxConcurrent fences with 429 ADMISSION_LIMITED.
+  // In-flight Executions keep their snapshot and run to their own terminal.
+  if (!effective.policy.admission.enabled) {
+    return {
+      effective,
+      policyJson,
+      refusal: new Fault(
+        409,
+        "SAGA_PAUSED",
+        "This Saga is paused for this Organization; new Executions do not dispatch.",
+      ),
+    };
+  }
+  if (effective.policy.admission.maxConcurrent > 0) {
+    // The row itself was just inserted (or reserved) as Pending: exempt it so
+    // the first Execution under a limit of 1 still dispatches, while the next
+    // active row fences with 429.
+    const active = await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM executions WHERE org_id=? AND saga_id=? AND status IN ('Pending','Running','Cancelling') AND id<>?",
+      )
+      .bind(orgId, sagaId, selfId)
+      .first<{ n: number }>();
+    if ((active?.n ?? 0) >= effective.policy.admission.maxConcurrent) {
+      return {
+        effective,
+        policyJson,
+        refusal: new Fault(429, "ADMISSION_LIMITED", "This Saga reached its concurrent Execution limit."),
+      };
+    }
+  }
+  return { effective, policyJson, refusal: null };
+}
 /** Provider-path Execution identity (RUN-03, ADR 023): the same deterministic
  * SHA-256 over (org, user, key) as async submit, so a key submitted to either
  * route converges on one receipt instead of forking two Executions. */
@@ -159,8 +215,14 @@ export async function submit(env: Bindings, caller: Principal, key: string, saga
   // onto the Execution row so applied behavior stays inspectable.
   const id = await executionId(caller, key);
   const inputJson = JSON.stringify(input);
-  const effective = await loadSagaPolicy(env.DB, caller.orgId, saga.id);
-  const policyJson = policySnapshot(effective.policy);
+  // Canonical RUN-01 admission (ADR 018): one shared decision with child
+  // dispatch, computed up front so the row stamps the applied snapshot. The
+  // refusal (when non-null) is enforced at the dispatch gate below, so a
+  // refused submit still leaves its Pending receipt for same-key replay.
+  // The maxConcurrent count exempts this row, so pre-insert placement reads
+  // exactly what the old post-insert count read.
+  const admission = await admitExecution(env.DB, caller.orgId, saga.id, id);
+  const policyJson = admission.policyJson;
   let inserted: D1Result;
   try {
     inserted = await env.DB.prepare(
@@ -206,25 +268,14 @@ export async function submit(env: Bindings, caller: Principal, key: string, saga
     throw new Fault(409, "EXECUTION_CANCELLED", "This Execution was cancelled and will not dispatch.");
   }
   if (!row.dispatched) {
-    // Pause/admission policy (RUN-01): disabled Sagas fence new dispatches
-    // with 409 SAGA_PAUSED; maxConcurrent fences with 429 ADMISSION_LIMITED.
-    // In-flight Executions keep their snapshot and run to their own terminal.
-    if (!effective.policy.admission.enabled) {
-      throw new Fault(409, "SAGA_PAUSED", "This Saga is paused for this Organization; new Executions do not dispatch.");
-    }
-    if (effective.policy.admission.maxConcurrent > 0) {
-      // The row itself was just inserted as Pending: exempt it so the first
-      // Execution under a limit of 1 still dispatches, while the next active
-      // row fences with 429.
-      const active = await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM executions WHERE org_id=? AND saga_id=? AND status IN ('Pending','Running','Cancelling') AND id<>?",
-      )
-        .bind(caller.orgId, saga.id, id)
-        .first<{ n: number }>();
-      if ((active?.n ?? 0) >= effective.policy.admission.maxConcurrent) {
-        throw new Fault(429, "ADMISSION_LIMITED", "This Saga reached its concurrent Execution limit.");
-      }
-    }
+    // Canonical RUN-01 admission (ADR 018): enforced from a fresh shared
+    // admitExecution decision at the dispatch gate — post-insert, exactly
+    // where the pre-refactor inline block ran — so the maxConcurrent count
+    // observes this row and top-level submit and child dispatch cannot
+    // drift. A refused admission still leaves its Pending receipt for
+    // same-key replay after resume.
+    const gate = await admitExecution(env.DB, caller.orgId, saga.id, id);
+    if (gate.refusal) throw gate.refusal;
     // Same-revision + 15-min refusal window (ADR 001 #15): never auto-fail
     // Pending, never resurrect after the window, never invent success.
     if (row.saga_revision !== saga.revision || Date.now() - Date.parse(row.created_at) >= RECOVERY_WINDOW_MS) {
