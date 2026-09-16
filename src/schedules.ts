@@ -719,27 +719,21 @@ export async function promoteDueSchedules(
   }
   const promoted: PromotionResult[] = [];
   const skipped: string[] = [];
-  const promotedPerOrg = new Map<string, number>();
   for (const schedule of due) {
     const saga = sagas.find((entry) => entry.id === schedule.saga_id);
     if (!saga) {
       skipped.push(schedule.name);
       continue;
     }
-    // Per-Organization fairness cap: defer this tenant's excess rows to the
-    // next tick so other tenants' due rows still enter this batch. Deferred
-    // rows are not skips: no quarantine accrual, no marker change.
-    if ((promotedPerOrg.get(schedule.org_id) ?? 0) >= SCHEDULE_TICK_PER_ORG_LIMIT) {
-      skipped.push(schedule.name);
-      continue;
-    }
+    // Per-Organization fairness cap lives in the selection scan above
+    // (at most SCHEDULE_TICK_PER_ORG_LIMIT rows admitted per
+    // Organization), so this loop needs no second cap.
     // next_due_at is non-null here: the tick query selects enabled rows
     // with next_due_at <= now, and only the one-off branch below nulls it.
     const dueAt = schedule.next_due_at as string;
     const window = schedule.kind === "one-off" ? `once-${schedule.id.slice(0, 16)}` : currentWindow(new Date(dueAt));
     try {
       promoted.push(await promoteWindow(db, env, schedule, window, sagas, submitFn));
-      promotedPerOrg.set(schedule.org_id, (promotedPerOrg.get(schedule.org_id) ?? 0) + 1);
       await clearSkipStreak(db, schedule);
     } catch (error) {
       // Owner-cancel-wins, admission, liveness, and authority fences surface
