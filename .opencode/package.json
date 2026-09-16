@@ -1,4 +1,7 @@
 {
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@prevalentware/opencode-goal-plugin": "0.1.49"
+  }
 }
