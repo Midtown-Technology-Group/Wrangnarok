@@ -255,6 +255,24 @@ import {
   testConnection,
   updateConnection,
 } from "./connections";
+import {
+  createProfile,
+  deleteProfile,
+  discoverModels,
+  getBehavior,
+  getEmbedding,
+  getProfile,
+  listAssignments as listAiAssignments,
+  listProfiles,
+  mergeProfiles,
+  parseRouteAssignmentKey,
+  resolveAssignment,
+  setAssignment,
+  setBehavior,
+  setEmbedding,
+  updateProfile,
+  verifyProfile,
+} from "./ai-profiles";
 import { describeIntegrations } from "./integrations";
 
 import {
@@ -2995,6 +3013,170 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const body = (await boundedJson(request.body)) as { secrets?: unknown };
       const stored = await putConnectionSecrets(env.DB, caller, connSecrets[1], body.secrets, env.SECRETS_KEK);
       return json(scrubConnectionPayload({ connection: stored }, env));
+    }
+    // AI-01 model profiles, capability assignments, embedding config, and
+    // behavior (issue #164, ADR 032 build slice 2): reusable profile CRUD
+    // with the four lifecycle guards, six fixed assignment keys, a
+    // fail-closed read-only resolver, bounded verify/discovery probes, and
+    // org-scoped embedding/behavior singletons. Same boundary as CON-01
+    // above: reads ride the membership gate, every mutation (plus the
+    // key-authenticated verify) is admin-only, and every response is
+    // scrubbed with the deployment secrets before send. Views carry
+    // profile identities only — provider model ids and key material never
+    // reach the browser. One explicit matcher per route.
+    if (url.pathname === "/api/ai/profiles" && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ profiles: await listProfiles(env.DB, caller) }, env));
+    }
+    if (url.pathname === "/api/ai/profiles" && request.method === "POST") {
+      requireJson(request);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "AI_FORBIDDEN", "Only an admin may manage AI model profiles.");
+      }
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      return json(
+        scrubConnectionPayload(
+          {
+            profile: await createProfile(env.DB, caller, {
+              ...(body.name === undefined ? {} : { name: body.name }),
+              ...(body.connectionId === undefined ? {} : { connectionId: body.connectionId }),
+              ...(body.modelId === undefined ? {} : { modelId: body.modelId }),
+              ...(body.capabilities === undefined ? {} : { capabilities: body.capabilities }),
+              ...(body.enabledForChat === undefined ? {} : { enabledForChat: body.enabledForChat }),
+              ...(body.openaiTransport === undefined ? {} : { openaiTransport: body.openaiTransport }),
+              ...(body.capabilityState === undefined ? {} : { capabilityState: body.capabilityState }),
+            }),
+          },
+          env,
+        ),
+        201,
+      );
+    }
+    if (url.pathname === "/api/ai/profiles/merge" && request.method === "POST") {
+      requireJson(request);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "AI_FORBIDDEN", "Only an admin may manage AI model profiles.");
+      }
+      const body = (await boundedJson(request.body)) as { profileIds?: unknown; targetProfileId?: unknown };
+      const merged = await mergeProfiles(env.DB, caller, {
+        ...(body.profileIds === undefined ? {} : { profileIds: body.profileIds }),
+        ...(body.targetProfileId === undefined ? {} : { targetProfileId: body.targetProfileId }),
+      });
+      return json(scrubConnectionPayload({ merge: merged }, env));
+    }
+    const aiVerify = /^\/api\/ai\/profiles\/([0-9a-f-]{36})\/verify$/.exec(url.pathname);
+    if (aiVerify?.[1] && request.method === "POST") {
+      // Key-authenticated verification is an admin action even though it is
+      // read-only: it exercises the deployment credential against the vendor.
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "AI_FORBIDDEN", "Only an admin may manage AI model profiles.");
+      }
+      const verified = await verifyProfile(env.DB, caller, aiVerify[1], env);
+      if (!verified.ok) return json(scrubConnectionPayload({ verification: verified }, env), 502);
+      return json(scrubConnectionPayload({ verification: verified }, env));
+    }
+    const aiProfileOne = /^\/api\/ai\/profiles\/([0-9a-f-]{36})$/.exec(url.pathname);
+    if (aiProfileOne?.[1] && request.method === "GET") {
+      return json(scrubConnectionPayload({ profile: await getProfile(env.DB, caller, aiProfileOne[1]) }, env));
+    }
+    if (aiProfileOne?.[1] && request.method === "PUT") {
+      requireJson(request);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "AI_FORBIDDEN", "Only an admin may manage AI model profiles.");
+      }
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      return json(
+        scrubConnectionPayload(
+          {
+            profile: await updateProfile(env.DB, caller, aiProfileOne[1], {
+              ...(body.name === undefined ? {} : { name: body.name }),
+              ...(body.connectionId === undefined ? {} : { connectionId: body.connectionId }),
+              ...(body.modelId === undefined ? {} : { modelId: body.modelId }),
+              ...(body.capabilities === undefined ? {} : { capabilities: body.capabilities }),
+              ...(body.enabledForChat === undefined ? {} : { enabledForChat: body.enabledForChat }),
+              ...(body.openaiTransport === undefined ? {} : { openaiTransport: body.openaiTransport }),
+              ...(body.capabilityState === undefined ? {} : { capabilityState: body.capabilityState }),
+            }),
+          },
+          env,
+        ),
+      );
+    }
+    if (aiProfileOne?.[1] && request.method === "DELETE") {
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "AI_FORBIDDEN", "Only an admin may manage AI model profiles.");
+      }
+      await deleteProfile(env.DB, caller, aiProfileOne[1]);
+      return json({ deleted: true });
+    }
+    const aiDiscover = /^\/api\/ai\/discover\/([0-9a-f-]{36})$/.exec(url.pathname);
+    if (aiDiscover?.[1] && request.method === "GET") {
+      rejectQuery(url);
+      const discovered = await discoverModels(env.DB, caller, aiDiscover[1], env);
+      if (!discovered.ok) return json(scrubConnectionPayload({ discovery: discovered }, env), 502);
+      return json(scrubConnectionPayload({ discovery: discovered }, env));
+    }
+    if (url.pathname === "/api/ai/assignments" && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ assignments: await listAiAssignments(env.DB, caller) }, env));
+    }
+    const aiAssignOne = /^\/api\/ai\/assignments\/([A-Za-z_]+)$/.exec(url.pathname);
+    if (aiAssignOne?.[1] && request.method === "PUT") {
+      requireJson(request);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "AI_FORBIDDEN", "Only an admin may manage AI model profiles.");
+      }
+      const body = (await boundedJson(request.body)) as { profileId?: unknown };
+      return json(
+        scrubConnectionPayload(
+          { assignment: await setAssignment(env.DB, caller, parseRouteAssignmentKey(aiAssignOne[1]), body) },
+          env,
+        ),
+      );
+    }
+    const aiResolve = /^\/api\/ai\/resolve\/([A-Za-z_]+)$/.exec(url.pathname);
+    if (aiResolve?.[1] && request.method === "GET") {
+      rejectQuery(url);
+      const resolved = await resolveAssignment(env.DB, caller, parseRouteAssignmentKey(aiResolve[1]));
+      if (!resolved) {
+        throw new Fault(404, "AI_ASSIGNMENT_UNRESOLVED", "This assignment does not resolve to a usable profile.");
+      }
+      return json(scrubConnectionPayload({ resolution: resolved }, env));
+    }
+    if (url.pathname === "/api/ai/embedding" && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ embedding: await getEmbedding(env.DB, caller) }, env));
+    }
+    if (url.pathname === "/api/ai/embedding" && request.method === "PUT") {
+      requireJson(request);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "AI_FORBIDDEN", "Only an admin may manage AI model profiles.");
+      }
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      return json(
+        scrubConnectionPayload(
+          {
+            embedding: await setEmbedding(env.DB, caller, {
+              ...(body.connectionId === undefined ? {} : { connectionId: body.connectionId }),
+              ...(body.modelId === undefined ? {} : { modelId: body.modelId }),
+              ...(body.dimensions === undefined ? {} : { dimensions: body.dimensions }),
+            }),
+          },
+          env,
+        ),
+      );
+    }
+    if (url.pathname === "/api/ai/behavior" && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ behavior: await getBehavior(env.DB, caller) }, env));
+    }
+    if (url.pathname === "/api/ai/behavior" && request.method === "PUT") {
+      requireJson(request);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "AI_FORBIDDEN", "Only an admin may manage AI model profiles.");
+      }
+      const body = (await boundedJson(request.body)) as { defaultSystemPrompt?: unknown };
+      return json(scrubConnectionPayload({ behavior: await setBehavior(env.DB, caller, body) }, env));
     }
     // TOOL-01 opt-in Saga tools (issue #170, ADR 022): explicit enrollment
     // with stable identity, collision-safe names, and distinctive
