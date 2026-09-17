@@ -151,7 +151,15 @@ export interface EndpointPolicy {
  * host). Same posture as the NinjaOne allowlist. */
 const CLOUDFLARE_ALLOWED_SUFFIXES: readonly string[] = Object.freeze(["api.cloudflare.com", ".invalid"]);
 
-function endpointPolicyFor(integrationName: string): EndpointPolicy {
+/** Suffixes a Halo Connection endpoint may live under: the lab proof origin
+ * only. The runtime pins the exact origin (see halo.ts), so persist-time
+ * validation admits nothing else routable — and Halo no longer inherits
+ * NinjaOne's allowlist, which made Halo Connections uncreatable through the
+ * management API (issue #236). `halo-lab.example.com` lives under RFC 2606
+ * `.example.com`, never a real routable host. */
+const HALO_ALLOWED_SUFFIXES: readonly string[] = Object.freeze(["halo-lab.example.com"]);
+
+function endpointPolicyFor(integrationName: string): EndpointPolicy | null {
   if (integrationName === "echo") {
     return { allowLoopback: true, requireHttps: false, allowedSuffixes: [], loopbackOnly: true };
   }
@@ -163,7 +171,26 @@ function endpointPolicyFor(integrationName: string): EndpointPolicy {
       loopbackOnly: false,
     };
   }
-  return { allowLoopback: false, requireHttps: true, allowedSuffixes: NINJA_ALLOWED_SUFFIXES, loopbackOnly: false };
+  if (integrationName === "ninjaone") {
+    return {
+      allowLoopback: false,
+      requireHttps: true,
+      allowedSuffixes: NINJA_ALLOWED_SUFFIXES,
+      loopbackOnly: false,
+    };
+  }
+  if (integrationName === "halo") {
+    return {
+      allowLoopback: false,
+      requireHttps: true,
+      allowedSuffixes: HALO_ALLOWED_SUFFIXES,
+      loopbackOnly: false,
+    };
+  }
+  // Unknown Integrations fail closed instead of inheriting another vendor's
+  // allowlist (issue #236): a new Integration declares its own endpoint
+  // policy here before its Connections can persist.
+  return null;
 }
 
 interface EndpointFailure {
@@ -189,6 +216,12 @@ function checkEndpointUrl(integrationName: string, raw: string): EndpointFailure
     return { code: "ENDPOINT_NOT_ALLOWED", message: `Config field "endpoint" must not embed credentials.` };
   }
   const policy = endpointPolicyFor(integrationName);
+  if (!policy) {
+    return {
+      code: "ENDPOINT_NOT_ALLOWED",
+      message: `Config field "endpoint" has no endpoint policy for this Integration.`,
+    };
+  }
   const host = stripBrackets(url.hostname).toLowerCase();
   if (isLoopbackHost(host)) {
     if (!policy.allowLoopback) {
@@ -657,5 +690,8 @@ export interface ConnectionView {
   readonly managedBy: string | null;
   readonly ownerKind: "managed" | "loose";
   readonly secretsRequired: readonly string[];
+  /** Declared secret-field names with provisioned per-Organization
+   * ciphertext (issue #411). Names only — values are never serialized. */
+  readonly secretsProvisioned: readonly string[];
   readonly updatedAt: string | null;
 }

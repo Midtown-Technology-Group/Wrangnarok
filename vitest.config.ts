@@ -14,6 +14,7 @@ export default defineConfig({
           NINJA_CLIENT_ID: "test-client-id",
           NINJA_CLIENT_SECRET: "test-client-secret-sentinel",
           CLOUDFLARE_API_TOKEN: "test-cloudflare-token-sentinel",
+          SECRETS_KEK: "test-secrets-kek-sentinel-fixture-only",
         },
       },
     }),
