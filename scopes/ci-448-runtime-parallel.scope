@@ -1,0 +1,5 @@
+# Issue #448: parallelize Runtime CI gates (static + runtime-test +
+# runtime-build shards under one fail-closed Validate aggregator).
+.github/workflows/ci.yml
+scripts/ci-topology.mjs
+scopes/ci-448-runtime-parallel.scope
