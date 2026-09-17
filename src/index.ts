@@ -176,7 +176,7 @@ import {
   parseScheduleAt,
   parseStartupHandle,
   peekStartupHandle,
-  resolveProviderOptions,
+  resolveFormProviders,
   saveForm,
   startFormSession,
   validateAndMerge,
@@ -276,7 +276,6 @@ import {
   insertRow,
   listTables,
   loadTable,
-  lookupPath,
   parseBatchBody,
   parseBatchDeleteBody,
   parseTableName,
@@ -614,6 +613,7 @@ function serializeForm(def: FormDefinition): unknown {
       ...(field.default === undefined ? {} : { default: field.default }),
       ...(field.options === undefined ? {} : { options: field.options }),
       ...(field.provider === undefined ? {} : { provider: field.provider }),
+      ...(field.autoFill === undefined ? {} : { autoFill: field.autoFill }),
       ...(field.visibleWhen === undefined ? {} : { visibleWhen: field.visibleWhen }),
       ...(field.file === undefined ? {} : { file: field.file }),
       ...(field.min === undefined ? {} : { min: field.min }),
@@ -624,18 +624,17 @@ function serializeForm(def: FormDefinition): unknown {
   };
 }
 
-/** Provider table reader for FORM-02 select/multiselect options: one Table,
- * caller-scoped read policy, distinct non-empty string values from the
- * valueField path, bounded scan (at most 50), sorted alphabetically so the
- * option list is deterministic regardless of row insertion or doc_id order.
- * Denied or missing tables throw (the resolver converts to per-field errors,
- * never a leak). */
-async function readProviderTable(
+/** Provider row scan for FORM-02 select/multiselect options and declared
+ * auto-fill targets: one caller-authorized queryRows result per
+ * table-provider source field (read grant required, at most 50 rows).
+ * Denied or missing tables throw (the resolver converts to safe per-field
+ * errors, never a leak). Option extraction, the 50-key cap, and the 64 KiB
+ * auto-fill output bound live in the resolver, not the scan. */
+async function readProviderRows(
   db: D1Database,
   caller: Principal,
   table: string,
-  valueField: string,
-): Promise<readonly string[]> {
+): Promise<readonly Record<string, unknown>[]> {
   const def = await loadTable(db, caller.orgId, table);
   if (!def) throw new Fault(404, "TABLE_NOT_FOUND", "Table not found.");
   const page = await queryRows(db, caller, def, {
@@ -644,18 +643,7 @@ async function readProviderTable(
     skipCount: true,
     limit: 50,
   });
-  const values: string[] = [];
-  const seen = new Set<string>();
-  for (const row of page.rows) {
-    const at = lookupPath(row.data, valueField);
-    if (typeof at !== "string" || at.length === 0 || at.length > 128) continue;
-    if (seen.has(at)) continue;
-    seen.add(at);
-    values.push(at);
-    if (values.length >= 50) break;
-  }
-  values.sort();
-  return values;
+  return page.rows.map((row) => row.data);
 }
 
 /** Re-validate file-field references against the live FILE-01 rows: the
@@ -1311,9 +1299,9 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const formStartup = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/startup$/.exec(url.pathname);
     if (formStartup?.[1] && request.method === "POST") {
       // FORM-02 startup: mint a session-bound 30-minute handle plus the
-      // resolved snapshot (defaults, opt-in prefill merge, provider
-      // options through the caller-scoped Table gate). Query strings and
-      // display-only/unknown prefill fail closed.
+      // resolved snapshot (defaults under declared auto-fill under opt-in
+      // prefill merge, provider options through the caller-scoped Table
+      // gate). Query strings and display-only/unknown prefill fail closed.
       const name = formStartup[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
@@ -1326,7 +1314,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (!(await mayStartForm(env.DB, ctx, caller.orgId, name))) {
         throw new Fault(403, "GRANT_REQUIRED", "Starting this Form requires a read or submit grant.");
       }
-      const started = await startFormSession(env.DB, caller, def, await boundedJson(request.body), readProviderTable);
+      const started = await startFormSession(env.DB, caller, def, await boundedJson(request.body), readProviderRows);
       return json(
         {
           form: name,
@@ -1343,7 +1331,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // FORM-02 provider fetch: resolved select/multiselect options for
       // this Organization through the caller-scoped Table gate. Denied or
       // foreign tables yield empty lists with per-field errors, never a
-      // leak. Query strings are unsupported (options ride the declaration).
+      // leak. Declared auto-fill targets resolve through the same gate and
+      // surface fetch/validation failures here too (startup carries no
+      // error channel). Query strings are unsupported (options ride the
+      // declaration).
       const name = formProviders[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
@@ -1356,7 +1347,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (!(await mayStartForm(env.DB, ctx, caller.orgId, name))) {
         throw new Fault(403, "GRANT_REQUIRED", "Reading this Form's providers requires a read or submit grant.");
       }
-      const resolved = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
+      const resolved = await resolveFormProviders(env.DB, caller, def.fields, readProviderRows);
       return json({ form: name, options: resolved.options, errors: resolved.errors });
     }
     const formSubmit = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/submit$/.exec(url.pathname);
@@ -1412,7 +1403,9 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // rides along so a handle spent by THIS key still peeks live for
       // same-key retries and canonical replays.
       const session = await peekStartupHandle(env.DB, caller, name, handle, def.id, key);
-      const fresh = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
+      // One provider pass per submit too: fresh options re-check membership
+      // while auto-fill values ride the persisted snapshot, never the scan.
+      const fresh = await resolveFormProviders(env.DB, caller, def.fields, readProviderRows);
       const values = record.values === undefined ? {} : record.values;
       // Order matters: form-gate validation + defaults merge first, then
       // the live FILE-01 file check, then the Saga parse gate last — so a

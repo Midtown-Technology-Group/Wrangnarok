@@ -462,6 +462,9 @@ export interface FormFieldDef {
   default?: unknown;
   options?: string[];
   provider?: unknown;
+  /** Declared auto-fill targets (FORM-02, issue #155): sibling target
+   * field name to provider row output key, on table-provider selects. */
+  autoFill?: Record<string, string>;
   visibleWhen?: { field: string; equals: string | number | boolean };
   file?: { location: string; maxMb?: number; contentTypes?: string[] };
   min?: number;

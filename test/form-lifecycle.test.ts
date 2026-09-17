@@ -10,7 +10,13 @@ import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { executionId, Fault, helloSaga } from "../src/domain";
-import { consumeAfterAdmission, consumeStartupHandle, mayStartForm, parseFileRef } from "../src/forms";
+import {
+  consumeAfterAdmission,
+  consumeStartupHandle,
+  mayStartForm,
+  parseFileRef,
+  resolveFormProviders,
+} from "../src/forms";
 import { createPolicyRule, ensureRoleTables } from "../src/roles";
 
 const bindings = env as unknown as Bindings;
@@ -1184,5 +1190,442 @@ describe("codex #342: single-consumption dispatch handles", () => {
     await expect(
       consumeAfterAdmission(bindings.DB, owner, "duel", started.handle, id, keyB, { id: helloSaga.id }, admittedB),
     ).rejects.toMatchObject({ code: "STALE_FORM_HANDLE" });
+  });
+});
+
+describe("FORM-02 auto-fill: declared provider targets with safe precedence", () => {
+  // The picker (`team`) reads Table `autodir` through the caller Table gate
+  // and declares which provider output key may fill which sibling field
+  // (`autoFill: { name: "lead" }`, upstream `auto_fill`). It stays hidden
+  // until the caller reveals it with coupon SHOW, so the hello-compatible
+  // submit below omits it and dispatches the auto-filled `name` alone.
+  const AUTOFILL_FIELDS = (table: string) => [
+    { name: "coupon", type: "text", required: false },
+    {
+      name: "team",
+      type: "select",
+      required: true,
+      provider: { kind: "table", table, valueField: "handle" },
+      autoFill: { name: "lead" },
+      visibleWhen: { field: "coupon", equals: "SHOW" },
+    },
+    { name: "name", type: "text", required: true, default: "Dee" },
+  ];
+
+  async function seedDirectory(table: string, rows: Record<string, Record<string, unknown>>): Promise<void> {
+    expect((await call("/api/tables", "POST", { name: table })).status).toBe(201);
+    for (const [id, data] of Object.entries(rows)) {
+      expect((await call(`/api/tables/${table}/rows/${id}`, "PUT", { data })).status).toBe(201);
+    }
+  }
+
+  it("fills the snapshot from the first provider row under prefill-over-defaults precedence", async () => {
+    // First-row projection: r1 sorts before r2 in the bounded scan, so the
+    // snapshot carries r1's lead even though r2 exists.
+    await seedDirectory("autodir", {
+      r1: { handle: "ops", lead: "Ada" },
+      r2: { handle: "web", lead: "Bo" },
+    });
+    await createForm("autodir-pick", AUTOFILL_FIELDS("autodir"), { allowPrefill: true });
+    const started = await startup("autodir-pick");
+    expect(started.snapshot).toMatchObject({ name: "Ada" });
+    expect(started.options).toMatchObject({ team: ["ops", "web"] });
+    expect(started.snapshot).not.toHaveProperty("team");
+    // Explicit prefill beats auto-fill, which beats the declared default:
+    // the exact precedence is defaults < auto-fill < prefill.
+    const prefilled = await startup("autodir-pick", { prefill: { name: "Pref" } });
+    expect(prefilled.snapshot).toMatchObject({ name: "Pref" });
+    const providers = await call("/api/forms/autodir-pick/providers");
+    expect(await providers.json()).toMatchObject({ options: { team: ["ops", "web"] }, errors: {} });
+    // The declaration round-trips through the designer read.
+    const read = await call("/api/forms/autodir-pick");
+    expect(await read.json()).toMatchObject({
+      form: { fields: expect.arrayContaining([expect.objectContaining({ name: "team", autoFill: { name: "lead" } })]) },
+    });
+  });
+
+  it("dispatches auto-filled input end to end and lets submissions win", async () => {
+    await seedDirectory("autodir-run", {
+      r1: { handle: "ops", lead: "Ada" },
+    });
+    await createForm("autodir-run", AUTOFILL_FIELDS("autodir-run"), { allowPrefill: true });
+    // The hidden picker is omitted, so the merged input is the auto-filled
+    // name alone and the hello Saga dispatches: 202 proves the projection
+    // passed the form gate.
+    const started = await startup("autodir-run");
+    expect(started.snapshot).toMatchObject({ name: "Ada" });
+    const key = "form-02-autofill-001";
+    const id = await executionId({ orgId: ORG, userId: OWNER }, key);
+    const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, id);
+    const accepted = await call(
+      "/api/forms/autodir-run/submit",
+      "POST",
+      { handle: started.handle, values: { name: "Ada" } },
+      ORG,
+      OWNER,
+      key,
+    );
+    expect(accepted.status).toBe(202);
+    await instance.waitForStatus("complete");
+    const detail = await call(`/api/executions/${id}`);
+    expect(await detail.json()).toMatchObject({ input: { name: "Ada" }, status: "Succeeded" });
+    // An explicit submission value beats the snapshot auto-fill: the
+    // persisted input carries Mallory, never the projected Ada.
+    const overrideKey = "form-02-autofill-002";
+    const overrideId = await executionId({ orgId: ORG, userId: OWNER }, overrideKey);
+    const override = await call(
+      "/api/forms/autodir-run/submit",
+      "POST",
+      { handle: (await startup("autodir-run")).handle, values: { name: "Mallory" } },
+      ORG,
+      OWNER,
+      overrideKey,
+    );
+    expect(override.status).toBe(202);
+    const overrideDetail = await call(`/api/executions/${overrideId}`);
+    expect(await overrideDetail.json()).toMatchObject({ input: { name: "Mallory" } });
+    // Revealing the picker passes the form gate (listed option, visible
+    // field), then the Saga gate refuses the drifted declaration the way
+    // every multi-field form does: 400, not 422.
+    const driftBody = {
+      handle: (await startup("autodir-run", { prefill: { coupon: "SHOW" } })).handle,
+      values: { coupon: "SHOW", team: "ops", name: "Ada" },
+    };
+    const drift = await call("/api/forms/autodir-run/submit", "POST", driftBody, ORG, OWNER, "form-02-autofill-003");
+    expect(drift.status).toBe(400);
+    expect(await drift.json()).toMatchObject({ error: { code: "INVALID_INPUT" } });
+  });
+
+  it("fails ambiguous auto-fill declarations closed at the designer route", async () => {
+    const table = "autodir";
+    const cases: { name: string; fields: unknown[] }[] = [
+      {
+        name: "autofill-unknown",
+        fields: [
+          {
+            name: "team",
+            type: "select",
+            required: true,
+            provider: { kind: "table", table, valueField: "handle" },
+            autoFill: { ghost: "lead" },
+          },
+          { name: "name", type: "text", required: true },
+        ],
+      },
+      {
+        name: "autofill-display",
+        fields: [
+          {
+            name: "team",
+            type: "select",
+            required: true,
+            provider: { kind: "table", table, valueField: "handle" },
+            autoFill: { title: "lead" },
+          },
+          { name: "title", type: "heading", required: false, content: "Hi" },
+        ],
+      },
+      {
+        name: "autofill-self",
+        fields: [
+          {
+            name: "team",
+            type: "select",
+            required: true,
+            provider: { kind: "table", table, valueField: "handle" },
+            autoFill: { team: "handle" },
+          },
+        ],
+      },
+      {
+        name: "autofill-dupe",
+        fields: [
+          {
+            name: "team",
+            type: "select",
+            required: true,
+            provider: { kind: "table", table, valueField: "handle" },
+            autoFill: { name: "lead" },
+          },
+          {
+            name: "team2",
+            type: "select",
+            required: false,
+            provider: { kind: "table", table, valueField: "handle" },
+            autoFill: { name: "lead" },
+          },
+          { name: "name", type: "text", required: false },
+        ],
+      },
+      {
+        name: "autofill-static",
+        fields: [
+          {
+            name: "team",
+            type: "select",
+            required: true,
+            provider: { kind: "static", options: ["a"] },
+            autoFill: { name: "lead" },
+          },
+          { name: "name", type: "text", required: false },
+        ],
+      },
+      {
+        name: "autofill-kind",
+        fields: [
+          { name: "team", type: "text", required: false, autoFill: { name: "lead" } },
+          { name: "name", type: "text", required: false },
+        ],
+      },
+      {
+        name: "autofill-key",
+        fields: [
+          {
+            name: "team",
+            type: "select",
+            required: true,
+            provider: { kind: "table", table, valueField: "handle" },
+            autoFill: { name: "9bad" },
+          },
+          { name: "name", type: "text", required: false },
+        ],
+      },
+      {
+        name: "autofill-longkey",
+        fields: [
+          {
+            name: "team",
+            type: "select",
+            required: true,
+            provider: { kind: "table", table, valueField: "handle" },
+            autoFill: { name: "x".repeat(129) },
+          },
+          { name: "name", type: "text", required: false },
+        ],
+      },
+      {
+        name: "autofill-empty",
+        fields: [
+          {
+            name: "team",
+            type: "select",
+            required: true,
+            provider: { kind: "table", table, valueField: "handle" },
+            autoFill: {},
+          },
+          { name: "name", type: "text", required: false },
+        ],
+      },
+      {
+        name: "autofill-shape",
+        fields: [
+          {
+            name: "team",
+            type: "select",
+            required: true,
+            provider: { kind: "table", table, valueField: "handle" },
+            autoFill: "lead",
+          },
+          { name: "name", type: "text", required: false },
+        ],
+      },
+      {
+        name: "autofill-badtarget",
+        fields: [
+          {
+            name: "team",
+            type: "select",
+            required: true,
+            provider: { kind: "table", table, valueField: "handle" },
+            autoFill: { "9bad": "lead" },
+          },
+          { name: "name", type: "text", required: false },
+        ],
+      },
+    ];
+    for (const entry of cases) {
+      const response = await call("/api/forms", "POST", {
+        name: entry.name,
+        sagaId: helloSaga.id,
+        fields: entry.fields,
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: "INVALID_FORM" } });
+    }
+  });
+
+  it("keeps the caller Table gate authoritative for auto-fill without a Saga grant", async () => {
+    await ensureRoleTables(bindings.DB);
+    await seedDirectory("autodir-gated-table", { r1: { handle: "ops", lead: "Ada" } });
+    await createForm("autodir-gated", AUTOFILL_FIELDS("autodir-gated-table"));
+    await createPolicyRule(bindings.DB, ORG, "form", "autodir-gated", "submit", "user", OTHER_USER);
+    // The member holds the form submit grant but no Table read grant: the
+    // startup still mints (201) with the default filling the gap, and the
+    // providers route reports the safe per-field error with no leak.
+    const denied = await call("/api/forms/autodir-gated/startup", "POST", {}, ORG, OTHER_USER);
+    expect(denied.status).toBe(201);
+    expect(await denied.json()).toMatchObject({ snapshot: { name: "Dee" } });
+    const deniedProviders = await call("/api/forms/autodir-gated/providers", "GET", undefined, ORG, OTHER_USER);
+    expect(deniedProviders.status).toBe(200);
+    const deniedBody = await deniedProviders.json();
+    expect(deniedBody).toMatchObject({ options: { team: [] }, errors: { team: expect.any(String) } });
+    expect(JSON.stringify(deniedBody)).not.toContain("Ada");
+    // Granting the underlying Table read lets the same caller resolve the
+    // projection — still with no Saga grant anywhere on the member.
+    expect(
+      (await call("/api/tables/autodir-gated-table/grants", "POST", { action: "read", granteeUserId: OTHER_USER }))
+        .status,
+    ).toBe(200);
+    const granted = await call("/api/forms/autodir-gated/startup", "POST", {}, ORG, OTHER_USER);
+    expect(granted.status).toBe(201);
+    const grantedBody = (await granted.json()) as { handle: string };
+    expect(grantedBody).toMatchObject({ snapshot: { name: "Ada" } });
+    const submitKey = "form-02-autofill-004";
+    const submitted = await call(
+      "/api/forms/autodir-gated/submit",
+      "POST",
+      { handle: grantedBody.handle, values: { name: "Ada" } },
+      ORG,
+      OTHER_USER,
+      submitKey,
+    );
+    expect(submitted.status).toBe(202);
+    expect(await submitted.json()).toMatchObject({ form: "autodir-gated", replayed: false });
+  });
+
+  it("fails provider loss, invalid projections, and membership drift closed", async () => {
+    await seedDirectory("autodir-fragile-table", { r1: { handle: "ops", lead: "Ada" } });
+    await createForm("autodir-fragile", AUTOFILL_FIELDS("autodir-fragile-table"));
+    expect((await startup("autodir-fragile")).snapshot).toMatchObject({ name: "Ada" });
+    // A mistyped projection (number into a text target) never enters the
+    // snapshot: the default fills the gap and the providers route names the
+    // safe per-field error.
+    expect(
+      (await call("/api/tables/autodir-fragile-table/rows/r1", "PATCH", { data: { handle: "ops", lead: 7 } })).status,
+    ).toBe(200);
+    expect((await startup("autodir-fragile")).snapshot).toMatchObject({ name: "Dee" });
+    // An over-bound projection (2000 chars into a 1024-byte target) drops
+    // the same way.
+    expect(
+      (
+        await call("/api/tables/autodir-fragile-table/rows/r1", "PATCH", {
+          data: { handle: "ops", lead: "x".repeat(2000) },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await startup("autodir-fragile")).snapshot).toMatchObject({ name: "Dee" });
+    const invalidProviders = await call("/api/forms/autodir-fragile/providers");
+    expect(await invalidProviders.json()).toMatchObject({ errors: { team: expect.any(String) } });
+    // Deleting the provider table between declaration and fetch degrades to
+    // the established safe shape; a stale echoed option then fails the
+    // submit-time membership re-check and dispatches nothing.
+    expect((await call("/api/tables/autodir-fragile-table", "DELETE")).status).toBe(200);
+    expect((await startup("autodir-fragile")).snapshot).toMatchObject({ name: "Dee" });
+    const goneProviders = await call("/api/forms/autodir-fragile/providers");
+    expect(await goneProviders.json()).toMatchObject({ options: { team: [] }, errors: { team: expect.any(String) } });
+    const staleBody = {
+      handle: (await startup("autodir-fragile")).handle,
+      values: { coupon: "SHOW", team: "ops", name: "Ada" },
+    };
+    const stale = await call(
+      "/api/forms/autodir-fragile/submit",
+      "POST",
+      staleBody,
+      ORG,
+      OWNER,
+      "form-02-autofill-005",
+    );
+    expect(stale.status).toBe(422);
+    expect(await stale.json()).toMatchObject({ error: { code: "FORM_VALIDATION_FAILED" } });
+    const missing = await bindings.DB.prepare("SELECT id FROM executions WHERE id=?")
+      .bind(await executionId({ orgId: ORG, userId: OWNER }, "form-02-autofill-005"))
+      .first<{ id: string }>();
+    expect(missing).toBeNull();
+  });
+
+  it("projects onto select targets only when listed and reports missing keys", async () => {
+    // The static select admits red: the projection lands. The declared
+    // `nosuch` key is absent from the row: no value is fabricated and the
+    // providers route names the safe per-field error.
+    await seedDirectory("autodir-shapes-table", { r1: { handle: "ops", color: "red" } });
+    await createForm("autodir-shapes", [
+      { name: "coupon", type: "text", required: false },
+      {
+        name: "team",
+        type: "select",
+        required: true,
+        provider: { kind: "table", table: "autodir-shapes-table", valueField: "handle" },
+        autoFill: { color: "color", extra: "nosuch" },
+        visibleWhen: { field: "coupon", equals: "SHOW" },
+      },
+      { name: "color", type: "select", required: false, options: ["red", "blue"] },
+      { name: "extra", type: "text", required: false },
+    ]);
+    const started = await startup("autodir-shapes");
+    expect(started.snapshot).toMatchObject({ color: "red" });
+    expect(started.snapshot).not.toHaveProperty("extra");
+    const providers = await call("/api/forms/autodir-shapes/providers");
+    expect(await providers.json()).toMatchObject({ errors: { team: expect.any(String) } });
+  });
+
+  it("fills nothing from an empty provider scan without an error", async () => {
+    // Zero rows is not a failure: options stay empty, no auto-fill error is
+    // recorded, and the default fills the gap.
+    expect((await call("/api/tables", "POST", { name: "autodir-empty-table" })).status).toBe(201);
+    await createForm("autodir-empty", AUTOFILL_FIELDS("autodir-empty-table"));
+    expect((await startup("autodir-empty")).snapshot).toMatchObject({ name: "Dee" });
+    const providers = await call("/api/forms/autodir-empty/providers");
+    expect(await providers.json()).toMatchObject({ options: { team: [] }, errors: {} });
+  });
+
+  it("skips corrupt persisted auto-fill rows without fabricating values", async () => {
+    // Rows written out of band bypass the designer declaration gate, so the
+    // single pass re-checks every target: a static-provider source, a
+    // display-only target, a self-target, and an unknown target all skip
+    // while a declared-but-missing key records the safe error. Options
+    // derive from the same stub scan, proving the one-pass contract.
+    const caller = { orgId: ORG, userId: OWNER };
+    const readRows = async () => [{ handle: "ops", lead: "Ada" }] as readonly Record<string, unknown>[];
+    const fields = [
+      {
+        name: "static_src",
+        type: "select",
+        required: false,
+        provider: { kind: "static", options: ["a"] },
+        autoFill: { name: "lead" },
+      },
+      {
+        name: "team",
+        type: "select",
+        required: false,
+        provider: { kind: "table", table: "t", valueField: "handle" },
+        autoFill: { title: "lead", team: "handle", ghost: "lead", name: "nosuch" },
+      },
+      { name: "name", type: "text", required: false, maxLength: 1024 },
+      { name: "title", type: "heading", required: false, content: "Hi" },
+    ] as const;
+    const resolved = await resolveFormProviders(bindings.DB, caller, fields as never, readRows);
+    expect(resolved.options).toMatchObject({ static_src: ["a"], team: ["ops"] });
+    expect(resolved.values).toEqual({});
+    expect(resolved.errors).toMatchObject({ team: expect.any(String) });
+    expect(Object.keys(resolved.errors)).toEqual(["team"]);
+  });
+
+  it("bounds fetched auto-fill output at 64 KiB without fencing option lists", async () => {
+    // Twenty ~3.4 KiB documents total ~68 KiB: past the 64 KiB output bound
+    // while each document stays under the 4 KiB Table cap and each value
+    // under the target maxLength, isolating the output fence itself.
+    const big: Record<string, Record<string, unknown>> = {};
+    for (let index = 0; index < 20; index += 1) {
+      big[`r${index}`] = { handle: `h${index}`, a: "x".repeat(1100), b: "y".repeat(1100), c: "z".repeat(1100) };
+    }
+    await seedDirectory("autodir-big-table", big);
+    await createForm("autodir-big", AUTOFILL_FIELDS("autodir-big-table"));
+    const started = await startup("autodir-big");
+    expect(started.snapshot).toMatchObject({ name: "Dee" });
+    const providers = await call("/api/forms/autodir-big/providers");
+    const body = (await providers.json()) as { options: Record<string, string[]>; errors: Record<string, string> };
+    expect(body.options.team).toHaveLength(20);
+    expect(body.errors.team).toMatch(/too large/);
   });
 });

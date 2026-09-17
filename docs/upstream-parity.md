@@ -687,7 +687,17 @@ display-only heading/paragraph/divider), declared defaults with
 submission-wins merge, `visibleWhen` conditionals (hidden values dropped,
 smuggled values fail closed), static + Table option providers resolved
 through the caller Table gate (denied tables yield empty lists, never
-leaks; membership re-checked at submit), session-bound 30-minute startup
+leaks; membership re-checked at submit), declared auto-fill targets
+(`autoFill` on table-provider selects mapping sibling fields to provider
+row output keys, upstream `auto_fill`): projected from the first row of
+the same bounded Table scan through the caller Table gate (mapping count
+bounded by the 50-field declaration cap — the tighter fence over the
+upstream 50-key bound — fetched output capped at 64 KiB per source) and
+merged into the startup snapshot under explicit prefill (defaults lose
+to auto-fill, auto-fill loses to prefill, every submission value wins;
+unknown/display-only/duplicate targets fail the declaration, invalid
+projections and provider errors yield no value plus a safe per-field
+error, never a leak), session-bound 30-minute startup
 handles (`POST /api/forms/:name/startup`, peeked for validation and
 consumed only after validation passes, org/user/form bound, `STALE_FORM_HANDLE` on
 unknown/expired/foreign/replayed),
@@ -720,10 +730,16 @@ caps form submissions at 256 KiB (`docs/upstream-spec.md` §17); the local
 route currently shares the stricter 4 KiB bound owned by LIMITS-01
 (#177, lane #428).
 
+Explicit Cloudflare-native adaptation (not permanent parity): upstream
+projects declared metadata keys per provider option for interactive
+per-selection refill; the local route projects the first bounded-scan row
+into the startup snapshot instead, with no new provider route — the
+single startup/provider/submit path stays authoritative.
 Explicitly deferred (retain until verified): public/embed publication
 with capability fingerprints and origin fencing (EMBED-01); scheduled
 promotion/due-time dispatch (TRG-01); realtime provider refresh (polling
-only); rich-text/signature/cascading-provider field kinds beyond the 17
+only); per-selection interactive refill beyond snapshot projection;
+rich-text/signature/cascading-provider field kinds beyond the 17
 shipped.
 
 Depends: FORM-01, RUN-03, TRG-01, AUTH-02, FILE-01
