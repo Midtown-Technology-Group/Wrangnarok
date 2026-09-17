@@ -3365,7 +3365,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const tableBatchInsert = /^\/api\/tables\/([a-z0-9][a-z0-9-]{0,63})\/rows\/batch$/.exec(url.pathname);
     if (tableBatchInsert?.[1] && request.method === "POST") {
       // Canonical batch-write endpoint (TABLE-02, upstream #735
-      // POST /documents/batch): { write_mode, items } over 0-1000 documents
+      // POST /documents/batch): { write_mode, items } over 0-25 documents
       // through the single executor. Legacy { items } bodies read as insert.
       // Whole-request order: org isolation (404), validation incl. the size
       // bound (400), policy preflight (403 TABLE_BATCH_DENIED), then

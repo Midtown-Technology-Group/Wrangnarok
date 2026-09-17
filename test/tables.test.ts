@@ -3,7 +3,7 @@
 // canonical-batch; issues #117, #154): declarations, deny-by-absence
 // per-action grants, policy-safe bounded queries, scoped counts, and the
 // canonical write_mode batch contract (insert, merge_upsert, replace_upsert
-// over 0-1000 documents), proven against real local D1 in workerd. Applies the full
+// over 0-25 documents), proven against real local D1 in workerd. Applies the full
 // migration chain (0001 + 0007 + 0008 + 0009) so the tables schema composes
 // with the org-membership gate (AUTH-01): route tests run as the LAB
 // fixture identity (OWNER bootstraps to admin of ORG in authenticate), and
@@ -902,7 +902,7 @@ describe("TABLE-02 canonical write_mode batch contract (upstream #735)", () => {
     expect(body.count).toBe(2);
   });
 
-  it("writes a full 1000-document batch without client-side chunking", async () => {
+  it("writes a full 25-document batch through one atomic batch() call", async () => {
     const items = Array.from({ length: TABLE_BATCH_MAX }, (_, i) => ({ id: `w${i}`, data: { n: i } }));
     const res = await call("/api/tables/contracts/rows/batch", "POST", { write_mode: "insert", items });
     expect(res.status).toBe(201);
@@ -910,13 +910,12 @@ describe("TABLE-02 canonical write_mode batch contract (upstream #735)", () => {
     expect(body.count).toBe(TABLE_BATCH_MAX);
     expect(body.results).toHaveLength(TABLE_BATCH_MAX);
     expect(body.results.every((result) => result.ok)).toBe(true);
-    // Exactly 1000 rows fills the count scan window, so the scoped count
-    // honestly answers -2 (bounded, not complete) instead of an invented
-    // exact number; the keyset walk below proves all 1000 landed.
-    expect(await call("/api/tables/contracts/count").then((r) => r.json())).toEqual({ total: -2 });
+    // 25 rows sit far below the count scan window, so the scoped count
+    // answers the exact total; the keyset walk below proves all 25 landed.
+    expect(await call("/api/tables/contracts/count").then((r) => r.json())).toEqual({ total: TABLE_BATCH_MAX });
     const walked: string[] = [];
     let cursor: string | null = null;
-    for (let page = 0; page < 25; page += 1) {
+    for (let page = 0; page < 3; page += 1) {
       const suffix = cursor === null ? "" : `&cursor=${cursor}`;
       const pageRes = await call(`/api/tables/contracts/rows?limit=50${suffix}`, "GET");
       expect(pageRes.status).toBe(200);
@@ -930,7 +929,7 @@ describe("TABLE-02 canonical write_mode batch contract (upstream #735)", () => {
       if (!pageBody.hasMore) break;
     }
     expect(new Set(walked).size).toBe(TABLE_BATCH_MAX);
-    // Spot-read the boundaries of the chunked write path.
+    // Spot-read the boundaries of the single-transaction write path.
     expect(await call("/api/tables/contracts/rows/w0").then((r) => r.json())).toMatchObject({
       row: { data: { n: 0 } },
     });
@@ -1135,7 +1134,10 @@ describe("tables query parser units", () => {
     expect(lookupPath({ a: { b: 1 } }, "a.b")).toBe(1);
     expect(lookupPath({ a: { b: 1 } }, "a.missing")).toBeUndefined();
     expect(lookupPath({ a: [1, 2] }, "a.0")).toBeUndefined();
-    expect(TABLE_BATCH_MAX).toBe(1000);
+    // 25, not upstream's 1000: one request must fit a single batch()
+    // transaction inside the 50-query Free invocation budget counting every
+    // batched statement (see src/tables.ts header and TABLE-02 parity note).
+    expect(TABLE_BATCH_MAX).toBe(25);
     expect(TABLE_QUERY_ROW_CAP).toBe(1000);
   });
 });

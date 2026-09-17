@@ -3222,7 +3222,7 @@ export function describeContract(): SdkContractDescriptor {
         method: "POST",
         path: "/api/tables/:name/rows/batch",
         description:
-          "Canonical batch write (upstream #735 documents/batch): write_mode insert, merge_upsert, or replace_upsert over 0-1000 documents; legacy upsert:true reads as merge_upsert; return_documents:false answers count-only. All-or-denied policy preflight, per-item operational results with an ok count. Never auto-chunks.",
+          "Canonical batch write (upstream #735 documents/batch, adapted to 0-25 documents for the D1 Free invocation budget and single-transaction atomicity): write_mode insert, merge_upsert, or replace_upsert; legacy upsert:true reads as merge_upsert; return_documents:false answers count-only. All-or-denied policy preflight, per-item operational results with an ok count. Never auto-chunks.",
       },
       {
         method: "PUT",
@@ -3414,7 +3414,7 @@ export function describeContract(): SdkContractDescriptor {
         name: "author-tables",
         status: "supported",
         detail:
-          "Author Tables over D1 (TABLE-02 query/count/canonical-batch slice): declarations, deny-by-absence per-action grants, bounded keyset queries, scoped counts with skip_count, canonical write_mode batches (insert, merge_upsert, replace_upsert over 0-1000 documents, count-only option, no auto-chunk). Realtime subscriptions stay deferred.",
+          "Author Tables over D1 (TABLE-02 query/count/canonical-batch slice): declarations, deny-by-absence per-action grants, bounded keyset queries, scoped counts with skip_count, canonical write_mode batches (insert, merge_upsert, replace_upsert over 0-25 documents, count-only option, no auto-chunk). Realtime subscriptions stay deferred.",
       },
       {
         name: "author-config",
