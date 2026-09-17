@@ -1,5 +1,5 @@
 // Migration-chain fidelity (issue #302, Slice C): applies every migration
-// 0001->0036 in order against a scratch database and proves table rebuilds
+// 0001->0037 in order against a scratch database and proves table rebuilds
 // carry all previously added columns. Guards the 0026 regression, which
 // rebuilt executions without policy_json (0012) and parent_execution_id /
 // parent_step (0015), breaking child lineage statements on fully migrated
@@ -43,6 +43,7 @@ import migration33 from "../migrations/0033_event_subscriptions.sql?raw";
 import migration34 from "../migrations/0034_branding_profile.sql?raw";
 import migration35 from "../migrations/0035_embeds.sql?raw";
 import migration36 from "../migrations/0036_anon_app_embeds.sql?raw";
+import migration37 from "../migrations/0037_executions_org_fk_drop.sql?raw";
 
 const bindings = env as unknown as Bindings;
 
@@ -82,6 +83,7 @@ const CHAIN = [
   migration34,
   migration35,
   migration36,
+  migration37,
 ];
 
 beforeEach(async () => {
@@ -104,6 +106,30 @@ it("rebuilds carry every previously added executions column", async () => {
     "SELECT name FROM sqlite_master WHERE type='index' AND name='executions_parent'",
   ).first<{ name: string }>();
   expect(index?.name).toBe("executions_parent");
+});
+
+it("executions carries no organizations foreign key after the full chain", async () => {
+  const ddl = await bindings.DB.prepare("SELECT sql FROM sqlite_master WHERE name='executions'").first<{
+    sql: string;
+  }>();
+  expect(ddl?.sql).not.toMatch(/REFERENCES organizations/);
+});
+
+it("org delete retains execution history on the fully migrated schema", async () => {
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "org").run();
+  await bindings.DB.prepare(
+    "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("exec-1", "smoke", "smoke", "r1", "org-1", "user-1", "{}", new Date().toISOString())
+    .run();
+  await bindings.DB.prepare("DELETE FROM organizations WHERE id=?").bind("org-1").run();
+  const org = await bindings.DB.prepare("SELECT id FROM organizations WHERE id=?").bind("org-1").first();
+  expect(org).toBeNull();
+  const exec = await bindings.DB.prepare("SELECT id,org_id FROM executions WHERE id=?")
+    .bind("exec-1")
+    .first<{ id: string; org_id: string }>();
+  expect(exec?.id).toBe("exec-1");
+  expect(exec?.org_id).toBe("org-1");
 });
 
 it("child lineage statements run on the fully migrated schema", async () => {
