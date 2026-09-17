@@ -12,7 +12,7 @@ import { reset } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
-import { echoSaga, helloSaga } from "../src/domain";
+import { echoSaga, executionId, helloSaga } from "../src/domain";
 import migration1 from "../migrations/0001_initial.sql?raw";
 import migration2 from "../migrations/0002_cancelling.sql?raw";
 import migration4 from "../migrations/0004_solutions_install.sql?raw";
@@ -21,6 +21,7 @@ import migration6 from "../migrations/0006_apps.sql?raw";
 import migration7 from "../migrations/0007_org_membership.sql?raw";
 import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
 import migration9 from "../migrations/0013_resource_roles.sql?raw";
+import migrationPolicies from "../migrations/0012_saga_policies.sql?raw";
 import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
@@ -82,6 +83,24 @@ async function submitSaga(userId: string, orgId: string, sagaId: string, input: 
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }
 
+async function submitProvider(userId: string, orgId: string, sagaId: string, input: unknown, key: string) {
+  const b = { ...bindings, LAB_USER_ID: userId, LAB_FIXTURE_USER_ID: USER_ADMIN, ADMIN_USER_IDS: USER_ADMIN };
+  const res = await worker.fetch(
+    new Request("https://local.test/api/executions/provider", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": key,
+        "X-Organization-Id": orgId,
+      },
+      body: JSON.stringify({ sagaId, input }),
+    }),
+    b,
+  );
+  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}
+
 beforeEach(async () => {
   await bindings.DB.exec(migration1);
   await bindings.DB.exec(migration2);
@@ -91,6 +110,10 @@ beforeEach(async () => {
   await bindings.DB.exec(migration6);
   await bindings.DB.exec(migration7);
   await bindings.DB.exec(migration8);
+  // RUN-03 provider executions INSERT the policy snapshot inline, so the
+  // 0012 executions.policy_json column must exist (numeric order matters:
+  // 0008 rebuilds executions, so 0012 runs after it as in production).
+  await bindings.DB.exec(migrationPolicies);
   await bindings.DB.exec(migration9);
   // Matrix identities: ordinary member, external member, and an owner (a
   // member who will hold a grant but no admin). Stranger stays unknown.
@@ -169,6 +192,103 @@ it("denies direct Saga execution by absence and grants it through roles", async 
     status: 403,
     body: { error: { code: "GRANT_REQUIRED" } },
   });
+});
+
+it("fences the provider execution ingress on the same saga execute grant (issue #143 S2)", async () => {
+  // S2 composition proof: POST /api/executions/provider resolves the same
+  // built-in Saga and must require the same saga execute grant as the direct
+  // POST /api/executions ingress (both routes call requireGrant with the
+  // identical check shape). An ordinary active member with no grant is denied
+  // on both before any Execution row, Operation row, vendor fetch, or
+  // dispatch side effect; granting the exact saga execute permission lets
+  // both proceed under their existing contracts. No second auth path: one
+  // grant, both routes.
+  const ordinary = { orgId: ORG_A, userId: USER_ORDINARY };
+  const directId = await executionId(ordinary, "auth02-s2-direct-0001");
+  const providerId = await executionId(ordinary, "auth02-s2-provider-0001");
+  // Deny by absence on both ingresses: the same 403 GRANT_REQUIRED.
+  expect(await submitSaga(USER_ORDINARY, ORG_A, echoSaga.id, { message: "x" }, "auth02-s2-direct-0001")).toMatchObject({
+    status: 403,
+    body: { error: { code: "GRANT_REQUIRED" } },
+  });
+  expect(
+    await submitProvider(USER_ORDINARY, ORG_A, echoSaga.id, { message: "x" }, "auth02-s2-provider-0001"),
+  ).toMatchObject({
+    status: 403,
+    body: { error: { code: "GRANT_REQUIRED" } },
+  });
+  // Neither denied request wrote or fetched anything.
+  expect(await bindings.DB.prepare("SELECT id FROM executions WHERE id=?").bind(directId).first()).toBeNull();
+  expect(await bindings.DB.prepare("SELECT id FROM executions WHERE id=?").bind(providerId).first()).toBeNull();
+  const deniedOps = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM operations").first<{ n: number }>();
+  expect(deniedOps?.n ?? -1).toBe(0);
+  expect(fetch).not.toHaveBeenCalled();
+  // Provider eligibility alone never authorizes: the grant gate runs before
+  // the eligibility gate, so an async-only Saga without the grant answers
+  // 403 (never 501) on the provider route.
+  expect(await submitProvider(USER_ORDINARY, ORG_A, helloSaga.id, { name: "x" }, "auth02-s2-hello-0001")).toMatchObject(
+    {
+      status: 403,
+      body: { error: { code: "GRANT_REQUIRED" } },
+    },
+  );
+  // Cross-org selection stays 404 at the membership gate (never a grant
+  // evaluation) and writes nothing.
+  const created = await call("/api/orgs", "POST", USER_ADMIN, { name: "s2-foreign-org" });
+  const orgB = created.body.id as string;
+  expect(await submitSaga(USER_ORDINARY, orgB, echoSaga.id, { message: "x" }, "auth02-s2-foreign-0001")).toMatchObject({
+    status: 404,
+  });
+  const foreignId = await executionId({ orgId: orgB, userId: USER_ORDINARY }, "auth02-s2-foreign-0001");
+  expect(await bindings.DB.prepare("SELECT id FROM executions WHERE id=?").bind(foreignId).first()).toBeNull();
+  // Grant the exact saga execute permission through the role path.
+  const roleId = await makeRole();
+  expect(
+    await call(`/api/orgs/${ORG_A}/roles/${roleId}/grants`, "POST", USER_ADMIN, {
+      resourceKind: "saga",
+      resourceId: echoSaga.id,
+      action: "execute",
+    }),
+  ).toMatchObject({ status: 201 });
+  expect(
+    await call(`/api/orgs/${ORG_A}/roles/${roleId}/assignments`, "POST", USER_ADMIN, { userId: USER_ORDINARY }),
+  ).toMatchObject({ status: 201 });
+  // Both ingresses now proceed under their existing contracts: an async
+  // receipt on the direct route, an inline result on the provider route.
+  const directAllowedId = await executionId(ordinary, "auth02-s2-direct-0002");
+  expect(await submitSaga(USER_ORDINARY, ORG_A, echoSaga.id, { message: "x" }, "auth02-s2-direct-0002")).toMatchObject({
+    status: 202,
+    body: { executionId: directAllowedId },
+  });
+  expect(
+    await bindings.DB.prepare("SELECT id FROM executions WHERE id=?").bind(directAllowedId).first(),
+  ).not.toBeNull();
+  const providerAllowedId = await executionId(ordinary, "auth02-s2-provider-0002");
+  expect(
+    // Input matches the in-file mock's fixed echo reply (the Action verifies
+    // echo fidelity and fails closed on mismatch).
+    await submitProvider(USER_ORDINARY, ORG_A, echoSaga.id, { message: "hello" }, "auth02-s2-provider-0002"),
+  ).toMatchObject({
+    status: 200,
+    // The in-file echo mock answers a fixed reply regardless of input.
+    body: {
+      executionId: providerAllowedId,
+      sagaId: echoSaga.id,
+      status: "Succeeded",
+      result: { message: "hello" },
+      dispatch: { inline: true, workflow: false },
+      statusUrl: `/api/executions/${providerAllowedId}`,
+    },
+  });
+  // The provider receipt persists like any Execution: same terminal result
+  // plus one prepare row and one inline row, never a Workflow dispatch.
+  const providerOps = await bindings.DB.prepare("SELECT name,status FROM operations WHERE execution_id=? ORDER BY name")
+    .bind(providerAllowedId)
+    .all<{ name: string; status: string }>();
+  expect(providerOps.results).toEqual([
+    { name: "prepare-input-v1", status: "Succeeded" },
+    { name: "provider-inline-v1", status: "Succeeded" },
+  ]);
 });
 
 it("grants kind-wide wildcards, direct user/kind rules, and global rules", async () => {
