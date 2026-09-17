@@ -364,7 +364,13 @@ import {
 } from "./executions";
 import { listExecutionLogs, parseLogSearchQuery, parseLogTailQuery, searchExecutionLogs } from "./logs";
 import { deploymentSecretsFromEnv, scrubValueWithDeploymentSecrets } from "./secrets";
-import { deleteAvatar, getProfile, putAvatar, readAvatarBytes, updateProfile } from "./profile";
+import {
+  deleteAvatar,
+  getProfile as getUserProfile,
+  putAvatar,
+  readAvatarBytes,
+  updateProfile as updateUserProfile,
+} from "./profile";
 import { logRequest } from "./usage";
 export {
   CloudflareInventoryWorkflow,
@@ -3892,12 +3898,12 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const profileStore = { db: env.DB, bucket: env.FILES };
     if (url.pathname === "/api/profile" && request.method === "GET") {
       rejectQuery(url);
-      return json({ profile: await getProfile(env.DB, caller) });
+      return json({ profile: await getUserProfile(env.DB, caller) });
     }
     if (url.pathname === "/api/profile" && request.method === "PUT") {
       rejectQuery(url);
       requireJson(request);
-      return json({ profile: await updateProfile(env.DB, caller, await boundedJson(request.body)) });
+      return json({ profile: await updateUserProfile(env.DB, caller, await boundedJson(request.body)) });
     }
     if (url.pathname === "/api/profile/avatar" && request.method === "GET") {
       rejectQuery(url);
