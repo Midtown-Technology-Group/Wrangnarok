@@ -30,6 +30,7 @@
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "mailbox": "node scripts/mailbox-cli.mjs",
+    "check:bundle:selftest": "node scripts/check-bundle-budget.mjs --selftest",
     "mailbox:selftest": "node scripts/mailbox-cli.mjs selftest",
     "preview:smoke": "node scripts/smoke-preview.mjs",
     "preview:smoke:selftest": "node scripts/smoke-preview.mjs selftest",
