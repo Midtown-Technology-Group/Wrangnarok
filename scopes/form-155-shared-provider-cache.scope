@@ -1,0 +1,11 @@
+# lane/form-155-shared-provider-cache scope (issue #155, FORM-02 shared-provider-table cache):
+# resolveFormProviders caches table scans by table before issuing another
+# read (failures cached as null), so every source field on a shared table
+# consumes one identical snapshot for options and auto-fill. Plus two
+# deterministic resolver regressions (single-scan proof, fail-on-second-call
+# sentinel). No new primitive, migration, route, auth, or budget change;
+# docs/upstream-parity.md already states the same-scan invariant, so its
+# text stands unchanged.
+src/forms.ts
+test/form-lifecycle.test.ts
+scopes/form-155-shared-provider-cache.scope
