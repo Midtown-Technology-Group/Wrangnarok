@@ -66,21 +66,42 @@ async function createSource(name: string): Promise<void> {
   expect(res.status).toBe(201);
 }
 
-async function createSub(
-  source: string,
-  body: Record<string, unknown>,
-): Promise<{ status: number; body: Record<string, { id: string; name: string }> }> {
+interface TestDelivery {
+  readonly subscription: string;
+  readonly status: string;
+  readonly executionId: string;
+  readonly replayed: boolean;
+  readonly code?: string;
+}
+
+interface EmitBody {
+  readonly event?: { eventId: string; topic: string };
+  readonly replayed?: boolean;
+  readonly deliveries?: TestDelivery[];
+  readonly overflowSkipped?: number;
+  readonly error?: { code?: string };
+}
+
+interface SubBody {
+  readonly subscription?: { id: string; name: string };
+  readonly subscriptions?: { name: string }[];
+  readonly deliveries?: { eventId: string; executionId: string }[];
+  readonly deleted?: boolean;
+  readonly error?: { code?: string };
+}
+
+async function createSub(source: string, body: Record<string, unknown>): Promise<{ status: number; body: SubBody }> {
   const res = await worker.fetch(authed(`/api/event-sources/${source}/subscriptions`, "POST", body), bindings);
-  return { status: res.status, body: (await res.json()) as Record<string, { id: string; name: string }> };
+  return { status: res.status, body: (await res.json()) as SubBody };
 }
 
 async function emit(
   source: string,
   body: Record<string, unknown>,
   caller: Bindings = bindings,
-): Promise<{ status: number; body: Record<string, never> & Record<string, unknown> }> {
+): Promise<{ status: number; body: EmitBody }> {
   const res = await worker.fetch(authed(`/api/event-sources/${source}/events`, "POST", body), caller);
-  return { status: res.status, body: (await res.json()) as Record<string, never> & Record<string, unknown> };
+  return { status: res.status, body: (await res.json()) as EmitBody };
 }
 
 async function trackAll(ids: readonly string[]): Promise<void> {
@@ -253,12 +274,7 @@ it("fans out one accepted event to every eligible subscriber with stable keys", 
     payload: { name: "Ada" },
   });
   expect(first.status).toBe(201);
-  const deliveries = first.body.deliveries as {
-    subscription: string;
-    status: string;
-    executionId: string;
-    replayed: boolean;
-  }[];
+  const deliveries: TestDelivery[] = first.body.deliveries ?? [];
   expect(first.body).toMatchObject({ replayed: false, overflowSkipped: 0 });
   expect(deliveries.map((entry) => [entry.subscription, entry.status])).toEqual([
     ["sub-exact", "dispatched"],
@@ -272,8 +288,8 @@ it("fans out one accepted event to every eligible subscriber with stable keys", 
   // (run-as org, run-as user, evt- delivery key).
   const runAs = { orgId: ORG, userId: LAB_USER };
   for (const [sub, id] of [
-    [exact.body.subscription.id, ids[0]],
-    [wild.body.subscription.id, ids[1]],
+    [exact.body.subscription?.id ?? "", ids[0]],
+    [wild.body.subscription?.id ?? "", ids[1]],
   ] as const) {
     const key = await subscriptionDeliveryKey(sub, "evt-fan-1");
     expect(key).toMatch(/^evt-[a-f0-9]{64}$/);
@@ -298,11 +314,9 @@ it("fans out one accepted event to every eligible subscriber with stable keys", 
   });
   expect(replay.status).toBe(200);
   expect(replay.body).toMatchObject({ replayed: true, overflowSkipped: 0 });
-  const replayed = (replay.body.deliveries as { executionId: string; replayed: boolean }[]).map(
-    (entry) => entry.executionId,
-  );
+  const replayed = (replay.body.deliveries ?? []).map((entry) => entry.executionId);
   expect(new Set([...ids, ...replayed]).size).toBe(2);
-  expect((replay.body.deliveries as { replayed: boolean }[]).every((entry) => entry.replayed)).toBe(true);
+  expect((replay.body.deliveries ?? []).every((entry) => entry.replayed)).toBe(true);
   const rows = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM event_deliveries").first<{ n: number }>();
   expect(rows?.n).toBe(2);
   expect(await executionCount()).toBe(before + 2);
@@ -335,17 +349,13 @@ it("matches, misses, and orders filters deterministically", async () => {
     payload: { name: "Bo" },
   });
   expect(first.status).toBe(201);
-  const order = (first.body.deliveries as { subscription: string; status: string }[]).map(
-    (entry) => entry.subscription,
-  );
+  const order = (first.body.deliveries ?? []).map((entry) => entry.subscription);
   expect(order).toEqual(["aaa-exact", "zzz-wild"]);
-  await trackAll((first.body.deliveries as { executionId: string }[]).map((entry) => entry.executionId));
+  await trackAll((first.body.deliveries ?? []).map((entry) => entry.executionId));
 
   const second = await emit("s2-filter", { eventId: "evt-cust-1", topic: "customer.created", payload: { name: "Cy" } });
-  expect((second.body.deliveries as { subscription: string }[]).map((entry) => entry.subscription)).toEqual([
-    "mmm-other",
-  ]);
-  await trackAll((second.body.deliveries as { executionId: string }[]).map((entry) => entry.executionId));
+  expect((second.body.deliveries ?? []).map((entry) => entry.subscription)).toEqual(["mmm-other"]);
+  await trackAll((second.body.deliveries ?? []).map((entry) => entry.executionId));
   expect(await executionCount()).toBe(before + 3);
 }, 25000);
 
@@ -429,7 +439,7 @@ it("bounds fan-out per event with explicit overflow", async () => {
   });
   expect(burst.status).toBe(201);
   expect(burst.body).toMatchObject({ overflowSkipped: 2 });
-  const deliveries = burst.body.deliveries as { subscription: string; status: string; executionId: string }[];
+  const deliveries: TestDelivery[] = burst.body.deliveries ?? [];
   expect(deliveries).toHaveLength(10);
   expect(deliveries.map((entry) => entry.subscription)).toEqual(
     Array.from({ length: 10 }, (_, index) => `s2-b${String(index).padStart(2, "0")}`),
@@ -486,7 +496,7 @@ it("fails with no side effects and deletes cascade to subscriptions", async () =
     payload: { name: "Ada" },
   });
   expect(live.status).toBe(201);
-  await trackAll((live.body.deliveries as { executionId: string }[]).map((entry) => entry.executionId));
+  await trackAll((live.body.deliveries ?? []).map((entry) => entry.executionId));
 
   // Deleting the source cascades to subscriptions and receipts while
   // dispatched Executions keep their history rows.
