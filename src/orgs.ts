@@ -555,6 +555,24 @@ export async function ensureLabFixture(db: D1Database, orgId: string, userId: st
   // would otherwise fail the tick's membership re-check with a driver error
   // instead of a clean gate, and any forked shape here would shadow the
   // canonical schema (UNIQUE(org_id,name), schedule_deliveries).
+  //
+  // A persistent local database that ran the pre-#436 fixture may still carry
+  // the forked schedules shape, which CREATE IF NOT EXISTS would leave in
+  // place. Detect it (canonical 0016 has `name`, never `cron_expr`) and drop
+  // it so the canonical CREATEs below rebuild it. No data migration is
+  // possible: the runtime's only writer INSERTs canonical columns, so no
+  // runtime row ever landed in a forked table, and forked rows carry no
+  // mappable `name` for the canonical UNIQUE(org_id,name). Canonical tables
+  // are never touched.
+  try {
+    const legacy = await db.prepare("PRAGMA table_info(schedules)").all<{ name: string }>();
+    const columns = new Set(legacy.results.map((row) => row.name));
+    if (columns.size > 0 && (!columns.has("name") || columns.has("cron_expr"))) {
+      await db.exec("DROP TABLE IF EXISTS schedules");
+    }
+  } catch {
+    // No schedules table at all: the canonical CREATEs below build it.
+  }
   const stmts = [
     "CREATE TABLE IF NOT EXISTS organizations(id TEXT PRIMARY KEY,name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',created_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z',disabled_at TEXT)",
     "ALTER TABLE organizations ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",

@@ -145,6 +145,44 @@ describe("TRG-01 schedule schema convergence (issue #436)", () => {
     expect((await worker.fetch(authed("/api/schedules/converge-migrated", "GET"), bindings)).status).toBe(404);
   }, 25000);
 
+  it("rebuilds a persistent legacy forked schedules table to canonical and promotes", async () => {
+    // A local database that ran the pre-#436 fixture keeps the forked shape,
+    // which CREATE IF NOT EXISTS would leave shadowing the canonical schema.
+    // The legacy row below is unmappable (no `name` for UNIQUE(org_id,name),
+    // `once` violates the canonical kind CHECK) and no runtime writer ever
+    // targeted these columns, so convergence rebuilds rather than migrates.
+    await bindings.DB.exec("DROP TABLE IF EXISTS schedule_deliveries");
+    await bindings.DB.exec("DROP TABLE IF EXISTS schedules");
+    await bindings.DB.exec(
+      "CREATE TABLE schedules(id TEXT PRIMARY KEY,org_id TEXT NOT NULL REFERENCES organizations(id),user_id TEXT NOT NULL,saga_id TEXT NOT NULL,input_json TEXT NOT NULL CHECK(length(input_json) <= 4096),kind TEXT NOT NULL CHECK(kind IN ('once','recurring')),status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled','deleted')),cron_expr TEXT,timezone TEXT NOT NULL DEFAULT 'UTC',run_at TEXT,next_due_at TEXT,overlap TEXT NOT NULL DEFAULT 'allow' CHECK(overlap IN ('allow','skip')),last_execution_id TEXT,last_skipped_window TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,CHECK((kind = 'once' AND cron_expr IS NULL AND run_at IS NOT NULL) OR (kind = 'recurring' AND cron_expr IS NOT NULL AND run_at IS NULL)))",
+    );
+    await bindings.DB.prepare(
+      "INSERT INTO schedules(id,org_id,user_id,saga_id,input_json,kind,status,cron_expr,timezone,run_at,next_due_at,overlap,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        "legacy-schedule-1",
+        ORG,
+        USER,
+        helloSaga.id,
+        "{}",
+        "recurring",
+        "active",
+        "* * * * *",
+        "UTC",
+        null,
+        new Date().toISOString(),
+        "allow",
+        new Date().toISOString(),
+        new Date().toISOString(),
+      )
+      .run();
+    await ensureLabFixture(bindings.DB, ORG, USER);
+    await expectCanonicalScheduleSchema();
+    await createDueOneOff("converge-legacy");
+    await expectPromotedOnce("converge-legacy");
+    expect((await worker.fetch(authed("/api/schedules/converge-legacy", "DELETE"), bindings)).status).toBe(200);
+  }, 25000);
+
   it("converges a hand-built LAB database to the same canonical schema and promotes", async () => {
     // Simulate a hand-built LAB database that never ran migration 0016: drop
     // the canonical tables, then let the fixture rebuild them.
