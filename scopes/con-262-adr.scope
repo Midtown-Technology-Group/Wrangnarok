@@ -1,0 +1,5 @@
+# CON-262-ADR lane scope (issue #262): capability-based Connection resolution ADR.
+# Docs-only design slice per auth Brief 3: TBD-numbered ADR (steward convention,
+# issue #225 open) plus this scope file. No src/test/migration/binding changes.
+docs/architecture/TBD-capability-connection-resolution.md
+scopes/con-262-adr.scope
