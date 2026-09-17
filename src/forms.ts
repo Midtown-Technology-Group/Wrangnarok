@@ -1527,19 +1527,31 @@ function randomHandle(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** Resolve provider options for one declaration through the caller's Table
- * policy gate. Static providers read the declaration; table providers scan
- * one Table (read grant required — denied or foreign tables yield an empty
- * list plus a per-field error entry, never a leak). Output projection
- * caps at 50 option keys: the bounded reader never returns more. */
-export async function resolveProviderOptions(
+/** One provider-resolution pass per request: option values and declared
+ * auto-fill projections derive from one caller-authorized row scan per
+ * table-provider source field (read grant required — denied or foreign
+ * tables yield an empty list plus a per-field error entry, never a leak).
+ * Static providers read the declaration; table scans repeat per source
+ * field and cache per table within the call. Options cap at 50 keys;
+ * auto-fill output caps at 64 KiB and projects the declared keys from the
+ * first row. Each projected value runs the target field's submission gate
+ * (minus required/hidden, which belong to submit time, reusing the prefill
+ * checks), so a value the submit gate would refuse never enters the
+ * snapshot. Targets that are also sources are not chained. */
+export async function resolveFormProviders(
   db: D1Database,
   caller: Principal,
   fields: readonly FormField[],
-  readTable: (db: D1Database, caller: Principal, table: string, valueField: string) => Promise<readonly string[]>,
-): Promise<{ options: Record<string, readonly string[]>; errors: Record<string, string> }> {
+  readRows: (db: D1Database, caller: Principal, table: string) => Promise<readonly Record<string, unknown>[]>,
+): Promise<{
+  options: Record<string, readonly string[]>;
+  errors: Record<string, string>;
+  values: Record<string, unknown>;
+}> {
   const options: Record<string, readonly string[]> = {};
   const errors: Record<string, string> = {};
+  const values: Record<string, unknown> = {};
+  const scanned = new Map<string, readonly Record<string, unknown>[] | null>();
   for (const field of fields) {
     if (field.type !== "select" && field.type !== "multiselect") continue;
     if (field.provider === undefined) {
@@ -1550,48 +1562,38 @@ export async function resolveProviderOptions(
       options[field.name] = field.provider.options;
       continue;
     }
-    try {
-      options[field.name] = (await readTable(db, caller, field.provider.table, field.provider.valueField)).slice(
-        0,
-        FORM_PROVIDER_MAX_OPTIONS,
-      );
-    } catch {
-      errors[field.name] = "Provider table is not available to this caller.";
-      options[field.name] = [];
-    }
-  }
-  return { options, errors };
-}
-
-/** Resolve declared auto-fill targets through the caller's Table policy
- * gate. For each table-provider source field, the bounded row scan (the
- * same scan feeding option lists, at most 50 rows) is fetched; output over
- * 64 KiB, denied or foreign tables, and missing keys yield no value plus a
- * safe per-field error entry, never a leak. Declared keys project from the
- * first row; each projected value runs the target field's submission gate
- * (minus required/hidden, which belong to submit time, reusing the prefill
- * checks), so a value the submit gate would refuse never enters the
- * snapshot. Resolution is one pass over provider rows only: targets that
- * are also sources are not chained. */
-export async function resolveAutoFillValues(
-  db: D1Database,
-  caller: Principal,
-  fields: readonly FormField[],
-  readRows: (db: D1Database, caller: Principal, table: string) => Promise<readonly Record<string, unknown>[]>,
-  allowedOptions?: Record<string, readonly string[]>,
-): Promise<{ values: Record<string, unknown>; errors: Record<string, string> }> {
-  const values: Record<string, unknown> = {};
-  const errors: Record<string, string> = {};
-  const byName = new Map(fields.map((field) => [field.name, field]));
-  for (const field of fields) {
-    if (field.autoFill === undefined || field.provider?.kind !== "table") continue;
-    let rows: readonly Record<string, unknown>[];
+    let rows: readonly Record<string, unknown>[] | null;
     try {
       rows = await readRows(db, caller, field.provider.table);
     } catch {
+      rows = null;
+    }
+    scanned.set(field.provider.table, rows);
+    if (rows === null) {
       errors[field.name] = "Provider table is not available to this caller.";
+      options[field.name] = [];
       continue;
     }
+    const listed: string[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const at = lookupPath(row, field.provider.valueField);
+      if (typeof at !== "string" || at.length === 0 || at.length > 128) continue;
+      if (seen.has(at)) continue;
+      seen.add(at);
+      listed.push(at);
+      if (listed.length >= FORM_PROVIDER_MAX_OPTIONS) break;
+    }
+    listed.sort();
+    options[field.name] = listed;
+  }
+  const byName = new Map(fields.map((field) => [field.name, field]));
+  for (const field of fields) {
+    if (field.autoFill === undefined || field.provider?.kind !== "table") continue;
+    // A failed scan already recorded the safe options error above; the
+    // merge keeps that message, never provider contents.
+    const rows = scanned.get(field.provider.table);
+    if (!rows) continue;
     if (byteLength(JSON.stringify(rows)) > FORM_AUTOFILL_MAX_BYTES) {
       errors[field.name] = "Provider auto-fill output is too large.";
       continue;
@@ -1617,7 +1619,7 @@ export async function resolveAutoFillValues(
       }
       const allowed =
         targetField.type === "select" || targetField.type === "multiselect"
-          ? (allowedOptions?.[target] ?? targetField.options ?? [])
+          ? (options[target] ?? targetField.options ?? [])
           : [];
       const failures: FieldFailure[] = [];
       checkPrefillValue(targetField, projected, allowed, failures);
@@ -1628,7 +1630,7 @@ export async function resolveAutoFillValues(
       values[target] = projected;
     }
   }
-  return { values, errors };
+  return { options, errors, values };
 }
 
 /** Mint a startup handle: resolve providers and declared auto-fill targets,
@@ -1645,7 +1647,6 @@ export async function startFormSession(
   caller: Principal,
   def: FormDefinition,
   body: unknown,
-  readTable: (db: D1Database, caller: Principal, table: string, valueField: string) => Promise<readonly string[]>,
   readRows: (db: D1Database, caller: Principal, table: string) => Promise<readonly Record<string, unknown>[]>,
 ): Promise<FormStartup> {
   await ensureStartupTable(db);
@@ -1674,11 +1675,10 @@ export async function startFormSession(
   if (Object.keys(prefill).length > 0 && !def.allowPrefill) {
     throw new Fault(403, "PREFILL_NOT_ALLOWED", "This form does not accept URL prefill.");
   }
-  const { options } = await resolveProviderOptions(db, caller, def.fields, readTable);
-  // Declared auto-fill projections resolve through the same caller Table
-  // gate; fetch failures and invalid values yield no snapshot entry (the
-  // providers route surfaces them), so they can never poison the snapshot.
-  const { values: autoFilled } = await resolveAutoFillValues(db, caller, def.fields, readRows, options);
+  // One provider pass feeds options and auto-fill together; fetch failures
+  // and invalid projections yield no snapshot entry (the providers route
+  // surfaces them), so they can never poison the snapshot.
+  const { options, values: autoFilled } = await resolveFormProviders(db, caller, def.fields, readRows);
   // Prefill runs the same per-field gate as submissions (minus required
   // and hidden-field checks, which belong to submit time): unknown names,
   // display-only names, wrong types, over-bound text, bad patterns, broken

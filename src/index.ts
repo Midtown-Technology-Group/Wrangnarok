@@ -176,8 +176,7 @@ import {
   parseScheduleAt,
   parseStartupHandle,
   peekStartupHandle,
-  resolveAutoFillValues,
-  resolveProviderOptions,
+  resolveFormProviders,
   saveForm,
   startFormSession,
   validateAndMerge,
@@ -277,7 +276,6 @@ import {
   insertRow,
   listTables,
   loadTable,
-  lookupPath,
   parseBatchBody,
   parseBatchDeleteBody,
   parseTableName,
@@ -626,46 +624,12 @@ function serializeForm(def: FormDefinition): unknown {
   };
 }
 
-/** Provider table reader for FORM-02 select/multiselect options: one Table,
- * caller-scoped read policy, distinct non-empty string values from the
- * valueField path, bounded scan (at most 50), sorted alphabetically so the
- * option list is deterministic regardless of row insertion or doc_id order.
- * Denied or missing tables throw (the resolver converts to per-field errors,
- * never a leak). */
-async function readProviderTable(
-  db: D1Database,
-  caller: Principal,
-  table: string,
-  valueField: string,
-): Promise<readonly string[]> {
-  const def = await loadTable(db, caller.orgId, table);
-  if (!def) throw new Fault(404, "TABLE_NOT_FOUND", "Table not found.");
-  const page = await queryRows(db, caller, def, {
-    filters: [],
-    order: "asc",
-    skipCount: true,
-    limit: 50,
-  });
-  const values: string[] = [];
-  const seen = new Set<string>();
-  for (const row of page.rows) {
-    const at = lookupPath(row.data, valueField);
-    if (typeof at !== "string" || at.length === 0 || at.length > 128) continue;
-    if (seen.has(at)) continue;
-    seen.add(at);
-    values.push(at);
-    if (values.length >= 50) break;
-  }
-  values.sort();
-  return values;
-}
-
-/** Provider row reader for FORM-02 declared auto-fill targets: the same
- * bounded Table scan that feeds option lists (caller-scoped read policy,
- * at most 50 rows, insertion order), but with full row documents so the
- * declaration can project named output keys. Denied or missing tables
- * throw (the resolver converts to safe per-field errors, never a leak).
- * The 64 KiB output bound is enforced by the resolver, not the scan. */
+/** Provider row scan for FORM-02 select/multiselect options and declared
+ * auto-fill targets: one caller-authorized queryRows result per
+ * table-provider source field (read grant required, at most 50 rows).
+ * Denied or missing tables throw (the resolver converts to safe per-field
+ * errors, never a leak). Option extraction, the 50-key cap, and the 64 KiB
+ * auto-fill output bound live in the resolver, not the scan. */
 async function readProviderRows(
   db: D1Database,
   caller: Principal,
@@ -1350,14 +1314,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (!(await mayStartForm(env.DB, ctx, caller.orgId, name))) {
         throw new Fault(403, "GRANT_REQUIRED", "Starting this Form requires a read or submit grant.");
       }
-      const started = await startFormSession(
-        env.DB,
-        caller,
-        def,
-        await boundedJson(request.body),
-        readProviderTable,
-        readProviderRows,
-      );
+      const started = await startFormSession(env.DB, caller, def, await boundedJson(request.body), readProviderRows);
       return json(
         {
           form: name,
@@ -1390,11 +1347,8 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (!(await mayStartForm(env.DB, ctx, caller.orgId, name))) {
         throw new Fault(403, "GRANT_REQUIRED", "Reading this Form's providers requires a read or submit grant.");
       }
-      const resolved = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
-      const filled = await resolveAutoFillValues(env.DB, caller, def.fields, readProviderRows, resolved.options);
-      // Option errors keep their established message on collision: both
-      // entries name the same unreadable table, never its contents.
-      return json({ form: name, options: resolved.options, errors: { ...filled.errors, ...resolved.errors } });
+      const resolved = await resolveFormProviders(env.DB, caller, def.fields, readProviderRows);
+      return json({ form: name, options: resolved.options, errors: resolved.errors });
     }
     const formSubmit = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/submit$/.exec(url.pathname);
     if (formSubmit?.[1] && request.method === "POST") {
@@ -1449,7 +1403,9 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // rides along so a handle spent by THIS key still peeks live for
       // same-key retries and canonical replays.
       const session = await peekStartupHandle(env.DB, caller, name, handle, def.id, key);
-      const fresh = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
+      // One provider pass per submit too: fresh options re-check membership
+      // while auto-fill values ride the persisted snapshot, never the scan.
+      const fresh = await resolveFormProviders(env.DB, caller, def.fields, readProviderRows);
       const values = record.values === undefined ? {} : record.values;
       // Order matters: form-gate validation + defaults merge first, then
       // the live FILE-01 file check, then the Saga parse gate last — so a

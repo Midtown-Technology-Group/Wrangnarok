@@ -15,7 +15,7 @@ import {
   consumeStartupHandle,
   mayStartForm,
   parseFileRef,
-  resolveAutoFillValues,
+  resolveFormProviders,
 } from "../src/forms";
 import { createPolicyRule, ensureRoleTables } from "../src/roles";
 
@@ -1580,9 +1580,10 @@ describe("FORM-02 auto-fill: declared provider targets with safe precedence", ()
 
   it("skips corrupt persisted auto-fill rows without fabricating values", async () => {
     // Rows written out of band bypass the designer declaration gate, so the
-    // resolver re-checks every target: a static-provider source, a
+    // single pass re-checks every target: a static-provider source, a
     // display-only target, a self-target, and an unknown target all skip
-    // while a declared-but-missing key records the safe error.
+    // while a declared-but-missing key records the safe error. Options
+    // derive from the same stub scan, proving the one-pass contract.
     const caller = { orgId: ORG, userId: OWNER };
     const readRows = async () => [{ handle: "ops", lead: "Ada" }] as readonly Record<string, unknown>[];
     const fields = [
@@ -1603,7 +1604,8 @@ describe("FORM-02 auto-fill: declared provider targets with safe precedence", ()
       { name: "name", type: "text", required: false, maxLength: 1024 },
       { name: "title", type: "heading", required: false, content: "Hi" },
     ] as const;
-    const resolved = await resolveAutoFillValues(bindings.DB, caller, fields as never, readRows);
+    const resolved = await resolveFormProviders(bindings.DB, caller, fields as never, readRows);
+    expect(resolved.options).toMatchObject({ static_src: ["a"], team: ["ops"] });
     expect(resolved.values).toEqual({});
     expect(resolved.errors).toMatchObject({ team: expect.any(String) });
     expect(Object.keys(resolved.errors)).toEqual(["team"]);
