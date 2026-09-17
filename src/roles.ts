@@ -12,7 +12,7 @@
 // There is deliberately no separate claims table — a third store for the
 // same allow tuple would be clever wrapping over boring typed rows.
 import { Fault, UUID, type Principal } from "./domain";
-import type { CallerCtx } from "./orgs";
+import { instanceAdmins, type AdminEnv, type CallerCtx } from "./orgs";
 
 export type ResourceKind = "saga" | "form" | "app";
 export type ResourceAction = "execute" | "read" | "submit" | "write" | "serve";
@@ -840,4 +840,102 @@ export async function canPrincipal(db: D1Database, caller: Principal, check: Rol
   } catch (error) {
     storeError(error);
   }
+}
+
+/**
+ * Canonical current-authority resolver for non-request dispatch (AUTH-02 S3,
+ * issue #143).
+ *
+ * A Principal (or any persisted actor ID) is an identity reference, never
+ * proof of current authority. Any path that turns persisted identity into a
+ * new privileged action — Cron schedule promotion today; future
+ * topic/webhook delivery, Workflow external events/approvals, and
+ * agent-triggered Saga execution — must resolve through here at action time
+ * instead of manufacturing `{ orgId, userId }` authority in feature code.
+ *
+ * Revalidation shape, per call:
+ *
+ * - Organization lifecycle: unknown orgs answer 404 ORG_NOT_FOUND, disabled
+ *   orgs answer 403 ORG_DISABLED (instance admins keep recovery scope).
+ * - User/service-identity lifecycle: both human and `service:` identities
+ *   resolve through the same users-table liveness gate — unknown identities
+ *   answer 404, disabled ones 403. There is no service bypass and no
+ *   accidental survival of human IDs past membership changes.
+ * - Membership/role/claim state: unknown memberships answer 404, revoked
+ *   answer 403 MEMBERSHIP_REVOKED, and every other non-active status
+ *   (suspended, invited, unknown) answers 403 MEMBERSHIP_SUSPENDED. An
+ *   `invited` membership is NEVER activated here: unattended dispatch only
+ *   serves already-active authority (request-driven `resolveCaller` keeps its
+ *   invited-activation write and stays the request adapter; it is not
+ *   refactored onto this resolver in this slice).
+ * - Resource/delegation grant at action time: when the dispatcher supplies a
+ *   RoleCheck, it is enforced through the canonical `can` (same precedence,
+ *   same deny-by-absence, 403 GRANT_REQUIRED on denial). Dispatchers with no
+ *   resource grant to check omit it and get lifecycle revalidation only.
+ *
+ * A store predating migration 0007 fails loud (503 ORG_STORE_NOT_MIGRATED)
+ * instead of dispatching unchecked. Codes and messages match the retired
+ * schedule-local helper exactly, so adopting callers keep every existing
+ * result/status/404/403 behavior.
+ */
+export async function resolveCurrentAuthority(
+  db: D1Database,
+  env: AdminEnv,
+  principal: Principal,
+  check?: RoleCheck,
+): Promise<CallerCtx> {
+  // Instance-admin recovery parity with resolveCaller: the env-held admin
+  // list passes without membership rows. Tick-exact: no org-existence gate
+  // on this path, matching the schedule-local helper this replaces.
+  if (instanceAdmins(env).has(principal.userId)) {
+    const admin: CallerCtx = {
+      principal: { orgId: principal.orgId, userId: principal.userId },
+      role: null,
+      kind: null,
+      isInstanceAdmin: true,
+      isOrgAdmin: false,
+    };
+    // `can` allows instance admins before any store read, so this stays
+    // available even when the role tables are unmigrated.
+    if (check) await requireGrant(db, admin, check);
+    return admin;
+  }
+  // One missing-table fence for all three reads: a store predating migration
+  // 0007 fails loud (503) instead of dispatching unchecked.
+  let org: { status?: string } | null;
+  let user: { status?: string } | null;
+  let membership: { role?: string; kind?: string; status?: string } | null;
+  try {
+    org = await db.prepare("SELECT * FROM organizations WHERE id=?").bind(principal.orgId).first<{
+      status?: string;
+    }>();
+    user = await db.prepare("SELECT * FROM users WHERE user_id=?").bind(principal.userId).first<{ status?: string }>();
+    membership = await db
+      .prepare("SELECT * FROM org_memberships WHERE org_id=? AND user_id=?")
+      .bind(principal.orgId, principal.userId)
+      .first<{ role?: string; kind?: string; status?: string }>();
+  } catch (error) {
+    if (error instanceof Error && /no such table/i.test(error.message)) {
+      throw new Fault(503, "ORG_STORE_NOT_MIGRATED", "Organization storage is not migrated: apply migration 0007.");
+    }
+    throw error;
+  }
+  if (!org) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
+  if ((org.status ?? "active") === "disabled") throw new Fault(403, "ORG_DISABLED", "This Organization is disabled.");
+  if (!user) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
+  if ((user.status ?? "active") !== "active") throw new Fault(403, "USER_DISABLED", "This user is disabled.");
+  if (!membership) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
+  if (membership.status === "revoked") throw new Fault(403, "MEMBERSHIP_REVOKED", "Membership is revoked.");
+  // Suspended, invited, and unknown statuses all read as not-active here: the
+  // resolver never activates membership, it only serves active authority.
+  if (membership.status !== "active") throw new Fault(403, "MEMBERSHIP_SUSPENDED", "Membership is not active.");
+  const ctx: CallerCtx = {
+    principal: { orgId: principal.orgId, userId: principal.userId },
+    role: (membership.role === "admin" ? "admin" : "member") as CallerCtx["role"],
+    kind: (membership.kind === "external" ? "external" : "ordinary") as CallerCtx["kind"],
+    isInstanceAdmin: false,
+    isOrgAdmin: membership.role === "admin",
+  };
+  if (check) await requireGrant(db, ctx, check);
+  return ctx;
 }

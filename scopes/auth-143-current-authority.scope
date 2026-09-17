@@ -1,0 +1,6 @@
+# AUTH-02 S3 residual (issue #143): canonical current-authority resolver for non-request schedule dispatch.
+src/roles.ts
+src/schedules.ts
+test/schedule-lifecycle.test.ts
+docs/architecture/018-resource-roles.md
+scopes/auth-143-current-authority.scope

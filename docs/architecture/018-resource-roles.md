@@ -96,6 +96,26 @@ Workflow instances are unaffected once dispatched (same in-flight posture as
 ADR 015 membership revocation): the Execution row keeps its stored
 `org_id`/`user_id`, and the org admin history surface keeps it visible.
 
+### Non-request dispatch (S3, issue #143)
+
+A Principal — or any persisted actor ID such as a schedule's `run_as_user_id`
+— is an identity reference, never proof of current authority. Any path that
+turns persisted identity into a new privileged action resolves through the
+one shared server-side resolver `resolveCurrentAuthority` (`src/roles.ts`)
+at action time instead of manufacturing `{ orgId, userId }` authority in
+feature code. The resolver revalidates Organization lifecycle,
+user/service-identity lifecycle (human and `service:` identities share the
+same users-table liveness gate; there is no service bypass), and
+membership/role/claim state with the request path's codes, and enforces a
+supplied `RoleCheck` through the canonical `can` above. An `invited`
+membership is never activated outside a verified request: unattended
+dispatch only serves already-active authority. Cron schedule promotion
+(`src/schedules.ts` `promoteWindow`) consumes the resolver for run-as
+revalidation; its schedule-local duplicate is deleted. Request-driven
+`resolveCaller` (ADR 015) is unchanged and stays the request adapter —
+this slice does not refactor it, add `table`/`file` kinds, or decide the
+S4 spine composition.
+
 ### Delegation (forms and apps are entry points)
 
 An authorized Form submit requires the Form `submit` grant — **not** a Saga
