@@ -44,6 +44,69 @@ it("degrades unknown result shapes to zeros instead of throwing", () => {
   });
 });
 
+it("emits counts-only telemetry for the hot-path history operations", async () => {
+  const seen: string[] = [];
+  vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+    seen.push(String(line));
+  });
+  const allowed = new Set([
+    "version",
+    "operation",
+    "kind",
+    "rowsRead",
+    "rowsWritten",
+    "rowsReturned",
+    "durationMs",
+    "servedByRegion",
+    "servedByPrimary",
+  ]);
+  const secretValue = "hotpath-secret-value-sentinel";
+  for (const operation of ["executions.history", "executions.history-filtered", "execution-logs.tail"] as const) {
+    seen.length = 0;
+    const stub = { results: [{ id: 1 }], meta: { rows_read: 7, rows_written: 0 } };
+    const out = await observeD1(operation, "all", () => Promise.resolve(stub));
+    expect(out).toBe(stub);
+    expect(seen).toHaveLength(1);
+    const line = seen[0] ?? "";
+    expect(line.startsWith("WRANGNAROK_D1 ")).toBe(true);
+    const payload = JSON.parse(line.slice("WRANGNAROK_D1 ".length)) as Record<string, unknown>;
+    for (const key of Object.keys(payload)) expect(allowed.has(key)).toBe(true);
+    expect(payload.operation).toBe(operation);
+    expect(payload.kind).toBe("all");
+    expect(payload.rowsRead).toBe(7);
+    expect(payload.rowsReturned).toBe(1);
+    expect(line).not.toContain(secretValue);
+    expect(line).not.toContain("SELECT");
+    expect(line).not.toContain("secret_payload");
+  }
+});
+
+it("never emits the SQL or bound values captured by the executed closure", async () => {
+  const seen: string[] = [];
+  vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+    seen.push(String(line));
+  });
+  const sql = "SELECT id FROM executions WHERE org_id=? AND user_id=? AND status IN (?,?)";
+  const boundOrg = "org-bound-sentinel-0001";
+  const boundStatus = "Running";
+  const stub = { results: [], meta: { rows_read: 3, rows_written: 0 } };
+  await observeD1("executions.history-filtered", "all", () => {
+    // The closure captures the statement shape and binds; telemetry must not
+    // repeat any of it — only the D1 meta counts flow out.
+    void sql;
+    void boundOrg;
+    void boundStatus;
+    return Promise.resolve(stub);
+  });
+  expect(seen).toHaveLength(1);
+  const line = seen[0] ?? "";
+  expect(line).toContain('"operation":"executions.history-filtered"');
+  expect(line).toContain('"rowsRead":3');
+  expect(line).not.toContain(sql);
+  expect(line).not.toContain(boundOrg);
+  expect(line).not.toContain(boundStatus);
+});
+
 it("returns the query result untouched and logs counts, never SQL", async () => {
   const seen: string[] = [];
   vi.spyOn(console, "log").mockImplementation((line: unknown) => {

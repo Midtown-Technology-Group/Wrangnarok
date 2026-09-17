@@ -27,6 +27,7 @@
 // which keeps attribution unforgeable.
 import { Fault, LOG_DATA_MAX_BYTES, LOG_MESSAGE_MAX_CHARS, parseDateBound } from "./domain";
 import type { Principal } from "./domain";
+import { observeD1 } from "./d1-observe";
 import { assertJsonSerializable } from "./saga";
 import { scrubExecutionText, scrubExecutionValue } from "./secrets";
 
@@ -354,10 +355,12 @@ export async function listExecutionLogs(
     clauses.push("seq>?");
     binds.push(query.afterSeq);
   }
-  const rows = await db
-    .prepare(`SELECT ${LOG_COLUMNS} FROM execution_logs WHERE ${clauses.join(" AND ")} ORDER BY seq ASC LIMIT ?`)
-    .bind(...binds, query.limit + 1)
-    .all<LogRow>();
+  const rows = await observeD1("execution-logs.tail", "all", () =>
+    db
+      .prepare(`SELECT ${LOG_COLUMNS} FROM execution_logs WHERE ${clauses.join(" AND ")} ORDER BY seq ASC LIMIT ?`)
+      .bind(...binds, query.limit + 1)
+      .all<LogRow>(),
+  );
   return toPage(rows.results, query.limit, query.afterSeq);
 }
 

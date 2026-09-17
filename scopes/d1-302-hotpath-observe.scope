@@ -1,0 +1,8 @@
+# Issue #302 hot-path observability slice (observe-only).
+# Wraps the already-reviewed execution-history and execution-log tail .all()
+# calls with observeD1 using stable operation names; no new statements,
+# round trips, DDL, primitive, dashboard, or product decision.
+src/executions.ts
+src/logs.ts
+test/d1-observe.test.ts
+scopes/d1-302-hotpath-observe.scope
