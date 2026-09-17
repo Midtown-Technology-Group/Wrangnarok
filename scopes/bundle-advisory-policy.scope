@@ -1,0 +1,13 @@
+# bundle-advisory-policy lane scope (issue #177, owner-approved policy decision).
+# Repository Worker bundle budget is advisory, not a merge gate: exact
+# measurement plus prominent warnings stay, soft-threshold failures go.
+# No production Worker source, dependency, binding, security-gate, coverage,
+# or other CI fail-closed change.
+scripts/check-bundle-budget.mjs
+test/limits-envelope.test.ts
+docs/feasibility-envelope.md
+docs/architecture/004-ci-cd.md
+docs/architecture/000-steward-checklist.md
+docs/upstream-parity.md
+.github/workflows/ci.yml
+scopes/bundle-advisory-policy.scope
