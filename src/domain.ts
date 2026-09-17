@@ -120,9 +120,10 @@ export const STEP_RETRY_CEILING = 2;
 export const VENDOR_TIMEOUT_MS = 1000;
 // NinjaOne vendor deadline (Phase 2, issue #76): same posture as echo — the
 // Integration enforces its own deadline and surfaces NINJA_VENDOR_TIMEOUT
-// for both aborted and merely-late vendors. New code routes it through
-// failSagaExecution; the six legacy timeout-mark-v1 Saga steps (untouched
-// until #416) now fail closed to the vendor retry budget (0 by default).
+// for both aborted and merely-late vendors. Every terminal routes through
+// failSagaExecution; any surviving legacy timeout-mark-v1 Saga step (see the
+// #416 migration order in ADR 033) fails closed to the vendor retry budget
+// (0 by default) until its migration lands.
 export const NINJA_TIMEOUT_MS = 5000;
 // --- Persisted per-Saga runtime policy (RUN-01, ADR 018) --------------------
 // NEVER Saga source: buildCatalog rejects these keys, and ordinary callers
@@ -267,9 +268,10 @@ export type ExecutionStatus = "Pending" | "Running" | "Succeeded" | "Failed" | "
 // pure TypeScript; Sagas must resolve every step.do retry limit through here.
 // ADR-033-3 (issue #414) retired timeout-mark-v1 from this set:
 // failSagaExecution classifies Failed vs TimedOut inside persist-failure-v1,
-// so no distinct timeout checkpoint exists. The six legacy Saga steps still
-// emit the name until #416 migrates them; unknown names fail closed to 0,
-// which the domain suite pins so the drift is loud, not silent.
+// so no distinct timeout checkpoint exists. Any surviving legacy Saga step
+// still emitting the name (see the #416 migration order in ADR 033) resolves
+// 0 until its migration lands; unknown names fail closed to 0, which the
+// domain suite pins so the drift is loud, not silent.
 const CHECKPOINT_STEPS: ReadonlySet<string> = new Set(["prepare-input-v1", "persist-success-v1", "persist-failure-v1"]);
 /** Child-dispatch Operations (`child-dispatch-<step>`) converge on one
  * deterministic child row, so they retry like other idempotent D1
