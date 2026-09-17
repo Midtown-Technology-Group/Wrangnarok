@@ -550,6 +550,14 @@ describe("policy rule uniqueness hardening (issue #430)", () => {
     ).first<{ name: string; sql: string }>();
     expect(index?.name).toBe("policy_rules_unique");
     expect(index?.sql ?? "").toContain("COALESCE");
+    // Exact index-set parity with migration 0013: the auto PK index plus the
+    // unique tuple index, no divergent extras on freshly bootstrapped tables.
+    const indexes = await bindings.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='policy_rules' ORDER BY name",
+    ).all<{ name: string }>();
+    expect(indexes.results.map((row) => row.name).sort()).toEqual(
+      ["policy_rules_unique", "sqlite_autoindex_policy_rules_1"].sort(),
+    );
     // The invariant holds at the D1 level, not just behind the application
     // pre-check: a raw duplicate tuple with a distinct id fails.
     const stamp = new Date().toISOString();
