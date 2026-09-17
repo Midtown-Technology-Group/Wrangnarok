@@ -10,10 +10,27 @@ import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 import { executionId, helloSaga, parseHelloInput } from "../src/domain";
-import { listSchedules, loadSchedule, promoteDueSchedules, promoteWindow, scheduleWindowKey } from "../src/schedules";
+import {
+  createSchedule,
+  listSchedules,
+  loadSchedule,
+  parseScheduleBody,
+  promoteDueSchedules,
+  promoteWindow,
+  scheduleWindowKey,
+} from "../src/schedules";
 import type { ScheduleRow } from "../src/schedules";
 import { submit } from "../src/executions";
 import { SAGA_DEFINITIONS } from "../src/sagas";
+import {
+  addGrant,
+  assignRole,
+  createRole,
+  deleteRole,
+  ensureRoleTables,
+  resolveCurrentAuthority,
+  revokeAssignment,
+} from "../src/roles";
 
 const bindings = env as unknown as Bindings;
 const principal = { orgId: "00000000-0000-4000-8000-000000000001", userId: "00000000-0000-4000-8000-000000000002" };
@@ -408,6 +425,132 @@ describe("TRG-01 promotion semantics (workerd)", () => {
       await bindings.DB.prepare("UPDATE org_memberships SET status='active' WHERE org_id=? AND user_id=?")
         .bind(principal.orgId, principal.userId)
         .run();
+    }
+  }, 25000);
+  it("revalidates run-as authority through the shared resolver with zero non-HTTP dispatch after revocation (AUTH-02 S3)", async () => {
+    // S3 canonical-resolver regression (issue #143): the persisted run-as
+    // IDs are an identity reference, never proof of current authority.
+    // An ordinary (non-admin) run-as holds a saga execute grant at schedule
+    // creation; after membership revocation the shared resolver fences the
+    // non-HTTP tick with zero submit and zero new Execution rows, and after
+    // grant revocation it fences with GRANT_REQUIRED even with live
+    // lifecycle. Unknown service identities fail closed without dispatch.
+    const ORDINARY = "00000000-0000-4000-8000-000000000003";
+    await ensureRoleTables(bindings.DB);
+    const stamp = new Date().toISOString();
+    await bindings.DB.prepare(
+      "INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?) ON CONFLICT(user_id) DO NOTHING",
+    )
+      .bind(ORDINARY, stamp)
+      .run();
+    await bindings.DB.prepare(
+      "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,'member','active','ordinary',?,?) ON CONFLICT(org_id,user_id) DO NOTHING",
+    )
+      .bind(principal.orgId, ORDINARY, stamp, stamp)
+      .run();
+    await bindings.DB.prepare(
+      "UPDATE org_memberships SET role='member',status='active',kind='ordinary' WHERE org_id=? AND user_id=?",
+    )
+      .bind(principal.orgId, ORDINARY)
+      .run();
+    let roleId: string | null = null;
+    try {
+      roleId = (await createRole(bindings.DB, principal.orgId, "s3-schedule-runners")).id;
+      await addGrant(bindings.DB, principal.orgId, roleId, "saga", helloSaga.id, "execute");
+      await assignRole(bindings.DB, principal.orgId, roleId, ORDINARY);
+      const runAs = { orgId: principal.orgId, userId: ORDINARY };
+      const check = {
+        orgId: principal.orgId,
+        resourceKind: "saga" as const,
+        resourceId: helloSaga.id,
+        action: "execute" as const,
+      };
+      // Live lifecycle plus grant: the shared resolver authorizes.
+      const allowed = await resolveCurrentAuthority(bindings.DB, {}, runAs, check);
+      expect(allowed.principal).toEqual(runAs);
+      expect(allowed.isOrgAdmin).toBe(false);
+      // Unknown service identities fail closed: no users row, no membership,
+      // no dispatch — a persisted actor ID never manufactures authority.
+      await expect(
+        resolveCurrentAuthority(bindings.DB, {}, { orgId: principal.orgId, userId: "service:probe" }, check),
+      ).rejects.toMatchObject({ code: "ORG_NOT_FOUND" });
+      // Schedule owned by the ordinary run-as. Direct create bypasses the
+      // HTTP admin gate; promotion authority is what this pins.
+      const parsed = parseScheduleBody(
+        {
+          name: "authority-revoked-probe",
+          sagaId: helloSaga.id,
+          kind: "recurring",
+          cron: "* * * * *",
+          input: { name: "sched" },
+        },
+        SAGA_DEFINITIONS,
+      );
+      await createSchedule(bindings.DB, runAs, parsed, SAGA_DEFINITIONS);
+      const tickEnv = { DB: bindings.DB, HELLO_WORKFLOW: bindings.HELLO_WORKFLOW } as never;
+      let ordinarySubmits = 0;
+      const countingSubmit: typeof submit = async (...args) => {
+        if (args[1].userId === ORDINARY) ordinarySubmits += 1;
+        return submit(...args);
+      };
+      // Ancient due instants sort first in the oldest-first per-org scan, so
+      // this probe is admitted even beside older leftover rows.
+      await bindings.DB.prepare("UPDATE schedules SET next_due_at=? WHERE org_id=? AND name=?")
+        .bind(new Date(Date.now() - 3_600_000).toISOString(), principal.orgId, "authority-revoked-probe")
+        .run();
+      const first = await promoteDueSchedules(bindings.DB, tickEnv, SAGA_DEFINITIONS, countingSubmit, new Date());
+      expect(first.promoted.map((entry) => entry.scheduleName)).toContain("authority-revoked-probe");
+      expect(ordinarySubmits).toBe(1);
+      // Revoke AFTER creation, BEFORE the next non-HTTP promotion.
+      await bindings.DB.prepare("UPDATE org_memberships SET status='revoked' WHERE org_id=? AND user_id=?")
+        .bind(principal.orgId, ORDINARY)
+        .run();
+      await expect(resolveCurrentAuthority(bindings.DB, {}, runAs, check)).rejects.toMatchObject({
+        code: "MEMBERSHIP_REVOKED",
+      });
+      const executionsBefore = await bindings.DB.prepare(
+        "SELECT COUNT(*) AS n FROM executions WHERE org_id=? AND user_id=?",
+      )
+        .bind(principal.orgId, ORDINARY)
+        .first<{ n: number }>();
+      ordinarySubmits = 0;
+      await bindings.DB.prepare("UPDATE schedules SET next_due_at=? WHERE org_id=? AND name=?")
+        .bind(new Date(Date.now() - 7_200_000).toISOString(), principal.orgId, "authority-revoked-probe")
+        .run();
+      const second = await promoteDueSchedules(bindings.DB, tickEnv, SAGA_DEFINITIONS, countingSubmit, new Date());
+      expect(second.promoted.map((entry) => entry.scheduleName)).not.toContain("authority-revoked-probe");
+      expect(second.skipped).toContain("authority-revoked-probe");
+      expect(ordinarySubmits).toBe(0);
+      const executionsAfter = await bindings.DB.prepare(
+        "SELECT COUNT(*) AS n FROM executions WHERE org_id=? AND user_id=?",
+      )
+        .bind(principal.orgId, ORDINARY)
+        .first<{ n: number }>();
+      expect(executionsAfter?.n).toBe(executionsBefore?.n ?? 0);
+      // Grant revocation fences even with live lifecycle: restore the
+      // membership, drop the assignment, and the shared resolver answers
+      // GRANT_REQUIRED through the canonical deny-by-absence path.
+      await bindings.DB.prepare("UPDATE org_memberships SET status='active' WHERE org_id=? AND user_id=?")
+        .bind(principal.orgId, ORDINARY)
+        .run();
+      await revokeAssignment(bindings.DB, principal.orgId, roleId, ORDINARY);
+      await expect(resolveCurrentAuthority(bindings.DB, {}, runAs, check)).rejects.toMatchObject({
+        code: "GRANT_REQUIRED",
+      });
+    } finally {
+      await bindings.DB.prepare("UPDATE org_memberships SET status='active' WHERE org_id=? AND user_id=?")
+        .bind(principal.orgId, ORDINARY)
+        .run();
+      // Delivery rows reference the schedule row (migration 0016 FK), so
+      // they go first — same order as the route's deleteSchedule batch.
+      const probeId = await bindings.DB.prepare("SELECT id FROM schedules WHERE org_id=? AND name=?")
+        .bind(principal.orgId, "authority-revoked-probe")
+        .first<{ id: string }>();
+      if (probeId) {
+        await bindings.DB.prepare("DELETE FROM schedule_deliveries WHERE schedule_id=?").bind(probeId.id).run();
+        await bindings.DB.prepare("DELETE FROM schedules WHERE id=?").bind(probeId.id).run();
+      }
+      if (roleId) await deleteRole(bindings.DB, principal.orgId, roleId).catch(() => undefined);
     }
   }, 25000);
   it("dispatches zero work when the run-as Organization is disabled before the tick", async () => {

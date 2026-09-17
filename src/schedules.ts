@@ -28,8 +28,7 @@ import type { Principal, SagaDef } from "./domain";
 import type { Bindings } from "./bindings";
 import { submit } from "./executions";
 import { SCHEDULE_DELIVERED_TOPIC, recordSourceDelivery } from "./events";
-import { instanceAdmins } from "./orgs";
-import type { AdminEnv } from "./orgs";
+import { resolveCurrentAuthority } from "./roles";
 
 export const SCHEDULE_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const SAFE_WINDOW_CHAR = /^[a-zA-Z0-9._:-]+$/;
@@ -521,53 +520,6 @@ function isMissingTable(error: unknown): boolean {
   return error instanceof Error && /no such table/i.test(error.message);
 }
 
-function storeNotMigrated(): Fault {
-  return new Fault(503, "ORG_STORE_NOT_MIGRATED", "Organization storage is not migrated: apply migration 0007.");
-}
-
-/** Revalidate the persisted run-as authority immediately before dispatch.
- * Same lifecycle semantics as the request path (orgs.resolveCaller): unknown
- * orgs answer as not-found, disabled orgs/users and non-active memberships
- * fail closed — but with two tick-specific differences. There is no verified
- * identity present, so an `invited` membership is never activated here: the
- * tick only dispatches for already-active authority. And a store that predates
- * migration 0007 fails loud (503) instead of dispatching unchecked. */
-async function assertScheduleAuthority(db: D1Database, env: AdminEnv, schedule: ScheduleRow): Promise<Principal> {
-  const principal: Principal = { orgId: schedule.org_id, userId: schedule.run_as_user_id };
-  // Instance-admin recovery parity: resolveCaller lets the env-held admin list
-  // through without membership rows, so the tick does the same.
-  if (instanceAdmins(env).has(principal.userId)) return principal;
-  // One missing-table fence for all three reads: a store predating migration
-  // 0007 fails loud (503) instead of dispatching unchecked.
-  let org: { status?: string } | null;
-  let user: { status?: string } | null;
-  let membership: { status?: string } | null;
-  try {
-    org = await db.prepare("SELECT * FROM organizations WHERE id=?").bind(schedule.org_id).first<{ status?: string }>();
-    user = await db
-      .prepare("SELECT * FROM users WHERE user_id=?")
-      .bind(schedule.run_as_user_id)
-      .first<{ status?: string }>();
-    membership = await db
-      .prepare("SELECT * FROM org_memberships WHERE org_id=? AND user_id=?")
-      .bind(schedule.org_id, schedule.run_as_user_id)
-      .first<{ status?: string }>();
-  } catch (error) {
-    if (isMissingTable(error)) throw storeNotMigrated();
-    throw error;
-  }
-  if (!org) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
-  if ((org.status ?? "active") === "disabled") throw new Fault(403, "ORG_DISABLED", "This Organization is disabled.");
-  if (!user) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
-  if ((user.status ?? "active") !== "active") throw new Fault(403, "USER_DISABLED", "This user is disabled.");
-  if (!membership) throw new Fault(404, "ORG_NOT_FOUND", "Organization not found.");
-  if (membership.status === "revoked") throw new Fault(403, "MEMBERSHIP_REVOKED", "Membership is revoked.");
-  // Suspended, invited, and unknown statuses all read as not-active here: the
-  // tick never activates membership, it only dispatches for active authority.
-  if (membership.status !== "active") throw new Fault(403, "MEMBERSHIP_SUSPENDED", "Membership is not active.");
-  return principal;
-}
-
 /** Tick skip codes: per-schedule fences that report a skip and let the next
  * tick retry (or stay refused for cancelled/unauthorized windows), never a
  * tick failure. Store-missing (ORG_STORE_NOT_MIGRATED) is deliberately absent:
@@ -617,11 +569,16 @@ export async function promoteWindow(
   }
   if (!fresh) throw new Fault(409, "SCHEDULE_GONE", "This schedule was deleted before dispatch.");
   if (fresh.enabled !== 1) throw new Fault(409, "SCHEDULE_DISABLED", "This schedule was disabled before dispatch.");
-  // Run-as revalidation: the persisted owner IDs are not continuing
-  // authorization. Mirror the request-path lifecycle semantics
-  // (orgs.resolveCaller) without its invited-activation write — an unattended
-  // tick never activates membership, it only dispatches for active authority.
-  const principal = await assertScheduleAuthority(db, env, fresh);
+  // Run-as revalidation: the persisted owner IDs are an identity reference,
+  // not continuing authorization. The canonical shared resolver
+  // (roles.resolveCurrentAuthority) re-resolves organization, user, and
+  // membership lifecycle at action time with the request path's lifecycle
+  // semantics minus its invited-activation write — an unattended tick never
+  // activates membership, it only dispatches for active authority.
+  const { principal } = await resolveCurrentAuthority(db, env, {
+    orgId: fresh.org_id,
+    userId: fresh.run_as_user_id,
+  });
   const saga = sagas.find((entry) => entry.id === fresh.saga_id);
   if (!saga) throw new Fault(500, "SCHEDULE_MISCONFIGURED", "This schedule is not configured correctly.");
   const key = await scheduleWindowKey(fresh.id, window);
