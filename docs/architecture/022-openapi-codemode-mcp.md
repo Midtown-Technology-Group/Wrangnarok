@@ -184,13 +184,18 @@ an OpenAPI 3.x document. Four generator contracts landed with the Defined
 Networking proof (2026-09-16) and stay stable:
 
 1. **Auth kind is detected, never assumed.** The generator reads the spec's
-   `components.securitySchemes`: `http` bearer, `apiKey`, and `http` basic
-   yield the bearer ApiToken shape (`Authorization: Bearer <token>`, one
-   `apiToken` secret); `oauth2` flows with a client-credentials-capable grant
-   yield the OAuth client-credentials exchange shape (the HaloPSA posture).
-   Anything else — including a spec with no recognizable scheme — fails
-   closed with `GENERATOR_INVALID_OPTIONS`. An explicit `--auth-kind`
-   override must agree with the detected kind.
+   effective security requirements: only schemes actually referenced by a
+   `security` block (top-level default or per-operation override) select the
+   kind. Referenced `http` bearer, `apiKey`, and `http` basic yield the
+   bearer shape (`Authorization: Bearer <token>`, one `apiToken` secret);
+   referenced `oauth2` with an explicit client-credentials-capable grant
+   yields the OAuth exchange shape (the HaloPSA posture). Unresolved
+   references, heterogeneous requirements (operations needing different
+   credential shapes under one host), missing/empty OAuth `flows`, and
+   anything else — including a spec with no security blocks — fail closed
+   with `GENERATOR_INVALID_OPTIONS`. An explicit `--auth-kind` override must
+   agree with the detected kind. Postman collections carry no auth metadata,
+   so the converter declares a bearer scheme and documents the assumption.
 2. **Integration identity is a deterministic UUIDv5** over the pinned spec
    digest hex (`SHA-256` of the exact spec bytes): `UUIDv5(namespace,
    "wrangnarok.integration.v1:<digest>")` per RFC 9562 section 6.5. Same

@@ -52,6 +52,7 @@ export function emitIntegrationSource({
   version,
   authKind = "clientCredentials",
   integrationUuid,
+  includeDeprecated = false,
   tokenPath = "/auth/token",
   scope = "all",
   timeoutMs = 5000,
@@ -70,6 +71,7 @@ export function emitIntegrationSource({
   // these, so out-of-band callers get safe output rather than a throw from
   // deep inside the template.
   const kind = authKind === "apiToken" ? "apiToken" : "clientCredentials";
+  const deprecatedOpts = includeDeprecated === true ? "{ includeDeprecated: true }" : "{}";
   const tokenPathLiteral = JSON.stringify(cleanTokenPath(tokenPath).slice(0, 128));
   const scopeLiteral = JSON.stringify(cleanScope(scope).slice(0, 128));
   const timeoutMsLiteral = JSON.stringify(cleanTimeoutMs(timeoutMs));
@@ -194,7 +196,7 @@ import type { OAuthFaultTable } from "../oauth";
   if (!view.enabled) {
     throw new Fault(404, "OPENAPI_CONNECTION_MISSING", "The Connection is disabled.");
   }
-  const operations = indexOperations(await pinnedSpec(), ${prefix}_CLASSIFICATIONS);
+  const operations = indexOperations(await pinnedSpec(), ${prefix}_CLASSIFICATIONS, ${deprecatedOpts});
   const operation: ContractOperation = inspectOperation(operations, call.operationId);
   authorizeOperation(operation, ${prefix}_DEFAULT_POLICY);
   const pinned = await pinnedContract();
@@ -235,6 +237,9 @@ import type { OAuthFaultTable } from "../oauth";
     });
   } catch (error) {
     if (error instanceof Fault) throw error;
+    if (error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      throw new Fault(504, "${prefix}_VENDOR_TIMEOUT", "The vendor exceeded its deadline.");
+    }
     throw new Fault(502, "OPENAPI_EXECUTION_FAILED", "The vendor API did not answer.");
   }
   if (response.status >= 300 && response.status < 400) {
@@ -284,7 +289,7 @@ import type { OAuthFaultTable } from "../oauth";
   if (!view.enabled) {
     throw new Fault(404, "OPENAPI_CONNECTION_MISSING", "The Connection is disabled.");
   }
-  const operations = indexOperations(await pinnedSpec(), ${prefix}_CLASSIFICATIONS);
+  const operations = indexOperations(await pinnedSpec(), ${prefix}_CLASSIFICATIONS, ${deprecatedOpts});
   const operation: ContractOperation = inspectOperation(operations, call.operationId);
   authorizeOperation(operation, ${prefix}_DEFAULT_POLICY);
   const pinned = await pinnedContract();
@@ -470,11 +475,11 @@ async function pinnedContract() {
 }
 
 export function search${typeName}Operations(query: string): readonly ContractOperation[] {
-  return searchOperations(indexOperations(__GENERATED_SPEC__, ${prefix}_CLASSIFICATIONS), query);
+  return searchOperations(indexOperations(__GENERATED_SPEC__, ${prefix}_CLASSIFICATIONS, ${deprecatedOpts}), query);
 }
 
 export function inspect${typeName}Operation(operationId: string): ContractOperation {
-  return inspectOperation(indexOperations(__GENERATED_SPEC__, ${prefix}_CLASSIFICATIONS), operationId);
+  return inspectOperation(indexOperations(__GENERATED_SPEC__, ${prefix}_CLASSIFICATIONS, ${deprecatedOpts}), operationId);
 }
 `;
 }

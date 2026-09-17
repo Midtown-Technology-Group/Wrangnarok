@@ -102,14 +102,17 @@ export interface OperationDef {
  * declared nothing recognizable and generation must fail closed. */
 export type GeneratorAuthKind = "apiToken" | "clientCredentials" | "unknown";
 
-/** Detect the generator auth kind from the spec's `components.securitySchemes`
- * (falling back to any referenced scheme names in top-level or per-operation
- * `security` blocks when components are absent). `http` bearer and `apiKey`
- * schemes yield `apiToken` (bearer ApiToken shape); `oauth2` flows with a
- * clientCredentials-capable grant (`clientCredentials`, `application`, or an
- * empty flows object) yield `clientCredentials`. Anything else — including a
- * spec with no security declarations at all — yields `unknown` so generation
- * fails closed instead of stamping the wrong credential shape. */
+/** Detect the generator auth kind from the spec's effective security
+ * requirements. Only schemes actually referenced by a `security` block
+ * (top-level, defaulting every operation, or per-operation override) select
+ * the kind: `http` bearer, `apiKey`, and `http` basic reference yield
+ * `apiToken` (bearer shape); `oauth2` with an explicit
+ * clientCredentials-capable grant yields `clientCredentials`. Unresolved
+ * references, heterogeneous requirements (operations needing different
+ * credential shapes under one host), and anything unrecognized yield
+ * `unknown` so generation fails closed instead of stamping the wrong
+ * credential shape. A spec with no security blocks at all is also `unknown`:
+ * never guess bearer from silence. */
 export function detectGeneratorAuthKind(doc: OpenApiDocument): GeneratorAuthKind {
   const raw = doc as unknown as Record<string, unknown>;
   const components = raw["components"];
@@ -121,22 +124,20 @@ export function detectGeneratorAuthKind(doc: OpenApiDocument): GeneratorAuthKind
     schemesRaw !== null && typeof schemesRaw === "object" && !Array.isArray(schemesRaw)
       ? (schemesRaw as Record<string, unknown>)
       : {};
-  const names = Object.keys(schemes);
-  // No declared schemes: consult security references (a spec may reference a
-  // scheme name without declaring components). Nothing recognizable either
-  // way means unknown — never guess bearer from silence.
-  if (names.length === 0) {
-    return referencesBearerName(raw) ? "apiToken" : "unknown";
-  }
+  const referenced = referencedSchemeNames(raw);
+  if (referenced.size === 0) return "unknown";
+  const lowered: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schemes)) lowered[key.toLowerCase()] = value;
   let sawBearer = false;
   let sawOAuth = false;
-  for (const name of names) {
-    const scheme = schemes[name];
-    if (scheme === null || typeof scheme !== "object" || Array.isArray(scheme)) continue;
+  for (const name of referenced) {
+    const scheme = lowered[name];
+    if (scheme === null || typeof scheme !== "object" || Array.isArray(scheme)) return "unknown";
     const entry = scheme as Record<string, unknown>;
     const type = typeof entry["type"] === "string" ? entry["type"].toLowerCase() : "";
     if (type === "oauth2") {
       if (oauthGrantsClientCredentials(entry["flows"])) sawOAuth = true;
+      else return "unknown";
       continue;
     }
     if (type === "http" && typeof entry["scheme"] === "string" && entry["scheme"].toLowerCase() === "bearer") {
@@ -153,24 +154,22 @@ export function detectGeneratorAuthKind(doc: OpenApiDocument): GeneratorAuthKind
       sawBearer = true;
       continue;
     }
+    return "unknown";
   }
+  // One generated host carries one credential shape: heterogeneous
+  // requirements fail closed rather than emitting a host that fits half
+  // the operations.
+  if (sawBearer && sawOAuth) return "unknown";
   if (sawBearer) return "apiToken";
   if (sawOAuth) return "clientCredentials";
-  return referencesBearerName(raw) ? "apiToken" : "unknown";
+  return "unknown";
 }
 
-function oauthGrantsClientCredentials(flows: unknown): boolean {
-  if (flows === null || typeof flows !== "object" || Array.isArray(flows)) return true;
-  const table = flows as Record<string, unknown>;
-  const keys = Object.keys(table);
-  if (keys.length === 0) return true;
-  return keys.some((key) => ["clientcredentials", "client_credentials", "application"].includes(key.toLowerCase()));
-}
-
-/** True when any top-level or per-operation `security` block references a
- * name shaped like a bearer/api-token scheme (ApiToken, bearer, apiKey).
- * Structural fallback only: precise typing still comes from securitySchemes. */
-function referencesBearerName(raw: Record<string, unknown>): boolean {
+/** Every scheme name referenced by any top-level or per-operation `security`
+ * block (lowercased). Per-operation blocks override the top-level default
+ * for that operation; an empty array means anonymous for that operation.
+ * Malformed blocks contribute nothing (fail closed downstream). */
+function referencedSchemeNames(raw: Record<string, unknown>): Set<string> {
   const names = new Set<string>();
   const collect = (value: unknown): void => {
     if (!Array.isArray(value)) return;
@@ -190,8 +189,18 @@ function referencesBearerName(raw: Record<string, unknown>): boolean {
       }
     }
   }
-  if (names.size === 0) return false;
-  return [...names].some((name) => /apitoken|bearer|apikey|api_key|token/.test(name));
+  return names;
+}
+
+/** True only when `flows` explicitly declares a clientCredentials-capable
+ * grant (`clientCredentials`, `client_credentials`, or `application`).
+ * Missing, malformed, or empty flows fail closed: an oauth2 scheme without
+ * an explicit grant never selects the client-credentials shape. */
+function oauthGrantsClientCredentials(flows: unknown): boolean {
+  if (flows === null || typeof flows !== "object" || Array.isArray(flows)) return false;
+  const keys = Object.keys(flows as Record<string, unknown>);
+  if (keys.length === 0) return false;
+  return keys.some((key) => ["clientcredentials", "client_credentials", "application"].includes(key.toLowerCase()));
 }
 
 const OPERATION_ID = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;

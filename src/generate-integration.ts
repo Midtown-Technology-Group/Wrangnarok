@@ -242,6 +242,7 @@ export function generateIntegrationModule(
     version,
     authKind,
     integrationUuid: integrationId,
+    includeDeprecated,
     tokenPath,
     scope,
     timeoutMs,

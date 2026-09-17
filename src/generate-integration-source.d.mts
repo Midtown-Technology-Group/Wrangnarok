@@ -17,6 +17,8 @@ export interface IntegrationSourceInput {
   readonly authKind?: EmitterAuthKind;
   /** Deterministic UUIDv5 Integration ID (see integrationUuidV5). */
   readonly integrationUuid?: string;
+  /** Whether deprecated operations were included (threaded into runtime calls). */
+  readonly includeDeprecated?: boolean;
   readonly tokenPath?: string;
   readonly scope?: string;
   readonly timeoutMs?: number;

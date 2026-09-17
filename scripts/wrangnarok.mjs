@@ -123,13 +123,13 @@ function stripEmbeddedValue(value) {
 }
 
 function oauthGrantsClientCredentials(flows) {
-  if (flows === null || typeof flows !== "object" || Array.isArray(flows)) return true;
+  if (flows === null || typeof flows !== "object" || Array.isArray(flows)) return false;
   const keys = Object.keys(flows);
-  if (keys.length === 0) return true;
+  if (keys.length === 0) return false;
   return keys.some((key) => ["clientcredentials", "client_credentials", "application"].includes(key.toLowerCase()));
 }
 
-function referencesBearerName(raw) {
+function referencedSchemeNames(raw) {
   const names = new Set();
   const collect = (value) => {
     if (!Array.isArray(value)) return;
@@ -149,14 +149,14 @@ function referencesBearerName(raw) {
       }
     }
   }
-  if (names.size === 0) return false;
-  return [...names].some((name) => /apitoken|bearer|apikey|api_key|token/.test(name));
+  if (names.size === 0) return names;
+  return names;
 }
 
 /** Mirror of detectGeneratorAuthKind in src/openapi.ts (the wrapper cannot
- * import TS): http/bearer, apiKey, and basic yield apiToken; oauth2 with a
- * clientCredentials-capable grant yields clientCredentials; anything else
- * yields unknown so generation fails closed. */
+ * import TS): only referenced schemes select the kind; unresolved,
+ * heterogeneous, or unrecognized requirements yield unknown so generation
+ * fails closed. */
 function detectAuthKind(doc) {
   const raw = doc;
   const components = raw.components;
@@ -165,16 +165,19 @@ function detectAuthKind(doc) {
       ? components.securitySchemes
       : undefined;
   const schemes = schemesRaw !== null && typeof schemesRaw === "object" && !Array.isArray(schemesRaw) ? schemesRaw : {};
-  const names = Object.keys(schemes);
-  if (names.length === 0) return referencesBearerName(raw) ? "apiToken" : "unknown";
+  const referenced = referencedSchemeNames(raw);
+  if (referenced.size === 0) return "unknown";
+  const lowered = {};
+  for (const [key, value] of Object.entries(schemes)) lowered[key.toLowerCase()] = value;
   let sawBearer = false;
   let sawOAuth = false;
-  for (const name of names) {
-    const scheme = schemes[name];
-    if (scheme === null || typeof scheme !== "object" || Array.isArray(scheme)) continue;
+  for (const name of referenced) {
+    const scheme = lowered[name];
+    if (scheme === null || typeof scheme !== "object" || Array.isArray(scheme)) return "unknown";
     const type = typeof scheme.type === "string" ? scheme.type.toLowerCase() : "";
     if (type === "oauth2") {
       if (oauthGrantsClientCredentials(scheme.flows)) sawOAuth = true;
+      else return "unknown";
       continue;
     }
     if (type === "http" && typeof scheme.scheme === "string" && scheme.scheme.toLowerCase() === "bearer") {
@@ -189,10 +192,12 @@ function detectAuthKind(doc) {
       sawBearer = true;
       continue;
     }
+    return "unknown";
   }
+  if (sawBearer && sawOAuth) return "unknown";
   if (sawBearer) return "apiToken";
   if (sawOAuth) return "clientCredentials";
-  return referencesBearerName(raw) ? "apiToken" : "unknown";
+  return "unknown";
 }
 
 function fail(code, message) {
@@ -412,6 +417,7 @@ function validateAndGenerate(ctx) {
     version,
     authKind,
     integrationUuid,
+    includeDeprecated,
     tokenPath,
     scope,
     timeoutMs,
