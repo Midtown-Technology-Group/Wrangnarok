@@ -150,6 +150,20 @@ import {
   vendorChallenge,
 } from "./endpoints";
 import {
+  appEmbedSummary,
+  checkAppEmbedBinding,
+  checkAppEmbedOrigin,
+  createAppEmbedGrant,
+  listAppEmbedGrants,
+  loadAppEmbedGrant,
+  loadLiveDeployment,
+  parseAppEmbedGrantId,
+  revokeAppEmbedGrant,
+  rotateAppEmbedGrant,
+  touchAppEmbedGrantUse,
+  verifyAppEmbedSecret,
+} from "./app-embeds";
+import {
   assertNoEmbedFileRefs,
   checkEmbedBinding,
   checkEmbedOrigin,
@@ -365,6 +379,20 @@ import {
   type ResourceAction,
   type ResourceKind,
 } from "./roles";
+import {
+  anonPrincipal,
+  anonPubIdFromUser,
+  checkPublicationBinding,
+  disablePublication,
+  isHoneypotFilled,
+  loadPublication,
+  loadScopedPublication,
+  parsePublicationId,
+  publicationSummary,
+  publishForm,
+  reviewPublication,
+  touchPublicationUse,
+} from "./public-forms";
 import { SAGA_CATALOG, SAGA_DEFINITIONS } from "./sagas";
 import { describeContract, SDK_DOC_PATH, SDK_VERSION } from "./sdk";
 import { isProviderEligible, parseProviderSubmission, providerSummary, runProvider } from "./sync";
@@ -823,7 +851,11 @@ async function scheduleFormExecution(
  * merged file ref past the refusal can only come from an author-declared
  * default, and stale defaults fail identically on both paths. `extraHeaders`
  * rides both receipts as-is (the embed route passes its CORS headers; the
- * operator route passes nothing). */
+ * operator route passes nothing). `disclosure` selects the receipt shape:
+ * anonymous public submissions dispatch identically but answer
+ * confirmation-only (`{ form, received: true }`, no execution ID, no
+ * status URL, no Location header), so the receipt never discloses
+ * execution/history. */
 async function runFormSubmit(
   env: Bindings,
   caller: Principal,
@@ -832,6 +864,7 @@ async function runFormSubmit(
   body: unknown,
   files: "check" | "refuse",
   extraHeaders: Record<string, string> = {},
+  disclosure: "standard" | "confirmation-only" = "standard",
 ): Promise<Response> {
   const name = def.name;
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
@@ -886,6 +919,9 @@ async function runFormSubmit(
     // a different key (PR 320 review).
     const scheduledInput = { ...(input as Record<string, unknown>), __form: name, __scheduleAt: scheduleAt };
     await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, scheduledInput);
+    if (disclosure === "confirmation-only") {
+      return json({ form: name, received: true }, scheduled.replayed ? 200 : 202, { ...extraHeaders });
+    }
     return json({ form: name, ...scheduled }, scheduled.replayed ? 200 : 202, {
       Location: scheduled.statusUrl,
       ...extraHeaders,
@@ -904,6 +940,9 @@ async function runFormSubmit(
   // under a different key afterwards.
   await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, sagaInput);
   // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
+  if (disclosure === "confirmation-only") {
+    return json({ form: name, received: true }, accepted.replayed ? 200 : 202, { ...extraHeaders });
+  }
   return json({ form: name, ...accepted }, accepted.replayed ? 200 : 202, {
     Location: accepted.statusUrl,
     ...extraHeaders,
@@ -1153,6 +1192,175 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           body,
           "refuse",
           cors,
+        );
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // EMBED-01 slice 2 (issue #156): signed app-embed asset reads. Pre-gate
+    // like the form-embed routes — the grant secret authenticates, never an
+    // operator session. Secret, origin, and deployment fingerprint all
+    // verify before any byte serves; success serves the ACTIVE deployment's
+    // stored bundle file. Unknown grants answer 404; revoked grants 410;
+    // expired or wrong secrets 401; foreign origins 403; a redeploy since
+    // issue/rotate 409. Form-embed grant IDs never resolve here (404), so
+    // the two signed classes cannot be repurposed across surfaces.
+    const appAssetEmbed = /^\/api\/app-embeds\/([0-9a-fA-F-]{36})\/assets\/(.+)$/.exec(url.pathname);
+    if (appAssetEmbed?.[1] && appAssetEmbed[2] && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin, X-Embed-Secret");
+    }
+    if (appAssetEmbed?.[1] && appAssetEmbed[2] && request.method === "GET") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read embed receipts and embed errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        const grantId = parseAppEmbedGrantId(appAssetEmbed[1]);
+        const grant = await loadAppEmbedGrant(env.DB, grantId).catch(() => null);
+        if (!grant) throw new Fault(404, "NOT_FOUND", "Not found.");
+        await verifyAppEmbedSecret(grant, request.headers.get("X-Embed-Secret"));
+        checkAppEmbedOrigin(grant, request.headers.get("Origin"));
+        const live = await loadLiveDeployment(env.DB, grant.org_id, grant.app_id);
+        if (!live) throw new Fault(404, "APP_NOT_FOUND", "App not found.");
+        await checkAppEmbedBinding(grant, live);
+        const served = await serveAsset(
+          env.DB,
+          { orgId: grant.org_id, userId: `appembed:${grant.id}` },
+          grant.app_id,
+          appAssetEmbed[2],
+        );
+        await touchAppEmbedGrantUse(env.DB, grant.id);
+        return apiBytes(served.content, 200, {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-store",
+          ETag: `"${served.contentHash}"`,
+          "X-Content-Type-Options": "nosniff",
+          ...cors,
+        });
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // EMBED-01 slice 2 (issue #156): anonymous public-form bootstrap.
+    // Pre-gate and credential-free by design — the publication ID is a
+    // public lookup key, never a secret. A live, capability-fresh
+    // publication mints a standard FORM-02 startup handle bound to the
+    // anonymous principal, plus the inspectable snapshot, resolved options,
+    // the server-authoritative declaration, the fingerprint, and the
+    // honeypot field the client must leave empty. Unknown publications
+    // answer 404; disabled ones 404 FORM_NOT_PUBLISHED (blocked means gone
+    // to the outside world); a form changed since publish/review 409
+    // PUBLICATION_STALE.
+    const publicStartup = /^\/api\/public\/([0-9a-fA-F-]{36})\/startup$/.exec(url.pathname);
+    if (publicStartup?.[1] && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin");
+    }
+    if (publicStartup?.[1] && request.method === "POST") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read public receipts and public errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        requireJson(request);
+        const pubId = parsePublicationId(publicStartup[1]);
+        const pub = await loadPublication(env.DB, pubId).catch(() => null);
+        if (!pub) throw new Fault(404, "NOT_FOUND", "Not found.");
+        if (pub.enabled !== 1) throw new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
+        const def = await loadForm(env.DB, pub.org_id, pub.form_name);
+        if (!def) throw new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
+        checkPublicationBinding(pub, { formId: def.id, fingerprint: await fingerprintFormDef(def) });
+        const started = await startFormSession(
+          env.DB,
+          anonPrincipal(pub.org_id, pub.id),
+          def,
+          await boundedJson(request.body),
+          readProviderRows,
+        );
+        await touchPublicationUse(env.DB, pub.id);
+        return json(
+          {
+            form: def.name,
+            handle: started.handle,
+            expiresAt: started.expiresAt,
+            snapshot: started.snapshot,
+            options: started.options,
+            declaration: serializeForm(def),
+            fingerprint: pub.capability_fingerprint,
+            honeypotField: pub.honeypot_field,
+          },
+          201,
+          cors,
+        );
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // Anonymous public submit: the handle binds the pre-gate request to its
+    // session (org, anonymous principal, form) before any other check. The
+    // publication re-resolves on every submit — disabling and capability
+    // drift kill outstanding sessions with STALE, no grace. Dispatch enters
+    // the shared submit core with confirmation-only disclosure (the receipt
+    // never names an execution), and the honeypot spam trap answers the
+    // identical confirmation without dispatching. Operator, form-embed, and
+    // app-embed handles are rejected here exactly as anonymous handles are
+    // rejected on those routes: the classes never accept each other.
+    if (url.pathname === "/api/public/submit" && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Idempotency-Key, Origin");
+    }
+    if (url.pathname === "/api/public/submit" && request.method === "POST") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read public receipts and public errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        const key = parseCallerKey(request.headers.get("Idempotency-Key"));
+        requireJson(request);
+        const body: unknown = await boundedJson(request.body);
+        const presented =
+          body !== null && typeof body === "object" && !Array.isArray(body)
+            ? ((body as Record<string, unknown>).handle ?? null)
+            : null;
+        const bound = await peekStartupIdentity(env.DB, presented);
+        const pubId = bound ? anonPubIdFromUser(bound.userId) : null;
+        const pub = pubId ? await loadPublication(env.DB, pubId).catch(() => null) : null;
+        if (!bound || !pub || pub.org_id !== bound.orgId || pub.form_name !== bound.formName) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        if (pub.enabled !== 1) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        const def = await loadForm(env.DB, pub.org_id, pub.form_name);
+        if (!def) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        const live = { formId: def.id, fingerprint: await fingerprintFormDef(def) };
+        if (pub.form_id !== live.formId || pub.capability_fingerprint !== live.fingerprint) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        const values =
+          body !== null && typeof body === "object" && !Array.isArray(body)
+            ? (body as Record<string, unknown>).values
+            : undefined;
+        if (isHoneypotFilled(values, pub.honeypot_field)) {
+          // Spam trap: identical confirmation, no dispatch, no consume —
+          // the response shape teaches bots nothing.
+          return json({ form: def.name, received: true }, 202, cors);
+        }
+        // Awaited (not returned): a bare `return runFormSubmit(...)` would
+        // adopt the rejection past this try/catch, escaping Faults as worker
+        // exceptions instead of serialized error responses.
+        return await runFormSubmit(
+          env,
+          anonPrincipal(pub.org_id, pub.id),
+          key,
+          def,
+          body,
+          "refuse",
+          cors,
+          "confirmation-only",
         );
       } catch (error) {
         return faultResponse(error, env, url, cors);
@@ -2008,6 +2216,163 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       }
       const revoked = await revokeEmbedGrant(env.DB, caller.orgId, name, grantId);
       return json({ grant: embedSummary(revoked) });
+    }
+    const appEmbedAdminList = /^\/api\/apps\/([0-9a-fA-F-]{36})\/embeds$/.exec(url.pathname);
+    if (appEmbedAdminList?.[1] && (request.method === "GET" || request.method === "POST")) {
+      // EMBED-01 slice 2 (issue #156): signed app-embed grant inventory.
+      // Admin-only (requireManageOrg), same posture as the form-embed
+      // inventory: grants are external capabilities, so ordinary members
+      // neither list nor mint them. Unknown or foreign apps answer 404
+      // APP_NOT_FOUND; apps with no active deployment answer 404 too (a
+      // grant fingerprints the live deployment, so there must be one).
+      // Create returns the raw secret once; every other response carries
+      // summaries only (no readback).
+      const id = parseAppId(appEmbedAdminList[1]);
+      rejectQuery(url);
+      if (request.method === "POST") requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      const live = await loadLiveDeployment(env.DB, caller.orgId, id);
+      if (!live) return json({ error: { code: "APP_NOT_FOUND", message: "App not found." } }, 404);
+      if (request.method === "GET") {
+        return json({ embeds: await listAppEmbedGrants(env.DB, caller.orgId, id).catch(() => []) });
+      }
+      const body = await boundedJson(request.body);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(400, "INVALID_APP_EMBED", "Provide allowedOrigins and an optional expiresAt.");
+      }
+      const record = body as Record<string, unknown>;
+      const created = await createAppEmbedGrant(env.DB, caller.orgId, live, {
+        allowedOrigins: record.allowedOrigins,
+        ...(record.expiresAt === undefined ? {} : { expiresAt: record.expiresAt }),
+      });
+      return json({ grant: appEmbedSummary(created.row), secret: created.secret }, 201);
+    }
+    const appEmbedAdminAction = /^\/api\/apps\/([0-9a-fA-F-]{36})\/embeds\/([0-9a-fA-F-]{36})\/(rotate|revoke)$/.exec(
+      url.pathname,
+    );
+    if (appEmbedAdminAction?.[1] && appEmbedAdminAction[2] && appEmbedAdminAction[3] && request.method === "POST") {
+      // Rotate mints a fresh secret and re-fingerprints against the live
+      // deployment (the old secret stops verifying, and a redeploy drift
+      // heals); revoke disables the grant terminally (410 on reads).
+      // Unknown shapes, foreign grants, and cross-app IDs answer 404.
+      const id = parseAppId(appEmbedAdminAction[1]);
+      rejectQuery(url);
+      requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      const grantId = parseAppEmbedGrantId(appEmbedAdminAction[2]);
+      const live = await loadLiveDeployment(env.DB, caller.orgId, id);
+      if (!live) return json({ error: { code: "APP_NOT_FOUND", message: "App not found." } }, 404);
+      // Drain the body: rotation and revocation are state changes, so they
+      // share the JSON-write gate (unencoded application/json rejects
+      // cross-origin form posts against Access-authenticated sessions).
+      await boundedJson(request.body);
+      if (appEmbedAdminAction[3] === "rotate") {
+        const rotated = await rotateAppEmbedGrant(env.DB, caller.orgId, live, grantId);
+        return json({ grant: appEmbedSummary(rotated.row), secret: rotated.secret });
+      }
+      const revoked = await revokeAppEmbedGrant(env.DB, caller.orgId, id, grantId);
+      return json({ grant: appEmbedSummary(revoked) });
+    }
+    const publicationAdmin = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/publication$/.exec(url.pathname);
+    if (
+      publicationAdmin?.[1] &&
+      (request.method === "GET" || request.method === "POST" || request.method === "DELETE")
+    ) {
+      // EMBED-01 slice 2 (issue #156): anonymous public-form publication.
+      // Admin-only (requireManageOrg): publishing opens an anonymous
+      // admission path, so ordinary members neither read nor change it.
+      // GET answers the summary (with the live staleness bit) or
+      // { publication: null } when never published; POST publishes (or
+      // re-publishes, healing drift) with an optional honeypotField;
+      // DELETE blocks the publication (anonymous routes answer 404 after).
+      // Unknown or foreign forms answer 404 FORM_NOT_FOUND. There is no
+      // secret material in this class, so summaries carry everything.
+      const name = publicationAdmin[1];
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      rejectQuery(url);
+      // POST shares the JSON-write gate (unencoded application/json rejects
+      // cross-origin form posts against Access-authenticated sessions).
+      // DELETE carries no body and is never a CORS-safelisted method, so a
+      // cross-origin form cannot issue it; no gate needed.
+      if (request.method === "POST") requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      const def = await loadForm(env.DB, caller.orgId, name);
+      const existing = await loadScopedPublication(env.DB, caller.orgId, name).catch(() => null);
+      if (!def) {
+        if (!existing) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+        return json({ publication: publicationSummary(existing, null) });
+      }
+      if (request.method === "GET") {
+        if (!existing) return json({ publication: null });
+        return json({
+          publication: publicationSummary(existing, {
+            formId: def.id,
+            fingerprint: await fingerprintFormDef(def),
+          }),
+        });
+      }
+      if (request.method === "DELETE") {
+        const disabled = await disablePublication(env.DB, caller.orgId, name);
+        if (!disabled) return json({ publication: null });
+        return json({
+          publication: publicationSummary(disabled, {
+            formId: def.id,
+            fingerprint: await fingerprintFormDef(def),
+          }),
+        });
+      }
+      const body = await boundedJson(request.body);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(400, "INVALID_PUBLICATION", "Provide an optional honeypotField.");
+      }
+      const record = body as Record<string, unknown>;
+      const published = await publishForm(env.DB, def, {
+        ...(record.honeypotField === undefined ? {} : { honeypotField: record.honeypotField }),
+      });
+      return json(
+        {
+          publication: publicationSummary(published, {
+            formId: def.id,
+            fingerprint: await fingerprintFormDef(def),
+          }),
+        },
+        existing ? 200 : 201,
+      );
+    }
+    const publicationReview = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/publication\/review$/.exec(url.pathname);
+    if (publicationReview?.[1] && request.method === "POST") {
+      // Republish review: the admin deliberately re-binds the publication
+      // to the live declaration after a capability change (the review UX
+      // keys on the summary's stale bit). The body must carry
+      // { approve: true } — anything else answers 400, never a rebind.
+      // Unknown or foreign forms answer 404; a form with no publication
+      // answers 404 FORM_NOT_PUBLISHED.
+      const name = publicationReview[1];
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      rejectQuery(url);
+      requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      const body = await boundedJson(request.body);
+      if (
+        !body ||
+        typeof body !== "object" ||
+        Array.isArray(body) ||
+        (body as Record<string, unknown>).approve !== true
+      ) {
+        throw new Fault(400, "INVALID_PUBLICATION", "Review requires { approve: true }.");
+      }
+      const def = await loadForm(env.DB, caller.orgId, name);
+      if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      const reviewed = await reviewPublication(env.DB, def);
+      if (!reviewed) {
+        return json({ error: { code: "FORM_NOT_PUBLISHED", message: "This form is not published." } }, 404);
+      }
+      return json({
+        publication: publicationSummary(reviewed, {
+          formId: def.id,
+          fingerprint: await fingerprintFormDef(def),
+        }),
+      });
     }
     if (url.pathname === "/api/dev/preview" && request.method === "POST") {
       // DEV-02 no-registration local preview (ADR 017): read-only by
