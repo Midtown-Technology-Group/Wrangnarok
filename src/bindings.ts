@@ -21,8 +21,15 @@ export interface HaloCredentials {
 export interface CloudflareCredentials {
   CLOUDFLARE_API_TOKEN?: string;
 }
+/** Per-Organization envelope encryption (SEC-02, issue #411): KEK material
+ * for wrapping per-Connection DEKs. One secret per environment
+ * (stdin-provisioned via Secrets Store); dev and prod values are distinct
+ * and never shared. Never persisted, never returned, never logged. */
+export interface SecretsKek {
+  SECRETS_KEK?: string;
+}
 export interface Bindings
-  extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials, HaloCredentials, CloudflareCredentials {
+  extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials, HaloCredentials, CloudflareCredentials, SecretsKek {
   DB: D1Database;
   FILES: R2Bucket;
   ARTIFACTS?: R2Bucket;
