@@ -164,10 +164,12 @@ it("never auto-retries a failing echo of the digest", async () => {
   expect(calls).toHaveLength(3);
   expect(calls.filter((url) => url.endsWith("/echo"))).toHaveLength(1);
 });
-it("surfaces a slow NinjaOne vendor as TimedOut through the explicit timeout step", async () => {
+it("surfaces a slow NinjaOne vendor as TimedOut via failSagaExecution classification", async () => {
   // The mocked orgs endpoint outlives the Integration's 5s deadline: the
-  // abort maps to NINJA_VENDOR_TIMEOUT and the census leg routes it to
-  // timeout-mark-v1, never an inferred failure. The echo hop never runs.
+  // abort maps to NINJA_VENDOR_TIMEOUT and failSagaExecution classifies it
+  // as TimedOut inside persist-failure-v1 (ADR-033-5, issue #416 — no
+  // explicit timeout step), never an inferred failure. The echo hop never
+  // runs.
   mockVendors(
     { access_token: TOKEN_SENTINEL, expires_in: 3600, token_type: "Bearer" },
     [{ id: 1, name: "Acme" }],
