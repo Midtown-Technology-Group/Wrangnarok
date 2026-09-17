@@ -38,6 +38,74 @@ question, not just a latency question.
 - Programmatic callers use `explainQueryPlan` / `reviewHotPaths` from
   `src/d1-plan.ts`, covered by `test/d1-plan.test.ts`.
 
+## Hot-path review record (Slice C, 2026-09-17)
+
+| Operation | Plan | Index |
+|---|---|---|
+| `saga-policy.load` | SEARCH | `saga_policies` PK `(org_id, saga_id)` |
+| `executions.admission-count` | SEARCH | `executions_history (org_id, …)` |
+| `children.list` | SEARCH | `executions_parent (parent_execution_id)` — restored by 0028 |
+| `executions.detail` | SEARCH | `executions` PK `(id)` |
+| `executions.history` | SEARCH (covering) | `executions_history (org_id, user_id, …)` |
+
+No new indexes were needed: the one gap (`children.list`) was a missing
+column, not a missing index — migration 0026 rebuilt `executions` without
+`policy_json` (0012) and `parent_execution_id`/`parent_step` (0015), so
+child lineage statements failed on fully migrated databases while
+à-la-carte tests stayed green. Fixed by 0028; guarded by
+`test/migrations-chain.test.ts`, which applies the whole chain.
+
+## Migration rules
+
+- Rebuilds (`CREATE TABLE … new` + copy + `RENAME TO`) must carry every
+  column added by earlier migrations. The chain test enforces this.
+- Keep migration files bare SQL (no `--` comments): the in-test
+  `db.exec` path rejects comment-only statements.
+- Large `UPDATE`/`DELETE` backfills must be chunked (see below), never one
+  giant statement: D1 execution limits will abort it midway.
+
+## Planner statistics (Slice D)
+
+- `npm run db:migrate:local` runs `PRAGMA optimize` after applying
+  migrations; `npm run db:optimize:local` reruns it alone. Planner stats
+  are per-connection, so this belongs in maintenance tooling, never in
+  request hot paths.
+- After creating an index against preview/prod, run
+  `PRAGMA optimize` there via an authenticated
+  `wrangler d1 execute <DB> --remote --command "PRAGMA optimize"`.
+- SQLite also benefits from a periodic re-run as data distribution shifts;
+  monthly alongside dependency updates is plenty until telemetry says
+  otherwise.
+
+## Chunked backfills (Slice E)
+
+Template for bounded batches (tune `LIMIT` by measurement; ~1k rows is the
+starting point, not doctrine):
+
+```sql
+DELETE FROM <table> WHERE <predicate> AND id NOT IN (SELECT id FROM <table> WHERE <predicate> LIMIT 1000);
+/* repeat until changes() = 0, or loop keyset: WHERE id > :last ORDER BY id LIMIT 1000 */
+```
+
+- Run from a script with progress output (rows affected per batch), never
+  silently; stop and page a human if a batch affects 0 rows unexpectedly
+  or errors twice in a row.
+- Prefer keyset pagination (`WHERE id > :last ORDER BY id LIMIT n`) over
+  `OFFSET` for large tables.
+- Never wrap a backfill around remote API calls: saga/workflow durability
+  belongs in Workflows/Queues/DOs, not in a D1 emulation.
+
+## Finding the most expensive operations (Slice F)
+
+- Primary source: Cloudflare's D1 dashboard / GraphQL Analytics API
+  (query counts, rows read/written, latency, DB size) — use those, not a
+  second billing estimator.
+- Application cut: every `observeD1`-wrapped call emits a `WRANGNAROK_D1`
+  line with operation + rows read/written/returned + duration. Aggregate
+  with `wrangler tail` output piped through JSON scraping, grouped by
+  `operation`, sorted by total `rowsRead`. When an operation's
+  rows-read/rows-returned ratio climbs, run it through `d1-plan.mjs`.
+
 ## Do not
 
 - Recreate PostgreSQL coordination (advisory locks, job claiming,
