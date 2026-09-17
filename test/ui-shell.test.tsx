@@ -74,13 +74,14 @@ it("marks unported nav entries disabled and links each tracking issue", () => {
   }
 });
 
-// UX-01c (issue #176): each disabled nav entry must name its actual OPEN
-// parity owner — never a closed scaffolding issue (#15/#16/#18, all CLOSED).
-// Owners per the #176 archaeology slice: Tables -> #154 TABLE-02,
-// Triggers -> #139 TRG-03 (only open trigger issue), Integrations -> #160.
+// UX-01 slice 1 (issue #176): each disabled nav entry must name its actual
+// OPEN parity owner — never a closed scaffolding issue (#15/#16/#18, all
+// CLOSED) and never #160 (APP-02, closed since the UX-01c retarget). Tables
+// -> #154 TABLE-02, Triggers -> #139 TRG-03 (only open trigger issue). The
+// Integrations family is served by the enabled Connections page, so no
+// disabled Integrations entry exists at all.
 it("points each disabled nav entry at its open parity owner", () => {
   const owners: Record<string, number> = {
-    Integrations: 160,
     Triggers: 139,
     Tables: 154,
   };
@@ -100,9 +101,11 @@ it("points each disabled nav entry at its open parity owner", () => {
     expect(html).toContain(`/issues/${issue}`);
   }
   // Quote-boundaried: /issues/154 must not satisfy a /issues/15 check.
-  for (const closed of [15, 16, 18]) {
+  // #160 joined the closed set when APP-02 shipped (UX-01 slice 1).
+  for (const closed of [15, 16, 18, 160]) {
     expect(html).not.toContain(`/issues/${closed}"`);
   }
+  expect(NAV_ENTRIES.find((e) => e.label === "Integrations")).toBeUndefined();
 });
 
 // UX-01c (issue #176): disabled entries stay honestly grayed out AND
@@ -139,6 +142,24 @@ it("enables the Dashboard nav entry at /dashboard", () => {
     </MemoryRouter>,
   );
   expect(html).toContain("/dashboard");
+});
+
+// UX-01 slice 1 (issue #176): the settings families are reachable,
+// enabled navigation — own profile plus admin branding.
+it("enables the Profile and Branding nav entries", () => {
+  const profile = NAV_ENTRIES.find((entry) => entry.label === "Profile");
+  expect(profile?.enabled).toBe(true);
+  expect(profile?.to).toBe("/profile");
+  const branding = NAV_ENTRIES.find((entry) => entry.label === "Branding");
+  expect(branding?.enabled).toBe(true);
+  expect(branding?.to).toBe("/admin/branding");
+  const html = renderToStaticMarkup(
+    <MemoryRouter>
+      <Nav />
+    </MemoryRouter>,
+  );
+  expect(html).toContain("/profile");
+  expect(html).toContain("/admin/branding");
 });
 
 it("renders the Dashboard summary with honestly-scoped sample counts", () => {

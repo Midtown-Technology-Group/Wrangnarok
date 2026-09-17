@@ -30,7 +30,7 @@ body {
 .site-header {
   background: var(--wrangnarok-gradient-night, linear-gradient(145deg, #0b0f14, #182431));
   border-radius: var(--wrangnarok-radius-lg, 1rem);
-  color: var(--wrangnarok-cloud, #f7f7f4);
+  color: var(--wrangnarok-on-night, #f7f7f4);
   padding: 1.25rem 1.5rem;
 }
 
@@ -54,8 +54,17 @@ body {
   letter-spacing: 0.04em;
 }
 
+/* Custom Organization logo (UX-01): same box as the static mark, the image
+   itself decides transparency. Decorative next to the wordmark. */
+.brand-logo {
+  flex: none;
+  height: 2rem;
+  object-fit: contain;
+  width: 2rem;
+}
+
 .brand-tagline {
-  color: var(--wrangnarok-mist, #e2e8f0);
+  color: var(--wrangnarok-on-night-muted, #e2e8f0);
   font-size: 0.75rem;
   letter-spacing: 0.18em;
   margin: 0.25rem 0 0;
@@ -80,7 +89,7 @@ body {
 .nav-link {
   border: 1px solid transparent;
   border-radius: 999px;
-  color: var(--wrangnarok-cloud, #f7f7f4);
+  color: var(--wrangnarok-on-night, #f7f7f4);
   display: inline-block;
   font-weight: 600;
   padding: 0.375rem 0.875rem;
@@ -121,7 +130,7 @@ body {
 /* ---- Page card ---- */
 
 .page {
-  background: #fff;
+  background: var(--wrangnarok-surface, #fff);
   border: 1px solid var(--wrangnarok-mist, #e2e8f0);
   border-radius: var(--wrangnarok-radius-lg, 1rem);
   margin-top: 1rem;
@@ -161,12 +170,23 @@ body {
 }
 
 .token-form input {
+  background: var(--wrangnarok-field, #fff);
   border: 1px solid var(--wrangnarok-mist, #e2e8f0);
   border-radius: var(--wrangnarok-radius-sm, 0.5rem);
   font: inherit;
   max-width: 22rem;
   padding: 0.5rem 0.75rem;
   width: 100%;
+}
+
+/* Labeled selects share the token-form row (UX-01 theme picker). */
+.token-form select {
+  background: var(--wrangnarok-field, #fff);
+  border: 1px solid var(--wrangnarok-mist, #e2e8f0);
+  border-radius: var(--wrangnarok-radius-sm, 0.5rem);
+  font: inherit;
+  max-width: 22rem;
+  padding: 0.5rem 0.75rem;
 }
 
 .token-form button {
@@ -181,7 +201,13 @@ body {
 }
 
 .token-form button:hover {
-  background: var(--wrangnarok-slate, #1f2937);
+  background: var(--wrangnarok-action-hover, #1f2937);
+  color: var(--wrangnarok-action-hover-fg, #fff);
+}
+
+.token-form button:disabled {
+  cursor: progress;
+  opacity: 0.6;
 }
 
 /* ---- Status badges (color + text + glyph, never color alone) ---- */
@@ -299,6 +325,7 @@ body {
 
 .filter-field input:not([type="checkbox"]),
 .filter-field select {
+  background: var(--wrangnarok-field, #fff);
   border: 1px solid var(--wrangnarok-mist, #e2e8f0);
   border-radius: var(--wrangnarok-radius-sm, 0.5rem);
   font: inherit;
@@ -344,7 +371,7 @@ body {
 
 .pill {
   align-items: center;
-  background: #fff;
+  background: var(--wrangnarok-surface, #fff);
   border: 1px solid var(--wrangnarok-mist, #e2e8f0);
   border-radius: 999px;
   cursor: pointer;
@@ -367,7 +394,7 @@ body {
 }
 
 .pill-count {
-  background: rgba(82, 96, 109, 0.12);
+  background: var(--wrangnarok-chip, rgba(82, 96, 109, 0.12));
   border-radius: 999px;
   font-size: 0.75rem;
   font-weight: 700;
@@ -612,7 +639,7 @@ body {
 }
 
 .cancel-row button:not(:disabled):hover {
-  background: var(--wrangnarok-slate, #1f2937);
+  background: var(--wrangnarok-danger-hover, #1f2937);
 }
 
 .more-row {
@@ -628,7 +655,7 @@ body {
 }
 
 .more-row button {
-  background: var(--wrangnarok-slate, #1f2937);
+  background: var(--wrangnarok-strong-bg, #1f2937);
   border: none;
   border-radius: var(--wrangnarok-radius-sm, 0.5rem);
   color: #fff;
@@ -674,6 +701,102 @@ input:focus-visible,
 select:focus-visible {
   outline: 2px solid var(--wrangnarok-sunrise, #f45d0b);
   outline-offset: 2px;
+}
+
+/* ---- Branding / profile (UX-01 slice 1) ---- */
+
+.color-swatch {
+  border: 1px solid var(--wrangnarok-mist, #e2e8f0);
+  border-radius: var(--wrangnarok-radius-sm, 0.5rem);
+  display: inline-block;
+  height: 1rem;
+  vertical-align: text-bottom;
+  width: 1rem;
+}
+
+/* Honest preview: custom colors render as text/border on the real page
+   surface, so an unreadable admin choice shows as unreadable here. */
+.brand-preview {
+  border: 1px solid var(--wrangnarok-mist, #e2e8f0);
+  border-radius: var(--wrangnarok-radius-md, 0.75rem);
+  padding: 0.75rem 1rem;
+}
+
+.brand-preview-word {
+  font-size: 1.25rem;
+  font-weight: 800;
+}
+
+.brand-preview-chip {
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding: 0.125rem 0.625rem;
+  white-space: nowrap;
+}
+
+.avatar-image,
+.logo-image {
+  border: 1px solid var(--wrangnarok-mist, #e2e8f0);
+  border-radius: var(--wrangnarok-radius-md, 0.75rem);
+  display: block;
+  height: 6rem;
+  object-fit: contain;
+  width: 6rem;
+}
+
+/* ---- Dark theme (UX-01 profile preference) ----
+   Explicit [data-theme="dark"], plus OS-driven system/unset under
+   prefers-color-scheme. Dark mode is a pure token flip: every themed rule
+   reads a var, so the two blocks carry the SAME
+   declarations and stay correct by construction. Fallbacks on every var
+   use preserve the light rendering when a token is undefined. The header
+   keeps its night gradient in both modes; its light-on-dark text reads the
+   never-flipped on-night tokens. */
+:root {
+  --wrangnarok-surface: #ffffff;
+  --wrangnarok-field: #ffffff;
+  --wrangnarok-chip: rgba(82, 96, 109, 0.12);
+  --wrangnarok-action-hover: #1f2937;
+  --wrangnarok-action-hover-fg: #ffffff;
+  --wrangnarok-strong-bg: #1f2937;
+  --wrangnarok-danger-hover: #1f2937;
+  --wrangnarok-on-night: #f7f7f4;
+  --wrangnarok-on-night-muted: #e2e8f0;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --wrangnarok-cloud: #0f1620;
+  --wrangnarok-mist: #3b4a5e;
+  --wrangnarok-text: #eef2f6;
+  --wrangnarok-text-muted: #9fb0c0;
+  --wrangnarok-surface: #1b2534;
+  --wrangnarok-field: #0f1620;
+  --wrangnarok-chip: rgba(255, 255, 255, 0.14);
+  --wrangnarok-action-hover: #f59e0b;
+  --wrangnarok-action-hover-fg: #111820;
+  --wrangnarok-strong-bg: #3b4a5e;
+  --wrangnarok-danger-hover: #8f1d18;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"],
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --wrangnarok-cloud: #0f1620;
+    --wrangnarok-mist: #3b4a5e;
+    --wrangnarok-text: #eef2f6;
+    --wrangnarok-text-muted: #9fb0c0;
+    --wrangnarok-surface: #1b2534;
+    --wrangnarok-field: #0f1620;
+    --wrangnarok-chip: rgba(255, 255, 255, 0.14);
+    --wrangnarok-action-hover: #f59e0b;
+    --wrangnarok-action-hover-fg: #111820;
+    --wrangnarok-strong-bg: #3b4a5e;
+    --wrangnarok-danger-hover: #8f1d18;
+  }
 }
 
 @media (max-width: 40rem) {

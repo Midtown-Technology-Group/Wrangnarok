@@ -27,6 +27,12 @@ import type {
   AuditEvent,
   AuditResponse,
   ArtifactDetail,
+  BrandingResponse,
+  BrandingView,
+  CallerResponse,
+  ProfileResponse,
+  ProfileTheme,
+  ProfileView,
   ArtifactFormat,
   ArtifactsResponse,
   ArtifactSummary,
@@ -1154,4 +1160,168 @@ export async function submitForm(
     ...(data.scheduled === true ? { scheduled: true as const } : {}),
     ...(typeof data.scheduleAt === "string" ? { scheduleAt: data.scheduleAt } : {}),
   };
+}
+
+const ORG_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isBrandingView(value: unknown): value is BrandingView {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const logo = v["logo"] as Record<string, unknown> | null;
+  return (
+    typeof v["orgId"] === "string" &&
+    typeof v["appName"] === "string" &&
+    typeof v["primaryColor"] === "string" &&
+    typeof v["accentColor"] === "string" &&
+    (logo === null ||
+      (typeof logo === "object" &&
+        typeof logo["contentType"] === "string" &&
+        typeof logo["sizeBytes"] === "number" &&
+        typeof logo["sha256"] === "string")) &&
+    (v["updatedAt"] === null || typeof v["updatedAt"] === "string")
+  );
+}
+
+function isProfileView(value: unknown): value is ProfileView {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const avatar = v["avatar"] as Record<string, unknown> | null;
+  return (
+    typeof v["orgId"] === "string" &&
+    typeof v["userId"] === "string" &&
+    typeof v["displayName"] === "string" &&
+    (v["theme"] === "light" || v["theme"] === "dark" || v["theme"] === "system") &&
+    (avatar === null ||
+      (typeof avatar === "object" &&
+        typeof avatar["contentType"] === "string" &&
+        typeof avatar["sizeBytes"] === "number" &&
+        typeof avatar["sha256"] === "string")) &&
+    (v["updatedAt"] === null || typeof v["updatedAt"] === "string")
+  );
+}
+
+/** GET /api/branding — Organization branding for this Organization (UX-01). */
+export async function fetchBranding(): Promise<BrandingResponse> {
+  const data = await get("/api/branding");
+  const branding = (data as { branding?: unknown }).branding;
+  if (!isBrandingView(branding)) throw new Error("Unexpected branding response shape.");
+  return { branding };
+}
+
+/** GET /api/branding/public/:orgId — safe public read, no token sent. */
+export async function fetchPublicBranding(orgId: string): Promise<BrandingResponse> {
+  if (!ORG_ID.test(orgId)) throw new Error("Unexpected Organization ID shape.");
+  const response = await fetch(`/api/branding/public/${orgId}`, { headers: { Accept: "application/json" } });
+  if (!response.ok) throw await parseApiError(response);
+  const branding = ((await response.json()) as { branding?: unknown }).branding;
+  if (!isBrandingView(branding)) throw new Error("Unexpected branding response shape.");
+  return { branding };
+}
+
+/** PUT /api/branding — admin-only name/color write (partial merge). */
+export async function updateBranding(body: {
+  appName?: string;
+  primaryColor?: string;
+  accentColor?: string;
+}): Promise<BrandingResponse> {
+  const data = await putJson("/api/branding", body);
+  const branding = (data as { branding?: unknown }).branding;
+  if (!isBrandingView(branding)) throw new Error("Unexpected branding response shape.");
+  return { branding };
+}
+
+/** POST /api/branding/reset — admin-only reset to static defaults. */
+export async function resetBranding(): Promise<BrandingResponse> {
+  const data = await postJson("/api/branding/reset", {});
+  const branding = (data as { branding?: unknown }).branding;
+  if (!isBrandingView(branding)) throw new Error("Unexpected branding response shape.");
+  return { branding };
+}
+
+async function putImageBytes(path: string, bytes: Uint8Array, contentType: string): Promise<unknown> {
+  const token = getToken();
+  const headers: Record<string, string> = { Accept: "application/json", "Content-Type": contentType };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(path, { method: "PUT", headers, body: bytes as Uint8Array<ArrayBuffer> });
+  if (!response.ok) throw await parseApiError(response);
+  return (await response.json()) as unknown;
+}
+
+/** PUT /api/branding/logo — admin-only logo upload (image bytes). */
+export async function uploadLogo(bytes: Uint8Array, contentType: string): Promise<BrandingResponse> {
+  const data = await putImageBytes("/api/branding/logo", bytes, contentType);
+  const branding = (data as { branding?: unknown }).branding;
+  if (!isBrandingView(branding)) throw new Error("Unexpected branding response shape.");
+  return { branding };
+}
+
+/** DELETE /api/branding/logo — admin-only logo removal. */
+export async function deleteLogo(): Promise<BrandingResponse> {
+  const data = await deleteJson("/api/branding/logo");
+  const branding = (data as { branding?: unknown }).branding;
+  if (!isBrandingView(branding)) throw new Error("Unexpected branding response shape.");
+  return { branding };
+}
+
+/** GET /api/profile — the caller's own profile (UX-01). */
+export async function fetchProfile(): Promise<ProfileResponse> {
+  const data = await get("/api/profile");
+  const profile = (data as { profile?: unknown }).profile;
+  if (!isProfileView(profile)) throw new Error("Unexpected profile response shape.");
+  return { profile };
+}
+
+/** PUT /api/profile — own display name / theme write (partial merge). */
+export async function updateProfile(body: { displayName?: string; theme?: ProfileTheme }): Promise<ProfileResponse> {
+  const data = await putJson("/api/profile", body);
+  const profile = (data as { profile?: unknown }).profile;
+  if (!isProfileView(profile)) throw new Error("Unexpected profile response shape.");
+  return { profile };
+}
+
+/** PUT /api/profile/avatar — own avatar upload (image bytes). */
+export async function uploadAvatar(bytes: Uint8Array, contentType: string): Promise<ProfileResponse> {
+  const data = await putImageBytes("/api/profile/avatar", bytes, contentType);
+  const profile = (data as { profile?: unknown }).profile;
+  if (!isProfileView(profile)) throw new Error("Unexpected profile response shape.");
+  return { profile };
+}
+
+/** DELETE /api/profile/avatar — own avatar removal. */
+export async function deleteAvatar(): Promise<ProfileResponse> {
+  const data = await deleteJson("/api/profile/avatar");
+  const profile = (data as { profile?: unknown }).profile;
+  if (!isProfileView(profile)) throw new Error("Unexpected profile response shape.");
+  return { profile };
+}
+
+/** GET /api/profile/avatar — own avatar bytes through the authorized route. */
+export async function downloadAvatar(): Promise<Blob> {
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch("/api/profile/avatar", { headers });
+  if (!response.ok) throw await parseApiError(response);
+  return await response.blob();
+}
+
+/** GET /api/auth/me — caller identity plus membership role (UX-01 admin cue).
+ * The server enforces every boundary; the role only decides which affordances
+ * the settings pages render. A null role means the instance-admin path, which
+ * the server gates — never a client-side denial. */
+export async function fetchCaller(): Promise<CallerResponse> {
+  const data = await get("/api/auth/me");
+  const v = data as Record<string, unknown>;
+  const caller = v["caller"] as Record<string, unknown> | undefined;
+  if (
+    typeof caller !== "object" ||
+    caller === null ||
+    typeof caller["userId"] !== "string" ||
+    typeof caller["orgId"] !== "string" ||
+    (v["role"] !== null && v["role"] !== "member" && v["role"] !== "admin") ||
+    (v["kind"] !== null && v["kind"] !== "ordinary" && v["kind"] !== "external")
+  ) {
+    throw new Error("Unexpected caller response shape.");
+  }
+  return data as CallerResponse;
 }

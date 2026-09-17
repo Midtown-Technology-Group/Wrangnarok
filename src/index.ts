@@ -18,6 +18,7 @@ import {
   swapSlugs,
   validateApp,
 } from "./apps";
+import { deleteLogo, getBranding, putLogo, readLogoBytes, resetBranding, updateBranding } from "./branding";
 import { cancelDirectChildren, isMissingLineageColumn } from "./children";
 import {
   artifactDetail,
@@ -365,6 +366,13 @@ import {
 } from "./executions";
 import { listExecutionLogs, parseLogSearchQuery, parseLogTailQuery, searchExecutionLogs } from "./logs";
 import { deploymentSecretsFromEnv, scrubValueWithDeploymentSecrets } from "./secrets";
+import {
+  deleteAvatar,
+  getProfile as getUserProfile,
+  putAvatar,
+  readAvatarBytes,
+  updateProfile as updateUserProfile,
+} from "./profile";
 import { logRequest } from "./usage";
 export {
   CloudflareInventoryWorkflow,
@@ -829,6 +837,28 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const delivered = await handlePublicDelivery(request, env);
       if (delivered) return delivered;
       return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+    }
+    // UX-01 slice 1 (issue #176): safe public branding read. Unauthenticated
+    // by design — name, colors, and logo bytes carry no secrets — so pre-auth
+    // shells and future embeds can render the Organization brand. Org UUIDs
+    // are unguessable lookup keys; unknown orgs 404 like unknown endpoints.
+    const publicBranding = /^\/api\/branding\/public\/([0-9a-fA-F-]{36})(\/logo)?$/.exec(url.pathname);
+    if (publicBranding?.[1] && request.method === "GET") {
+      rejectQuery(url);
+      const orgId = parseOrgId(publicBranding[1]);
+      const org = await env.DB.prepare("SELECT id FROM organizations WHERE id=?").bind(orgId).first<{ id: string }>();
+      if (!org) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+      if (publicBranding[2]) {
+        const logo = await readLogoBytes({ db: env.DB, bucket: env.FILES }, orgId);
+        if (!logo) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+        return apiBytes(logo.bytes as Uint8Array<ArrayBuffer>, 200, {
+          "Content-Type": logo.contentType,
+          "Content-Length": String(logo.bytes.byteLength),
+          ETag: `"${logo.sha256}"`,
+          "Cache-Control": "public, max-age=300",
+        });
+      }
+      return json({ branding: await getBranding(env.DB, orgId) });
     }
     const identity = await authenticate(request, env);
     // AUTH-01 membership gate (ADR 015): every /api/* request resolves the
@@ -3879,6 +3909,93 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         await deleteConfig(env.DB, caller, configOne[1]);
         return json({ deleted: true });
       }
+    }
+    // UX-01 slice 1 (issue #176): Organization branding. Reads are
+    // member-open (safe fields only); writes and reset are operator-managed
+    // (requireManageOrg). Logo bytes ride the FILES bucket with D1 metadata.
+    const brandingStore = { db: env.DB, bucket: env.FILES };
+    if (url.pathname === "/api/branding" && request.method === "GET") {
+      rejectQuery(url);
+      return json({ branding: await getBranding(env.DB, caller.orgId) });
+    }
+    if (url.pathname === "/api/branding" && request.method === "PUT") {
+      rejectQuery(url);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
+      return json({ branding: await updateBranding(env.DB, caller.orgId, await boundedJson(request.body)) });
+    }
+    if (url.pathname === "/api/branding/reset" && request.method === "POST") {
+      rejectQuery(url);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
+      return json({ branding: await resetBranding(brandingStore, caller.orgId) });
+    }
+    if (url.pathname === "/api/branding/logo" && request.method === "GET") {
+      rejectQuery(url);
+      const logo = await readLogoBytes(brandingStore, caller.orgId);
+      if (!logo) return json({ error: { code: "LOGO_NOT_FOUND", message: "No custom logo is set." } }, 404);
+      return apiBytes(logo.bytes as Uint8Array<ArrayBuffer>, 200, {
+        "Content-Type": logo.contentType,
+        "Content-Length": String(logo.bytes.byteLength),
+        ETag: `"${logo.sha256}"`,
+        "Cache-Control": "private, max-age=300",
+      });
+    }
+    if (url.pathname === "/api/branding/logo" && request.method === "PUT") {
+      rejectQuery(url);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      if (request.headers.has("Content-Encoding")) {
+        throw new Fault(415, "BYTES_REQUIRED", "Logo bytes require unencoded image bytes.");
+      }
+      if (request.body === null) throw new Fault(400, "EMPTY_LOGO", "Logo bytes must not be empty.");
+      const buffer = await request.arrayBuffer();
+      return json({
+        branding: await putLogo(brandingStore, caller, request.headers.get("Content-Type"), new Uint8Array(buffer)),
+      });
+    }
+    if (url.pathname === "/api/branding/logo" && request.method === "DELETE") {
+      rejectQuery(url);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      return json({ branding: await deleteLogo(brandingStore, caller.orgId) });
+    }
+    // UX-01 slice 1 (issue #176): own profile. Every route resolves the
+    // profile from the membership-gated caller — no caller-supplied user ID
+    // appears on any path, so own-scope is structural, not checked.
+    const profileStore = { db: env.DB, bucket: env.FILES };
+    if (url.pathname === "/api/profile" && request.method === "GET") {
+      rejectQuery(url);
+      return json({ profile: await getUserProfile(env.DB, caller) });
+    }
+    if (url.pathname === "/api/profile" && request.method === "PUT") {
+      rejectQuery(url);
+      requireJson(request);
+      return json({ profile: await updateUserProfile(env.DB, caller, await boundedJson(request.body)) });
+    }
+    if (url.pathname === "/api/profile/avatar" && request.method === "GET") {
+      rejectQuery(url);
+      const avatar = await readAvatarBytes(profileStore, caller);
+      if (!avatar) return json({ error: { code: "AVATAR_NOT_FOUND", message: "No avatar is set." } }, 404);
+      return apiBytes(avatar.bytes as Uint8Array<ArrayBuffer>, 200, {
+        "Content-Type": avatar.contentType,
+        "Content-Length": String(avatar.bytes.byteLength),
+        ETag: `"${avatar.sha256}"`,
+        "Cache-Control": "private, max-age=300",
+      });
+    }
+    if (url.pathname === "/api/profile/avatar" && request.method === "PUT") {
+      rejectQuery(url);
+      if (request.headers.has("Content-Encoding")) {
+        throw new Fault(415, "BYTES_REQUIRED", "Avatar bytes require unencoded image bytes.");
+      }
+      if (request.body === null) throw new Fault(400, "EMPTY_AVATAR", "Avatar bytes must not be empty.");
+      const buffer = await request.arrayBuffer();
+      return json({
+        profile: await putAvatar(profileStore, caller, request.headers.get("Content-Type"), new Uint8Array(buffer)),
+      });
+    }
+    if (url.pathname === "/api/profile/avatar" && request.method === "DELETE") {
+      rejectQuery(url);
+      return json({ profile: await deleteAvatar(profileStore, caller) });
     }
     // Gray-out is server-enforced: mapped /api/* routes serve, every other
     // /api/* path reports UNIMPLEMENTED (never a generic NOT_FOUND).

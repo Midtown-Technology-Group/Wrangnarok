@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0
 import { Link, NavLink } from "react-router-dom";
+import type { BrandingView } from "../lib/client-types";
 
 const REPO = "https://github.com/Midtown-Technology-Group/Wrangnarok";
 
@@ -15,6 +16,13 @@ export interface NavEntry {
  * Roadmap-surface nav. Unported entries are visibly disabled AND link their
  * tracking issue so gray-out is honest, not theater. Server enforces the same
  * boundary: unmapped /api/* routes return UNIMPLEMENTED.
+ *
+ * UX-01 slice 1 (issue #176): the stale disabled "Integrations" entry is
+ * gone. It pointed at #160, which has since closed (APP-02 shipped), and no
+ * open issue tracks a separate Integrations page — the family is served by
+ * the enabled Connections page (portable definitions plus org mappings,
+ * CON-01 closed complete). A disabled entry that can name no honest owner
+ * is theater, so it reads as removed rather than retargeted.
  */
 export const NAV_ENTRIES: NavEntry[] = [
   { label: "History", to: "/history", enabled: true, phase: "Phase 4 (#17)" },
@@ -61,12 +69,6 @@ export const NAV_ENTRIES: NavEntry[] = [
     phase: "Phase 4 (#157)",
   },
   {
-    label: "Integrations",
-    enabled: false,
-    issue: `${REPO}/issues/160`,
-    phase: "Phase 2 / Phase 3",
-  },
-  {
     label: "Configuration",
     to: "/configs",
     enabled: true,
@@ -108,6 +110,18 @@ export const NAV_ENTRIES: NavEntry[] = [
     enabled: true,
     phase: "Phase 6 (#164)",
   },
+  {
+    label: "Profile",
+    to: "/profile",
+    enabled: true,
+    phase: "Phase 4 (#176)",
+  },
+  {
+    label: "Branding",
+    to: "/admin/branding",
+    enabled: true,
+    phase: "Phase 4 (#176)",
+  },
 ];
 
 /**
@@ -146,12 +160,38 @@ function BrandMark(): React.JSX.Element {
   );
 }
 
-export function Nav(): React.JSX.Element {
+/**
+ * Shell header. Optional Organization branding (UX-01 slice 1): a loaded
+ * view swaps the wordmark, swaps the static mark for the custom logo, and
+ * recolors header accents through header-scoped token overrides. Absent
+ * branding (loading, signed out, fetch failed) renders the static brand —
+ * the shell never blocks on branding.
+ */
+export function Nav(props: { branding?: BrandingView | null }): React.JSX.Element {
+  const branding = props.branding ?? null;
+  const word = branding?.appName ?? "Wrangnarök";
+  const headerStyle = branding
+    ? ({
+        "--wrangnarok-sunrise": branding.primaryColor,
+        "--wrangnarok-amber": branding.accentColor,
+      } as React.CSSProperties)
+    : undefined;
   return (
-    <header className="site-header">
-      <Link to="/history" className="brand" aria-label="Wrangnarök home (Execution history)">
-        <BrandMark />
-        <span className="brand-word">Wrangnarök</span>
+    <header className="site-header" style={headerStyle}>
+      <Link to="/history" className="brand" aria-label={`${word} home (Execution history)`}>
+        {branding?.logo ? (
+          <img
+            className="brand-logo"
+            src={`/api/branding/public/${branding.orgId}/logo`}
+            alt=""
+            aria-hidden="true"
+            width={32}
+            height={32}
+          />
+        ) : (
+          <BrandMark />
+        )}
+        <span className="brand-word">{word}</span>
       </Link>
       <p className="brand-tagline">Automation across realms</p>
       <nav aria-label="Primary" className="nav">
