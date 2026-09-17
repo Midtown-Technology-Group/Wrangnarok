@@ -44,7 +44,7 @@ question, not just a latency question.
 |---|---|---|
 | `saga-policy.load` | SEARCH | `saga_policies` PK `(org_id, saga_id)` |
 | `executions.admission-count` | SEARCH | `executions_history (org_id, …)` |
-| `children.list` | SEARCH | `executions_parent (parent_execution_id)` — restored by 0028 |
+| `children.list` | SEARCH | `executions_parent (parent_execution_id)` — restored by 0032 |
 | `executions.detail` | SEARCH | `executions` PK `(id)` |
 | `executions.history` | SEARCH (covering) | `executions_history (org_id, user_id, …)` |
 
@@ -52,7 +52,7 @@ No new indexes were needed: the one gap (`children.list`) was a missing
 column, not a missing index — migration 0026 rebuilt `executions` without
 `policy_json` (0012) and `parent_execution_id`/`parent_step` (0015), so
 child lineage statements failed on fully migrated databases while
-à-la-carte tests stayed green. Fixed by 0028; guarded by
+à-la-carte tests stayed green. Fixed by 0032; guarded by
 `test/migrations-chain.test.ts`, which applies the whole chain.
 
 ## Migration rules

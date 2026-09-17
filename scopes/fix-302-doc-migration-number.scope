@@ -1,0 +1,3 @@
+# Issue #302 post-merge documentation correction for migration 0032.
+docs/d1-conventions.md
+scopes/fix-302-doc-migration-number.scope
