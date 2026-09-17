@@ -8,9 +8,10 @@
 // Provenance: test/fixtures/definednet-openapi.json is the YAML spec at
 // https://docs.defined.net/openapi.yaml (fetched 2026-09-16, openapi 3.1.0,
 // info.version 1.0.0) converted locally with `python3 -c
-// "yaml.safe_load + json.dump(sort_keys=True, indent=1)"`. Regenerate with
-// the same one-liner when the vendor spec moves; the pinned digest assertion
-// below will fail loudly on drift (diff, not silent overwrite).
+// "yaml.safe_load + json.dump(sort_keys=True, indent=1)"` then normalized
+// with `prettier --write` (2-space form). Regenerate with the same pipeline
+// when the vendor spec moves; the pinned digest assertion below will fail
+// loudly on drift (diff, not silent overwrite).
 import { describe, expect, it } from "vitest";
 import { runCommand } from "../scripts/wrangnarok.mjs";
 import { generateIntegrationModule } from "../src/generate-integration";
@@ -28,7 +29,7 @@ function sha256Hex(text: string): Promise<string> {
 
 describe("INT-01 DefinedNet end-to-end proof (issue #229)", () => {
   it("pins the fixture digest (spec drift fails loudly here)", async () => {
-    expect(await sha256Hex(fixtureText)).toBe("d5cdaefef546598e5253559042ccb7424456844e46922b314a82d78ee7184b1f");
+    expect(await sha256Hex(fixtureText)).toBe("0fa496613b00674ab42c92fa18f15643247332053080ce018eab8259577a7434");
   });
 
   it("detects the bearer ApiToken scheme (never OAuth fields)", () => {
@@ -75,7 +76,7 @@ describe("INT-01 DefinedNet end-to-end proof (issue #229)", () => {
     const spec = fixtureText;
     const digest = await sha256Hex(spec);
     const expected = integrationUuidV5(digest);
-    expect(expected).toBe("19f50853-3e53-5611-b8ff-ac1e3745a069");
+    expect(expected).toBe("9e6319e8-06dd-5589-906b-d427e661b0ca");
     const out = generateIntegrationModule(
       spec,
       { id: "definednet", name: "definednet", allowedOrigins: [ORIGIN] },
