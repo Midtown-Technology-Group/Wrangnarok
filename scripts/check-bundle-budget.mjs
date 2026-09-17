@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0
-// Worker bundle budget (ADR 004): fail closed when the emitted Worker
-// bundle exceeds its size budget. Measures raw bytes of the exact bundle
+// Worker bundle budget (ADR 004, advisory per issue #177 owner decision):
+// the repository soft budget is an early-warning reference level, not a
+// merge gate. Measures raw bytes of the exact bundle
 // `wrangler deploy --dry-run --env dev --outfile` produces — no CLI output parsing —
-// so dependency bloat and cold-start creep break CI instead of drifting.
+// so dependency bloat and cold-start creep stay visible instead of drifting.
 // The dev env is pinned (issue #331) so the measurement never drifts against
 // the default environment when wrangler.jsonc defines multiple envs.
+// Soft-threshold conditions (over the 730 KiB reference level, below the
+// 8 KiB reserve, or stale LIMITS-META bookkeeping) print prominent warnings
+// and exit zero. Only a real build/dry-run error, a malformed invocation,
+// or an inability to obtain the artifact fails the run.
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -321,11 +326,12 @@ import { fileURLToPath } from "node:url";
 // governs): 8438 bytes of headroom, 246 bytes above the 8 KiB minimum.
 // LIMITS-META measuredBytes only; BUDGET_BYTES/MIN_HEADROOM_BYTES untouched.
 const BUDGET_BYTES = 730 * 1024;
-// LIMITS-01 minimum operating headroom (issue #177): the budget must exceed
-// the measured bundle by at least this margin, so a `measured + a few
-// bytes` raise cannot pass. A feature PR that lands inside the budget but
-// below this margin fails closed: shrink the Worker surface first, or carry
-// a deliberate BUDGET_BYTES raise plus a same-PR LIMITS-META update.
+// LIMITS-01 advisory reserve (issue #177, advisory per owner decision): the
+// reference level should exceed the measured bundle by at least this margin.
+// Landing inside the reference level but below this margin prints a
+// prominent warning; it never fails the run. BUDGET_BYTES stays a soft
+// reference, separate from Cloudflare's 3 MB hard deploy ceiling (which
+// Wrangler itself enforces) and from billing limits.
 const MIN_HEADROOM_BYTES = 8 * 1024;
 
 // Bundle-attribution options (issue #438 latest audit, smallest reversible
@@ -426,21 +432,20 @@ if (cliOpts.consumeMetafile) {
     const { size } = statSync(outfile);
     const headroom = BUDGET_BYTES - size;
     console.log(
-      `Worker bundle: ${size} bytes (budget ${BUDGET_BYTES} bytes, headroom ${headroom} bytes, minimum ${MIN_HEADROOM_BYTES} bytes).`,
+      `Worker bundle: ${size} bytes (advisory reference ${BUDGET_BYTES} bytes, headroom ${headroom} bytes, advisory reserve ${MIN_HEADROOM_BYTES} bytes).`,
     );
     if (size > BUDGET_BYTES) {
       console.error(
-        `Worker bundle budget exceeded: ${size} bytes > ${BUDGET_BYTES} bytes. Shrink the bundle or raise the budget deliberately.`,
+        `ADVISORY: Worker bundle ${size} bytes exceeds the ${BUDGET_BYTES}-byte soft reference level (over by ${-headroom} bytes). ` +
+          `Not a merge gate (issue #177): consider shrinking the bundle or recording a deliberate reference-level change.`,
       );
-      process.exitCode = 1;
     } else if (headroom < MIN_HEADROOM_BYTES) {
       console.error(
-        `Worker bundle headroom exhausted: ${headroom} bytes < ${MIN_HEADROOM_BYTES} bytes minimum. ` +
-          `Shrink the Worker surface first, or raise BUDGET_BYTES deliberately with a same-PR docs/feasibility-envelope.md LIMITS-META update (issue #177).`,
+        `ADVISORY: Worker bundle reserve low: ${headroom} bytes of headroom < ${MIN_HEADROOM_BYTES} bytes advisory reserve. ` +
+          `Not a merge gate (issue #177): consider shrinking the Worker surface or recording a deliberate reference-level change.`,
       );
-      process.exitCode = 1;
     }
-    // Attribution is advisory: it never changes the verdict above. When the
+    // Attribution is advisory: it never changes the outcome above. When the
     // metafile is missing or unparseable, report that instead of inventing
     // contributors from source file sizes.
     try {
@@ -449,7 +454,7 @@ if (cliOpts.consumeMetafile) {
       }
       if (cliOpts.emitMetafile) copyFileSync(metafile, cliOpts.emitMetafile);
     } catch (err) {
-      console.error(`Bundle attribution unavailable (gates above still authoritative): ${err.message}`);
+      console.error(`Bundle attribution unavailable (measurement above still stands): ${err.message}`);
     }
     checkLimitsMeta();
   } finally {
@@ -618,6 +623,13 @@ function runSelftest() {
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+  // Advisory META reporting never throws: null, arrays, and strings warn
+  // instead of failing the run; matching bookkeeping stays silent.
+  for (const bad of [null, [], "730"]) {
+    check(`advisory meta ${JSON.stringify(bad)}`, describeLimitsMeta(bad).length === 1);
+  }
+  check("advisory meta match silent", describeLimitsMeta({ budgetKiB: 730, minHeadroomBytes: 8192 }).length === 0);
+  check("advisory meta drift warns", describeLimitsMeta({ budgetKiB: 700, minHeadroomBytes: 0 }).length === 2);
   // Argument validation rejects bad --top without running anything.
   for (const bad of ["0", "-3", "2.5", "many", undefined]) {
     let error = null;
@@ -640,40 +652,52 @@ function runSelftest() {
   console.log(`bundle-budget selftest: ${passed} passed.`);
 }
 
-// LIMITS-01 envelope sync (issue #177): the canonical feasibility record in
-// docs/feasibility-envelope.md carries a machine-readable LIMITS-META block
-// (budgetKiB, measuredBytes, measuredDate, minHeadroomBytes). A BUDGET_BYTES
-// change without a same-PR META update fails closed here, so prose cannot
-// silently trail code the way the 575 KiB matrix trailed the 700 KiB budget.
-// measuredBytes is advisory (local vs CI builds vary slightly); the budget
-// and headroom mirrors are exact.
+// LIMITS-01 envelope report (issue #177, advisory per owner decision): the
+// canonical feasibility record in docs/feasibility-envelope.md carries a
+// machine-readable LIMITS-META block (budgetKiB, measuredBytes,
+// measuredDate, minHeadroomBytes). Drift between the block and
+// BUDGET_BYTES / MIN_HEADROOM_BYTES prints a prominent warning so prose
+// cannot silently trail code the way the 575 KiB matrix trailed the 700 KiB
+// budget — but stale bookkeeping never fails the run. measuredBytes is
+// informational (local vs CI builds vary slightly).
+// Pure reporter for the parsed LIMITS-META value: returns advisory
+// warning lines, never throws, so malformed or stale bookkeeping (null,
+// arrays, strings, drift) warns instead of failing the run.
+function describeLimitsMeta(meta) {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+    return ["ADVISORY: LIMITS-META block in docs/feasibility-envelope.md must be a JSON object. Not a merge gate."];
+  }
+  const warnings = [];
+  if (meta.budgetKiB * 1024 !== BUDGET_BYTES) {
+    warnings.push(
+      `ADVISORY: LIMITS-META budgetKiB (${meta.budgetKiB}) disagrees with BUDGET_BYTES (${BUDGET_BYTES}). Not a merge gate; update docs/feasibility-envelope.md when convenient.`,
+    );
+  }
+  if (meta.minHeadroomBytes !== MIN_HEADROOM_BYTES) {
+    warnings.push(
+      `ADVISORY: LIMITS-META minHeadroomBytes (${meta.minHeadroomBytes}) disagrees with MIN_HEADROOM_BYTES (${MIN_HEADROOM_BYTES}). Not a merge gate; update docs/feasibility-envelope.md when convenient.`,
+    );
+  }
+  return warnings;
+}
 function checkLimitsMeta() {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const envelope = readFileSync(join(root, "docs/feasibility-envelope.md"), "utf8");
   const match = envelope.match(/<!-- LIMITS-META (\{.*?\}) -->/);
   if (!match) {
-    console.error("LIMITS-META block missing from docs/feasibility-envelope.md (issue #177).");
-    process.exitCode = 1;
+    console.error(
+      "ADVISORY: LIMITS-META block missing from docs/feasibility-envelope.md (issue #177). Not a merge gate.",
+    );
     return;
   }
   let meta;
   try {
     meta = JSON.parse(match[1]);
   } catch {
-    console.error("LIMITS-META block in docs/feasibility-envelope.md is not valid JSON.");
-    process.exitCode = 1;
+    console.error("ADVISORY: LIMITS-META block in docs/feasibility-envelope.md is not valid JSON. Not a merge gate.");
     return;
   }
-  if (meta.budgetKiB * 1024 !== BUDGET_BYTES) {
-    console.error(
-      `LIMITS-META budgetKiB (${meta.budgetKiB}) disagrees with BUDGET_BYTES (${BUDGET_BYTES}). Update docs/feasibility-envelope.md in the same PR.`,
-    );
-    process.exitCode = 1;
-  }
-  if (meta.minHeadroomBytes !== MIN_HEADROOM_BYTES) {
-    console.error(
-      `LIMITS-META minHeadroomBytes (${meta.minHeadroomBytes}) disagrees with MIN_HEADROOM_BYTES (${MIN_HEADROOM_BYTES}). Update docs/feasibility-envelope.md in the same PR.`,
-    );
-    process.exitCode = 1;
+  for (const line of describeLimitsMeta(meta)) {
+    console.error(line);
   }
 }

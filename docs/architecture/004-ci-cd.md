@@ -24,7 +24,7 @@ The baseline PR pipeline is:
 5. unit tests;
 6. Worker-runtime integration tests using Cloudflare's Vitest/workerd tooling and local bindings;
 7. `wrangler deploy --dry-run --env dev` or the closest current non-mutating build validation;
-8. Worker bundle budget (`npm run check:bundle`, see below).
+8. Worker bundle measurement, observational (`npm run check:bundle`, see below — advisory, never a gate).
 
 External Integration/vendor behavior is mocked or served by deterministic fixtures. Cloudflare services are locally emulated wherever Cloudflare provides supported local bindings.
 
@@ -96,11 +96,11 @@ Typical staged change:
 
 D1 recovery features are a safety net, not a substitute for compatible migrations.
 
-### Worker bundle budget
+### Worker bundle budget (advisory, not a gate)
 
-The Worker bundle MUST stay under 640 KiB of raw emitted bytes, enforced by `npm run check:bundle` in PR CI. The script measures the exact bundle `wrangler deploy --dry-run --env dev --outfile` produces (no CLI output parsing), so a heavy dependency or cold-start creep breaks the build instead of drifting.
+Per the owner-approved policy decision (issue #177), the repository Worker bundle budget is advisory, not a merge gate. `npm run check:bundle` stays in PR CI as an observational check: the script measures the exact bundle `wrangler deploy --dry-run --env dev --outfile` produces (no CLI output parsing), prints bytes, headroom, and prominent warnings against the 730 KiB soft reference level and the 8 KiB advisory reserve, and always exits zero for soft-threshold conditions (over the reference, low reserve, or stale `LIMITS-META` bookkeeping).
 
-The budget is deliberately generous against the current ~62 KiB bundle. Shrink the bundle first when it trips; raise the budget only with the reason recorded alongside the bump — never silently to make a red run green.
+Only a real build/dry-run error, a malformed script invocation, or an inability to obtain the artifact fails the run. Cloudflare Free viability and the provider 3 MB hard deploy ceiling stay truthful — Wrangler itself enforces deployment validity, so CI invents no local duplicate hard cap. When the advisory reference trips, shrink the bundle first; record reference-level changes deliberately with the reason noted.
 
 ### Observability
 
