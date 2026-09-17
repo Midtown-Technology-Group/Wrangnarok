@@ -100,10 +100,38 @@ stated as decisions, not options:
     those helpers own scrub plus terminal-state rules plus timeout
     classification. Author-owned `expectedFailure` / `timedOut` plumbing,
     per-Saga timeout-code checks, and hand-chosen success/failure/timed-out
-    persistence paths disappear from generated code. Whether `timeout-mark-v1`
-    remains a distinct step name or merges into the failure helper is a
-    shaping detail: it must reconcile with ADR 018's rule that TimedOut has
-    exactly one writer, and the ADR must state which.
+    persistence paths disappear from generated code.
+2c. **Timeout classification subsumes `timeout-mark-v1` (decision, not
+    detail).** `timeout-mark-v1` does not survive as a distinct durable
+    step. `failSagaExecution` classifies Failed vs TimedOut internally and
+    is the one canonical terminal writer:
+
+    ```text
+    Integration Action fails
+            ↓
+    persist-failure-v1
+            ↓
+    failSagaExecution(...)
+            ↓
+    classifies Failed vs TimedOut
+            ↓
+    one canonical terminal writer
+    ```
+
+    Rationale, verified against the current implementation: `failExecution`
+    already takes the terminal status as a parameter (`"Failed" |
+    "TimedOut"`, `src/executions.ts`), and its conditional writes
+    (`Pending`/`Running`-gated executions, `Running`-gated operations)
+    already fence the cancel/timeout races — so no independent timeout
+    checkpoint is needed for replay or recovery semantics. No code reads a
+    `timeout-mark-v1` Operation row; it is a second terminal-writing shape,
+    not an independent recovery checkpoint. The visible durable graph gets
+    simpler for agents (one failure step, not two mutually exclusive
+    terminal writers), and the `stepRetryLimit` table entry for
+    `timeout-mark-v1` retires with it. ADR 018's "sole writer of TimedOut"
+    invariant is preserved by mechanism — `failSagaExecution` becomes that
+    sole writer — and the accepted ADR records the retirement explicitly
+    rather than leaving two terminal shapes in the codebase.
 3. **Saga helpers accept no runtime-policy knobs.** Effective deadlines and
    retry ceilings derive internally from the Integration default plus the
    Execution policy snapshot plus the platform ceiling. Saga authors never
@@ -241,12 +269,11 @@ export const echoSagaDef = defineSaga<EchoInput>({
           ctx.integrations.echo.echo(connection, prepared.input, operationId, deadline),
       }),
     );
-    // Terminal interiors are helper-owned (principle 2b): the persist steps
-    // stay visible, but scrub, terminal-state rules, and timeout
-    // classification live inside completeExecution / failSagaExecution.
-    // No expectedFailure/timedOut plumbing in generated code. How outcome
-    // errors reach the failure branch (throw vs return) and whether
-    // timeout-mark-v1 stays a distinct step are shaping details for the ADR.
+    // Terminal interiors are helper-owned (principles 2b-2c): the persist
+    // steps stay visible, but scrub, terminal-state rules, and timeout
+    // classification live inside completeExecution / failSagaExecution —
+    // timeout-mark-v1 is subsumed, not a separate step. No
+    // expectedFailure/timedOut plumbing in generated code.
     if (!outcome.ok) {
       await step.do("persist-failure-v1", () =>
         failSagaExecution(ctx, id, outcome.error),
