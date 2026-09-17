@@ -32,6 +32,7 @@ function shortHash(value: string): string {
 
 function GrantsTable(props: {
   grants: EmbedGrantSummary[];
+  busy: boolean;
   onRotate: (id: string) => void;
   onRevoke: (id: string) => void;
 }): React.JSX.Element {
@@ -68,10 +69,10 @@ function GrantsTable(props: {
               <td>
                 {grant.enabled ? (
                   <>
-                    <button type="button" onClick={() => props.onRotate(grant.id)}>
+                    <button type="button" disabled={props.busy} onClick={() => props.onRotate(grant.id)}>
                       Rotate
                     </button>{" "}
-                    <button type="button" onClick={() => props.onRevoke(grant.id)}>
+                    <button type="button" disabled={props.busy} onClick={() => props.onRevoke(grant.id)}>
                       Revoke
                     </button>
                   </>
@@ -93,6 +94,7 @@ export function FormEmbedsSection(props: {
   initialIssued?: IssuedSecret | null;
 }): React.JSX.Element {
   const [data, setData] = useState<EmbedGrantsResponse | null>(props.initial ?? null);
+  const [busy, setBusy] = useState(false);
   const [issued, setIssued] = useState<IssuedSecret | null>(props.initialIssued ?? null);
   const [origins, setOrigins] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
@@ -131,6 +133,7 @@ export function FormEmbedsSection(props: {
 
   async function onCreate(e: React.FormEvent): Promise<void> {
     e.preventDefault();
+    if (busy) return;
     setError(null);
     setNotice(null);
     const allowedOrigins = parseOriginsInput(origins);
@@ -138,6 +141,7 @@ export function FormEmbedsSection(props: {
       setError("List at least one exact-match origin (https://host[:port], no wildcards).");
       return;
     }
+    setBusy(true);
     try {
       const created = await createFormEmbed(props.formName, {
         allowedOrigins,
@@ -150,10 +154,14 @@ export function FormEmbedsSection(props: {
       await reload();
     } catch (err) {
       setError(getErrorMessage(err, "Could not issue an embed grant."));
+    } finally {
+      setBusy(false);
     }
   }
 
   async function onRotate(id: string): Promise<void> {
+    if (busy) return;
+    setBusy(true);
     setError(null);
     setNotice(null);
     try {
@@ -163,10 +171,14 @@ export function FormEmbedsSection(props: {
       await reload();
     } catch (err) {
       setError(getErrorMessage(err, "Could not rotate the embed grant."));
+    } finally {
+      setBusy(false);
     }
   }
 
   async function onRevoke(id: string): Promise<void> {
+    if (busy) return;
+    setBusy(true);
     setError(null);
     setNotice(null);
     try {
@@ -176,6 +188,8 @@ export function FormEmbedsSection(props: {
       await reload();
     } catch (err) {
       setError(getErrorMessage(err, "Could not revoke the embed grant."));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -231,10 +245,17 @@ export function FormEmbedsSection(props: {
           onChange={(e) => setExpiresAt(e.target.value)}
           placeholder="2027-01-01T00:00:00.000Z"
         />
-        <button type="submit">Issue grant</button>
+        <button type="submit" disabled={busy}>
+          Issue grant
+        </button>
       </form>
       {data ? (
-        <GrantsTable grants={data.embeds} onRotate={(id) => void onRotate(id)} onRevoke={(id) => void onRevoke(id)} />
+        <GrantsTable
+          grants={data.embeds}
+          busy={busy}
+          onRotate={(id) => void onRotate(id)}
+          onRevoke={(id) => void onRevoke(id)}
+        />
       ) : null}
     </section>
   );

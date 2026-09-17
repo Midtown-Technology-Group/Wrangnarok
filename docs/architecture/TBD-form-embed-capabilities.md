@@ -128,6 +128,17 @@ re-validate the merged remainder identically (a ref past the refusal can
 only come from an author-declared default, and stale defaults fail the
 same on both paths).
 
+Browser delivery rides CORS on the two embed routes only (PR review,
+slice 1): `OPTIONS` preflights reflect the request `Origin` with the
+route's methods/headers (cached 10 minutes) without touching D1 — the
+submit preflight has no body to resolve a handle from, and preflight
+authorizes nothing either way — while `POST` receipts and `POST` failures
+both carry `Access-Control-Allow-Origin` plus `Vary: Origin` so browsers
+can read embed results instead of surfacing opaque TypeErrors. Reflection
+never substitutes for the allowlist: the `POST` handlers enforce
+`checkEmbedOrigin` before doing anything, and error bodies carry codes
+and fixed messages, never secrets. No other route gains CORS headers.
+
 ### 5. Revocation semantics
 
 Revoke sets `enabled=0` and is terminal in slice 1: there is no re-enable,
@@ -139,7 +150,7 @@ bootstrap, `STALE` at submit).
 
 ### 6. Signed grants are not anonymous publication
 
-The signed-HMAC grant class and any future anonymous/public-form
+The signed bearer-secret grant class and any future anonymous/public-form
 publication are distinct grants with distinct threat models. Anonymous
 admission is a new unauthenticated path and needs its own ADR proving one
 execution path (standard submit), confirmation-only disclosure (no

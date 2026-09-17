@@ -68,6 +68,13 @@ function bootstrap(grantId: string, secret: string | null, origin: string | null
   );
 }
 
+/** CORS preflight for one embed route. */
+function preflight(path: string, origin: string | null) {
+  const heads: Record<string, string> = {};
+  if (origin !== null) heads["Origin"] = origin;
+  return worker.fetch(new Request(`https://local.test${path}`, { method: "OPTIONS", headers: heads }), bindings);
+}
+
 /** Pre-gate embed submit: handle + Origin + caller key, no session. */
 function embedSubmit(body: unknown, origin: string | null, key: string) {
   const heads: Record<string, string> = { "Content-Type": "application/json", "Idempotency-Key": key };
@@ -923,6 +930,68 @@ it("keeps embed routes on the shared JSON and query gates", async () => {
     bindings,
   );
   expect(formPost.status).toBe(415);
+});
+
+it("serves CORS preflights and marks embed responses readable", async () => {
+  await createForm();
+  const grant = await createGrant("contact");
+  // Preflights reflect the request Origin with the route's methods and
+  // headers, cached 10 minutes. Neither touches D1: unknown and malformed
+  // grant IDs still answer 204, and the POST enforces everything.
+  const startupFlight = await preflight(`/api/embeds/${grant.id}/startup`, ORIGIN);
+  expect(startupFlight.status).toBe(204);
+  expect(startupFlight.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
+  expect(startupFlight.headers.get("Vary")).toBe("Origin");
+  expect(startupFlight.headers.get("Access-Control-Allow-Methods")).toBe("POST, OPTIONS");
+  expect(startupFlight.headers.get("Access-Control-Allow-Headers")).toBe("Content-Type, Origin, X-Embed-Secret");
+  expect(startupFlight.headers.get("Access-Control-Max-Age")).toBe("600");
+  const submitFlight = await preflight("/api/embeds/submit", ORIGIN);
+  expect(submitFlight.status).toBe(204);
+  expect(submitFlight.headers.get("Access-Control-Allow-Headers")).toBe("Content-Type, Idempotency-Key, Origin");
+  const unknownFlight = await preflight(`/api/embeds/${crypto.randomUUID().toLowerCase()}/startup`, ORIGIN);
+  expect(unknownFlight.status).toBe(204);
+  const malformedFlight = await preflight(`/api/embeds/${"-".repeat(36)}/startup`, ORIGIN);
+  expect(malformedFlight.status).toBe(204);
+  const noOriginFlight = await preflight("/api/embeds/submit", null);
+  expect(noOriginFlight.status).toBe(204);
+  expect(noOriginFlight.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  expect(noOriginFlight.headers.get("Vary")).toBe("Origin");
+  const queriedFlight = await worker.fetch(
+    new Request(`https://local.test/api/embeds/${grant.id}/startup?x=1`, {
+      method: "OPTIONS",
+      headers: { Origin: ORIGIN },
+    }),
+    bindings,
+  );
+  expect(queriedFlight.status).toBe(400);
+
+  // POST receipts and POST failures both carry CORS so browsers can read
+  // them: success, origin denial (reflection authorizes nothing — the
+  // body still answers 403), stale sessions, and missing keys.
+  const ok = await bootstrap(grant.id, grant.secret, ORIGIN);
+  expect(ok.status).toBe(201);
+  expect(ok.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
+  expect(ok.headers.get("Vary")).toBe("Origin");
+  const denied = await bootstrap(grant.id, grant.secret, OTHER_ORIGIN);
+  expect(denied.status).toBe(403);
+  expect(denied.headers.get("Access-Control-Allow-Origin")).toBe(OTHER_ORIGIN);
+  const started = await bootstrapOk(grant);
+  const submitted = await embedSubmit({ handle: started.handle, values: { name: "Ada" } }, ORIGIN, keyFor("cors-ok"));
+  expect(submitted.status).toBe(202);
+  expect(submitted.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
+  const replayed = await embedSubmit({ handle: started.handle, values: { name: "Ada" } }, ORIGIN, keyFor("cors-stale"));
+  expect(replayed.status).toBe(422);
+  expect(replayed.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
+  const keyless = await worker.fetch(
+    new Request("https://local.test/api/embeds/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: ORIGIN },
+      body: JSON.stringify({ handle: started.handle, values: {} }),
+    }),
+    bindings,
+  );
+  expect(keyless.status).toBe(400);
+  expect(keyless.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
 });
 
 it("parses embed subjects and file posture as pure helpers", () => {
