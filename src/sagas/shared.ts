@@ -5,7 +5,7 @@
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
-import { EXECUTION_ID } from "../domain";
+import { CLOUDFLARE_INTEGRATION_ID, EXECUTION_ID, NINJA_INTEGRATION_ID } from "../domain";
 import type { ExecutionParams, SagaRuntimePolicy } from "../domain";
 import { assertJsonSerializable, bindSagaStep } from "../saga";
 import type { SagaDefinition, SagaEventContext } from "../saga";
@@ -17,7 +17,9 @@ import { clearExecutionSecrets, registerExecutionSecrets, scrubExecutionText, sc
 import { echo } from "../integrations/echo";
 import { listOrganizations } from "../integrations/ninjaone";
 import { inventoryZones, verifyConnection } from "../integrations/cloudflare";
-import { parseStoredPolicy } from "../executions";
+import { parseStoredPolicy, resolveConnection } from "../executions";
+import { resolveConnectionSecrets } from "../connections";
+import { ENVELOPE_KEY_VERSION } from "../envelope";
 
 /** Read the parent caller identity from its immutable D1 Execution row.
  * Lazy (first child invoke/await only): context construction itself never
@@ -52,7 +54,56 @@ export async function executeSaga<TOutput>(
   // checkpoint below scrubs them by substring, including tokens the Action
   // registers mid-run. Cleared on every exit path — a reused isolate never
   // carries one Execution's secrets into the next.
-  registerExecutionSecrets(id, [env.NINJA_CLIENT_ID, env.NINJA_CLIENT_SECRET, env.CLOUDFLARE_API_TOKEN]);
+  registerExecutionSecrets(id, [
+    env.NINJA_CLIENT_ID,
+    env.NINJA_CLIENT_SECRET,
+    env.HALO_CLIENT_ID,
+    env.HALO_CLIENT_SECRET,
+    env.CLOUDFLARE_API_TOKEN,
+  ]);
+  // Per-Organization secrets (SEC-02, issue #411). Skipped entirely without
+  // a KEK: the v0 path runs untouched with zero extra reads, and removing
+  // the KEK parks the per-org path (rows stay inert ciphertext) rather than
+  // migrating anything. With a KEK, stored envelopes for the Execution's
+  // org resolve here and win over the deployment credential; corrupt rows
+  // fail loud via resolveConnectionSecrets (never a silent deployment
+  // fallback). Unknown executions resolve to no org row and skip — the
+  // prepare step below still owns that failure exactly as before.
+  const keks: Readonly<Record<number, string>> =
+    typeof env.SECRETS_KEK === "string" && env.SECRETS_KEK.length > 0
+      ? { [ENVELOPE_KEY_VERSION]: env.SECRETS_KEK }
+      : {};
+  const orgSecrets: { clientSecret?: string; apiToken?: string } = {};
+  if (Object.keys(keks).length > 0) {
+    const orgRow = await env.DB.prepare("SELECT org_id,user_id FROM executions WHERE id=?")
+      .bind(id)
+      .first<{ org_id: string; user_id: string }>()
+      .catch(() => null);
+    if (orgRow) {
+      const orgCtx = {
+        orgId: orgRow.org_id,
+        userId: orgRow.user_id,
+        executionId: id,
+        sagaId: def.id,
+        sagaRevision: def.revision,
+        attemptToken: `${id}:0`,
+      };
+      const bindings = [
+        { integrationId: NINJA_INTEGRATION_ID, field: "clientSecret", ctxKey: "clientSecret" },
+        { integrationId: CLOUDFLARE_INTEGRATION_ID, field: "apiToken", ctxKey: "apiToken" },
+      ] as const;
+      for (const binding of bindings) {
+        const resolved = await resolveConnection(env.DB, orgCtx, binding.integrationId, []);
+        if (!resolved.found) continue;
+        const decrypted = await resolveConnectionSecrets(env.DB, orgRow.org_id, resolved.connection.id, keks);
+        const value = decrypted[binding.field];
+        if (typeof value === "string" && value.length > 0) {
+          orgSecrets[binding.ctxKey] = value;
+          registerExecutionSecrets(id, [value]);
+        }
+      }
+    }
+  }
   try {
     const sagaStep = bindSagaStep(step);
     const catalog: ChildCatalog = { sagas: SAGA_DEFINITIONS };
@@ -134,8 +185,8 @@ export async function executeSaga<TOutput>(
       db: env.DB,
       secrets: {
         clientId: env.NINJA_CLIENT_ID,
-        clientSecret: env.NINJA_CLIENT_SECRET,
-        apiToken: env.CLOUDFLARE_API_TOKEN,
+        clientSecret: orgSecrets.clientSecret ?? env.NINJA_CLIENT_SECRET,
+        apiToken: orgSecrets.apiToken ?? env.CLOUDFLARE_API_TOKEN,
       },
       children: lazyChildren,
       config: lazyConfig,

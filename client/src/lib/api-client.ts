@@ -684,7 +684,8 @@ function isConnectionSummary(value: unknown): value is ConnectionSummary {
     typeof v["enabled"] === "boolean" &&
     (v["managedBy"] === null || typeof v["managedBy"] === "string") &&
     (v["ownerKind"] === "managed" || v["ownerKind"] === "loose") &&
-    Array.isArray(v["secretsRequired"])
+    Array.isArray(v["secretsRequired"]) &&
+    Array.isArray(v["secretsProvisioned"])
   );
 }
 

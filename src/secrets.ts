@@ -27,8 +27,10 @@
 // Tenancy: the registry is keyed by Execution ID and cleared when the
 // Execution settles. Scrubbing for one Execution never sees another
 // Execution's secrets. Provider-global v0 (ADR 005) is unchanged: deployment
-// credentials plus org-scoped non-secret Connections; the per-tenant-secret
-// envelope stays tripwire-gated and is not built here.
+// credentials plus org-scoped non-secret Connections; per-tenant-secret
+// ciphertext lives in `connection_secrets` under the ADR 005 firing
+// amendment (issue #411) and is decrypted transiently in src/envelope.ts —
+// decrypted values register here like any other materialized secret.
 export const SCRUB_PLACEHOLDER = "[REDACTED]";
 export const MIN_SCRUB_SECRET_LENGTH = 8;
 
@@ -37,6 +39,8 @@ type SecretEnv = {
   readonly NINJA_CLIENT_SECRET?: string;
   readonly HALO_CLIENT_ID?: string;
   readonly HALO_CLIENT_SECRET?: string;
+  readonly CLOUDFLARE_API_TOKEN?: string;
+  readonly SECRETS_KEK?: string;
 };
 
 /** Normalize candidate secrets: keep strings at or above the floor, dedupe,
@@ -155,6 +159,8 @@ export function deploymentSecretsFromEnv(env: SecretEnv): string[] {
     env.NINJA_CLIENT_SECRET,
     env.HALO_CLIENT_ID,
     env.HALO_CLIENT_SECRET,
+    env.CLOUDFLARE_API_TOKEN,
+    env.SECRETS_KEK,
   ]);
 }
 

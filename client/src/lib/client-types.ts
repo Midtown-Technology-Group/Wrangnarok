@@ -96,6 +96,9 @@ export interface ConnectionSummary {
   managedBy: string | null;
   ownerKind: "managed" | "loose";
   secretsRequired: string[];
+  /** Declared secret-field names with provisioned per-Organization
+   * ciphertext (issue #411). Names only — values are never serialized. */
+  secretsProvisioned: string[];
   updatedAt: string | null;
 }
 

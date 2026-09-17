@@ -25,6 +25,9 @@ import {
 
 const SECRET = "test-client-secret-sentinel";
 const TOKEN = "test-access-token-sentinel";
+// PR #406 credential (issue #411): the Cloudflare deployment token must meet
+// the same Worker-isolate scrub bar as the NinjaOne credential.
+const CF_TOKEN = "test-cloudflare-token-sentinel";
 const ID = "id-for-isolation-probe";
 const OTHER = "other-execution-probe";
 
@@ -87,8 +90,16 @@ describe("execution secret registry (SEC-01)", () => {
     expect(scrubbed.self).toBe(scrubbed);
     // Deployment-secret helper covers the Worker HTTP isolate, which never
     // sees Workflow-registered tokens.
-    const env = { NINJA_CLIENT_ID: "test-client-id", NINJA_CLIENT_SECRET: SECRET };
+    const env = {
+      NINJA_CLIENT_ID: "test-client-id",
+      NINJA_CLIENT_SECRET: SECRET,
+      CLOUDFLARE_API_TOKEN: CF_TOKEN,
+    };
     expect(deploymentSecretsFromEnv(env)).toContain(SECRET);
+    expect(deploymentSecretsFromEnv(env)).toContain(CF_TOKEN);
+    expect(scrubTextWithDeploymentSecrets(`Bearer ${CF_TOKEN} rejected`, env)).toBe(
+      `Bearer ${SCRUB_PLACEHOLDER} rejected`,
+    );
     expect(deploymentSecretsFromEnv({})).toEqual([]);
     clearExecutionSecrets(ID);
   });
@@ -130,10 +141,15 @@ describe("execution secret registry (SEC-01)", () => {
     })();
     expect(scrubValueWithSecrets(instance, [TOKEN])).toBe(instance);
     // Deployment-secret text helper covers the Worker HTTP isolate shape.
-    const env = { NINJA_CLIENT_ID: "test-client-id", NINJA_CLIENT_SECRET: SECRET };
+    const env = {
+      NINJA_CLIENT_ID: "test-client-id",
+      NINJA_CLIENT_SECRET: SECRET,
+      CLOUDFLARE_API_TOKEN: CF_TOKEN,
+    };
     expect(scrubTextWithDeploymentSecrets(`id test-client-id secret ${SECRET}`, env)).toBe(
       `id ${SCRUB_PLACEHOLDER} secret ${SCRUB_PLACEHOLDER}`,
     );
+    expect(scrubTextWithDeploymentSecrets(`token ${CF_TOKEN} in vendor body`, env)).not.toContain(CF_TOKEN);
     expect(scrubTextWithDeploymentSecrets("clean", {})).toBe("clean");
     clearExecutionSecrets(ID);
   });

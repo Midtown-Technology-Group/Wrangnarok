@@ -657,5 +657,8 @@ export interface ConnectionView {
   readonly managedBy: string | null;
   readonly ownerKind: "managed" | "loose";
   readonly secretsRequired: readonly string[];
+  /** Declared secret-field names with provisioned per-Organization
+   * ciphertext (issue #411). Names only — values are never serialized. */
+  readonly secretsProvisioned: readonly string[];
   readonly updatedAt: string | null;
 }
