@@ -26,14 +26,46 @@
 // management are unsupported and fail closed with explicit codes; version
 // tokens were not established upstream and are a separate adaptation decision.
 //
+// Batch-write contract (TABLE-02 canonical slice, upstream 0428e0fb/PR
+// #735): one endpoint with an explicit write_mode — insert, merge_upsert, or
+// replace_upsert — over 0 through 25 documents. 26+ is rejected before any
+// write, and the caller never auto-chunks: oversized batches fail closed
+// (INVALID_BATCH) so transaction/policy atomicity cannot silently change.
+// Local documents are whole objects, so merge and replace upsert with the
+// same wholesale effect; both modes stay accepted for SDK portability. The
+// 25-document bound (not upstream's 1000) is the Cloudflare-driven
+// adaptation, recorded in docs/upstream-parity.md TABLE-02.
+//
 // D1 bounds (explicit, Free-tier viable): every document is capped at 4 KB of
 // JSON, every bounded list scans at most QUERY_ROW_CAP rows in one query,
 // the document_ids allowlist caps at 25 IDs of at most 255 chars each
 // (bound parameters, never interpolation), and retention is org-owned
 // deletion (see docs/upstream-parity.md TABLE-02).
-// The D1 500 MB Free per-database limit (10 GB Paid), single-database
-// transactions, and unsupported query operators are recorded there as
-// explicit blockers.
+// The 25-document bound holds on Free by construction. Authoritative
+// Cloudflare behavior (checked 2026-09-17):
+// https://developers.cloudflare.com/d1/platform/limits/ publishes 50 queries
+// per Worker invocation on Free (1000 on Paid) and states that limits for
+// individual queries apply to each individual statement inside a batch, so
+// every batched statement is counted against the invocation budget — one
+// batch() method call does NOT count once.
+// https://developers.cloudflare.com/d1/worker-api/d1-database/ documents
+// batch() as one call whose statements run as a single SQL transaction: a
+// failing statement aborts or rolls back the entire sequence of that call.
+// Atomicity therefore ends at the batch() call boundary — spreading one
+// request over several batch() calls is several transactions, not one.
+// A full-size request under this bound spends at most 29 queries against
+// the 50-query Free cap, proven under the strictest plausible counting
+// (every batched statement counts, including a rolled-back call): 1
+// declaration load, up to 2 grant checks, 1 preflight SELECT of at most 26
+// binds against the 100-bound-parameter cap, and 25 statements in one
+// batch() call — with 21 queries of margin, and no row-by-row fallback
+// exists that could spend more. Each INSERT carries at most ~4.6 KB
+// against the 100 KB statement cap. The batch transport cap is 256 KB for
+// the route body (25 capped documents plus ids and envelope fit; what
+// persists still answers to the per-document CHECK). The D1 500 MB Free
+// per-database limit (10 GB Paid), single-database transactions, and
+// unsupported query operators are recorded in the parity ledger as explicit
+// blockers.
 //
 // Realtime table-change subscriptions are NOT in this slice (the multi-slice
 // note in issue #154 lets the query/count slice land first). Polling via
@@ -51,8 +83,19 @@ export const TABLE_QUERY_LIMIT_MAX = 50;
 /** Absolute scan ceiling behind one bounded list call: limit+1 keyset rows
  * plus one bounded COUNT scan that stops at this many matching rows. */
 export const TABLE_QUERY_ROW_CAP = 1000;
-/** Batch mutation ceiling: D1 batch writes and per-item preflight stay small. */
+/** Canonical batch-write ceiling (upstream 0428e0fb/PR #735 adapts 1000 down
+ * to 25): 0 through 25 documents per request. 26+ is rejected before any
+ * write, and the caller never auto-chunks: splitting would change
+ * transaction/policy atomicity. At 25, one request fits in a single batch()
+ * transaction and costs at most 29 queries against the 50-query Free
+ * invocation cap counting every batched statement — 21 of margin, and no
+ * fallback path exists that could spend more (see the header note and
+ * docs/upstream-parity.md TABLE-02). */
 export const TABLE_BATCH_MAX = 25;
+/** Transport cap for the batch route body: 25 capped 4 KB documents plus ids
+ * and envelope fit inside 256 KB with margin. What persists still answers
+ * to the per-document CHECK; this bounds only the wire. */
+export const TABLE_BATCH_BODY_LIMIT = 256_000;
 /** Nested-filter ceiling: enough for authored queries, never a full scan DSL. */
 export const TABLE_FILTER_MAX = 5;
 /** Physical document-ID list ceiling: D1 allows 100 bound parameters per
@@ -106,11 +149,6 @@ export interface TablePage {
   readonly nextCursor: string | null;
   /** Filtered match count, or -1 when the caller passed skip_count. */
   readonly total: number;
-}
-
-export interface TableBatchItem {
-  readonly docId: string;
-  readonly data: Record<string, unknown>;
 }
 
 export interface TableBatchResult {
@@ -283,19 +321,100 @@ export function parseTableQuery(params: URLSearchParams): TableQuery {
   };
 }
 
-/** Parse a batch mutation body: { items: [{ id, data }] }. IDs and payloads
- * share the single-row bounds; the operation count is capped. */
-export function parseBatchBody(value: unknown): TableBatchItem[] {
+/** Canonical batch write modes (upstream 0428e0fb/PR #735): insert writes
+ * fresh rows and reports per-item conflicts; merge_upsert and replace_upsert
+ * insert missing rows and replace present ones wholesale. Local documents
+ * are whole objects, so the two upsert modes share one wholesale effect;
+ * both stay accepted so portable callers need no local fork. */
+export type TableWriteMode = "insert" | "merge_upsert" | "replace_upsert";
+
+/** One parsed batch item: a null docId is an idless row (upstream permits
+ * them on the upsert path); the executor assigns a server UUID. */
+export interface TableBatchInputItem {
+  readonly docId: string | null;
+  readonly data: Record<string, unknown>;
+}
+
+/** A canonical batch response: per-item outcomes in submission order plus
+ * the count of successful writes. Count-only callers (return_documents
+ * false) receive an empty results list with the same count. */
+export interface TableBatchResponse {
+  readonly results: TableBatchResult[];
+  readonly count: number;
+}
+
+/** Internal executor modes: the three canonical write modes plus the
+ * update-only semantics behind the batch-update compatibility route. */
+export type TableBatchMode = TableWriteMode | "update";
+
+/** A parsed canonical batch request: the executor mode, 0 through 25
+ * items, and whether the response carries per-item detail or a bare count. */
+export interface TableBatchRequest {
+  readonly mode: TableBatchMode;
+  readonly items: readonly TableBatchInputItem[];
+  readonly returnDocuments: boolean;
+}
+
+/** Parse a canonical batch body: { write_mode?, upsert?, return_documents?,
+ * items }. Legacy { items } bodies read as insert; legacy upsert:true reads
+ * as merge_upsert. An explicit write_mode wins over the legacy flag; a
+ * non-boolean upsert fails closed. Empty item lists are valid (a 0-document
+ * write succeeds with count 0); 26+ fails closed before any write. Compat
+ * shims force their mode and, for the update shim, require every item to
+ * carry an id. */
+export function parseBatchRequest(value: unknown, forceMode?: TableBatchMode): TableBatchRequest {
   if (!object(value) || !Array.isArray(value.items)) {
     throw invalid("INVALID_BATCH", "Batch bodies must be a JSON object with an items list.");
   }
-  if (value.items.length === 0 || value.items.length > TABLE_BATCH_MAX) {
-    throw invalid("INVALID_BATCH", `Batch bodies must list 1 to ${TABLE_BATCH_MAX} items.`);
+  if (value.items.length > TABLE_BATCH_MAX) {
+    throw invalid(
+      "INVALID_BATCH",
+      `Batch bodies must list 0 to ${TABLE_BATCH_MAX} items; split nothing client-side, the bound is atomicity.`,
+    );
   }
-  return value.items.map((entry) => {
-    if (!object(entry)) throw invalid("INVALID_BATCH", "Each batch item needs { id, data }.");
-    return { docId: parseDocId(entry.id), data: parseDocument(entry.data) };
+  let mode: TableBatchMode = "insert";
+  if (forceMode !== undefined) {
+    mode = forceMode;
+  } else if (value.write_mode !== undefined) {
+    if (value.write_mode !== "insert" && value.write_mode !== "merge_upsert" && value.write_mode !== "replace_upsert") {
+      throw invalid("INVALID_WRITE_MODE", 'write_mode must be "insert", "merge_upsert", or "replace_upsert".');
+    }
+    mode = value.write_mode;
+  } else if (value.upsert === true) {
+    mode = "merge_upsert";
+  }
+  if (value.upsert !== undefined && value.upsert !== true && value.upsert !== false) {
+    throw invalid("INVALID_BATCH", "upsert must be true or false when present; prefer write_mode.");
+  }
+  let returnDocuments = true;
+  if (value.return_documents !== undefined) {
+    if (typeof value.return_documents !== "boolean") {
+      throw invalid("INVALID_BATCH", "return_documents must be true or false when present.");
+    }
+    returnDocuments = value.return_documents;
+  }
+  const items = value.items.map((entry) => {
+    if (!object(entry)) throw invalid("INVALID_BATCH", "Each batch item needs { data } and an optional id.");
+    const data = parseDocument(entry.data);
+    if (entry.id === undefined || entry.id === null) {
+      if (forceMode === "update") throw invalid("INVALID_BATCH", "Batch updates need an id per item.");
+      return { docId: null, data };
+    }
+    return { docId: parseDocId(entry.id), data };
   });
+  return { mode, items, returnDocuments };
+}
+
+/** Parse a batch delete body: { ids }. 0 through 25 ids; empty deletes
+ * succeed with count 0 like the write path. */
+export function parseBatchDeleteBody(value: unknown): string[] {
+  if (!object(value) || !Array.isArray(value.ids)) {
+    throw invalid("INVALID_BATCH", "Batch delete bodies must be a JSON object with an ids list.");
+  }
+  if (value.ids.length > TABLE_BATCH_MAX) {
+    throw invalid("INVALID_BATCH", `Batch deletes must list 0 to ${TABLE_BATCH_MAX} document IDs.`);
+  }
+  return value.ids.map((id) => parseDocId(id));
 }
 
 interface TableRow {
@@ -703,164 +822,238 @@ export async function countRows(
   return { total };
 }
 
-/** Batch insert with all-or-denied policy semantics (TABLE-02 batch slice):
- * the per-action policy preflight runs for every item first, and a single
- * policy/attribution denial fails the whole batch before any row is written
- * (TABLE_BATCH_DENIED). Operational per-item failures (conflicts, invalid
- * shapes) instead ride per-item results after the surviving writes land.
- * D1 writes go through one batch() call, so the surviving set is atomic. */
-export async function batchInsert(
+/** Existence preflight in one SELECT: at most TABLE_BATCH_MAX ids plus
+ * table_id binds, far under the D1 100-bound-parameter cap. Empty input
+ * skips the query entirely. */
+async function preflightExisting(db: D1Database, table: TableDefinition, ids: readonly string[]): Promise<Set<string>> {
+  const found = new Set<string>();
+  if (ids.length === 0) return found;
+  const rows = await db
+    .prepare(`SELECT doc_id FROM table_rows WHERE table_id=? AND doc_id IN (${ids.map(() => "?").join(",")})`)
+    .bind(table.id, ...ids)
+    .all<{ doc_id: string }>();
+  for (const row of rows.results) found.add(row.doc_id);
+  return found;
+}
+
+/** Single-transaction write discipline: the whole surviving set goes through
+ * ONE batch() call, so it lands atomically or not at all (a failing
+ * statement aborts or rolls back the call's entire sequence per the D1
+ * worker API). D1 batch() rejects the whole call on a constraint failure
+ * instead of returning per-item results, so callers preflight first to
+ * classify per-item outcomes. There is deliberately NO row-by-row fallback:
+ * retrying items individually after an aborted call would persist a partial
+ * write set the caller never approved item-by-item, and up to N extra
+ * statements would break the proven Free worst case below. A lost race
+ * instead fails the whole request with TABLE_BATCH_RETRY (503, nothing
+ * persisted — the single call rolled back) and the caller retries the full
+ * batch; wholesale writes replay safely and per-item outcomes are
+ * re-derived. Never split one request across several batch() calls: each
+ * extra call is a separate transaction and a separate slice of the 50-query
+ * Free invocation budget. */
+async function runSingleBatch(db: D1Database, statements: readonly D1PreparedStatement[]): Promise<void> {
+  if (statements.length === 0) return;
+  try {
+    await db.batch([...statements]);
+  } catch {
+    throw invalid(
+      "TABLE_BATCH_RETRY",
+      "The batch did not land: the single write transaction aborted and rolled back, so nothing was persisted. Retry the full batch.",
+      503,
+    );
+  }
+}
+
+/** The single canonical batch-write executor (upstream 0428e0fb/PR #735):
+ * one implementation behind POST rows/batch and both compatibility shims,
+ * so there is exactly one authoritative batch semantics path. Policy and
+ * attribution denials fail the whole batch before any row is written
+ * (TABLE_BATCH_DENIED); operational per-item outcomes for preflight-known
+ * states (conflicts, missing rows) ride per-item results in submission
+ * order with an ok count, and the surviving set persists through one atomic
+ * transaction — never a partial row-by-row write. A write transaction that
+ * aborts past a clean preflight (a concurrent writer won the race) fails
+ * the whole request with TABLE_BATCH_RETRY (503, nothing persisted) for a
+ * full-batch retry. Empty batches succeed with count 0. Tables are never
+ * auto-created: the declaration must exist, so writes cannot bypass owner
+ * attribution. */
+export async function executeBatchWrite(
   db: D1Database,
   caller: Principal,
   table: TableDefinition,
-  items: readonly TableBatchItem[],
-): Promise<{ results: TableBatchResult[] }> {
-  const allowed = await canAct(db, table, caller, "insert");
-  if (!allowed) {
-    throw invalid("TABLE_BATCH_DENIED", "The batch is denied: this caller holds no insert grant.", 403);
+  request: TableBatchRequest,
+): Promise<TableBatchResponse> {
+  // All-or-denied policy preflight first: upsert modes compose both grants
+  // fail-closed (upstream row-policies have no local per-action split; a
+  // caller that may only insert must not gain update power through upsert,
+  // and vice versa). Nothing is written before every required grant holds.
+  // Whole-request validation at the domain layer too: a future caller that
+  // skips the parser still cannot slip an oversized batch past the bound.
+  // Validation precedes the policy preflight, matching the route order.
+  if (request.items.length > TABLE_BATCH_MAX) {
+    throw invalid(
+      "INVALID_BATCH",
+      `Batch bodies must list 0 to ${TABLE_BATCH_MAX} items; split nothing client-side, the bound is atomicity.`,
+    );
   }
-  // D1 batch() rejects the whole call on a constraint failure instead of
-  // returning per-item results, so conflicts are preflighted: known IDs ride
-  // per-item DOCUMENT_CONFLICT results while only fresh rows go through the
-  // single atomic batch() call. A writer that races the preflight is
-  // classified per item on the fallback path below.
-  const existing = await db
-    .prepare(`SELECT doc_id FROM table_rows WHERE table_id=? AND doc_id IN (${items.map(() => "?").join(",")})`)
-    .bind(table.id, ...items.map((item) => item.docId))
-    .all<{ doc_id: string }>();
-  const taken = new Set(existing.results.map((row) => row.doc_id));
-  const fresh = items.filter((item) => !taken.has(item.docId));
-  const now = new Date().toISOString();
-  if (fresh.length > 0) {
-    try {
-      await db.batch(
-        fresh.map((item) =>
-          db
-            .prepare(
-              "INSERT INTO table_rows(table_id, org_id, doc_id, owner_user_id, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(table.id, table.orgId, item.docId, caller.userId, JSON.stringify(item.data), now, now),
-        ),
-      );
-    } catch {
-      // Lost a race with a concurrent writer between preflight and write:
-      // retry the fresh set row by row so each item still reports its own
-      // outcome (conflict or written) instead of failing the batch.
-      for (const item of fresh) {
-        try {
-          await db
-            .prepare(
-              "INSERT INTO table_rows(table_id, org_id, doc_id, owner_user_id, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(table.id, table.orgId, item.docId, caller.userId, JSON.stringify(item.data), now, now)
-            .run();
-        } catch {
-          taken.add(item.docId);
-        }
-      }
+  const actions: TableAction[] =
+    request.mode === "insert" ? ["insert"] : request.mode === "update" ? ["update"] : ["insert", "update"];
+  for (const action of actions) {
+    if (!(await canAct(db, table, caller, action))) {
+      throw invalid("TABLE_BATCH_DENIED", `The batch is denied: this caller holds no ${action} grant.`, 403);
     }
   }
-  return {
-    results: items.map((item) =>
-      taken.has(item.docId)
-        ? {
-            docId: item.docId,
-            ok: false as const,
-            error: { code: "DOCUMENT_CONFLICT", message: `Document "${item.docId}" already exists.` },
-          }
-        : { docId: item.docId, ok: true as const, error: null },
-    ),
-  };
-}
-
-/** Batch update with the same all-or-denied policy shape as batch insert:
- * denied callers fail the whole batch first (TABLE_BATCH_DENIED); missing
- * rows ride per-item DOCUMENT_NOT_FOUND results after the surviving writes
- * land atomically through one batch() call. */
-export async function batchUpdate(
-  db: D1Database,
-  caller: Principal,
-  table: TableDefinition,
-  items: readonly TableBatchItem[],
-): Promise<{ results: TableBatchResult[] }> {
-  const allowed = await canAct(db, table, caller, "update");
-  if (!allowed) {
-    throw invalid("TABLE_BATCH_DENIED", "The batch is denied: this caller holds no update grant.", 403);
-  }
-  const existing = await db
-    .prepare(`SELECT doc_id FROM table_rows WHERE table_id=? AND doc_id IN (${items.map(() => "?").join(",")})`)
-    .bind(table.id, ...items.map((item) => item.docId))
-    .all<{ doc_id: string }>();
-  const present = new Set(existing.results.map((row) => row.doc_id));
+  // Idless rows (upstream permits them on the upsert path) take a server
+  // UUID here, before the preflight, so the rest of the executor sees only
+  // concrete ids. UUIDs satisfy the document-ID alphabet.
   const now = new Date().toISOString();
-  const statements: D1PreparedStatement[] = [];
-  const order: number[] = [];
-  items.forEach((item, index) => {
-    if (!present.has(item.docId)) return;
-    order.push(index);
-    statements.push(
-      db
-        .prepare("UPDATE table_rows SET data_json=?, updated_at=? WHERE table_id=? AND doc_id=?")
-        .bind(JSON.stringify(item.data), now, table.id, item.docId),
-    );
-  });
-  if (statements.length > 0) await db.batch(statements);
-  return {
-    results: items.map((item) =>
-      present.has(item.docId)
-        ? { docId: item.docId, ok: true as const, error: null }
-        : {
-            docId: item.docId,
-            ok: false as const,
-            error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." },
-          },
-    ),
+  const ids = request.items.map((item) => item.docId ?? crypto.randomUUID().toLowerCase());
+  const finish = (results: TableBatchResult[]): TableBatchResponse => {
+    const count = results.filter((result) => result.ok).length;
+    return request.returnDocuments ? { results, count } : { results: [], count };
   };
+  if (ids.length === 0) return finish([]);
+  const buildInsert = (docId: string, data: Record<string, unknown>): D1PreparedStatement =>
+    db
+      .prepare(
+        "INSERT INTO table_rows(table_id, org_id, doc_id, owner_user_id, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(table.id, table.orgId, docId, caller.userId, JSON.stringify(data), now, now);
+  const buildUpdate = (docId: string, data: Record<string, unknown>): D1PreparedStatement =>
+    db
+      .prepare("UPDATE table_rows SET data_json=?, updated_at=? WHERE table_id=? AND doc_id=?")
+      .bind(JSON.stringify(data), now, table.id, docId);
+
+  if (request.mode === "insert") {
+    const taken = await preflightExisting(db, table, ids);
+    const seen = new Set<string>();
+    const fresh: { docId: string; data: Record<string, unknown> }[] = [];
+    // Per-index conflict flags: a repeat of an id already seen in this same
+    // request conflicts like a present row, since the first occurrence
+    // writes it.
+    const conflicted = ids.map(() => false);
+    ids.forEach((docId, index) => {
+      if (taken.has(docId) || seen.has(docId)) {
+        conflicted[index] = true;
+        return;
+      }
+      seen.add(docId);
+      fresh.push({ docId, data: request.items[index]!.data });
+    });
+    // The surviving set lands through the single transaction; a lost race
+    // fails the whole request for retry (TABLE_BATCH_RETRY) instead of
+    // persisting a partial set row by row.
+    await runSingleBatch(
+      db,
+      fresh.map((item) => buildInsert(item.docId, item.data)),
+    );
+    return finish(
+      ids.map((docId, index) =>
+        taken.has(docId) || conflicted[index]
+          ? {
+              docId,
+              ok: false as const,
+              error: { code: "DOCUMENT_CONFLICT", message: `Document "${docId}" already exists.` },
+            }
+          : { docId, ok: true as const, error: null },
+      ),
+    );
+  }
+
+  if (request.mode === "update") {
+    const present = await preflightExisting(db, table, ids);
+    const targets = ids
+      .map((docId, index) => ({ docId, data: request.items[index]!.data }))
+      .filter((item) => present.has(item.docId));
+    // Missing rows ride per-item DOCUMENT_NOT_FOUND from the preflight; the
+    // surviving set lands through the single transaction, and a lost race
+    // fails the whole request for retry instead of persisting row by row.
+    await runSingleBatch(
+      db,
+      targets.map((item) => buildUpdate(item.docId, item.data)),
+    );
+    return finish(
+      ids.map((docId) =>
+        present.has(docId)
+          ? { docId, ok: true as const, error: null }
+          : {
+              docId,
+              ok: false as const,
+              error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." },
+            },
+      ),
+    );
+  }
+
+  // merge_upsert and replace_upsert: present rows are replaced wholesale
+  // (local documents are whole objects, so the modes share one effect);
+  // missing rows are inserted under the caller's attribution while updates
+  // preserve the existing owner. Within-request repeats apply in submission
+  // order, last write winning, every occurrence reporting ok.
+  const present = await preflightExisting(db, table, ids);
+  const seen = new Set<string>();
+  const statements = ids.map((docId, index) => {
+    const data = request.items[index]!.data;
+    if (present.has(docId) || seen.has(docId)) return buildUpdate(docId, data);
+    seen.add(docId);
+    return buildInsert(docId, data);
+  });
+  // Every item reports ok: upserts insert or replace wholesale, so the only
+  // failure mode past the preflight is a lost race, which fails the whole
+  // request for retry instead of reconciling row by row.
+  await runSingleBatch(db, statements);
+  return finish(ids.map((docId) => ({ docId, ok: true as const, error: null })));
 }
 
-/** Batch delete with the same all-or-denied policy shape: denied callers
+/** Batch delete behind the batch-delete compatibility route: denied callers
  * fail the whole batch first (TABLE_BATCH_DENIED); missing rows ride
- * per-item DOCUMENT_NOT_FOUND results after the surviving deletes land
- * atomically through one batch() call. */
-export async function batchDelete(
+ * per-item DOCUMENT_NOT_FOUND results, as do repeats of an id this same
+ * request already deleted — only the first occurrence deletes, so count
+ * reflects unique physical deletions (mirroring the insert path, where a
+ * repeat of an id the same request wrote reports DOCUMENT_CONFLICT).
+ * Deletes land through the same single batch() transaction discipline as
+ * writes. */
+export async function executeBatchDelete(
   db: D1Database,
   caller: Principal,
   table: TableDefinition,
   docIds: readonly string[],
-): Promise<{ results: TableBatchResult[] }> {
-  if (docIds.length === 0 || docIds.length > TABLE_BATCH_MAX) {
-    throw invalid("INVALID_BATCH", `Batch deletes must list 1 to ${TABLE_BATCH_MAX} document IDs.`);
+): Promise<TableBatchResponse> {
+  if (docIds.length > TABLE_BATCH_MAX) {
+    throw invalid("INVALID_BATCH", `Batch deletes must list 0 to ${TABLE_BATCH_MAX} document IDs.`);
   }
-  const parsed = docIds.map((id) => parseDocId(id));
-  const allowed = await canAct(db, table, caller, "delete");
-  if (!allowed) {
+  if (!(await canAct(db, table, caller, "delete"))) {
     throw invalid("TABLE_BATCH_DENIED", "The batch is denied: this caller holds no delete grant.", 403);
   }
-  const existing = await db
-    .prepare(`SELECT doc_id FROM table_rows WHERE table_id=? AND doc_id IN (${parsed.map(() => "?").join(",")})`)
-    .bind(table.id, ...parsed)
-    .all<{ doc_id: string }>();
-  const present = new Set(existing.results.map((row) => row.doc_id));
-  const statements = parsed
-    .filter((id) => present.has(id))
-    .map((id) => db.prepare("DELETE FROM table_rows WHERE table_id=? AND doc_id=?").bind(table.id, id));
-  if (statements.length > 0) await db.batch(statements);
-  return {
-    results: parsed.map((id) =>
-      present.has(id)
-        ? { docId: id, ok: true as const, error: null }
-        : { docId: id, ok: false as const, error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." } },
-    ),
-  };
-}
-
-/** Parse a batch delete body: { ids: [...] }. */
-export function parseBatchDeleteBody(value: unknown): string[] {
-  if (!object(value) || !Array.isArray(value.ids)) {
-    throw invalid("INVALID_BATCH", "Batch delete bodies must be a JSON object with an ids list.");
-  }
-  if (value.ids.length === 0 || value.ids.length > TABLE_BATCH_MAX) {
-    throw invalid("INVALID_BATCH", `Batch deletes must list 1 to ${TABLE_BATCH_MAX} document IDs.`);
-  }
-  return value.ids.map((id) => parseDocId(id));
+  if (docIds.length === 0) return { results: [], count: 0 };
+  const present = await preflightExisting(db, table, docIds);
+  // Deduplicate to unique physical deletions: repeats of an id this request
+  // already targets send no second statement (it would delete nothing yet
+  // still cost a query) and report DOCUMENT_NOT_FOUND per item below.
+  const seen = new Set<string>();
+  const targets = docIds.filter((id) => {
+    if (!present.has(id) || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  // Missing rows ride per-item DOCUMENT_NOT_FOUND from the preflight; the
+  // surviving deletes land through the single transaction, and a lost race
+  // fails the whole request for retry instead of deleting row by row.
+  await runSingleBatch(
+    db,
+    targets.map((id) => db.prepare("DELETE FROM table_rows WHERE table_id=? AND doc_id=?").bind(table.id, id)),
+  );
+  const reported = new Set<string>();
+  const results = docIds.map((id) => {
+    if (seen.has(id) && !reported.has(id)) {
+      reported.add(id);
+      return { docId: id, ok: true as const, error: null };
+    }
+    return {
+      docId: id,
+      ok: false as const,
+      error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." },
+    };
+  });
+  return { results, count: results.filter((result) => result.ok).length };
 }

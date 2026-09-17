@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0
-// Author Tables over D1 (TABLE-01 minimal slice, TABLE-02 query/count/batch;
-// issues #117, #154): declarations, deny-by-absence per-action grants,
-// policy-safe bounded queries, scoped counts, and all-or-denied batch
-// mutations, proven against real local D1 in workerd. Applies the full
+// Author Tables over D1 (TABLE-01 minimal slice, TABLE-02 query/count/
+// canonical-batch; issues #117, #154): declarations, deny-by-absence
+// per-action grants, policy-safe bounded queries, scoped counts, and the
+// canonical write_mode batch contract (insert, merge_upsert, replace_upsert
+// over 0-25 documents), proven against real local D1 in workerd. Applies the full
 // migration chain (0001 + 0007 + 0008 + 0009) so the tables schema composes
 // with the org-membership gate (AUTH-01): route tests run as the LAB
 // fixture identity (OWNER bootstraps to admin of ORG in authenticate), and
@@ -26,7 +27,7 @@ import {
   insertRow,
   loadTable,
   lookupPath,
-  parseBatchBody,
+  parseBatchRequest,
   parseDocument,
   parseTableQuery,
   readRow,
@@ -613,6 +614,7 @@ describe("TABLE-02 all-or-denied batch mutations", () => {
         { docId: "a", ok: true, error: null },
         { docId: "b", ok: true, error: null },
       ],
+      count: 2,
     });
     expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 2 });
   });
@@ -626,9 +628,13 @@ describe("TABLE-02 all-or-denied batch mutations", () => {
       ],
     });
     expect(res.status).toBe(201);
-    const body = (await res.json()) as { results: { docId: string; ok: boolean; error: { code: string } | null }[] };
+    const body = (await res.json()) as {
+      results: { docId: string; ok: boolean; error: { code: string } | null }[];
+      count: number;
+    };
     expect(body.results[0]).toMatchObject({ docId: "a", ok: false, error: { code: "DOCUMENT_CONFLICT" } });
     expect(body.results[1]).toMatchObject({ docId: "b", ok: true, error: null });
+    expect(body.count).toBe(1);
     // The surviving write landed.
     expect(await call("/api/tables/ledger/rows/b").then((r) => r.json())).toMatchObject({ row: { data: { n: 2 } } });
     // An all-conflict batch reports per-item conflicts with no writes.
@@ -643,6 +649,7 @@ describe("TABLE-02 all-or-denied batch mutations", () => {
         { docId: "a", ok: false, error: { code: "DOCUMENT_CONFLICT", message: 'Document "a" already exists.' } },
         { docId: "b", ok: false, error: { code: "DOCUMENT_CONFLICT", message: 'Document "b" already exists.' } },
       ],
+      count: 0,
     });
   });
 
@@ -694,6 +701,7 @@ describe("TABLE-02 all-or-denied batch mutations", () => {
         { docId: "a", ok: true, error: null },
         { docId: "ghost", ok: false, error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." } },
       ],
+      count: 1,
     });
     const removed = await call("/api/tables/ledger/rows/batch-delete", "POST", { ids: ["a", "ghost"] });
     expect(await removed.json()).toEqual({
@@ -701,6 +709,7 @@ describe("TABLE-02 all-or-denied batch mutations", () => {
         { docId: "a", ok: true, error: null },
         { docId: "ghost", ok: false, error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." } },
       ],
+      count: 1,
     });
     expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 1 });
     // Ghost-only batches skip the write batch() entirely and still report.
@@ -709,11 +718,38 @@ describe("TABLE-02 all-or-denied batch mutations", () => {
     });
     expect(await ghostUpdate.json()).toEqual({
       results: [{ docId: "ghost", ok: false, error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." } }],
+      count: 0,
     });
     const ghostDelete = await call("/api/tables/ledger/rows/batch-delete", "POST", { ids: ["ghost"] });
     expect(await ghostDelete.json()).toEqual({
       results: [{ docId: "ghost", ok: false, error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." } }],
+      count: 0,
     });
+  });
+
+  it("counts duplicate delete ids once: repeats report DOCUMENT_NOT_FOUND", async () => {
+    // One physical row deleted twice must not count twice. The first
+    // occurrence deletes; later ones report DOCUMENT_NOT_FOUND like ghosts
+    // (mirroring the insert path, where a repeat of an id the same request
+    // wrote reports DOCUMENT_CONFLICT). The scoped count proves only one
+    // row left the table.
+    const inserted = await call("/api/tables/ledger/rows/batch", "POST", {
+      items: [{ id: "a", data: { n: 1 } }],
+    });
+    expect(inserted.status).toBe(201);
+    const removed = await call("/api/tables/ledger/rows/batch-delete", "POST", {
+      ids: ["a", "a", "ghost", "a"],
+    });
+    expect(await removed.json()).toEqual({
+      results: [
+        { docId: "a", ok: true, error: null },
+        { docId: "a", ok: false, error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." } },
+        { docId: "ghost", ok: false, error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." } },
+        { docId: "a", ok: false, error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." } },
+      ],
+      count: 1,
+    });
+    expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 0 });
   });
 
   it("bounds batches and validates batch bodies", async () => {
@@ -722,10 +758,18 @@ describe("TABLE-02 all-or-denied batch mutations", () => {
     });
     expect(tooMany.status).toBe(400);
     expect(await tooMany.json()).toMatchObject({ error: { code: "INVALID_BATCH" } });
-    expect((await call("/api/tables/ledger/rows/batch", "POST", { items: [] })).status).toBe(400);
+    // Nothing was written: oversized batches are rejected before any write.
+    expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 0 });
+    // Empty batches are valid 0-document writes, not validation failures.
+    const empty = await call("/api/tables/ledger/rows/batch", "POST", { items: [] });
+    expect(empty.status).toBe(201);
+    expect(await empty.json()).toEqual({ results: [], count: 0 });
+    const emptyDelete = await call("/api/tables/ledger/rows/batch-delete", "POST", { ids: [] });
+    expect(emptyDelete.status).toBe(200);
+    expect(await emptyDelete.json()).toEqual({ results: [], count: 0 });
     expect((await call("/api/tables/ledger/rows/batch", "POST", {})).status).toBe(400);
-    expect((await call("/api/tables/ledger/rows/batch-delete", "POST", { ids: [] })).status).toBe(400);
     expect((await call("/api/tables/ledger/rows/batch-delete", "POST", {})).status).toBe(400);
+    expect((await call("/api/tables/ledger/rows/batch", "POST", { write_mode: "bogus", items: [] })).status).toBe(400);
   });
 
   it("lets a granted caller batch while strangers stay denied", async () => {
@@ -750,6 +794,192 @@ describe("TABLE-02 all-or-denied batch mutations", () => {
         )
       ).status,
     ).toBe(403);
+  });
+});
+
+describe("TABLE-02 canonical write_mode batch contract (upstream #735)", () => {
+  beforeEach(async () => {
+    await createTable("contracts");
+  });
+
+  type BatchBody = {
+    results: { docId: string; ok: boolean; error: { code: string; message: string } | null }[];
+    count: number;
+  };
+
+  it("upserts with merge_upsert: inserts missing rows, replaces present ones", async () => {
+    expect((await putDoc("contracts", "kept", { n: 1 })).status).toBe(201);
+    const res = await call("/api/tables/contracts/rows/batch", "POST", {
+      write_mode: "merge_upsert",
+      items: [
+        { id: "kept", data: { n: 2 } },
+        { id: "fresh", data: { n: 3 } },
+      ],
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as BatchBody;
+    expect(body).toEqual({
+      results: [
+        { docId: "kept", ok: true, error: null },
+        { docId: "fresh", ok: true, error: null },
+      ],
+      count: 2,
+    });
+    expect(await call("/api/tables/contracts/rows/kept").then((r) => r.json())).toMatchObject({
+      row: { data: { n: 2 } },
+    });
+    expect(await call("/api/tables/contracts/rows/fresh").then((r) => r.json())).toMatchObject({
+      row: { data: { n: 3 } },
+    });
+  });
+
+  it("treats replace_upsert like merge_upsert: wholesale replace, same count", async () => {
+    expect((await putDoc("contracts", "r", { n: 1 })).status).toBe(201);
+    const res = await call("/api/tables/contracts/rows/batch", "POST", {
+      write_mode: "replace_upsert",
+      items: [
+        { id: "r", data: { n: 9 } },
+        { id: "new", data: { n: 1 } },
+      ],
+    });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({
+      results: [
+        { docId: "r", ok: true, error: null },
+        { docId: "new", ok: true, error: null },
+      ],
+      count: 2,
+    });
+    expect(await call("/api/tables/contracts/rows/r").then((r) => r.json())).toMatchObject({
+      row: { data: { n: 9 } },
+    });
+  });
+
+  it("maps legacy upsert:true to merge_upsert and permits idless rows", async () => {
+    const res = await call("/api/tables/contracts/rows/batch", "POST", {
+      upsert: true,
+      items: [{ data: { n: 1 } }, { id: "named", data: { n: 2 } }],
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as BatchBody;
+    expect(body.count).toBe(2);
+    expect(body.results[1]).toEqual({ docId: "named", ok: true, error: null });
+    const generated = body.results[0]!.docId;
+    expect(typeof generated).toBe("string");
+    expect(generated.length).toBeGreaterThan(0);
+    expect(body.results[0]).toEqual({ docId: generated, ok: true, error: null });
+    // The generated id reads back like any other row.
+    expect(await call(`/api/tables/contracts/rows/${generated}`).then((r) => r.status)).toBe(200);
+  });
+
+  it("answers count-only when return_documents is false", async () => {
+    const res = await call("/api/tables/contracts/rows/batch", "POST", {
+      write_mode: "merge_upsert",
+      return_documents: false,
+      items: [
+        { id: "a", data: { n: 1 } },
+        { id: "b", data: { n: 2 } },
+      ],
+    });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ results: [], count: 2 });
+    expect(await call("/api/tables/contracts/count").then((r) => r.json())).toEqual({ total: 2 });
+  });
+
+  it("requires both insert and update grants for upsert modes", async () => {
+    await call("/api/tables/contracts/grants", "POST", { action: "insert", granteeUserId: OTHER_USER });
+    const insertOnly = await call(
+      "/api/tables/contracts/rows/batch",
+      "POST",
+      { write_mode: "merge_upsert", items: [{ id: "x", data: { n: 1 } }] },
+      ORG,
+      OTHER_USER,
+    );
+    expect(insertOnly.status).toBe(403);
+    expect(await insertOnly.json()).toMatchObject({ error: { code: "TABLE_BATCH_DENIED" } });
+    await call("/api/tables/contracts/grants", "POST", { action: "update", granteeUserId: OTHER_USER });
+    const both = await call(
+      "/api/tables/contracts/rows/batch",
+      "POST",
+      { write_mode: "merge_upsert", items: [{ id: "x", data: { n: 1 } }] },
+      ORG,
+      OTHER_USER,
+    );
+    expect(both.status).toBe(201);
+    expect(await both.json()).toMatchObject({ count: 1 });
+    // Nothing landed from the denied attempt: the preflight precedes writes.
+    expect(await call("/api/tables/contracts/count").then((r) => r.json())).toEqual({ total: 1 });
+  });
+
+  it("keeps submission order in per-item results", async () => {
+    expect((await putDoc("contracts", "taken", { n: 0 })).status).toBe(201);
+    const res = await call("/api/tables/contracts/rows/batch", "POST", {
+      write_mode: "insert",
+      items: [
+        { id: "z-last", data: { n: 1 } },
+        { id: "taken", data: { n: 2 } },
+        { id: "a-first", data: { n: 3 } },
+      ],
+    });
+    const body = (await res.json()) as BatchBody;
+    expect(body.results.map((result) => result.docId)).toEqual(["z-last", "taken", "a-first"]);
+    expect(body.results.map((result) => result.ok)).toEqual([true, false, true]);
+    expect(body.count).toBe(2);
+  });
+
+  it("writes a full 25-document batch through one atomic batch() call", async () => {
+    const items = Array.from({ length: TABLE_BATCH_MAX }, (_, i) => ({ id: `w${i}`, data: { n: i } }));
+    const res = await call("/api/tables/contracts/rows/batch", "POST", { write_mode: "insert", items });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as BatchBody;
+    expect(body.count).toBe(TABLE_BATCH_MAX);
+    expect(body.results).toHaveLength(TABLE_BATCH_MAX);
+    expect(body.results.every((result) => result.ok)).toBe(true);
+    // 25 rows sit far below the count scan window, so the scoped count
+    // answers the exact total; the keyset walk below proves all 25 landed.
+    expect(await call("/api/tables/contracts/count").then((r) => r.json())).toEqual({ total: TABLE_BATCH_MAX });
+    const walked: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 3; page += 1) {
+      const suffix = cursor === null ? "" : `&cursor=${cursor}`;
+      const pageRes = await call(`/api/tables/contracts/rows?limit=50${suffix}`, "GET");
+      expect(pageRes.status).toBe(200);
+      const pageBody = (await pageRes.json()) as {
+        rows: { id: string }[];
+        hasMore: boolean;
+        nextCursor: string | null;
+      };
+      walked.push(...pageBody.rows.map((row) => row.id));
+      cursor = pageBody.nextCursor;
+      if (!pageBody.hasMore) break;
+    }
+    expect(new Set(walked).size).toBe(TABLE_BATCH_MAX);
+    // Spot-read the boundaries of the single-transaction write path.
+    expect(await call("/api/tables/contracts/rows/w0").then((r) => r.json())).toMatchObject({
+      row: { data: { n: 0 } },
+    });
+    expect(await call(`/api/tables/contracts/rows/w${TABLE_BATCH_MAX - 1}`).then((r) => r.json())).toMatchObject({
+      row: { data: { n: TABLE_BATCH_MAX - 1 } },
+    });
+  });
+
+  it("rejects duplicates within one insert request as conflicts", async () => {
+    const res = await call("/api/tables/contracts/rows/batch", "POST", {
+      items: [
+        { id: "dup", data: { n: 1 } },
+        { id: "dup", data: { n: 2 } },
+      ],
+    });
+    expect(await res.json()).toEqual({
+      results: [
+        { docId: "dup", ok: true, error: null },
+        { docId: "dup", ok: false, error: { code: "DOCUMENT_CONFLICT", message: 'Document "dup" already exists.' } },
+      ],
+      count: 1,
+    });
+    expect(await call("/api/tables/contracts/rows/dup").then((r) => r.json())).toMatchObject({
+      row: { data: { n: 1 } },
+    });
   });
 });
 
@@ -910,13 +1140,28 @@ describe("tables query parser units", () => {
     );
     expect(faultCode(() => parseDocument({ "0bad": 1 }))).toBe("INVALID_DOCUMENT");
     expect(faultCode(() => parseDocument({ blob: "x".repeat(5000) }))).toBe("DOCUMENT_TOO_LARGE");
-    expect(faultCode(() => parseBatchBody({ items: [] }))).toBe("INVALID_BATCH");
-    expect(faultCode(() => parseBatchBody({}))).toBe("INVALID_BATCH");
-    expect(faultCode(() => parseBatchBody({ items: ["nope"] }))).toBe("INVALID_BATCH");
-    expect(faultCode(() => parseBatchBody({ items: [{ id: "ok" }] }))).toBe("INVALID_DOCUMENT");
+    expect(faultCode(() => parseBatchRequest({}))).toBe("INVALID_BATCH");
+    expect(faultCode(() => parseBatchRequest({ items: ["nope"] }))).toBe("INVALID_BATCH");
+    expect(faultCode(() => parseBatchRequest({ items: [{ id: "ok" }] }))).toBe("INVALID_DOCUMENT");
+    // Empty batches are valid 0-document canonical writes.
+    expect(parseBatchRequest({ items: [] })).toEqual({ mode: "insert", items: [], returnDocuments: true });
+    expect(parseBatchRequest({ items: [], write_mode: "replace_upsert" }).mode).toBe("replace_upsert");
+    expect(parseBatchRequest({ items: [], upsert: true }).mode).toBe("merge_upsert");
+    expect(parseBatchRequest({ items: [], write_mode: "merge_upsert", upsert: false }).mode).toBe("merge_upsert");
+    expect(faultCode(() => parseBatchRequest({ items: [], write_mode: "bogus" }))).toBe("INVALID_WRITE_MODE");
+    expect(faultCode(() => parseBatchRequest({ items: [], upsert: "yes" }))).toBe("INVALID_BATCH");
+    expect(faultCode(() => parseBatchRequest({ items: [], return_documents: "no" }))).toBe("INVALID_BATCH");
+    expect(parseBatchRequest({ items: [], return_documents: false }).returnDocuments).toBe(false);
+    // Idless rows parse with a null id; the update shim still requires ids.
+    expect(parseBatchRequest({ items: [{ data: { n: 1 } }] }).items).toEqual([{ docId: null, data: { n: 1 } }]);
+    expect(faultCode(() => parseBatchRequest({ items: [{ data: { n: 1 } }] }, "update"))).toBe("INVALID_BATCH");
+    expect(parseBatchRequest({ items: [{ id: "a", data: { n: 1 } }] }, "update").mode).toBe("update");
     expect(lookupPath({ a: { b: 1 } }, "a.b")).toBe(1);
     expect(lookupPath({ a: { b: 1 } }, "a.missing")).toBeUndefined();
     expect(lookupPath({ a: [1, 2] }, "a.0")).toBeUndefined();
+    // 25, not upstream's 1000: one request must fit a single batch()
+    // transaction inside the 50-query Free invocation budget counting every
+    // batched statement (see src/tables.ts header and TABLE-02 parity note).
     expect(TABLE_BATCH_MAX).toBe(25);
     expect(TABLE_QUERY_ROW_CAP).toBe(1000);
   });
