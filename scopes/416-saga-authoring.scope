@@ -1,0 +1,12 @@
+# ADR-033-5 acceptance + proofs (issue #416): accept the RFC as ADR 033
+# (TBD rename + decisions record + sagaRun re-deferral), native-entrypoint
+# proof for makeSagaWorkflow (test-only workerd proof worker), agent
+# synthesis proof, and the tiny Saga-authoring-for-agents guide with golden
+# examples. No Saga rewrites, no new primitive, no policy knobs, no DSL;
+# Worker+D1 only.
+scopes/416-saga-authoring.scope
+docs/architecture/033-saga-authoring-ergonomics.md
+docs/saga-authoring-for-agents.md
+test/agent-synthesis-proof.test.ts
+test/entrypoint-proof/
+vitest.config.ts
