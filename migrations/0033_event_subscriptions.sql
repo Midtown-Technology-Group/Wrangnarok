@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS event_subscriptions(id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), source_id TEXT NOT NULL REFERENCES event_sources(id), name TEXT NOT NULL, saga_id TEXT NOT NULL, topic_filter TEXT NOT NULL CHECK(length(topic_filter) BETWEEN 1 AND 128), enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)), run_as_user_id TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(source_id, name));
+CREATE INDEX IF NOT EXISTS event_subscriptions_source ON event_subscriptions(source_id, enabled, name);
+CREATE INDEX IF NOT EXISTS event_subscriptions_org ON event_subscriptions(org_id);
+CREATE TABLE IF NOT EXISTS event_deliveries(subscription_id TEXT NOT NULL REFERENCES event_subscriptions(id), event_id TEXT NOT NULL, org_id TEXT NOT NULL, topic TEXT NOT NULL CHECK(length(topic) BETWEEN 1 AND 128), execution_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(subscription_id, event_id));
+CREATE INDEX IF NOT EXISTS event_deliveries_subscription ON event_deliveries(subscription_id, created_at DESC, event_id DESC);

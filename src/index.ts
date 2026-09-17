@@ -146,12 +146,22 @@ import {
 } from "./endpoints";
 import {
   createEventSource,
+  createSubscription,
   deleteEventSource,
+  deleteSubscription,
+  dispatchEventFanout,
   emitEvent,
   listEventSources,
   listEvents,
+  listSubscriptionDeliveries,
+  listSubscriptions,
+  loadEventSource,
+  loadSubscription,
   parseEventSourceName,
+  parseSubscriptionName,
   setEventSourceEnabled,
+  setSubscriptionEnabled,
+  subscriptionSummary,
 } from "./events";
 import {
   createSchedule,
@@ -1074,14 +1084,19 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       /^\/api\/event-sources\/[^/]+(\/[^/]+)?$/.exec(url.pathname) &&
       !sourceEvents &&
       !/^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname) &&
-      !/^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/(enable|disable)$/.exec(url.pathname)
+      !/^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/(enable|disable)$/.exec(url.pathname) &&
+      !/^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/subscriptions$/.exec(url.pathname)
     ) {
       return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
     }
     if (sourceEvents?.[1] && request.method === "POST") {
       // Operator emission into the log: deterministic (source, event) key,
       // same-content replays, mismatched content 409s. The tick and endpoint
-      // delivery paths append internally without passing through here.
+      // delivery paths append internally without passing through here. Every
+      // accepted event then fans out through the standard submit protocol
+      // to the eligible subscribers of this source (TRG-03 S2): the fan-out
+      // response carries per-subscriber outcomes plus the explicit overflow
+      // count, and a validation failure emits nothing at all.
       await requireManageOrg(env.DB, ctx, caller.orgId);
       requireJson(request);
       const name = parseEventSourceName(sourceEvents[1]);
@@ -1095,13 +1110,137 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         topic: record.topic,
         payload: record.payload,
       });
-      return json({ event: emitted.event, replayed: emitted.replayed }, emitted.replayed ? 200 : 201);
+      const fanout = await dispatchEventFanout(env.DB, env, submit, {
+        orgId: caller.orgId,
+        sourceId: emitted.sourceId,
+        eventId: emitted.event.eventId,
+        topic: emitted.event.topic,
+        payload: emitted.event.payload,
+      });
+      return json(
+        {
+          event: emitted.event,
+          replayed: emitted.replayed,
+          deliveries: fanout.deliveries,
+          overflowSkipped: fanout.overflowSkipped,
+        },
+        emitted.replayed ? 200 : 201,
+      );
     }
     if (sourceEvents?.[1] && request.method === "GET") {
       // Log history for replay visibility: newest first, bounded 50.
       const name = parseEventSourceName(sourceEvents[1]);
       rejectQuery(url);
       return json({ events: await listEvents(env.DB, caller.orgId, name, 50) });
+    }
+    // TRG-03 S2 subscriptions (issue #139): org-scoped subscription CRUD
+    // binding typed topic filters to a target Saga, plus per-subscription
+    // delivery receipts. Writes are operator-managed (requireManageOrg),
+    // reads are member-open, and foreign rows answer 404 — the same
+    // posture as the source registry above.
+    const sourceSubscriptions = /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/subscriptions$/.exec(url.pathname);
+    if (sourceSubscriptions?.[1] && request.method === "GET") {
+      const name = parseEventSourceName(sourceSubscriptions[1]);
+      rejectQuery(url);
+      const source = await loadEventSource(env.DB, caller.orgId, name);
+      if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");
+      return json({ subscriptions: await listSubscriptions(env.DB, caller.orgId, source.id) });
+    }
+    if (sourceSubscriptions?.[1] && request.method === "POST") {
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
+      const name = parseEventSourceName(sourceSubscriptions[1]);
+      const source = await loadEventSource(env.DB, caller.orgId, name);
+      if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");
+      const body = await boundedJson(request.body);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(400, "INVALID_SUBSCRIPTION", "Provide name, topicFilter, and sagaId.");
+      }
+      const record = body as Record<string, unknown>;
+      return json(
+        {
+          subscription: await createSubscription(env.DB, caller, source, {
+            name: record.name,
+            topicFilter: record.topicFilter,
+            sagaId: record.sagaId,
+          }),
+        },
+        201,
+      );
+    }
+    const subscriptionDetail =
+      /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/subscriptions\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname);
+    if (
+      subscriptionDetail?.[1] &&
+      subscriptionDetail?.[2] &&
+      (request.method === "GET" || request.method === "DELETE")
+    ) {
+      const sourceName = parseEventSourceName(subscriptionDetail[1]);
+      const subName = parseSubscriptionName(subscriptionDetail[2]);
+      rejectQuery(url);
+      const source = await loadEventSource(env.DB, caller.orgId, sourceName);
+      if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");
+      if (request.method === "GET") {
+        const found = await loadSubscription(env.DB, caller.orgId, source.id, subName);
+        if (!found) throw new Fault(404, "NOT_FOUND", "Not found.");
+        return json({ subscription: subscriptionSummary(found) });
+      }
+      // Deleting removes the subscription plus its delivery receipts;
+      // dispatched Executions keep their history. Gone-or-foreign 404s.
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      await deleteSubscription(env.DB, caller, source, subName);
+      return json({ deleted: true });
+    }
+    const subscriptionEnable =
+      /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/subscriptions\/([a-z0-9][a-z0-9-]{0,63})\/(enable|disable)$/.exec(
+        url.pathname,
+      );
+    if (subscriptionEnable?.[1] && subscriptionEnable?.[2] && subscriptionEnable?.[3] && request.method === "POST") {
+      // Enablement fences future fan-out while dispatched Executions run
+      // to terminal and delivery receipts keep history.
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      rejectQuery(url);
+      const source = await loadEventSource(env.DB, caller.orgId, parseEventSourceName(subscriptionEnable[1]));
+      if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");
+      const subName = parseSubscriptionName(subscriptionEnable[2]);
+      return json({
+        subscription: await setSubscriptionEnabled(env.DB, caller, source, subName, subscriptionEnable[3] === "enable"),
+      });
+    }
+    const subscriptionDeliveries =
+      /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/subscriptions\/([a-z0-9][a-z0-9-]{0,63})\/deliveries$/.exec(
+        url.pathname,
+      );
+    if (subscriptionDeliveries?.[1] && subscriptionDeliveries?.[2] && request.method === "GET") {
+      // Delivery receipts for replay visibility: newest first, bounded 50.
+      const source = await loadEventSource(env.DB, caller.orgId, parseEventSourceName(subscriptionDeliveries[1]));
+      if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");
+      const found = await loadSubscription(
+        env.DB,
+        caller.orgId,
+        source.id,
+        parseSubscriptionName(subscriptionDeliveries[2]),
+      );
+      if (!found) throw new Fault(404, "NOT_FOUND", "Not found.");
+      rejectQuery(url);
+      return json({ deliveries: await listSubscriptionDeliveries(env.DB, found.id, 50) });
+    }
+    // Unknown shapes under the event-source namespace answer 404, never
+    // UNIMPLEMENTED theater — including paths deeper than the S1 guard.
+    if (url.pathname === "/api/event-sources" || url.pathname.startsWith("/api/event-sources/")) {
+      const knownCollection =
+        url.pathname === "/api/event-sources" && request.method !== "GET" && request.method !== "POST";
+      const knownItem =
+        sourceEvents?.[1] !== undefined ||
+        sourceSubscriptions?.[1] !== undefined ||
+        subscriptionDetail?.[1] !== undefined ||
+        subscriptionEnable?.[1] !== undefined ||
+        subscriptionDeliveries?.[1] !== undefined ||
+        eventSourceDetail?.[1] !== undefined ||
+        eventSourceEnable?.[1] !== undefined;
+      if (knownCollection || !knownItem) {
+        return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+      }
     }
     if (url.pathname === "/api/executions" && request.method === "POST") {
       const key = parseCallerKey(request.headers.get("Idempotency-Key"));

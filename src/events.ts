@@ -17,12 +17,20 @@
 // event IDs: same (source, event) replays, mismatched duplicates answer 409,
 // and schedule promotion / endpoint delivery append best-effort delivery
 // rows (topics `schedule.delivered` / `webhook.delivered`) that never fail
-// the delivery itself. Subscriptions, fan-out, operator replay, and built-in
-// platform events are explicitly deferred to later TRG-03 slices: this file
-// owns registration plus the log, nothing downstream. No Queue, no Durable
-// Object, no second auth or execution path.
-import { BODY_LIMIT, EXECUTION_ID, Fault, hash, UUID } from "./domain";
+// the delivery itself. Operator replay and built-in platform events stay
+// deferred to the S3 slice. No Queue, no Durable Object, no second auth or
+// execution path.
+//
+// TRG-03 S2 (issue #139) adds scoped subscriptions plus bounded fan-out in
+// this same file: one accepted event fans out through the existing submit
+// protocol to every eligible subscriber, with the schedule-tick fencing
+// discipline (disable/delete fence plus pre-dispatch authority revalidation
+// through the canonical resolver/grant path) applied per subscriber.
+import { BODY_LIMIT, EXECUTION_ID, Fault, hash, parseKeyShape, resolveSubmissionSaga, UUID } from "./domain";
 import type { Principal } from "./domain";
+import type { Bindings } from "./bindings";
+import type { submit } from "./executions";
+import { resolveCurrentAuthority } from "./roles";
 
 export const EVENT_SOURCE_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const SAFE_EVENT_CHAR = /^[a-zA-Z0-9._:-]+$/;
@@ -222,10 +230,29 @@ export async function setEventSourceEnabled(
 export async function deleteEventSource(db: D1Database, caller: Principal, name: string): Promise<void> {
   const row = await loadEventSource(db, caller.orgId, name);
   if (!row) throw new Fault(404, "NOT_FOUND", "Not found.");
-  await db.batch([
-    db.prepare("DELETE FROM events WHERE source_id=?").bind(row.id),
-    db.prepare("DELETE FROM event_sources WHERE id=?").bind(row.id),
-  ]);
+  // S2 cascade: subscriptions hang off the source, and delivery receipts
+  // hang off the subscriptions. Deleting the source removes all three
+  // layers; dispatched Executions keep their ExecutionHistory rows.
+  try {
+    await db.batch([
+      db
+        .prepare(
+          "DELETE FROM event_deliveries WHERE subscription_id IN (SELECT id FROM event_subscriptions WHERE source_id=?)",
+        )
+        .bind(row.id),
+      db.prepare("DELETE FROM event_subscriptions WHERE source_id=?").bind(row.id),
+      db.prepare("DELETE FROM events WHERE source_id=?").bind(row.id),
+      db.prepare("DELETE FROM event_sources WHERE id=?").bind(row.id),
+    ]);
+  } catch (error) {
+    // A database with the S1 tables but without migration 0033 keeps the
+    // S1 delete shape instead of failing the operator request.
+    if (!(error instanceof Error) || !/no such table/i.test(error.message)) throw error;
+    await db.batch([
+      db.prepare("DELETE FROM events WHERE source_id=?").bind(row.id),
+      db.prepare("DELETE FROM event_sources WHERE id=?").bind(row.id),
+    ]);
+  }
 }
 
 export interface EmitEventInput {
@@ -237,6 +264,9 @@ export interface EmitEventInput {
 export interface EmitEventResult {
   readonly event: EventSummary;
   readonly replayed: boolean;
+  /** Registry ID of the source the event landed in: the fan-out route
+   * resolves subscriptions against it without re-reading the source row. */
+  readonly sourceId: string;
 }
 
 /** Append one event to a source log through the deterministic identity
@@ -268,6 +298,7 @@ export async function emitEvent(
     return {
       event: { eventId, topic, payload: JSON.parse(payloadJson) as unknown, executionId, createdAt: stamp },
       replayed: false,
+      sourceId: row.id,
     };
   }
   const prior = await db
@@ -291,6 +322,7 @@ export async function emitEvent(
       createdAt: prior.created_at,
     },
     replayed: true,
+    sourceId: row.id,
   };
 }
 
@@ -378,4 +410,482 @@ export async function recordSourceDelivery(
   } catch {
     // Best-effort by contract: see above.
   }
+}
+
+// ---------------------------------------------------------------------------
+// TRG-03 S2 (issue #139): org-scoped subscriptions plus bounded fan-out.
+//
+// A subscription binds one event source to one target Saga through a typed
+// dot-namespaced topic filter. One accepted operator event fans out through
+// the existing submit protocol to every eligible subscriber: exact-org rows
+// only, deterministic name order, stable per-(subscription, event)
+// idempotency keys, and per-subscriber fencing (disable/delete fence plus
+// pre-dispatch authority revalidation through the canonical
+// resolver/grant path, copied from promoteWindow). Each subscriber fails
+// independently: an unauthorized or misconfigured subscriber skips with its
+// code while eligible siblings still dispatch — but a skipped subscriber
+// never dispatches, so there is no partial unauthorized dispatch.
+//
+// Admission bound: at most EVENT_FANOUT_LIMIT subscribers dispatch per
+// accepted event (D1 per-invocation query discipline: every dispatch is a
+// full submit). Eligible subscribers beyond the bound are skipped and
+// reported as overflowSkipped, never silently dropped. Re-emitting the same
+// event (same content replays) re-runs fan-out idempotently: submit
+// converges on the same Executions and delivery rows converge via
+// ON CONFLICT DO NOTHING, which is also the restart-recovery story —
+// there is no cursor to resume and no Queue to drain.
+//
+// Worker + Workflows + D1 only. Operator replay/retry APIs and built-in
+// platform events stay deferred to S3.
+
+/** Deterministic per-event fan-out admission bound. Every dispatch is a
+ * full submit-protocol call; the bound keeps one emit inside the D1
+ * per-invocation query discipline. Raise only with measured evidence. */
+export const EVENT_FANOUT_LIMIT = 10;
+
+/** Delivery history per subscription stays bounded like the event log. */
+export const SUBSCRIPTION_DELIVERY_LIMIT = 50;
+
+export interface SubscriptionRow {
+  id: string;
+  org_id: string;
+  source_id: string;
+  name: string;
+  saga_id: string;
+  topic_filter: string;
+  enabled: number;
+  run_as_user_id: string;
+  created_at: string;
+}
+
+export interface SubscriptionSummary {
+  id: string;
+  name: string;
+  sagaId: string;
+  topicFilter: string;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface SubscriptionDeliverySummary {
+  eventId: string;
+  topic: string;
+  executionId: string;
+  createdAt: string;
+}
+
+/** Subscription names share the source shape (lowercase/dashes, 64 max)
+ * and are scoped per source. Unknown shapes answer 404, never a leak. */
+export function parseSubscriptionName(name: string): string {
+  if (!EVENT_SOURCE_NAME.test(name)) throw new Fault(404, "NOT_FOUND", "Not found.");
+  return name;
+}
+
+/** A single topic segment: the legal base of a top-level namespace filter
+ * such as `vendor.*`. Multi-segment bases reuse EVENT_TOPIC. */
+const TOPIC_FILTER_SEGMENT = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+/** Topic filters are dot-namespaced like topics, with one deterministic
+ * extension: a trailing `.*` matches the whole producer namespace
+ * (`vendor.order.*` matches `vendor.order.created`, `vendor.*` matches any
+ * vendor-namespaced topic). Bare `*` segments, mid-filter wildcards, and
+ * unnamespaced exact filters are rejected. */
+export function parseTopicFilter(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 128) {
+    throw invalid("INVALID_SUBSCRIPTION", "Topic filters are 1 to 128 characters of dot-namespaced topic shape.");
+  }
+  if (value.endsWith(".*")) {
+    const base = value.slice(0, -2);
+    if (!EVENT_TOPIC.test(base) && !TOPIC_FILTER_SEGMENT.test(base)) {
+      throw invalid(
+        "INVALID_SUBSCRIPTION",
+        "Topic filters must be an exact dot-namespaced topic or a namespace prefix ending in .*.",
+      );
+    }
+    return value;
+  }
+  if (!EVENT_TOPIC.test(value)) {
+    throw invalid(
+      "INVALID_SUBSCRIPTION",
+      "Topic filters must be an exact dot-namespaced topic or a namespace prefix ending in .*.",
+    );
+  }
+  return value;
+}
+
+/** Deterministic bounded filter evaluation: exact equality, or a strict
+ * namespace-prefix match for trailing-`.*` filters. No regex, no payload
+ * inspection, no ordering dependence — the same (topic, filter) pair
+ * always answers the same way. */
+export function matchesTopicFilter(topic: string, filter: string): boolean {
+  if (filter.endsWith(".*")) {
+    const prefix = filter.slice(0, -1);
+    return topic.length > prefix.length && topic.startsWith(prefix);
+  }
+  return topic === filter;
+}
+
+function subscriptionInvalid(message: string): Fault {
+  return invalid("INVALID_SUBSCRIPTION", message);
+}
+
+/** The target Saga resolves through the submission catalog: unknown IDs
+ * answer UNKNOWN_SAGA like the submit path, so a subscription can never
+ * name a Saga the Worker cannot dispatch. */
+export function parseSubscriptionSagaId(value: unknown): string {
+  if (typeof value !== "string" || !resolveSubmissionSaga(value)) {
+    throw new Fault(400, "UNKNOWN_SAGA", "Provide a built-in Saga ID the Worker can dispatch.");
+  }
+  return value;
+}
+
+/** Exact-org subscription visibility: foreign rows resolve to null so
+ * routes answer 404. */
+export async function loadSubscription(
+  db: D1Database,
+  orgId: string,
+  sourceId: string,
+  name: string,
+): Promise<SubscriptionRow | null> {
+  const row = await db
+    .prepare("SELECT * FROM event_subscriptions WHERE org_id=? AND source_id=? AND name=?")
+    .bind(orgId, sourceId, name)
+    .first<SubscriptionRow>();
+  return row ?? null;
+}
+
+/** Public summary shape for subscription rows (route responses). */
+export function subscriptionSummary(row: SubscriptionRow): SubscriptionSummary {
+  return {
+    id: row.id,
+    name: row.name,
+    sagaId: row.saga_id,
+    topicFilter: row.topic_filter,
+    enabled: row.enabled === 1,
+    createdAt: row.created_at,
+  };
+}
+
+function toSubscriptionSummary(row: SubscriptionRow): SubscriptionSummary {
+  return subscriptionSummary(row);
+}
+
+export interface CreateSubscriptionInput {
+  readonly name: unknown;
+  readonly topicFilter: unknown;
+  readonly sagaId: unknown;
+}
+
+/** Register one subscription on an exact-org source. The deterministic ID
+ * converges like sources: re-creating the same name answers 409, never a
+ * fork. The creator becomes the persisted run-as owner whose authority is
+ * revalidated at every fan-out — creation grants nothing by itself. */
+export async function createSubscription(
+  db: D1Database,
+  caller: Principal,
+  source: EventSourceRow,
+  input: CreateSubscriptionInput,
+): Promise<SubscriptionSummary> {
+  const name = typeof input.name === "string" ? input.name : "";
+  if (!EVENT_SOURCE_NAME.test(name)) {
+    throw subscriptionInvalid("Subscription names are 1 to 64 lowercase letters, digits, or dashes.");
+  }
+  const topicFilter = parseTopicFilter(input.topicFilter);
+  const sagaId = parseSubscriptionSagaId(input.sagaId);
+  const id = await hash(JSON.stringify(["wrangnarok.event-subscription.v1", caller.orgId, source.id, name]));
+  const stamp = new Date().toISOString();
+  try {
+    await db
+      .prepare(
+        "INSERT INTO event_subscriptions(id,org_id,source_id,name,saga_id,topic_filter,enabled,run_as_user_id,created_at) VALUES (?,?,?,?,?,?,1,?,?)",
+      )
+      .bind(id, caller.orgId, source.id, name, sagaId, topicFilter, caller.userId, stamp)
+      .run();
+  } catch {
+    throw invalid("SUBSCRIPTION_EXISTS", "A subscription with this name already exists.", 409);
+  }
+  return { id, name, sagaId, topicFilter, enabled: true, createdAt: stamp };
+}
+
+/** Enabled subscriptions for one source in deterministic dispatch order
+ * (name ASC). Pre-migration absence reads as empty; a real backend fault
+ * rethrows so discovery never answers failure as a successful empty list. */
+export async function listSubscriptions(
+  db: D1Database,
+  orgId: string,
+  sourceId: string,
+): Promise<SubscriptionSummary[]> {
+  let rows: SubscriptionRow[];
+  try {
+    const result = await db
+      .prepare("SELECT * FROM event_subscriptions WHERE org_id=? AND source_id=? ORDER BY name ASC")
+      .bind(orgId, sourceId)
+      .all<SubscriptionRow>();
+    rows = result.results;
+  } catch (error) {
+    if (error instanceof Error && /no such table/i.test(error.message)) return [];
+    throw error;
+  }
+  return rows.map(toSubscriptionSummary);
+}
+
+/** Disable (or re-enable) one subscription. Disabling fences future
+ * fan-out while already-dispatched Executions run to their own terminal;
+ * delivery receipts keep their rows and history. */
+export async function setSubscriptionEnabled(
+  db: D1Database,
+  caller: Principal,
+  source: EventSourceRow,
+  name: string,
+  enabled: boolean,
+): Promise<SubscriptionSummary> {
+  const row = await loadSubscription(db, caller.orgId, source.id, name);
+  if (!row) throw new Fault(404, "NOT_FOUND", "Not found.");
+  await db
+    .prepare("UPDATE event_subscriptions SET enabled=? WHERE id=?")
+    .bind(enabled ? 1 : 0, row.id)
+    .run();
+  const updated = await loadSubscription(db, caller.orgId, source.id, name);
+  if (!updated) throw new Fault(404, "NOT_FOUND", "Not found.");
+  return toSubscriptionSummary(updated);
+}
+
+/** Deleting removes the subscription plus its delivery receipts in one
+ * batch. Dispatched Executions keep their ExecutionHistory rows (keyed by
+ * Execution ID, never by subscription). */
+export async function deleteSubscription(
+  db: D1Database,
+  caller: Principal,
+  source: EventSourceRow,
+  name: string,
+): Promise<void> {
+  const row = await loadSubscription(db, caller.orgId, source.id, name);
+  if (!row) throw new Fault(404, "NOT_FOUND", "Not found.");
+  await db.batch([
+    db.prepare("DELETE FROM event_deliveries WHERE subscription_id=?").bind(row.id),
+    db.prepare("DELETE FROM event_subscriptions WHERE id=?").bind(row.id),
+  ]);
+}
+
+/** Delivery receipts for replay visibility: newest first, bounded.
+ * Unknown or foreign subscriptions answer 404. */
+export async function listSubscriptionDeliveries(
+  db: D1Database,
+  subscriptionId: string,
+  limit: number,
+): Promise<SubscriptionDeliverySummary[]> {
+  // Exact-org visibility is enforced by the caller via loadSubscription:
+  // only a subscription row already resolved in this Organization reaches
+  // this query, so foreign delivery rows stay unreachable here.
+  const capped = Math.min(Math.max(limit, 1), SUBSCRIPTION_DELIVERY_LIMIT);
+  let rows: { event_id: string; topic: string; execution_id: string; created_at: string }[];
+  try {
+    const result = await db
+      .prepare(
+        "SELECT event_id,topic,execution_id,created_at FROM event_deliveries WHERE subscription_id=? ORDER BY created_at DESC,event_id DESC LIMIT ?",
+      )
+      .bind(subscriptionId, capped)
+      .all<{ event_id: string; topic: string; execution_id: string; created_at: string }>();
+    rows = result.results;
+  } catch (error) {
+    // Old DB without the table: the Execution row itself stays the receipt.
+    if (error instanceof Error && /no such table/i.test(error.message)) return [];
+    throw error;
+  }
+  return rows.map((entry) => ({
+    eventId: entry.event_id,
+    topic: entry.topic,
+    executionId: entry.execution_id,
+    createdAt: entry.created_at,
+  }));
+}
+
+/** Derive the deterministic submit Idempotency-Key for one
+ * (subscription, event) pair. The 16-128 safe-alphabet rule is satisfied
+ * by construction: `evt-` plus 64 hex. The same event re-emitted (or
+ * re-run after a crash) converges via same-key replay, and caller keys
+ * starting with `evt-` are rejected at parseCallerKey so no caller can
+ * squat the delivery namespace. */
+export async function subscriptionDeliveryKey(subscriptionId: string, eventId: string): Promise<string> {
+  const key = `evt-${await hash(JSON.stringify(["wrangnarok.event-delivery.v1", subscriptionId, eventId]))}`;
+  return parseKeyShape(key);
+}
+
+export interface FanoutEvent {
+  readonly orgId: string;
+  readonly sourceId: string;
+  readonly eventId: string;
+  readonly topic: string;
+  readonly payload: unknown;
+}
+
+export interface FanoutDelivery {
+  readonly subscription: string;
+  readonly status: "dispatched" | "skipped";
+  readonly executionId?: string;
+  readonly replayed?: boolean;
+  readonly code?: string;
+}
+
+export interface FanoutResult {
+  readonly deliveries: readonly FanoutDelivery[];
+  readonly overflowSkipped: number;
+}
+
+function fanoutSkip(subscription: string, code: string): FanoutDelivery {
+  return { subscription, status: "skipped", code };
+}
+
+/** Fan out one accepted event through the standard submit protocol.
+ * Deterministic: eligible subscribers resolve exact-org in name order and
+ * at most EVENT_FANOUT_LIMIT dispatch; the remainder report as
+ * overflowSkipped. Fenced per subscriber, in order:
+ *
+ * 1. Re-read by id — a disable/delete that landed after the scan wins the
+ *    race (SUBSCRIPTION_DISABLED/SUBSCRIPTION_GONE skips, zero dispatch).
+ * 2. Revalidate the persisted run-as owner through the canonical shared
+ *    resolver plus the saga execute grant — revoked/disabled authority
+ *    fails closed with the same codes as the request path, and an
+ *    unattended fan-out never activates membership. Skipped authority
+ *    never dispatches.
+ * 3. Resolve the target Saga from the live catalog — a removed Saga skips
+ *    as SUBSCRIPTION_MISCONFIGURED instead of dispatching stale config.
+ * 4. Parse the event payload through the Saga parse gate — caller payload
+ *    that is not valid Saga input skips with the parse code.
+ * 5. Submit with the stable delivery key. Submit Faults (pause, admission,
+ *    cancel, expiry, unconfirmed dispatch) skip with their code and record
+ *    no receipt; the operator re-emits the same event to retry, and the
+ *    same keys converge instead of forking.
+ *
+ * Only a successful submit records a delivery receipt (submit first, then
+ * the row — the endpoint_events discipline), so a failed dispatch leaves
+ * no receipt and a redelivered event converges on the exact created
+ * Execution with no latest-for-subscription lookup. */
+export async function dispatchEventFanout(
+  db: D1Database,
+  env: Bindings,
+  submitFn: typeof submit,
+  event: FanoutEvent,
+): Promise<FanoutResult> {
+  let scanned: SubscriptionRow[];
+  try {
+    const result = await db
+      .prepare("SELECT * FROM event_subscriptions WHERE org_id=? AND source_id=? ORDER BY name ASC")
+      .bind(event.orgId, event.sourceId)
+      .all<SubscriptionRow>();
+    scanned = result.results;
+  } catch (error) {
+    // Pre-migration database: no subscription can exist, so no fan-out.
+    if (error instanceof Error && /no such table/i.test(error.message)) {
+      return { deliveries: [], overflowSkipped: 0 };
+    }
+    throw error;
+  }
+  // Matched in deterministic name order. Disabled rows report an explicit
+  // fence skip (no dispatch, no bound consumption); enabled rows past the
+  // admission bound report as overflowSkipped, never silently dropped.
+  const matched = scanned.filter((row) => matchesTopicFilter(event.topic, row.topic_filter));
+  const deliveries: FanoutDelivery[] = [];
+  let attempted = 0;
+  let overflowSkipped = 0;
+  for (const candidate of matched) {
+    if (candidate.enabled !== 1) {
+      deliveries.push(fanoutSkip(candidate.name, "SUBSCRIPTION_DISABLED"));
+      continue;
+    }
+    if (attempted >= EVENT_FANOUT_LIMIT) {
+      overflowSkipped += 1;
+      continue;
+    }
+    attempted += 1;
+    // Fence 1: never trust the scan. Re-read by id so a disable/delete
+    // that landed after the scan wins the race here.
+    let fresh: SubscriptionRow | null;
+    try {
+      fresh = await db
+        .prepare("SELECT * FROM event_subscriptions WHERE id=?")
+        .bind(candidate.id)
+        .first<SubscriptionRow>();
+    } catch (error) {
+      if (error instanceof Error && /no such table/i.test(error.message)) fresh = null;
+      else throw error;
+    }
+    if (!fresh) {
+      deliveries.push(fanoutSkip(candidate.name, "SUBSCRIPTION_GONE"));
+      continue;
+    }
+    if (fresh.enabled !== 1) {
+      deliveries.push(fanoutSkip(candidate.name, "SUBSCRIPTION_DISABLED"));
+      continue;
+    }
+    // Fence 2: the persisted run-as IDs are an identity reference, not
+    // continuing authorization. Re-resolve organization, user, and
+    // membership lifecycle plus the saga execute grant at action time.
+    let principal: { orgId: string; userId: string };
+    try {
+      ({ principal } = await resolveCurrentAuthority(
+        db,
+        env,
+        { orgId: fresh.org_id, userId: fresh.run_as_user_id },
+        {
+          orgId: fresh.org_id,
+          resourceKind: "saga",
+          resourceId: fresh.saga_id.toLowerCase(),
+          action: "execute",
+        },
+      ));
+    } catch (error) {
+      if (error instanceof Fault) {
+        deliveries.push(fanoutSkip(candidate.name, error.code));
+        continue;
+      }
+      throw error;
+    }
+    // Fence 3: the catalog is the authority on dispatchable Sagas.
+    const saga = resolveSubmissionSaga(fresh.saga_id);
+    if (!saga) {
+      deliveries.push(fanoutSkip(candidate.name, "SUBSCRIPTION_MISCONFIGURED"));
+      continue;
+    }
+    // Fence 4: the event payload must be valid Saga input.
+    let input: unknown;
+    try {
+      input = saga.parse(event.payload);
+    } catch (error) {
+      if (error instanceof Fault) {
+        deliveries.push(fanoutSkip(candidate.name, error.code));
+        continue;
+      }
+      throw error;
+    }
+    const key = await subscriptionDeliveryKey(fresh.id, event.eventId);
+    let accepted: { executionId: string; replayed: boolean };
+    try {
+      accepted = await submitFn(env, principal, key, saga, input);
+    } catch (error) {
+      if (error instanceof Fault) {
+        deliveries.push(fanoutSkip(candidate.name, error.code));
+        continue;
+      }
+      throw error;
+    }
+    try {
+      await db
+        .prepare(
+          "INSERT INTO event_deliveries(subscription_id,event_id,org_id,topic,execution_id,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(subscription_id,event_id) DO NOTHING",
+        )
+        .bind(fresh.id, event.eventId, event.orgId, event.topic, accepted.executionId, new Date().toISOString())
+        .run();
+    } catch {
+      // Delivery receipts are replay visibility only: a missing table on an
+      // old database must not fail the Execution itself.
+    }
+    deliveries.push({
+      subscription: candidate.name,
+      status: "dispatched",
+      executionId: accepted.executionId,
+      replayed: accepted.replayed,
+    });
+  }
+  return { deliveries, overflowSkipped };
 }

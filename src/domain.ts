@@ -703,9 +703,11 @@ export function parseKey(key: string | null): string {
  * TRG-02 (issue #138, ADR 018): keys starting with `wep-` are reserved for
  * endpoint-derived delivery keys (endpointIdempotencyKey). TRG-01 (issue
  * #137, ADR 012): keys starting with `sch-` are reserved for
- * schedule-window delivery keys (scheduleWindowKey). A caller that
- * squats either namespace could replay against or collide with a
- * Trigger-owned Execution, so caller keys fail closed here. */
+ * schedule-window delivery keys (scheduleWindowKey). TRG-03 (issue #139
+ * S2): keys starting with `evt-` are reserved for subscription-delivery
+ * keys (subscriptionDeliveryKey). A caller that squats any of these
+ * namespaces could replay against or collide with a Trigger-owned
+ * Execution, so caller keys fail closed here. */
 export function parseCallerKey(key: string | null): string {
   const parsed = parseKeyShape(key);
   if (parsed.startsWith("wep-")) {
@@ -713,6 +715,9 @@ export function parseCallerKey(key: string | null): string {
   }
   if (parsed.startsWith("sch-")) {
     throw new Fault(400, "INVALID_IDEMPOTENCY_KEY", "Keys starting with sch- are reserved for schedule deliveries.");
+  }
+  if (parsed.startsWith("evt-")) {
+    throw new Fault(400, "INVALID_IDEMPOTENCY_KEY", "Keys starting with evt- are reserved for event deliveries.");
   }
   return parsed;
 }

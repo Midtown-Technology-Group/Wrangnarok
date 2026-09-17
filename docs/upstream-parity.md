@@ -8,7 +8,7 @@ Status vocabulary: **Implemented** (shipped locally), **Partial** (materially na
 
 Upstream tests are evidence of intended assertions, not passing-test claims. Upstream sources were inspected, not executed; no upstream production instance was used.
 
-Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 28 Partial, 13 Missing, 1 Gated.
+Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 29 Partial, 12 Missing, 1 Gated.
 
 | ID | Title | Phase | Status | Depends | Existing issue |
 | --- | --- | --- | --- | --- | --- |
@@ -16,7 +16,7 @@ Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 28 Par
 | RUN-02 | Invoke child Sagas with explicit context, completion and failure semantics | 2 | Missing | AUTH-02, RUN-01 | new |
 | TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented (gaps reopened, see #137) | AUTH-02, RUN-01 | #137 |
 | TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01, AUTH-03, CON-01 | #138 |
-| TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Missing | TRG-01, TRG-02, AUTH-02 | new |
+| TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Partial | TRG-01, TRG-02, AUTH-02 | new |
 | DEV-01 | Provide a complete typed TypeScript author and automation SDK | 1+4 | Partial | — | new |
 | DEV-02 | Preview, sync and deploy author source with explicit dependency compatibility | 5 | Partial | DEV-01, SOL-01 | new |
 | AUTH-01 | Replace the single-org allowlist with Organization and user lifecycle management | 3 | Partial | — | new |
@@ -165,9 +165,9 @@ Related Wrangnarok issues: #76
 
 ## TRG-03: Deliver topic and built-in events through scoped subscriptions with replay visibility
 
-Phase 4; **Missing**; existing issue: new
+Phase 4; **Partial**; existing issue: new
 
-Local status: No event-source/subscription model, event log or topic emission API exists.
+Local status: S1 ships the org-scoped event-source registry plus the typed append-only event log (migration 0030, `src/events.ts`): deterministic (source, event) identity with same-content replay and 409 on mismatched content, operator emit/list, disable fencing, and best-effort delivery appends from schedule promotion and endpoint delivery. S2 (issue #139, migration 0033) adds scoped subscriptions binding topic filters (exact or trailing-`.*` namespace) to a target Saga with bounded fan-out through the standard submit protocol: exact-org rows in name order, stable `evt-` delivery keys, per-subscriber disable/delete fencing plus pre-dispatch authority revalidation through the canonical resolver/grant path, an explicit per-event admission bound (10 dispatches, overflow reported, never silently dropped), and per-subscription delivery receipts. Still missing (S3): operator retry/replay APIs, built-in platform emissions, and retention/admission policy. Worker + Workflows + D1 only; no Queue/DO.
 
 Depends: TRG-01, TRG-02, AUTH-02
 
