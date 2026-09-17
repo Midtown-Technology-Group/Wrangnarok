@@ -16,6 +16,7 @@ import { bindSagaConfig } from "../config";
 import { clearExecutionSecrets, registerExecutionSecrets, scrubExecutionText, scrubExecutionValue } from "../secrets";
 import { echo } from "../integrations/echo";
 import { listOrganizations } from "../integrations/ninjaone";
+import { inventoryZones, verifyConnection } from "../integrations/cloudflare";
 import { parseStoredPolicy } from "../executions";
 
 /** Read the parent caller identity from its immutable D1 Execution row.
@@ -51,7 +52,7 @@ export async function executeSaga<TOutput>(
   // checkpoint below scrubs them by substring, including tokens the Action
   // registers mid-run. Cleared on every exit path — a reused isolate never
   // carries one Execution's secrets into the next.
-  registerExecutionSecrets(id, [env.NINJA_CLIENT_ID, env.NINJA_CLIENT_SECRET]);
+  registerExecutionSecrets(id, [env.NINJA_CLIENT_ID, env.NINJA_CLIENT_SECRET, env.CLOUDFLARE_API_TOKEN]);
   try {
     const sagaStep = bindSagaStep(step);
     const catalog: ChildCatalog = { sagas: SAGA_DEFINITIONS };
@@ -93,6 +94,8 @@ export async function executeSaga<TOutput>(
     const deploymentSecrets: Record<string, string | undefined> = {
       clientSecret: env.NINJA_CLIENT_SECRET,
       NINJA_CLIENT_SECRET: env.NINJA_CLIENT_SECRET,
+      apiToken: env.CLOUDFLARE_API_TOKEN,
+      CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
     };
     // One handle per Execution: the org is looked up lazily (inside step.do)
     // so construction performs no I/O, then delegates to the pure binder.
@@ -123,9 +126,17 @@ export async function executeSaga<TOutput>(
       snapshot?.policy_json == null ? undefined : parseStoredPolicy(snapshot.policy_json);
     const ctx: SagaEventContext = {
       executionId: id,
-      integrations: { echo: { echo }, ninjaone: { listOrganizations } },
+      integrations: {
+        echo: { echo },
+        ninjaone: { listOrganizations },
+        cloudflare: { verifyConnection, inventoryZones },
+      },
       db: env.DB,
-      secrets: { clientId: env.NINJA_CLIENT_ID, clientSecret: env.NINJA_CLIENT_SECRET },
+      secrets: {
+        clientId: env.NINJA_CLIENT_ID,
+        clientSecret: env.NINJA_CLIENT_SECRET,
+        apiToken: env.CLOUDFLARE_API_TOKEN,
+      },
       children: lazyChildren,
       config: lazyConfig,
     };

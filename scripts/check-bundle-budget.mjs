@@ -271,7 +271,14 @@ import { join } from "node:path";
 // locally (CI number governs). Hand-written security-boundary code, no new
 // dependencies (package.json unchanged versus main); deliberate feature
 // headroom only.
-const BUDGET_BYTES = 670 * 1024;
+// 2026-09-16 (mig-zone-inventory, issues #116 MIG-01, #119 MIG-02): 700 KiB.
+// The Cloudflare Zone Inventory migration (two Sagas with Workflow
+// entrypoints, bearer Integration with two Actions, domain identity plus
+// parsers, installer and source catalog pins, Connection probe) measures
+// 700963 bytes locally against the 670 KiB line: ~15 KiB of hand-written
+// migration code, no new dependencies (package.json unchanged versus main);
+// deliberate feature headroom only.
+const BUDGET_BYTES = 700 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");

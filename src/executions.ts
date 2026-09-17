@@ -2,6 +2,8 @@
 import { NonRetryableError } from "cloudflare:workflows";
 import {
   DEFAULT_SAGA_POLICY,
+  cloudflareInventorySaga,
+  cloudflareVerifySaga,
   digestSaga,
   encodeHistoryCursor,
   Fault,
@@ -200,6 +202,8 @@ export function workflowForSaga(env: Bindings, sagaId: string): Workflow<{ execu
   if (sagaId === smokeSaga.id) return env.SMOKE_WORKFLOW;
   if (sagaId === helloSaga.id) return env.HELLO_WORKFLOW;
   if (sagaId === helloParentSaga.id) return env.HELLO_PARENT_WORKFLOW;
+  if (sagaId === cloudflareVerifySaga.id) return env.CLOUDFLARE_VERIFY_WORKFLOW;
+  if (sagaId === cloudflareInventorySaga.id) return env.CLOUDFLARE_INVENTORY_WORKFLOW;
   return env.ECHO_WORKFLOW;
 }
 export async function submit(env: Bindings, caller: Principal, key: string, saga: SagaDef, input: unknown) {

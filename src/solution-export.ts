@@ -36,6 +36,9 @@
 // index, solutions): it bundles into plain-node runners with esbuild and runs
 // in workerd tests without Cloudflare bindings.
 import {
+  cloudflareInventorySaga,
+  cloudflareVerifySaga,
+  CLOUDFLARE_INTEGRATION_ID,
   digestSaga,
   echoSaga,
   ECHO_INTEGRATION_ID,
@@ -143,6 +146,8 @@ const CODE_SAGAS: readonly CodeSagaPin[] = Object.freeze([
   { ...smokeSaga, requiredIntegrations: Object.freeze([]) },
   { ...helloSaga, requiredIntegrations: Object.freeze([]) },
   { ...helloParentSaga, requiredIntegrations: Object.freeze([]) },
+  { ...cloudflareVerifySaga, requiredIntegrations: Object.freeze([CLOUDFLARE_INTEGRATION_ID]) },
+  { ...cloudflareInventorySaga, requiredIntegrations: Object.freeze([CLOUDFLARE_INTEGRATION_ID]) },
 ]);
 
 /** Node-safe static catalogs: no Workflows runtime import, so plain-node

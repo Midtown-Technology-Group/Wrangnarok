@@ -1,0 +1,43 @@
+# MIG zone-inventory lane scope (issues #116 MIG-01, #119 MIG-02).
+# Cloudflare Zone Inventory bundle migration: two read-only Sagas plus the
+# Cloudflare bearer Integration, six vendored replay scenarios, bridge
+# conversion, mapping appendix. Wiring files approved by coordinator herb
+# (DM 2026-09-16): every Saga needs dispatch/binding/registry/manifest
+# entries. No migration: accountId resolves test-locally, apiToken from the
+# CLOUDFLARE_API_TOKEN test binding (follow-up issue if generally needed).
+# Shared with int-01 (cricket): src/domain.ts + src/integrations/index.ts —
+# stay in cloudflare regions only, merge origin/main on conflict.
+# Coordinator amendment (takeover): src/solutions.ts for the installer
+# CODE_SAGAS catalog pins only (installs fail UNKNOWN_SAGA without them).
+# src/solution-export.ts likewise for the source-catalog CODE_SAGAS pins.
+# test/connections.test.ts + test/integrations.test.ts: hardcoded inventory
+# counts/names updated for the new member (no behavior changes).
+# test/cloudflare-unit.test.ts
+scripts/check-bundle-budget.mjs: new fast unit coverage for the new files.
+src/solutions.ts
+src/solution-export.ts
+test/connections.test.ts
+test/integrations.test.ts
+test/cloudflare-unit.test.ts
+scripts/check-bundle-budget.mjs
+src/domain.ts
+src/saga.ts
+src/sagas/cloudflare.ts
+src/sagas/definitions.ts
+src/sagas/index.ts
+src/sagas/shared.ts
+src/integrations/cloudflare.ts
+src/integrations/index.ts
+src/executions.ts
+src/bindings.ts
+src/index.ts
+src/connections.ts
+sagas.manifest.json
+wrangler.jsonc
+vitest.config.ts
+test/cloudflare-inventory.test.ts
+test/saga-contract.test.ts
+test/migration-bridge.test.ts
+test/fixtures/zone-inventory/
+docs/migration-pilot.md
+scopes/mig-zone-inventory.scope

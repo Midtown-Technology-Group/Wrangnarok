@@ -68,6 +68,24 @@ export const helloParentSaga = Object.freeze({
   revision: "hello-parent-v1",
   description: "Nested-invocation demo: invoke the hello Saga as a child and await its greeting",
 });
+// Zone Inventory migration (issues #116 MIG-01, #119 MIG-02): the
+// `cloudflare-zone-inventory` bundle re-authored as TypeScript Sagas. The
+// Bifrost manifest UUIDs are source identity only (docs/migration-bridge.md);
+// the registered IDs below are minted Wrangnarok identity, mapped explicitly
+// in docs/migration-pilot.md. Stable identity per ADR 002 (UUID + revision).
+export const cloudflareVerifySaga = Object.freeze({
+  id: "9d2f4a6c-3b1e-4f5a-9c2d-6e8f0a1b2c3d",
+  name: "cloudflare-verify-connection",
+  revision: "cloudflare-verify-connection-v1",
+  description: "Zone Inventory migration: verify the Cloudflare API credential and account mapping read-only",
+});
+export const cloudflareInventorySaga = Object.freeze({
+  id: "7c1e3b5a-2d4f-4e6b-8a1c-5d7f9e0a1b2c",
+  name: "cloudflare-inventory-zones",
+  revision: "cloudflare-inventory-zones-v1",
+  description: "Zone Inventory migration: bounded read-only inventory of Cloudflare zones",
+});
+export const CLOUDFLARE_INTEGRATION_ID = "6b0d2a48-1c3e-4d5a-7b9a-4c6e8d0f2a1b";
 // Disposable smoke Organization (ADR 004): smoke runs here, never against
 // production tenant/Connection data. Seeded in tests; provisioned in dev via
 // the runbook (docs/architecture/004-ci-cd.md).
@@ -485,6 +503,131 @@ export function parseDigestInput(value: unknown): DigestInput {
   }
   return {};
 }
+// Zone Inventory migration (issues #116 MIG-01, #119 MIG-02): Cloudflare
+// bearer vendor contract. The bundle's Python bounds are preserved verbatim:
+// at most 250 zones, 50 per page, 20s vendor deadline, read-only (no
+// mutations exist in this bundle).
+export const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
+export const CLOUDFLARE_VERIFY_PATH = "/user/tokens/verify";
+export const CLOUDFLARE_ZONES_PATH = "/zones";
+export const CLOUDFLARE_MAX_ZONES = 250;
+export const CLOUDFLARE_PAGE_SIZE = 50;
+export const CLOUDFLARE_TIMEOUT_MS = 20000;
+export const CLOUDFLARE_ACCOUNT_ID_PATTERN = /^[a-f0-9]{32}$/;
+export interface CloudflareAccountBinding {
+  readonly id: unknown;
+  readonly name: unknown;
+}
+export interface CloudflareVerifyInput {
+  readonly account?: CloudflareAccountBinding;
+}
+export interface CloudflareInventoryInput {
+  readonly maxZones: number;
+  readonly account?: CloudflareAccountBinding;
+}
+/** Optional account envelope (migration binding `entity_id/entity_name`):
+ * accepted and carried through the parsed input so the Saga can resolve
+ * the account mapping without scraping the raw persisted body. Validated
+ * as an object when present; the Integration boundary owns the strict
+ * account-ID check. */
+function parseCloudflareAccountBinding(value: unknown): CloudflareAccountBinding | undefined {
+  if (value === undefined) return undefined;
+  if (!object(value)) {
+    throw new Fault(400, "INVALID_INPUT", "The account binding must be an object with id and name.");
+  }
+  const record = value as Record<string, unknown>;
+  return { id: record.id ?? null, name: record.name ?? null };
+}
+export function parseCloudflareVerifyInput(value: unknown): CloudflareVerifyInput {
+  if (!object(value)) {
+    throw new Fault(400, "INVALID_INPUT", "The cloudflare-verify-connection Saga takes an empty input object.");
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== "account") {
+      throw new Fault(400, "INVALID_INPUT", "The cloudflare-verify-connection Saga takes an empty input object.");
+    }
+  }
+  const account = parseCloudflareAccountBinding((value as Record<string, unknown>).account);
+  return account === undefined ? {} : { account };
+}
+export function parseCloudflareInventoryInput(value: unknown): CloudflareInventoryInput {
+  if (!object(value)) {
+    throw new Fault(400, "INVALID_INPUT", `max_zones must be an integer between 1 and ${CLOUDFLARE_MAX_ZONES}.`);
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "max_zones" && key !== "maxZones" && key !== "account") {
+      throw new Fault(400, "INVALID_INPUT", `max_zones must be an integer between 1 and ${CLOUDFLARE_MAX_ZONES}.`);
+    }
+  }
+  // The bundle default (Python `max_zones: int = MAX_ZONES`) is preserved:
+  // an omitted key inventories the full bound. The parsed camelCase form is
+  // accepted too: submit persists parsed input and prepareExecution
+  // re-parses it, so the parser must be idempotent over its own output.
+  const raw =
+    record.maxZones === undefined
+      ? record.max_zones === undefined
+        ? CLOUDFLARE_MAX_ZONES
+        : record.max_zones
+      : record.maxZones;
+  if (typeof raw === "boolean" || typeof raw !== "number" || !Number.isInteger(raw)) {
+    throw new Fault(400, "INVALID_INPUT", `max_zones must be an integer between 1 and ${CLOUDFLARE_MAX_ZONES}.`);
+  }
+  if (raw < 1 || raw > CLOUDFLARE_MAX_ZONES) {
+    throw new Fault(400, "INVALID_INPUT", `max_zones must be an integer between 1 and ${CLOUDFLARE_MAX_ZONES}.`);
+  }
+  const account = parseCloudflareAccountBinding(record.account);
+  return account === undefined ? { maxZones: raw } : { maxZones: raw, account };
+}
+export interface CloudflareAccountRef {
+  readonly id: string;
+  readonly name: string;
+}
+export interface CloudflareCredentialStatus {
+  readonly status: string;
+  readonly expiresOn: string | null;
+  readonly notBefore: string | null;
+}
+export interface CloudflareVerifyResult {
+  readonly status: "healthy" | "unhealthy";
+  readonly readOnly: true;
+  readonly integration: "Cloudflare";
+  readonly account: CloudflareAccountRef;
+  readonly credential: CloudflareCredentialStatus;
+  readonly apiCalls: 1;
+}
+export interface CloudflareZoneSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly status: string;
+  readonly type: string;
+  readonly paused: boolean;
+  readonly developmentModeActive: boolean;
+  readonly accountId: string;
+  readonly accountName: string;
+  readonly plan: string;
+  readonly nameServers: readonly string[];
+  readonly activatedOn: string | null;
+  readonly modifiedOn: string | null;
+}
+export interface CloudflareInventorySummary {
+  readonly statusCounts: Readonly<Record<string, number>>;
+  readonly typeCounts: Readonly<Record<string, number>>;
+  readonly paused: number;
+  readonly developmentModeActive: number;
+}
+export interface CloudflareInventoryResult {
+  readonly status: "completed";
+  readonly readOnly: true;
+  readonly integration: "Cloudflare";
+  readonly account: CloudflareAccountRef;
+  readonly zoneCount: number;
+  readonly totalAvailable: number | null;
+  readonly truncated: boolean;
+  readonly apiCalls: number;
+  readonly summary: CloudflareInventorySummary;
+  readonly zones: readonly CloudflareZoneSummary[];
+}
 // Digest census names shown in the echoed summary. The persisted echo output
 // stays under the echo input bound (1024 UTF-8 bytes) via truncation below,
 // so the digest never inherits an unbounded vendor list.
@@ -515,6 +658,8 @@ const catalog: SagaDef[] = [
   { ...smokeSaga, parse: parseSmokeInput },
   { ...helloSaga, parse: parseHelloInput },
   { ...helloParentSaga, parse: parseHelloParentInput },
+  { ...cloudflareVerifySaga, parse: parseCloudflareVerifyInput },
+  { ...cloudflareInventorySaga, parse: parseCloudflareInventoryInput },
 ];
 export function parseSubmission(value: unknown): { saga: SagaDef; input: unknown } {
   if (
