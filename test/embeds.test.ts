@@ -119,6 +119,7 @@ async function createGrant(
 
 interface BootstrapReceipt {
   handle: string;
+  expiresAt: string;
   snapshot: Record<string, unknown>;
   options: Record<string, string[]>;
   declaration: { fields: { name: string }[] };
