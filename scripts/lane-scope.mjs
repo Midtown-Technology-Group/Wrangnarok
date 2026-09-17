@@ -11,6 +11,8 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 
 const args = process.argv.slice(2);
+const eventNameIndex = args.indexOf("--event-name");
+const eventName = eventNameIndex >= 0 ? args[eventNameIndex + 1] : process.env.GITHUB_EVENT_NAME || "pull_request";
 
 // Directories lanes must never stage, regardless of scope file.
 const NEVER = [".jcode/skills/", ".opencode/skills/", "node_modules/", ".wrangler/", "vendor/"];
@@ -25,6 +27,14 @@ function readAllowed(scopeFile) {
 function isAllowed(f, allowed) {
   if (NEVER.some((n) => f.startsWith(n))) return false;
   return allowed.some((a) => f === a || f.startsWith(a.endsWith("/") ? a : a + "/") || f.startsWith(a));
+}
+
+function coversAll(diff, allowed) {
+  return diff.every((f) => isAllowed(f, allowed));
+}
+
+function coveredByUnion(diff, scopeSets) {
+  return diff.every((f) => scopeSets.some((allowed) => isAllowed(f, allowed)));
 }
 
 function branchDiff() {
@@ -58,6 +68,17 @@ if (args[0] === "--selftest") {
   check("reject outside", !isAllowed("src/index.ts", ["scripts/"]));
   check("reject never", !isAllowed("node_modules/x", ["node_modules/"]));
   check("reject partial", !isAllowed("scripts2/a.mjs", ["scripts/"]));
+  const batchedDiff = ["src/a.ts", "test/b.test.ts", "scopes/a.scope", "scopes/b.scope"];
+  const batchedScopes = [
+    ["src/a.ts", "scopes/a.scope"],
+    ["test/b.test.ts", "scopes/b.scope"],
+  ];
+  check("single lane cannot claim batch", !batchedScopes.some((allowed) => coversAll(batchedDiff, allowed)));
+  check("merge-group union covers batch", coveredByUnion(batchedDiff, batchedScopes));
+  check(
+    "merge-group union rejects uncovered path",
+    !coveredByUnion([...batchedDiff, "src/unclaimed.ts"], batchedScopes),
+  );
   // Fail-closed contract: branchDiff() and the committed-diff read must
   // exit 2 (not return empty) when origin/main is unavailable. The live
   // behavior is verified by code inspection plus the CI gate below; this
@@ -100,8 +121,10 @@ if (args[0] === "--self-check") {
   // without covering this branch's changes.
   const covering = [];
   const uncoveredReports = [];
+  const scopeSets = [];
   for (const scopeFile of scopeFiles) {
     const allowed = readAllowed(scopeFile);
+    scopeSets.push(allowed);
     const bad = diff.filter((f) => !isAllowed(f, allowed));
     if (bad.length) {
       uncoveredReports.push({ scopeFile, bad });
@@ -109,6 +132,21 @@ if (args[0] === "--self-check") {
       covering.push(scopeFile);
       console.log(`lane-scope: clean (${scopeFile} covers ${diff.length} files)`);
     }
+  }
+  // A pull request must remain wholly owned by one lane. A merge_group is a
+  // synthetic aggregate of PRs that already passed that required check, so
+  // no single lane should claim the other lanes' files. Require the aggregate
+  // to be covered by the union of the scope files carried in the group; this
+  // preserves fail-closed coverage without defeating merge-queue batching.
+  if (eventName === "merge_group") {
+    const bad = diff.filter((f) => !scopeSets.some((allowed) => isAllowed(f, allowed)));
+    if (bad.length === 0) {
+      console.log(`lane-scope: clean (merge-group union of ${scopeFiles.length} scopes covers ${diff.length} files)`);
+      process.exit(0);
+    }
+    console.error("lane-scope: merge-group scope union does not cover:");
+    for (const f of bad) console.error(`  ${f}`);
+    process.exit(1);
   }
   if (covering.length === 0) {
     for (const { scopeFile, bad } of uncoveredReports) {
