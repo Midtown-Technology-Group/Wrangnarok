@@ -1611,6 +1611,84 @@ describe("FORM-02 auto-fill: declared provider targets with safe precedence", ()
     expect(Object.keys(resolved.errors)).toEqual(["team"]);
   });
 
+  it("shares one table scan across source fields on the same table", async () => {
+    // Two table-provider sources on one table must consume one identical
+    // snapshot for options and auto-fill (FORM-02 same-scan invariant).
+    const caller = { orgId: ORG, userId: OWNER };
+    const rows = [
+      { handle: "ops", lead: "Ada" },
+      { handle: "web", lead: "Bob" },
+    ] as readonly Record<string, unknown>[];
+    let calls = 0;
+    const readRows = async () => {
+      calls += 1;
+      return rows;
+    };
+    const fields = [
+      {
+        name: "team_a",
+        type: "select",
+        required: false,
+        provider: { kind: "table", table: "shared", valueField: "handle" },
+        autoFill: { name_a: "lead" },
+      },
+      {
+        name: "team_b",
+        type: "select",
+        required: false,
+        provider: { kind: "table", table: "shared", valueField: "handle" },
+        autoFill: { name_b: "lead" },
+      },
+      { name: "name_a", type: "text", required: false, maxLength: 1024 },
+      { name: "name_b", type: "text", required: false, maxLength: 1024 },
+    ] as const;
+    const resolved = await resolveFormProviders(bindings.DB, caller, fields as never, readRows);
+    expect(calls).toBe(1);
+    expect(resolved.options).toMatchObject({ team_a: ["ops", "web"], team_b: ["ops", "web"] });
+    expect(resolved.values).toEqual({ name_a: "Ada", name_b: "Ada" });
+    expect(resolved.errors).toEqual({});
+  });
+
+  it("never issues a second scan for a shared table, even when it would fail", async () => {
+    // Split-snapshot sentinel: a second scan that throws (or returns changed
+    // rows) must never run, so field 1 options can never diverge from the
+    // auto-fill snapshot the shared table feeds.
+    const caller = { orgId: ORG, userId: OWNER };
+    const rows = [
+      { handle: "ops", lead: "Ada" },
+      { handle: "web", lead: "Bob" },
+    ] as readonly Record<string, unknown>[];
+    let calls = 0;
+    const readRows = async () => {
+      calls += 1;
+      if (calls > 1) throw new Error("second scan must not run");
+      return rows;
+    };
+    const fields = [
+      {
+        name: "team_a",
+        type: "select",
+        required: false,
+        provider: { kind: "table", table: "shared", valueField: "handle" },
+        autoFill: { name_a: "lead" },
+      },
+      {
+        name: "team_b",
+        type: "select",
+        required: false,
+        provider: { kind: "table", table: "shared", valueField: "handle" },
+        autoFill: { name_b: "lead" },
+      },
+      { name: "name_a", type: "text", required: false, maxLength: 1024 },
+      { name: "name_b", type: "text", required: false, maxLength: 1024 },
+    ] as const;
+    const resolved = await resolveFormProviders(bindings.DB, caller, fields as never, readRows);
+    expect(calls).toBe(1);
+    expect(resolved.options).toMatchObject({ team_a: ["ops", "web"], team_b: ["ops", "web"] });
+    expect(resolved.values).toEqual({ name_a: "Ada", name_b: "Ada" });
+    expect(resolved.errors).toEqual({});
+  });
+
   it("bounds fetched auto-fill output at 64 KiB without fencing option lists", async () => {
     // Twenty ~3.4 KiB documents total ~68 KiB: past the 64 KiB output bound
     // while each document stays under the 4 KiB Table cap and each value

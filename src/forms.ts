@@ -1529,10 +1529,11 @@ function randomHandle(): string {
 
 /** One provider-resolution pass per request: option values and declared
  * auto-fill projections derive from one caller-authorized row scan per
- * table-provider source field (read grant required — denied or foreign
- * tables yield an empty list plus a per-field error entry, never a leak).
- * Static providers read the declaration; table scans repeat per source
- * field and cache per table within the call. Options cap at 50 keys;
+ * table (read grant required — denied or foreign tables yield an empty
+ * list plus a per-field error entry, never a leak). Static providers read
+ * the declaration; table scans run once per table and cache within the
+ * call, so every source field on a shared table consumes the same
+ * snapshot for options and auto-fill. Options cap at 50 keys;
  * auto-fill output caps at 64 KiB and projects the declared keys from the
  * first row. Each projected value runs the target field's submission gate
  * (minus required/hidden, which belong to submit time, reusing the prefill
@@ -1562,13 +1563,16 @@ export async function resolveFormProviders(
       options[field.name] = field.provider.options;
       continue;
     }
-    let rows: readonly Record<string, unknown>[] | null;
-    try {
-      rows = await readRows(db, caller, field.provider.table);
-    } catch {
-      rows = null;
+    const table = field.provider.table;
+    let rows = scanned.get(table);
+    if (rows === undefined) {
+      try {
+        rows = await readRows(db, caller, table);
+      } catch {
+        rows = null;
+      }
+      scanned.set(table, rows);
     }
-    scanned.set(field.provider.table, rows);
     if (rows === null) {
       errors[field.name] = "Provider table is not available to this caller.";
       options[field.name] = [];
