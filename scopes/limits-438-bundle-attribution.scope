@@ -1,0 +1,9 @@
+# limits-438-bundle-attribution lane scope (issues #438 latest audit, #177 LIMITS-01 headroom).
+# Smallest reversible measurement-only slice: the dry-run/budget tool optionally
+# emits or consumes an esbuild/Wrangler metafile and prints deterministic top
+# module/input contributors plus totals. No Worker build, upload-bytes, budget,
+# headroom, UI-gate, CI-authority, or provider-assumption change. No tracked
+# build artifacts.
+scripts/check-bundle-budget.mjs
+package.json
+scopes/limits-438-bundle-attribution.scope

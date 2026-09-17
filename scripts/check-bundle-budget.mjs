@@ -6,7 +6,7 @@
 // The dev env is pinned (issue #331) so the measurement never drifts against
 // the default environment when wrangler.jsonc defines multiple envs.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -323,38 +323,316 @@ const BUDGET_BYTES = 730 * 1024;
 // a deliberate BUDGET_BYTES raise plus a same-PR LIMITS-META update.
 const MIN_HEADROOM_BYTES = 8 * 1024;
 
-const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
-const outfile = join(dir, "worker.js");
-try {
-  // Run the pinned local Wrangler directly under node: no shell, no npx
-  // resolution, identical on every platform.
-  execFileSync(
-    process.execPath,
-    ["node_modules/wrangler/bin/wrangler.js", "deploy", "--dry-run", "--env", "dev", "--outfile", outfile],
-    {
-      stdio: "inherit",
-    },
+// Bundle-attribution options (issue #438 latest audit, smallest reversible
+// slice). Measurement-only: nothing here changes the Worker build, the
+// measured bytes, the budget/headroom gates, or CI authority.
+//   --top N               print the top N contributors (default 10)
+//   --emit-metafile PATH  copy the fresh dry-run metafile to PATH (emit)
+//   --metafile PATH       print attribution from an existing metafile only
+//                         (consume; skips the Wrangler run and the gates,
+//                         so it is stable offline without credentials)
+//   --selftest            deterministic fixture checks, no Wrangler/network
+const DEFAULT_TOP_N = 10;
+
+function usageError(message) {
+  console.error(
+    `Usage: node scripts/check-bundle-budget.mjs [--top N] [--emit-metafile PATH] [--metafile PATH] [--selftest]`,
   );
-  const { size } = statSync(outfile);
-  const headroom = BUDGET_BYTES - size;
-  console.log(
-    `Worker bundle: ${size} bytes (budget ${BUDGET_BYTES} bytes, headroom ${headroom} bytes, minimum ${MIN_HEADROOM_BYTES} bytes).`,
-  );
-  if (size > BUDGET_BYTES) {
-    console.error(
-      `Worker bundle budget exceeded: ${size} bytes > ${BUDGET_BYTES} bytes. Shrink the bundle or raise the budget deliberately.`,
-    );
-    process.exitCode = 1;
-  } else if (headroom < MIN_HEADROOM_BYTES) {
-    console.error(
-      `Worker bundle headroom exhausted: ${headroom} bytes < ${MIN_HEADROOM_BYTES} bytes minimum. ` +
-        `Shrink the Worker surface first, or raise BUDGET_BYTES deliberately with a same-PR docs/feasibility-envelope.md LIMITS-META update (issue #177).`,
-    );
+  console.error(message);
+  process.exit(2);
+}
+
+function parseArgs(argv) {
+  const opts = { topN: DEFAULT_TOP_N, emitMetafile: null, consumeMetafile: null, selftest: false };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--selftest") {
+      opts.selftest = true;
+    } else if (arg === "--top") {
+      opts.topN = parseTopN(argv[i + 1]);
+      i += 1;
+    } else if (arg === "--emit-metafile") {
+      if (!argv[i + 1]) usageError("--emit-metafile requires a PATH.");
+      opts.emitMetafile = argv[i + 1];
+      i += 1;
+    } else if (arg === "--metafile") {
+      if (!argv[i + 1]) usageError("--metafile requires a PATH.");
+      opts.consumeMetafile = argv[i + 1];
+      i += 1;
+    } else {
+      usageError(`Unknown argument: ${arg}`);
+    }
+  }
+  if (opts.consumeMetafile && opts.emitMetafile) {
+    usageError("--metafile (consume) and --emit-metafile (emit) are mutually exclusive.");
+  }
+  return opts;
+}
+
+function parseTopN(value) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) usageError(`--top requires a positive integer, got: ${value}`);
+  return n;
+}
+
+const cliOpts = parseArgs(process.argv.slice(2));
+if (cliOpts.selftest) {
+  runSelftest();
+  process.exit(0);
+}
+if (cliOpts.consumeMetafile) {
+  // Offline attribution only: no Wrangler run, no gates. CI never uses this
+  // path; the live dry-run below remains the single authoritative measurement.
+  try {
+    for (const line of attributionLines(loadMetafile(cliOpts.consumeMetafile), cliOpts.topN)) {
+      console.log(line);
+    }
+  } catch (err) {
+    console.error(`Cannot attribute from metafile ${cliOpts.consumeMetafile}: ${err.message}`);
     process.exitCode = 1;
   }
-  checkLimitsMeta();
-} finally {
-  rmSync(dir, { recursive: true, force: true });
+} else {
+  const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
+  const outfile = join(dir, "worker.js");
+  // The pinned Wrangler (4.131.1) exposes `--metafile` on `deploy --dry-run`:
+  // a genuine esbuild metafile for the exact bundle being measured. The
+  // sidecar never changes the emitted Worker bytes.
+  const metafile = join(dir, "bundle-meta.json");
+  try {
+    // Run the pinned local Wrangler directly under node: no shell, no npx
+    // resolution, identical on every platform.
+    execFileSync(
+      process.execPath,
+      [
+        "node_modules/wrangler/bin/wrangler.js",
+        "deploy",
+        "--dry-run",
+        "--env",
+        "dev",
+        "--outfile",
+        outfile,
+        "--metafile",
+        metafile,
+      ],
+      {
+        stdio: "inherit",
+      },
+    );
+    const { size } = statSync(outfile);
+    const headroom = BUDGET_BYTES - size;
+    console.log(
+      `Worker bundle: ${size} bytes (budget ${BUDGET_BYTES} bytes, headroom ${headroom} bytes, minimum ${MIN_HEADROOM_BYTES} bytes).`,
+    );
+    if (size > BUDGET_BYTES) {
+      console.error(
+        `Worker bundle budget exceeded: ${size} bytes > ${BUDGET_BYTES} bytes. Shrink the bundle or raise the budget deliberately.`,
+      );
+      process.exitCode = 1;
+    } else if (headroom < MIN_HEADROOM_BYTES) {
+      console.error(
+        `Worker bundle headroom exhausted: ${headroom} bytes < ${MIN_HEADROOM_BYTES} bytes minimum. ` +
+          `Shrink the Worker surface first, or raise BUDGET_BYTES deliberately with a same-PR docs/feasibility-envelope.md LIMITS-META update (issue #177).`,
+      );
+      process.exitCode = 1;
+    }
+    // Attribution is advisory: it never changes the verdict above. When the
+    // metafile is missing or unparseable, report that instead of inventing
+    // contributors from source file sizes.
+    try {
+      for (const line of attributionLines(loadMetafile(metafile), cliOpts.topN, size)) {
+        console.log(line);
+      }
+      if (cliOpts.emitMetafile) copyFileSync(metafile, cliOpts.emitMetafile);
+    } catch (err) {
+      console.error(`Bundle attribution unavailable (gates above still authoritative): ${err.message}`);
+    }
+    checkLimitsMeta();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+} // end live dry-run path (consume-metafile returns earlier)
+
+// Bundle attribution from a genuine esbuild metafile (issue #438 latest
+// audit). Uses outputs[<bundle>].inputs[*].bytesInOutput — the bundler's own
+// per-module contribution accounting — never source-file globbing. All
+// ordering and formatting is deterministic (bytes desc, path asc; plain
+// integers; one-decimal shares) so output is stable across runs and locales.
+// The measured --outfile bytes passed in as measuredBytes stay authoritative:
+// metafile output bytes can differ by a small prelude/wrapper delta.
+function loadMetafile(path) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new Error(`not valid JSON: ${path}`);
+  }
+  return parsed;
+}
+
+function comparePaths(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function selectBundleOutput(metafile) {
+  const outputs = metafile && metafile.outputs;
+  if (!outputs || typeof outputs !== "object") throw new Error("metafile has no outputs map");
+  // Output keys carry a nondeterministic `.wrangler/tmp/deploy-*/` prefix, so
+  // never print them raw: pick the largest emitted `.js` bundle (never a map)
+  // with a path-asc tiebreak.
+  const candidates = Object.entries(outputs).filter(([key]) => key.endsWith(".js") && !key.endsWith(".js.map"));
+  if (candidates.length === 0) throw new Error("metafile has no emitted .js bundle output");
+  candidates.sort((a, b) => b[1].bytes - a[1].bytes || comparePaths(a[0], b[0]));
+  return candidates[0][1];
+}
+
+function summarizeAttribution(metafile, topN) {
+  const output = selectBundleOutput(metafile);
+  if (!Number.isInteger(output.bytes) || output.bytes < 0) throw new Error("bundle output has no byte count");
+  const perOutput = output.inputs;
+  if (!perOutput || typeof perOutput !== "object" || Object.keys(perOutput).length === 0) {
+    throw new Error("bundle output names no inputs");
+  }
+  const contributors = Object.entries(perOutput).map(([path, entry]) => {
+    const bytes = entry && entry.bytesInOutput;
+    if (!Number.isInteger(bytes) || bytes < 0) throw new Error(`input ${path} has no bytesInOutput count`);
+    return { path, bytes, sharePct: ((bytes / output.bytes) * 100).toFixed(1) };
+  });
+  contributors.sort((a, b) => b.bytes - a.bytes || comparePaths(a.path, b.path));
+  const attributedBytes = contributors.reduce((sum, c) => sum + c.bytes, 0);
+  const shown = contributors.slice(0, topN);
+  const omitted = contributors.slice(topN);
+  return {
+    bundleBytes: output.bytes,
+    inputCount: contributors.length,
+    attributedBytes,
+    shown,
+    omittedCount: omitted.length,
+    omittedBytes: omitted.reduce((sum, c) => sum + c.bytes, 0),
+  };
+}
+
+function attributionLines(metafile, topN, measuredBytes = null) {
+  const summary = summarizeAttribution(metafile, topN);
+  const lines = [`Bundle attribution (esbuild metafile, ${summary.inputCount} inputs):`];
+  for (const c of summary.shown) lines.push(`  ${c.bytes} B (${c.sharePct}%) ${c.path}`);
+  if (summary.omittedCount > 0) {
+    lines.push(`  ... and ${summary.omittedCount} more inputs totaling ${summary.omittedBytes} B`);
+  }
+  let totals = `Metafile bundle output: ${summary.bundleBytes} B; attributed to inputs: ${summary.attributedBytes} B.`;
+  if (measuredBytes !== null) totals += ` Measured worker.js: ${measuredBytes} B (authoritative).`;
+  lines.push(totals);
+  return lines;
+}
+
+function runSelftest() {
+  let passed = 0;
+  const check = (name, cond) => {
+    if (!cond) throw new Error(`bundle-budget selftest failed: ${name}`);
+    passed += 1;
+  };
+  const fixture = () => ({
+    inputs: {
+      "src/a.ts": { bytes: 100 },
+      "src/b.ts": { bytes: 50 },
+      "src/c.ts": { bytes: 50 },
+      "src/d.ts": { bytes: 10 },
+    },
+    outputs: {
+      ".wrangler/tmp/deploy-RANDOM/index.js.map": { bytes: 999, inputs: {} },
+      ".wrangler/tmp/deploy-RANDOM/index.js": {
+        bytes: 200,
+        inputs: {
+          "src/a.ts": { bytesInOutput: 100 },
+          "src/b.ts": { bytesInOutput: 50 },
+          "src/c.ts": { bytesInOutput: 50 },
+          "src/d.ts": { bytesInOutput: 0 },
+        },
+      },
+    },
+  });
+
+  // Ordering: bytes desc, path asc on ties; map output never selected.
+  check(
+    "attribution lines",
+    JSON.stringify(attributionLines(fixture(), 10)) ===
+      JSON.stringify([
+        "Bundle attribution (esbuild metafile, 4 inputs):",
+        "  100 B (50.0%) src/a.ts",
+        "  50 B (25.0%) src/b.ts",
+        "  50 B (25.0%) src/c.ts",
+        "  0 B (0.0%) src/d.ts",
+        "Metafile bundle output: 200 B; attributed to inputs: 200 B.",
+      ]),
+  );
+  // Truncation: top 2 plus a deterministic omitted remainder.
+  check(
+    "top truncation",
+    JSON.stringify(attributionLines(fixture(), 2)) ===
+      JSON.stringify([
+        "Bundle attribution (esbuild metafile, 4 inputs):",
+        "  100 B (50.0%) src/a.ts",
+        "  50 B (25.0%) src/b.ts",
+        "  ... and 2 more inputs totaling 50 B",
+        "Metafile bundle output: 200 B; attributed to inputs: 200 B.",
+      ]),
+  );
+  // Measured-bytes footer marks the --outfile number authoritative.
+  check(
+    "measured footer",
+    attributionLines(fixture(), 10, 205).at(-1) ===
+      "Metafile bundle output: 200 B; attributed to inputs: 200 B. Measured worker.js: 205 B (authoritative).",
+  );
+  // Largest .js wins when several bundles exist; ties break on raw key asc.
+  const multi = fixture();
+  multi.outputs[".wrangler/tmp/deploy-RANDOM/second.js"] = { bytes: 200, inputs: { "src/z.ts": { bytesInOutput: 7 } } };
+  check(
+    "bundle selection",
+    summarizeAttribution(multi, 10).bundleBytes === 200 && summarizeAttribution(multi, 10).shown[0].path === "src/a.ts",
+  );
+  // Malformed metafiles fail with a message instead of invented numbers.
+  for (const [name, bad] of [
+    ["no outputs", {}],
+    ["no bundle", { outputs: { "x.js.map": { bytes: 1, inputs: {} } } }],
+    ["no inputs", { outputs: { "b.js": { bytes: 1, inputs: {} } } }],
+    ["no contribution", { outputs: { "b.js": { bytes: 1, inputs: { "src/a.ts": {} } } } }],
+  ]) {
+    let error = null;
+    try {
+      summarizeAttribution(bad, 10);
+    } catch (err) {
+      error = err;
+    }
+    check(`rejects ${name}`, error instanceof Error);
+  }
+  // Consume path: an on-disk metafile round-trips through the loader.
+  const tmp = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-selftest-"));
+  try {
+    const probe = join(tmp, "meta.json");
+    writeFileSync(probe, JSON.stringify(fixture()));
+    check("consume file", attributionLines(loadMetafile(probe), 1).length === 4);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  // Argument validation rejects bad --top without running anything.
+  for (const bad of ["0", "-3", "2.5", "many", undefined]) {
+    let error = null;
+    const originalExit = process.exit;
+    const originalError = console.error;
+    console.error = () => {};
+    process.exit = () => {
+      throw new Error("exit");
+    };
+    try {
+      parseTopN(bad);
+    } catch (err) {
+      error = err;
+    } finally {
+      process.exit = originalExit;
+      console.error = originalError;
+    }
+    check(`rejects top ${bad}`, error instanceof Error);
+  }
+  console.log(`bundle-budget selftest: ${passed} passed.`);
 }
 
 // LIMITS-01 envelope sync (issue #177): the canonical feasibility record in
