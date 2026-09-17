@@ -53,11 +53,14 @@
 // failing statement aborts or rolls back the entire sequence of that call.
 // Atomicity therefore ends at the batch() call boundary — spreading one
 // request over several batch() calls is several transactions, not one.
-// A full-size request under this bound spends at most ~29 queries against
-// the 50-query Free cap (1 declaration load, up to 2 grant checks, 1
-// preflight SELECT of at most 26 binds against the 100-bound-parameter cap,
-// 25 statements in one batch() call; each INSERT carries at most ~4.6 KB
-// against the 100 KB statement cap). The batch transport cap is 256 KB for
+// A full-size request under this bound spends at most 29 queries against
+// the 50-query Free cap, proven under the strictest plausible counting
+// (every batched statement counts, including a rolled-back call): 1
+// declaration load, up to 2 grant checks, 1 preflight SELECT of at most 26
+// binds against the 100-bound-parameter cap, and 25 statements in one
+// batch() call — with 21 queries of margin, and no row-by-row fallback
+// exists that could spend more. Each INSERT carries at most ~4.6 KB
+// against the 100 KB statement cap. The batch transport cap is 256 KB for
 // the route body (25 capped documents plus ids and envelope fit; what
 // persists still answers to the per-document CHECK). The D1 500 MB Free
 // per-database limit (10 GB Paid), single-database transactions, and
@@ -84,10 +87,10 @@ export const TABLE_QUERY_ROW_CAP = 1000;
  * to 25): 0 through 25 documents per request. 26+ is rejected before any
  * write, and the caller never auto-chunks: splitting would change
  * transaction/policy atomicity. At 25, one request fits in a single batch()
- * transaction and stays comfortably inside the 50-query Free invocation cap
- * counting every batched statement, with headroom left for the row-by-row
- * lost-race fallback (see the header note and docs/upstream-parity.md
- * TABLE-02). */
+ * transaction and costs at most 29 queries against the 50-query Free
+ * invocation cap counting every batched statement — 21 of margin, and no
+ * fallback path exists that could spend more (see the header note and
+ * docs/upstream-parity.md TABLE-02). */
 export const TABLE_BATCH_MAX = 25;
 /** Transport cap for the batch route body: 25 capped 4 KB documents plus ids
  * and envelope fit inside 256 KB with margin. What persists still answers
@@ -834,22 +837,30 @@ async function preflightExisting(db: D1Database, table: TableDefinition, ids: re
 }
 
 /** Single-transaction write discipline: the whole surviving set goes through
- * ONE batch() call, so it lands atomically (a failing statement aborts the
- * call's entire sequence per the D1 worker API). D1 batch() rejects the
- * whole call on a constraint failure instead of returning per-item results,
- * so callers preflight first and reserve the row-by-row fallback for lost
- * races. Returns true when the call landed: a failed call lands nothing, so
- * the full set still needs row-by-row handling — retrying landed rows would
- * misreport this request's own writes as conflicts. Never split one request
- * across several batch() calls: each extra call is a separate transaction
- * and a separate slice of the 50-query Free invocation budget. */
-async function runWriteBatch(db: D1Database, statements: readonly D1PreparedStatement[]): Promise<boolean> {
-  if (statements.length === 0) return true;
+ * ONE batch() call, so it lands atomically or not at all (a failing
+ * statement aborts or rolls back the call's entire sequence per the D1
+ * worker API). D1 batch() rejects the whole call on a constraint failure
+ * instead of returning per-item results, so callers preflight first to
+ * classify per-item outcomes. There is deliberately NO row-by-row fallback:
+ * retrying items individually after an aborted call would persist a partial
+ * write set the caller never approved item-by-item, and up to N extra
+ * statements would break the proven Free worst case below. A lost race
+ * instead fails the whole request with TABLE_BATCH_RETRY (503, nothing
+ * persisted — the single call rolled back) and the caller retries the full
+ * batch; wholesale writes replay safely and per-item outcomes are
+ * re-derived. Never split one request across several batch() calls: each
+ * extra call is a separate transaction and a separate slice of the 50-query
+ * Free invocation budget. */
+async function runSingleBatch(db: D1Database, statements: readonly D1PreparedStatement[]): Promise<void> {
+  if (statements.length === 0) return;
   try {
     await db.batch([...statements]);
-    return true;
   } catch {
-    return false;
+    throw invalid(
+      "TABLE_BATCH_RETRY",
+      "The batch did not land: the single write transaction aborted and rolled back, so nothing was persisted. Retry the full batch.",
+      503,
+    );
   }
 }
 
@@ -857,10 +868,15 @@ async function runWriteBatch(db: D1Database, statements: readonly D1PreparedStat
  * one implementation behind POST rows/batch and both compatibility shims,
  * so there is exactly one authoritative batch semantics path. Policy and
  * attribution denials fail the whole batch before any row is written
- * (TABLE_BATCH_DENIED); operational per-item outcomes (conflicts, missing
- * rows) ride per-item results in submission order with an ok count. Empty
- * batches succeed with count 0. Tables are never auto-created: the
- * declaration must exist, so writes cannot bypass owner attribution. */
+ * (TABLE_BATCH_DENIED); operational per-item outcomes for preflight-known
+ * states (conflicts, missing rows) ride per-item results in submission
+ * order with an ok count, and the surviving set persists through one atomic
+ * transaction — never a partial row-by-row write. A write transaction that
+ * aborts past a clean preflight (a concurrent writer won the race) fails
+ * the whole request with TABLE_BATCH_RETRY (503, nothing persisted) for a
+ * full-batch retry. Empty batches succeed with count 0. Tables are never
+ * auto-created: the declaration must exist, so writes cannot bypass owner
+ * attribution. */
 export async function executeBatchWrite(
   db: D1Database,
   caller: Principal,
@@ -924,25 +940,13 @@ export async function executeBatchWrite(
       seen.add(docId);
       fresh.push({ docId, data: request.items[index]!.data });
     });
-    if (fresh.length > 0) {
-      // Lost a race with a concurrent writer between preflight and write:
-      // the single batch() call landed nothing, so retry the full fresh set
-      // row by row and each item still reports its own outcome (conflict or
-      // written) instead of failing the batch.
-      const landed = await runWriteBatch(
-        db,
-        fresh.map((item) => buildInsert(item.docId, item.data)),
-      );
-      if (!landed) {
-        for (const item of fresh) {
-          try {
-            await buildInsert(item.docId, item.data).run();
-          } catch {
-            taken.add(item.docId);
-          }
-        }
-      }
-    }
+    // The surviving set lands through the single transaction; a lost race
+    // fails the whole request for retry (TABLE_BATCH_RETRY) instead of
+    // persisting a partial set row by row.
+    await runSingleBatch(
+      db,
+      fresh.map((item) => buildInsert(item.docId, item.data)),
+    );
     return finish(
       ids.map((docId, index) =>
         taken.has(docId) || conflicted[index]
@@ -961,23 +965,13 @@ export async function executeBatchWrite(
     const targets = ids
       .map((docId, index) => ({ docId, data: request.items[index]!.data }))
       .filter((item) => present.has(item.docId));
-    // A row deleted between preflight and write reports per-item instead of
-    // failing the batch; a failed single call landed nothing, so the full
-    // target set retries row by row.
-    const landed = await runWriteBatch(
+    // Missing rows ride per-item DOCUMENT_NOT_FOUND from the preflight; the
+    // surviving set lands through the single transaction, and a lost race
+    // fails the whole request for retry instead of persisting row by row.
+    await runSingleBatch(
       db,
       targets.map((item) => buildUpdate(item.docId, item.data)),
     );
-    if (!landed) {
-      for (const item of targets) {
-        try {
-          const changed = await buildUpdate(item.docId, item.data).run();
-          if (changed.meta.changes === 0) present.delete(item.docId);
-        } catch {
-          present.delete(item.docId);
-        }
-      }
-    }
     return finish(
       ids.map((docId) =>
         present.has(docId)
@@ -1004,32 +998,10 @@ export async function executeBatchWrite(
     seen.add(docId);
     return buildInsert(docId, data);
   });
-  // A concurrent writer raced the preflight: the single batch() call landed
-  // nothing, so reconcile every item row by row and each lands exactly once
-  // with a truthful ok. UPDATE-then-INSERT covers a row that appeared;
-  // INSERT-then-UPDATE covers one that vanished; a third failure is a defect
-  // and fails loud, never silent.
-  const landed = await runWriteBatch(db, statements);
-  if (!landed) {
-    for (let index = 0; index < ids.length; index += 1) {
-      const docId = ids[index]!;
-      const data = request.items[index]!.data;
-      try {
-        if (present.has(docId) || seen.has(docId)) {
-          const changed = await buildUpdate(docId, data).run();
-          if (changed.meta.changes === 0) await buildInsert(docId, data).run();
-        } else {
-          try {
-            await buildInsert(docId, data).run();
-          } catch {
-            await buildUpdate(docId, data).run();
-          }
-        }
-      } catch {
-        throw new Error(`Table batch raced itself on document "${docId}".`);
-      }
-    }
-  }
+  // Every item reports ok: upserts insert or replace wholesale, so the only
+  // failure mode past the preflight is a lost race, which fails the whole
+  // request for retry instead of reconciling row by row.
+  await runSingleBatch(db, statements);
   return finish(ids.map((docId) => ({ docId, ok: true as const, error: null })));
 }
 
@@ -1052,23 +1024,13 @@ export async function executeBatchDelete(
   if (docIds.length === 0) return { results: [], count: 0 };
   const present = await preflightExisting(db, table, docIds);
   const targets = docIds.filter((id) => present.has(id));
-  const landed = await runWriteBatch(
+  // Missing rows ride per-item DOCUMENT_NOT_FOUND from the preflight; the
+  // surviving deletes land through the single transaction, and a lost race
+  // fails the whole request for retry instead of deleting row by row.
+  await runSingleBatch(
     db,
     targets.map((id) => db.prepare("DELETE FROM table_rows WHERE table_id=? AND doc_id=?").bind(table.id, id)),
   );
-  if (!landed) {
-    for (const id of targets) {
-      try {
-        const changed = await db
-          .prepare("DELETE FROM table_rows WHERE table_id=? AND doc_id=?")
-          .bind(table.id, id)
-          .run();
-        if (changed.meta.changes === 0) present.delete(id);
-      } catch {
-        present.delete(id);
-      }
-    }
-  }
   const results = docIds.map((id) =>
     present.has(id)
       ? { docId: id, ok: true as const, error: null }

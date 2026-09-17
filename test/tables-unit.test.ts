@@ -2,7 +2,7 @@
 // Author Tables unit pins (TABLE-02, issue #154): branches that real HTTP
 // traffic cannot reach without thousand-row fixtures or fault injection —
 // corrupt persisted declarations, the bounded scan-cap count, the
-// batch-race fallback, and the defensive batch-delete guard. The stub below
+// batch-race whole-request abort, and the defensive batch-delete guard. The stub below
 // fakes only the D1Database surface these pure domain functions touch;
 // every behavior above the stub (policy, parsing, batching) is the real
 // src/tables.ts code.
@@ -106,7 +106,16 @@ describe("tables defensive branches", () => {
     });
   });
 
-  it("retries a raced batch row by row so each item keeps its own outcome", async () => {
+  it("fails a raced insert batch whole for retry instead of persisting row by row", async () => {
+    // Fault injection for the lost-race window: the preflight is clean but
+    // the single write transaction aborts. The contract is all-or-nothing
+    // persistence past the preflight — no item may land while its siblings
+    // report per-item outcomes — so the whole request fails 503
+    // TABLE_BATCH_RETRY (nothing persisted: the single call rolled back)
+    // and the caller retries the full batch. A workerd integration test
+    // cannot deterministically hit this window, so the stub aborts the
+    // batch() call itself; every behavior above the stub is the real
+    // src/tables.ts code.
     const db = stubDb({ batchThrows: true, runThrowsFor: new Set(["taken"]) });
     await expect(
       executeBatchWrite(
@@ -120,20 +129,10 @@ describe("tables defensive branches", () => {
           ],
         }),
       ),
-    ).resolves.toEqual({
-      results: [
-        { docId: "fresh", ok: true, error: null },
-        {
-          docId: "taken",
-          ok: false,
-          error: { code: "DOCUMENT_CONFLICT", message: 'Document "taken" already exists.' },
-        },
-      ],
-      count: 1,
-    });
+    ).rejects.toMatchObject({ code: "TABLE_BATCH_RETRY", status: 503 });
   });
 
-  it("reconciles a raced upsert row by row without losing writes", async () => {
+  it("fails a raced upsert batch whole for retry instead of reconciling row by row", async () => {
     const db = stubDb({ batchThrows: true, allRows: [{ doc_id: "kept" }] });
     await expect(
       executeBatchWrite(
@@ -148,12 +147,10 @@ describe("tables defensive branches", () => {
           ],
         }),
       ),
-    ).resolves.toEqual({
-      results: [
-        { docId: "kept", ok: true, error: null },
-        { docId: "fresh", ok: true, error: null },
-      ],
-      count: 2,
+    ).rejects.toMatchObject({ code: "TABLE_BATCH_RETRY", status: 503 });
+    await expect(executeBatchDelete(db, caller, table, ["kept"])).rejects.toMatchObject({
+      code: "TABLE_BATCH_RETRY",
+      status: 503,
     });
   });
 

@@ -617,11 +617,17 @@ D1 bounds and blockers (explicit, Free-tier posture): 4 KB per document, 0
 through 25 documents per batch, 25 document_ids per query (255 chars each),
 1000-row scan caps, limit 1-50, 5 nested filters. The 25-document bound (not
 upstream's 1000) is the Cloudflare-driven adaptation, and it holds on Free
-by construction: one request costs at most ~29 queries against the
-50-queries-per-invocation Free cap — 1 declaration load, up to 2 grant
-checks, 1 preflight SELECT of at most 26 binds (far under the
-100-bound-parameter cap), and 25 statements in a single batch() call with
-headroom left for the row-by-row lost-race fallback. Two authoritative
+by construction: one request costs at most 29 queries against the
+50-queries-per-invocation Free cap, proven under the strictest plausible
+counting (every batched statement counts, including a rolled-back call) — 1
+declaration load, up to 2 grant checks, 1 preflight SELECT of at most 26
+binds (far under the 100-bound-parameter cap), and 25 statements in a single
+batch() call, with 21 queries of margin. There is deliberately no row-by-row
+fallback that could spend more: a write transaction that aborts past a clean
+preflight fails the whole request with TABLE_BATCH_RETRY (503, nothing
+persisted) for a full-batch retry, so persistence is all-or-denied on
+policy, per-item on preflight-known operational states, and never partially
+persisted by a race. Two authoritative
 Cloudflare behaviors force this bound (both re-checked 2026-09-17).
 `D1 limits <https://developers.cloudflare.com/d1/platform/limits/>`
 publishes 50 queries per Worker invocation on Free (1000 on Paid) and states
