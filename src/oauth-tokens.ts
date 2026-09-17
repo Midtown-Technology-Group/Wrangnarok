@@ -619,6 +619,33 @@ export async function deleteOAuthTokens(db: D1Database, connectionId: string): P
   await db.prepare("DELETE FROM oauth_tokens WHERE connection_id=?").bind(connectionId).run();
 }
 
+/** Non-secret persisted health for one Connection's token: the aggregate
+ * input. No ciphertext columns are selected, so aggregation never observes
+ * — let alone decrypts — token material. */
+export interface PersistedOAuthHealth {
+  readonly connectionId: string;
+  readonly status: TokenHealthStatus;
+}
+
+/** Read the non-secret health of every persisted OAuth token (OAUTH-01
+ * Integration-list aggregate, issue #149). Pre-0031 chains resolve to no
+ * rows; an unknown persisted status fails loud (never silently dropped
+ * from the counts) exactly like the single-row read. */
+export async function readAllOAuthTokenHealth(db: D1Database): Promise<readonly PersistedOAuthHealth[]> {
+  if (!(await hasOAuthTokensTable(db))) return Object.freeze([]);
+  const found = await db
+    .prepare("SELECT connection_id,status FROM oauth_tokens")
+    .all<{ connection_id: string; status: string }>();
+  const rows: PersistedOAuthHealth[] = [];
+  for (const row of found.results) {
+    if (row.status !== "healthy" && row.status !== "failed" && row.status !== "revoked") {
+      throw invalid("OAUTH_TOKEN_UNREADABLE", "A stored OAuth token could not be read.", 500);
+    }
+    rows.push({ connectionId: row.connection_id, status: row.status });
+  }
+  return Object.freeze(rows);
+}
+
 export interface RefreshPersistedTokenRequest {
   readonly orgId: string;
   readonly connectionId: string;

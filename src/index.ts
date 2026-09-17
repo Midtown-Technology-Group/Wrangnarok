@@ -242,12 +242,14 @@ import {
   deleteConnection,
   getConnection,
   listConnections,
+  listIntegrationOAuthHealth,
   putConnectionSecrets,
   scrubConnectionPayload,
   testConnection,
   updateConnection,
 } from "./connections";
 import { describeIntegrations } from "./integrations";
+import { authorizeOAuthConsent, handleOAuthCallback } from "./oauth-consent";
 
 import {
   canManageOrg,
@@ -2814,6 +2816,17 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       rejectQuery(url);
       return json(scrubConnectionPayload({ integrations: describeIntegrations() }, env));
     }
+    // Integration-list credential health (OAUTH-01 aggregate, issue #149):
+    // per-Integration Connected/Degraded/Failed/None over the effective
+    // OAuth Connection set with mappingCount kept separate. Instance-admin
+    // only (upstream PR #762 is platform-admin-only too): the counts span
+    // Organizations but carry no org attribution. Reads committed persisted
+    // health only — non-secret columns, never decrypted.
+    if (url.pathname === "/api/integrations/health" && request.method === "GET") {
+      rejectQuery(url);
+      requireInstanceAdmin(ctx);
+      return json(scrubConnectionPayload({ integrations: await listIntegrationOAuthHealth(env.DB) }, env));
+    }
     if (url.pathname === "/api/connections" && request.method === "GET") {
       rejectQuery(url);
       return json(scrubConnectionPayload({ connections: await listConnections(env.DB, caller) }, env));
@@ -2907,6 +2920,59 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const body = (await boundedJson(request.body)) as { secrets?: unknown };
       const stored = await putConnectionSecrets(env.DB, caller, connSecrets[1], body.secrets, env.SECRETS_KEK);
       return json(scrubConnectionPayload({ connection: stored }, env));
+    }
+    // Operator auth-code consent (OAUTH-01, issue #149): authorize-URL
+    // issuance plus the single-use code exchange that persists the consented
+    // token through the generation-fenced write path. Admin-only writes
+    // under the same caller gate as the Connection mapping writes above;
+    // the client secret resolves server-side (per-Organization ciphertext
+    // first, deployment credential second) and no token value is ever
+    // returned. The operator holds the consent session (state + verifier)
+    // between the two calls — the Worker persists nothing until the token.
+    const oauthAuthorize = /^\/api\/connections\/([0-9a-f-]{36})\/oauth\/authorize$/.exec(url.pathname);
+    if (oauthAuthorize?.[1] && request.method === "POST") {
+      requireJson(request);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CONNECTION_FORBIDDEN", "Only an admin may manage Connections.");
+      }
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const issued = await authorizeOAuthConsent(env.DB, caller, {
+        integrationId: oauthAuthorize[1],
+        redirectUri: body.redirectUri,
+        authorizeEndpoint: body.authorizeEndpoint,
+        clientId: body.clientId,
+        scope: body.scope,
+        ...(body.tenant === undefined ? {} : { tenant: body.tenant }),
+        ...(body.audience === undefined ? {} : { audience: body.audience }),
+      });
+      return json(scrubConnectionPayload({ authorization: issued }, env));
+    }
+    const oauthCallback = /^\/api\/connections\/([0-9a-f-]{36})\/oauth\/callback$/.exec(url.pathname);
+    if (oauthCallback?.[1] && request.method === "POST") {
+      requireJson(request);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CONNECTION_FORBIDDEN", "Only an admin may manage Connections.");
+      }
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const consented = await handleOAuthCallback(
+        env.DB,
+        caller,
+        {
+          integrationId: oauthCallback[1],
+          code: body.code,
+          state: body.state,
+          expectedState: body.expectedState,
+          error: body.error,
+          errorDescription: body.errorDescription,
+          codeVerifier: body.codeVerifier,
+          redirectUri: body.redirectUri,
+          tokenPath: body.tokenPath,
+          scope: body.scope,
+          clientId: body.clientId,
+        },
+        env,
+      );
+      return json(scrubConnectionPayload({ consent: consented }, env));
     }
     // TOOL-01 opt-in Saga tools (issue #170, ADR 022): explicit enrollment
     // with stable identity, collision-safe names, and distinctive

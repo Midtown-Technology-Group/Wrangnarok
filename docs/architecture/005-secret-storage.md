@@ -301,6 +301,62 @@ lifecycle, same registry/scrub discipline). No third storage story;
 Free-tier posture unchanged (one D1 table, no new primitive, no new
 binding).
 
+### Operator consent + Integration-list health slice (issue #149)
+
+This slice adds the deferred operator surface on top of slice 1 without
+changing the envelope, KEK lifecycle, or storage layout (no migration, no
+new table, no new primitive or binding):
+
+- Consent routes (`src/oauth-consent.ts`, admin-only under the same caller
+  gate as the `/api/connections` boundary — `CONNECTION_FORBIDDEN` on
+  denial, `CONNECTION_NOT_FOUND` 404 across orgs, `MANAGED_RESOURCE` 409
+  on installer-owned rows):
+  - `POST /api/connections/:id/oauth/authorize` mints PKCE (S256) plus
+    state and returns the vendor authorization URL. Pure issuance: no D1
+    writes, no KEK, no vendor contact. The operator holds the consent
+    session (state + verifier) between the calls.
+  - `POST /api/connections/:id/oauth/callback` validates the
+    authorization response through `parseOAuthCallback` (bad state answers
+    `OAUTH_STATE_MISMATCH`, denial answers the fixed
+    `OAUTH_AUTHORIZATION_DENIED`, vendor prose never copied), spends the
+    single-use code in exactly one vendor POST, and persists the issued
+    token through the existing fenced path (initial store for first
+    consent, conditional replacement for re-consent). Callback responses
+    carry non-secret persisted state only: generation, scope, expiry, and
+    health — token values are never returned.
+- One secrets path is preserved: the client secret resolves server-side,
+  per-Organization ciphertext first then the deployment credential (the
+  same precedence as Execution resolution), and is never accepted in a
+  request body. The token endpoint is a same-host path resolved against
+  the Connection endpoint, so the exchange POST cannot carry the client
+  secret to an operator-chosen host; the authorize endpoint is
+  operator-navigated (the Worker never fetches it) and stays an absolute
+  http(s) URL. A consent-exchange failure writes no health: the failure
+  implicates the spent code, never the stored credential.
+- Integration-list health (`GET /api/integrations/health`,
+  instance-admin-only — upstream PR #762 is platform-admin-only too):
+  per-Integration Connected/Degraded/Failed/None plus
+  mappingCount/connectedCount/needsReconnectionCount/
+  connectionStatusCounts. Reads committed persisted health only
+  (non-secret columns, never decrypted); mappings without a token shape
+  mappingCount alone. Explicit narrowing: upstream counts a global
+  default connection plus per-mapping overrides, but Wrangnarok has no
+  global/default OAuth token (ADR 003 exact-org resolution), so the
+  effective set is per-Organization override rows only; revoked counts
+  toward needs-reconnection (terminal until re-consent). The counts span
+  Organizations but carry no org attribution.
+- Still deferred: scheduled refresh (needs its Cron/second-trigger
+  justification against the TRG-01 tripwire); browser-redirect callback
+  (the operator posts the vendor-issued code to the callback API);
+  UI/CLI/SDK surfaces beyond this API contract.
+
+Steward checkpoint (one-diagram test, this slice): still one auth path
+(Access plus membership gate; admin-only writes; instance-admin-only
+cross-org counts) and still one secrets path (deployment plus envelope
+ciphertext, same KEK lifecycle, same scrub discipline). No second
+authority, no new storage story; Free-tier posture unchanged (no new
+primitive, no new binding, no new table).
+
 ## Why Secrets Store alone is insufficient for per-org secrets (tripwire rationale)
 
 This is why the envelope — not more deployment secrets — is the upgrade

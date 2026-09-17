@@ -1,0 +1,13 @@
+# OAUTH-01 operator surface (issue #149): auth-code consent routes plus
+# Integration-list credential-health aggregate. Allowed: consent handlers,
+# aggregate reader/rollup, route wiring, worker-runtime tests, parity row,
+# ADR 005 OAuth section. Out of scope: scheduled refresh, #451 lifecycle
+# precedence, storage redesign, UI/CLI/SDK, other parity rows.
+src/oauth-consent.ts
+src/oauth-tokens.ts
+src/connections.ts
+src/index.ts
+test/oauth-consent.test.ts
+docs/upstream-parity.md
+docs/architecture/005-secret-storage.md
+scopes/oauth-149-consent.scope
