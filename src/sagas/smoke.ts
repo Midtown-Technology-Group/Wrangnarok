@@ -1,28 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0
 // Stable system.smoke Saga definition (ADR 002): loopback-free platform
-// smoke. Moved verbatim from src/sagas.ts; no behavior change.
-import { WorkflowEntrypoint } from "cloudflare:workers";
-import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
+// smoke. Migrated to the ADR 033 interior helpers (issue #416): schemaOf,
+// prepareInput, completeExecution/failSagaExecution, makeSagaWorkflow.
+// Behavior unchanged: D1-only Operations plus a pure transform and the
+// usage block — zero external vendor dependency, no Connection lookup,
+// no secrets, no fetch.
 import { NonRetryableError } from "cloudflare:workflows";
-import type { Bindings } from "../bindings";
 import { parseSmokeInput, smokeSaga } from "../domain";
-import type { ExecutionParams, SafeError, SmokeResult } from "../domain";
-import { defineSaga } from "../saga";
+import type { SafeError, SmokeResult } from "../domain";
+import { defineSaga, schemaOf } from "../saga";
 import { getExecutionSecrets } from "../secrets";
 import {
   assertRunExecutionId,
   beginOperation,
+  completeExecution,
+  failSagaExecution,
   finishOperation,
-  persistRunFailure,
-  persistRunSuccess,
-  prepareExecution,
 } from "../executions";
+import { prepareInput } from "../saga-helpers";
 import { buildUsage, logUsage, persistUsage } from "../usage";
-import { executeSaga } from "./shared";
+import { makeSagaWorkflow } from "./shared";
 
-/** Stable system.smoke Saga: loopback-free platform smoke. D1-only Operations
- * plus a pure transform — zero external vendor dependency, no Connection
- * lookup, no secrets, no fetch. D1 checkpoint steps only may use retries up to
+/** Stable system.smoke Saga: loopback-free platform smoke. D1 checkpoint steps only may use retries up to
  * the operator ceiling 2; expected failures throw NonRetryableError. */
 export const smokeSagaDef = defineSaga<SmokeResult>({
   id: smokeSaga.id,
@@ -31,34 +30,25 @@ export const smokeSagaDef = defineSaga<SmokeResult>({
   description: smokeSaga.description,
   tags: ["platform", "smoke"],
   requiredIntegrations: [],
-  inputSchema: Object.freeze({
-    type: "object" as const,
-    properties: Object.freeze({}),
-    required: Object.freeze([]),
-    additionalProperties: false,
-  }),
-  outputSchema: Object.freeze({
-    type: "object" as const,
-    properties: Object.freeze({
-      d1WriteOk: Object.freeze({ type: "boolean" }),
-      d1ReadOk: Object.freeze({ type: "boolean" }),
-      operationCount: Object.freeze({ type: "number" }),
-      operations: Object.freeze({ type: "array" }),
-    }),
-    required: Object.freeze(["d1WriteOk", "d1ReadOk", "operationCount", "operations"]),
-    additionalProperties: false,
-  }),
+  inputSchema: schemaOf({}, []),
+  outputSchema: schemaOf({ d1WriteOk: "boolean", d1ReadOk: "boolean", operationCount: "number", operations: "array" }, [
+    "d1WriteOk",
+    "d1ReadOk",
+    "operationCount",
+    "operations",
+  ]),
   parse: parseSmokeInput,
   run: async (ctx, step): Promise<SmokeResult> => {
     const id = assertRunExecutionId(ctx.executionId);
-    let expectedFailure: SafeError | undefined;
+    // The expected-failure branches below persist before throwing, so the
+    // catch rethrows an already-persisted failure untouched: step names are
+    // unique per Execution, so exactly one persist-failure-v1 runs.
+    let terminalWritten = false;
     try {
       // startedMs is captured inside the shared prepare Operation
       // (replay-memoized), never at the top of run: wall-clock reads outside
       // step.do fail the contract.
-      const prepared = await step.do("prepare-input-v1", () =>
-        prepareExecution(ctx.db, id, smokeSaga.id, smokeSaga.revision, parseSmokeInput),
-      );
+      const prepared = await step.do("prepare-input-v1", () => prepareInput(ctx, smokeSaga, parseSmokeInput));
       const written = await step.do("smoke-write-v1", async () => {
         // D1 write verification: durable probe row, then read it back in-step.
         await beginOperation(ctx.db, id, "smoke-write-v1", 1);
@@ -76,7 +66,8 @@ export const smokeSagaDef = defineSaga<SmokeResult>({
         return { ok: true as const, result: { probe: probe.result_json } };
       });
       if (!written.ok) {
-        expectedFailure = written.error;
+        await step.do("persist-failure-v1", () => failSagaExecution(ctx.db, id, written.error));
+        terminalWritten = true;
         throw new NonRetryableError(written.error.code);
       }
       const verified = await step.do("smoke-verify-v1", async () => {
@@ -116,12 +107,13 @@ export const smokeSagaDef = defineSaga<SmokeResult>({
         return { ok: true as const, result: { shaped: result, orgId: execution.org_id } };
       });
       if (!verified.ok) {
-        expectedFailure = verified.error;
+        await step.do("persist-failure-v1", () => failSagaExecution(ctx.db, id, verified.error));
+        terminalWritten = true;
         throw new NonRetryableError(verified.error.code);
       }
       const output: SmokeResult = verified.result.shaped;
       await step.do("persist-success-v1", async () => {
-        await persistRunSuccess(ctx.db, id, output);
+        await completeExecution(ctx.db, id, output);
         const count = await ctx.db
           .prepare("SELECT COUNT(*) AS n FROM operations WHERE execution_id=?")
           .bind(id)
@@ -142,14 +134,16 @@ export const smokeSagaDef = defineSaga<SmokeResult>({
         await persistUsage(ctx.db, id, usage, getExecutionSecrets(id));
       });
       return output;
-    } catch {
-      return persistRunFailure(ctx, step, id, expectedFailure, false);
+    } catch (error) {
+      if (terminalWritten) throw error;
+      const failure: SafeError = {
+        code: "EXECUTION_FAILED",
+        message: "The Execution could not complete. Inspect local runtime diagnostics.",
+      };
+      await step.do("persist-failure-v1", () => failSagaExecution(ctx.db, id, failure));
+      throw new NonRetryableError(failure.code);
     }
   },
 });
 
-export class SmokeWorkflow extends WorkflowEntrypoint<Bindings, ExecutionParams> {
-  async run(event: WorkflowEvent<ExecutionParams>, step: WorkflowStep): Promise<SmokeResult> {
-    return executeSaga(this.env, event, step, smokeSagaDef);
-  }
-}
+export class SmokeWorkflow extends makeSagaWorkflow(smokeSagaDef) {}
