@@ -541,6 +541,8 @@ Commands:
                                           [--name NAME] [--classify op=CLASS]
                                           [--token-path PATH] [--scope SCOPE]
                                           [--timeout-ms MS]
+                                          [--auth-kind KIND]
+                                          [--include-deprecated]
                                           Emit a typed Integration module from
                                           OpenAPI 3.x JSON (offline)
   submit --saga NAME|UUID [--input JSON|@FILE] [--key KEY] [--no-wait]

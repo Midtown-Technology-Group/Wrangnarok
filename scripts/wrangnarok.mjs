@@ -14,6 +14,191 @@ import { parseContext as coreParseContext, runCommand as coreRunCommand } from "
 const RISKS = ["read", "mutation", "destructive", "credential", "billing", "security", "tenant-admin"];
 const OPERATION_ID = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 const SAFE_METHODS = new Set(["get", "head", "options"]);
+/** Embedded-spec literal budget mirror (see GENERATOR_EMBED_BYTES_MAX in
+ * src/generate-integration.ts): the wrapper cannot import TS, so the bound
+ * is duplicated here and pinned equal by the generator parity tests. */
+const EMBED_BYTES_MAX = 96 * 1024;
+const EMBED_DESCRIPTION_MAX = 280;
+/** UUIDv5 namespace mirror (see INTEGRATION_ID_NAMESPACE in src/openapi.ts):
+ * duplicated for the same reason; the parity tests pin both. */
+const INTEGRATION_ID_NAMESPACE = "7f3a2c1e-9b4d-4f8a-8e6c-1d5a3b9c7e2f";
+
+function sha1Bytes(input) {
+  let h0 = 0x67452301;
+  let h1 = 0xefcdab89;
+  let h2 = 0x98badcfe;
+  let h3 = 0x10325476;
+  let h4 = 0xc3d2e1f0;
+  const bitLength = input.length * 8;
+  const paddedLength = (((input.length + 8) >> 6) + 1) << 6;
+  const padded = new Uint8Array(paddedLength);
+  padded.set(input, 0);
+  padded[input.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(paddedLength - 4, bitLength >>> 0, false);
+  view.setUint32(paddedLength - 8, Math.floor(bitLength / 2 ** 32), false);
+  const w = new Uint32Array(80);
+  const rotl = (value, bits) => (value << bits) | (value >>> (32 - bits));
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    for (let i = 0; i < 16; i += 1) w[i] = view.getUint32(offset + i * 4, false);
+    for (let i = 16; i < 80; i += 1) w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    for (let i = 0; i < 80; i += 1) {
+      let f;
+      let k;
+      if (i < 20) {
+        f = (b & c) | (~b & d);
+        k = 0x5a827999;
+      } else if (i < 40) {
+        f = b ^ c ^ d;
+        k = 0x6ed9eba1;
+      } else if (i < 60) {
+        f = (b & c) | (b & d) | (c & d);
+        k = 0x8f1bbcdc;
+      } else {
+        f = b ^ c ^ d;
+        k = 0xca62c1d6;
+      }
+      const temp = (rotl(a, 5) + f + e + k + w[i]) >>> 0;
+      e = d;
+      d = c;
+      c = rotl(b, 30) >>> 0;
+      b = a;
+      a = temp;
+    }
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+  }
+  const out = new Uint8Array(20);
+  const outView = new DataView(out.buffer);
+  outView.setUint32(0, h0, false);
+  outView.setUint32(4, h1, false);
+  outView.setUint32(8, h2, false);
+  outView.setUint32(12, h3, false);
+  outView.setUint32(16, h4, false);
+  return out;
+}
+
+function integrationUuidV5(specDigestHex) {
+  if (!/^[a-f0-9]{64}$/.test(specDigestHex)) {
+    fail("GENERATOR_INVALID_OPTIONS", "The spec digest must be 64 lowercase hex chars.");
+  }
+  const namespace = INTEGRATION_ID_NAMESPACE.replace(/-/g, "");
+  const name = new TextEncoder().encode(`wrangnarok.integration.v1:${specDigestHex}`);
+  const nsBytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i += 1) nsBytes[i] = parseInt(namespace.slice(i * 2, i * 2 + 2), 16);
+  const input = new Uint8Array(16 + name.length);
+  input.set(nsBytes, 0);
+  input.set(name, 16);
+  const hash = sha1Bytes(input);
+  hash[6] = (hash[6] & 0x0f) | 0x50;
+  hash[8] = (hash[8] & 0x3f) | 0x80;
+  const hex = Array.from(hash.slice(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+function stripEmbeddedValue(value) {
+  if (Array.isArray(value)) return value.map(stripEmbeddedValue);
+  if (value !== null && typeof value === "object") {
+    const out = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (key === "example" || key === "examples") continue;
+      if (key.startsWith("x-")) continue;
+      if (key === "description" && typeof entry === "string" && entry.length > EMBED_DESCRIPTION_MAX) {
+        out[key] = `${entry.slice(0, EMBED_DESCRIPTION_MAX)}…[truncated]`;
+        continue;
+      }
+      out[key] = stripEmbeddedValue(entry);
+    }
+    return out;
+  }
+  return value;
+}
+
+function oauthGrantsClientCredentials(flows) {
+  if (flows === null || typeof flows !== "object" || Array.isArray(flows)) return false;
+  const keys = Object.keys(flows);
+  if (keys.length === 0) return false;
+  return keys.some((key) => ["clientcredentials", "client_credentials", "application"].includes(key.toLowerCase()));
+}
+
+function referencedSchemeNames(raw) {
+  const names = new Set();
+  const collect = (value) => {
+    if (!Array.isArray(value)) return;
+    for (const requirement of value) {
+      if (requirement === null || typeof requirement !== "object" || Array.isArray(requirement)) continue;
+      for (const name of Object.keys(requirement)) names.add(name.toLowerCase());
+    }
+  };
+  collect(raw.security);
+  const paths = raw.paths;
+  if (paths !== null && typeof paths === "object" && !Array.isArray(paths)) {
+    for (const methods of Object.values(paths)) {
+      if (methods === null || typeof methods !== "object" || Array.isArray(methods)) continue;
+      for (const def of Object.values(methods)) {
+        if (def === null || typeof def !== "object" || Array.isArray(def)) continue;
+        collect(def.security);
+      }
+    }
+  }
+  if (names.size === 0) return names;
+  return names;
+}
+
+/** Mirror of detectGeneratorAuthKind in src/openapi.ts (the wrapper cannot
+ * import TS): only referenced schemes select the kind; unresolved,
+ * heterogeneous, or unrecognized requirements yield unknown so generation
+ * fails closed. */
+function detectAuthKind(doc) {
+  const raw = doc;
+  const components = raw.components;
+  const schemesRaw =
+    components !== null && typeof components === "object" && !Array.isArray(components)
+      ? components.securitySchemes
+      : undefined;
+  const schemes = schemesRaw !== null && typeof schemesRaw === "object" && !Array.isArray(schemesRaw) ? schemesRaw : {};
+  const referenced = referencedSchemeNames(raw);
+  if (referenced.size === 0) return "unknown";
+  const lowered = {};
+  for (const [key, value] of Object.entries(schemes)) lowered[key.toLowerCase()] = value;
+  let sawBearer = false;
+  let sawOAuth = false;
+  for (const name of referenced) {
+    const scheme = lowered[name];
+    if (scheme === null || typeof scheme !== "object" || Array.isArray(scheme)) return "unknown";
+    const type = typeof scheme.type === "string" ? scheme.type.toLowerCase() : "";
+    if (type === "oauth2") {
+      if (oauthGrantsClientCredentials(scheme.flows)) sawOAuth = true;
+      else return "unknown";
+      continue;
+    }
+    if (type === "http" && typeof scheme.scheme === "string" && scheme.scheme.toLowerCase() === "bearer") {
+      sawBearer = true;
+      continue;
+    }
+    if (type === "apikey") {
+      sawBearer = true;
+      continue;
+    }
+    if (type === "http" && typeof scheme.scheme === "string" && scheme.scheme.toLowerCase() === "basic") {
+      sawBearer = true;
+      continue;
+    }
+    return "unknown";
+  }
+  if (sawBearer && sawOAuth) return "unknown";
+  if (sawBearer) return "apiToken";
+  if (sawOAuth) return "clientCredentials";
+  return "unknown";
+}
 
 function fail(code, message) {
   if (process.argv.includes("--json")) console.error(JSON.stringify({ error: { code, message: String(message) } }));
@@ -93,23 +278,15 @@ export function validateAndGenerate(ctx) {
     }
   }
 
-  // Auth strategy is explicit, never silently assumed: mirrors the typed
-  // generator's GENERATOR_INVALID_OPTIONS checks so both entry points reject
-  // the same bad inputs (the shared emitter only clamps for safety).
-  const tokenPath = ctx.genTokenPath ?? "/auth/token";
-  if (typeof tokenPath !== "string" || !tokenPath.startsWith("/") || tokenPath.length > 128) {
+  // Auth-kind detection mirrors the typed generator: read securitySchemes,
+  // fail closed on unknown schemes, and honor an explicit --auth-kind only
+  // when it agrees with the detected kind.
+  const rawAuthKind = ctx.genAuthKind;
+  if (rawAuthKind !== undefined && rawAuthKind !== "apiToken" && rawAuthKind !== "clientCredentials") {
     fail(
-      "GENERATOR_INVALID_OPTIONS",
-      "generate-integration --token-path must be a same-origin absolute path starting with / (1-128 chars).",
+      "USAGE",
+      "generate-integration --auth-kind must be apiToken or clientCredentials (omit to detect from securitySchemes).",
     );
-  }
-  const scope = ctx.genScope ?? "all";
-  if (typeof scope !== "string" || scope.length === 0 || scope.length > 128) {
-    fail("GENERATOR_INVALID_OPTIONS", "generate-integration --scope must be 1-128 chars.");
-  }
-  const timeoutMs = ctx.genTimeoutMs ?? 5000;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 30000) {
-    fail("GENERATOR_INVALID_OPTIONS", "generate-integration --timeout-ms must be an integer 1 to 30000.");
   }
 
   let doc;
@@ -151,6 +328,23 @@ export function validateAndGenerate(ctx) {
     fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract needs a paths object.");
   }
 
+  const detected = detectAuthKind(doc);
+  const authKind =
+    rawAuthKind === undefined
+      ? detected === "unknown"
+        ? fail(
+            "GENERATOR_INVALID_OPTIONS",
+            "The spec declares no recognized securityScheme (need http/bearer, apiKey, or oauth2 client-credentials); refusing to guess the credential shape.",
+          )
+        : detected
+      : rawAuthKind !== detected
+        ? fail(
+            "GENERATOR_INVALID_OPTIONS",
+            `Auth override ${JSON.stringify(rawAuthKind)} disagrees with the spec's detected ${JSON.stringify(detected)} scheme; refusing to stamp the wrong credential shape.`,
+          )
+        : rawAuthKind;
+
+  const includeDeprecated = ctx.genIncludeDeprecated === true;
   const seen = new Set();
   const operations = [];
   for (const [path, methods] of Object.entries(doc.paths)) {
@@ -169,6 +363,7 @@ export function validateAndGenerate(ctx) {
       if (seen.has(operationId))
         fail("GENERATOR_INVALID_SPEC", `Duplicate operationId ${JSON.stringify(operationId)}.`);
       seen.add(operationId);
+      if (def.deprecated === true && !includeDeprecated) continue;
       const summary = typeof def.summary === "string" ? def.summary.slice(0, 280) : "";
       const classified = classifications[operationId];
       const risk = classified !== undefined ? classified : SAFE_METHODS.has(method.toLowerCase()) ? "read" : "mutation";
@@ -177,13 +372,45 @@ export function validateAndGenerate(ctx) {
   }
   if (operations.length === 0) fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract declares no operations.");
 
+  // OAuth-only strategy options: accepted only for the clientCredentials
+  // kind, mirroring the typed generator.
+  if (
+    authKind === "apiToken" &&
+    (ctx.genTokenPath !== undefined || ctx.genScope !== undefined || ctx.genTimeoutMs !== undefined)
+  ) {
+    fail(
+      "GENERATOR_INVALID_OPTIONS",
+      "tokenPath/scope/timeoutMs apply to OAuth client-credentials specs only; a bearer spec takes none.",
+    );
+  }
+  const tokenPath = ctx.genTokenPath ?? "/auth/token";
+  if (typeof tokenPath !== "string" || !tokenPath.startsWith("/") || tokenPath.length > 128) {
+    fail(
+      "GENERATOR_INVALID_OPTIONS",
+      "generate-integration --token-path must be a same-origin absolute path starting with / (1-128 chars).",
+    );
+  }
+  const scope = ctx.genScope ?? "all";
+  if (typeof scope !== "string" || scope.length === 0 || scope.length > 128) {
+    fail("GENERATOR_INVALID_OPTIONS", "generate-integration --scope must be 1-128 chars.");
+  }
+  const timeoutMs = ctx.genTimeoutMs ?? 5000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 30000) {
+    fail("GENERATOR_INVALID_OPTIONS", "generate-integration --timeout-ms must be an integer 1 to 30000.");
+  }
+
   const digestHex = createHash("sha256").update(specText, "utf-8").digest("hex");
+  const integrationUuid = integrationUuidV5(digestHex);
+  const strippedDoc = stripEmbeddedValue(doc);
+  if (new TextEncoder().encode(JSON.stringify(strippedDoc)).length > EMBED_BYTES_MAX) {
+    fail("GENERATOR_INVALID_SPEC", `The stripped embedded spec exceeds the ${EMBED_BYTES_MAX}-byte embedding budget.`);
+  }
   const prefix = id
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
   const content = emitIntegrationSource({
-    doc,
+    doc: strippedDoc,
     operations,
     id,
     name: ctx.genName ?? id,
@@ -191,6 +418,9 @@ export function validateAndGenerate(ctx) {
     envPrefix: `${prefix}_CLIENT`,
     digestHex,
     version,
+    authKind,
+    integrationUuid,
+    includeDeprecated,
     tokenPath,
     scope,
     timeoutMs,
@@ -258,6 +488,8 @@ async function main() {
     genTokenPath: arg("token-path"),
     genScope: arg("scope"),
     genTimeoutMs: arg("timeout-ms") === undefined ? undefined : Number(arg("timeout-ms")),
+    genAuthKind: arg("auth-kind"),
+    genIncludeDeprecated: process.argv.includes("--include-deprecated"),
   });
   writeGenerated(result, process.argv.includes("--json"));
 }

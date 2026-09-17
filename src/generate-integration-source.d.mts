@@ -1,5 +1,10 @@
 import type { ContractOperation, OpenApiDocument } from "./openapi";
 
+/** Credential shape the emitted Integration host uses. `apiToken` sends a
+ * bearer token directly; `clientCredentials` exchanges a deployment pair
+ * for a transient token first. */
+export type EmitterAuthKind = "apiToken" | "clientCredentials";
+
 export interface IntegrationSourceInput {
   readonly doc: OpenApiDocument;
   readonly operations: readonly ContractOperation[];
@@ -9,12 +14,13 @@ export interface IntegrationSourceInput {
   readonly envPrefix: string;
   readonly digestHex: string;
   readonly version: string;
-  /** OAuth token endpoint path, resolved against the Connection endpoint
-   * origin (HaloPSA: /auth/token). Operator-overridable per provider. */
+  readonly authKind?: EmitterAuthKind;
+  /** Deterministic UUIDv5 Integration ID (see integrationUuidV5). */
+  readonly integrationUuid?: string;
+  /** Whether deprecated operations were included (threaded into runtime calls). */
+  readonly includeDeprecated?: boolean;
   readonly tokenPath?: string;
-  /** OAuth scope requested at the token endpoint. Operator-overridable. */
   readonly scope?: string;
-  /** Shared vendor deadline ms over token plus resource call (1-30000). */
   readonly timeoutMs?: number;
 }
 
