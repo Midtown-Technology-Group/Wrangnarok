@@ -126,7 +126,7 @@ API base is `https://us2.ninjarmm.com/api` with `/v2/organizations`; both `/api/
 
 The response is a bare JSON array of organizations (297 observed, ~24KB); entries are `{id number, name string}`; results are shaped to count plus max 25 persisted (4KB D1 result bound) with a 256KB transport cap for this call.
 
-Error mapping used: 401 `NINJA_UNAUTHORIZED`, 429 `NINJA_RATE_LIMITED`, 5xx `NINJA_VENDOR_FAILED`, non-array `NINJA_BAD_RESPONSE`, 3xx rejected (workerd has no `redirect:error`), slow vendor/abort `NINJA_VENDOR_TIMEOUT` (explicit 5s deadline per call; Sagas route it to the `timeout-mark-v1` checkpoint, never inferred).
+Error mapping used: 401 `NINJA_UNAUTHORIZED`, 429 `NINJA_RATE_LIMITED`, 5xx `NINJA_VENDOR_FAILED`, non-array `NINJA_BAD_RESPONSE`, 3xx rejected (workerd has no `redirect:error`), slow vendor/abort `NINJA_VENDOR_TIMEOUT` (explicit 5s deadline per call; `failSagaExecution` classifies it as `TimedOut`, never inferred — the `timeout-mark-v1` checkpoint retired under ADR-033-3/issue #414).
 
 Runtime facts: workerd `fetch` rejects `redirect:error` (use `manual` plus explicit 3xx handling); cross-realm `Request` construction from Workflow-isolate init fails (read headers directly); D1 `exec()` rejects leading SQL comments.
 

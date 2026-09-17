@@ -8,7 +8,7 @@
 // arrives as plain args (Connection holds endpoint + org mapping; D1 holds
 // no per-tenant secrets per ADR 005). Every vendor call enforces its own
 // 20s deadline and surfaces CLOUDFLARE_VENDOR_TIMEOUT for slow or late
-// vendors; Sagas route it to timeout-mark-v1 like every other lane.
+// vendors; failSagaExecution classifies it as TimedOut (ADR-033-3, issue #414).
 import {
   boundedJson,
   CLOUDFLARE_ACCOUNT_ID_PATTERN,

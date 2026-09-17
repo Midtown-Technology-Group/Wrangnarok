@@ -70,7 +70,7 @@ process-pool infrastructure is copied.
   keeps running and stays inspectable. Dispatch ambiguity yields
   `CHILD_DISPATCH_UNCONFIRMED` (retry the parent under the same key).
 - **Timeout/cancel propagation:** vendor deadlines stay per-Saga
-  (`timeout-mark-v1` remains the sole `TimedOut` writer). Awaiting does not
+  (`failSagaExecution` is the sole `TimedOut` writer). Awaiting does not
   cancel. Parent cancellation fans out best-effort to still-active direct
   children through the same mark-then-terminate-then-classify protocol as
   the parent (RUN-04); ambiguous children stay active and inspectable, and
