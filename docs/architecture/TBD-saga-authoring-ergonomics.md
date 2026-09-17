@@ -1,7 +1,7 @@
 # ADR TBD (RFC): Saga authoring ergonomics — less ceremony over the canonical contract
 
 - **Status:** Proposed (RFC, not yet accepted — shape into ADR before any Saga rewrite)
-- **Date:** 2026-09-16 (revised 2026-09-17 per steward feedback on PR #404)
+- **Date:** 2026-09-16 (revised 2026-09-16 per steward feedback on PR #404 and #408)
 - **Extends:** ADR 002 (stable Saga identity), ADR 010 (source boundary), ADR 018 RUN-01/RUN-02 (runtime policy, child invocation), `docs/upstream-spec.md` findings 1, 3, 15, 18
 - **Implements:** nothing yet — no issue number assigned; no code changes ride this RFC
 - **Numbering note:** this document carries no ADR number until the steward
@@ -81,9 +81,29 @@ stated as decisions, not options:
    `step.do(...)` / `step.sleep(...)` stay visible in Saga source, so the
    author can read the file and see `prepare -> integration/action -> wait ->
    persist` at a glance. Helpers may own the repetitive *interior* of an
-   Operation. The `sagaRun(...)` lifecycle wrapper is deferred: it would hide
-   the durable Operation boundaries and force the determinism scanner to
-   learn a second blessed syntax.
+   Operation — including terminal/error interiors (principle 2b) — but never
+   the durable boundary itself. Concretely: helpers never receive `step`.
+   The Saga owns every `step.do` / `step.sleep` call; a helper is always
+   invoked *inside* a visible step callback (or in a pure, non-durable
+   section). This gives agents one obvious shape to generate and the
+   determinism scanner one invariant to check. The `sagaRun(...)` lifecycle
+   wrapper is deferred: it would hide the durable Operation boundaries and
+   force the scanner to learn a second blessed syntax.
+
+2b. **Terminal and error interiors are helper-owned, not author-owned.**
+    Timeout classification, scrub discipline, and terminal persistence are
+    exactly the correctness machinery agents are most likely to get subtly
+    wrong, so they belong inside helpers even though the persist *steps*
+    stay visible. The Saga visibly calls
+    `step.do("persist-success-v1", () => completeExecution(...))` /
+    `step.do("persist-failure-v1", () => failSagaExecution(...))`, where
+    those helpers own scrub plus terminal-state rules plus timeout
+    classification. Author-owned `expectedFailure` / `timedOut` plumbing,
+    per-Saga timeout-code checks, and hand-chosen success/failure/timed-out
+    persistence paths disappear from generated code. Whether `timeout-mark-v1`
+    remains a distinct step name or merges into the failure helper is a
+    shaping detail: it must reconcile with ADR 018's rule that TimedOut has
+    exactly one writer, and the ADR must state which.
 3. **Saga helpers accept no runtime-policy knobs.** Effective deadlines and
    retry ceilings derive internally from the Integration default plus the
    Execution policy snapshot plus the platform ceiling. Saga authors never
@@ -172,15 +192,23 @@ the repeated interiors while `run` keeps calling `step.do` visibly:
   entries remain explicit (native binding names are Cloudflare's, not ours
   to abstract). Acceptance requires a workerd/Wrangler proof that the
   generated subclass remains a valid native Workflow entrypoint.
-- `prepareInput(ctx, step, saga, parse)` — one-line `prepare-input-v1`.
-- `integrationOperation(ctx, prepared, { op, integrationId, required, call })`
+- `prepareInput(ctx, saga, parse)` — the `prepare-input-v1` interior,
+  always invoked as `step.do("prepare-input-v1", () =>
+  prepareInput(ctx, echoSaga, parseInput))`. Note the signature takes no
+  `step`: per principle 2 the Saga owns the durable boundary.
+- `integrationOperation(ctx, def, prepared, { op, integrationId, call })`
   — owns the ~25-line Integration-step interior (begin, applied-policy
   deadline derived internally, org-scoped resolution, Fault mapping, finish,
   `{ok,...}` shaping) while the author's `call` callback holds only the
   Integration Action invocation. Called **inside** a visible `step.do` so
-  the scanner keeps working unchanged. It takes no timeout/retry/deadline
-  argument: the effective deadline resolves inside the helper from the
-  Integration default + Execution policy snapshot + platform ceiling.
+  the scanner keeps working unchanged, and takes no `step` argument (the
+  Saga owns the boundary). It takes no timeout/retry/deadline argument:
+  the effective deadline resolves inside the helper from the Integration
+  default + Execution policy snapshot + platform ceiling. It takes no
+  `required` list either: required-vs-optional semantics derive from the
+  Saga definition (`def.requiredIntegrations`, already authoritative via
+  ADR 002) plus the integration ID, so generated call sites cannot drift
+  out of sync with the declared requirements.
 
 Sketch (echo, illustrative — exact names/shapes are shaping details.
 Topology stays explicit; the sketch shows visible `step.do` boundaries and
@@ -202,47 +230,35 @@ export const echoSagaDef = defineSaga<EchoInput>({
     if (typeof id !== "string" || !EXECUTION_ID.test(id)) {
       throw new NonRetryableError("Invalid local Execution invocation.");
     }
-    let expectedFailure: SafeError | undefined;
-    let timedOut = false;
-    try {
-      const prepared = await step.do("prepare-input-v1", () =>
-        prepareInput(ctx, echoSaga, parseInput),
+    const prepared = await step.do("prepare-input-v1", () =>
+      prepareInput(ctx, echoSaga, parseInput),
+    );
+    const outcome = await step.do("echo-http-v1", () =>
+      integrationOperation(ctx, echoSagaDef, prepared, {
+        op: "echo-http-v1",
+        integrationId: ECHO_INTEGRATION_ID,
+        call: (connection, secrets, deadline, operationId) =>
+          ctx.integrations.echo.echo(connection, prepared.input, operationId, deadline),
+      }),
+    );
+    // Terminal interiors are helper-owned (principle 2b): the persist steps
+    // stay visible, but scrub, terminal-state rules, and timeout
+    // classification live inside completeExecution / failSagaExecution.
+    // No expectedFailure/timedOut plumbing in generated code. How outcome
+    // errors reach the failure branch (throw vs return) and whether
+    // timeout-mark-v1 stays a distinct step are shaping details for the ADR.
+    if (!outcome.ok) {
+      await step.do("persist-failure-v1", () =>
+        failSagaExecution(ctx, id, outcome.error),
       );
-      const outcome = await step.do("echo-http-v1", () =>
-        integrationOperation(ctx, prepared, {
-          op: "echo-http-v1",
-          integrationId: ECHO_INTEGRATION_ID,
-          required: echoSagaDef.requiredIntegrations,
-          call: (connection, secrets, deadline, operationId) =>
-            ctx.integrations.echo.echo(connection, prepared.input, operationId, deadline),
-        }),
-      );
-      if (!outcome.ok) {
-        expectedFailure = outcome.error;
-        timedOut = outcome.error.code === "ECHO_VENDOR_TIMEOUT";
-        if (timedOut) {
-          const failure: SafeError = scrubExecutionError(outcome.error, id);
-          await step.do("timeout-mark-v1", () => failExecution(ctx.db, id, failure, "TimedOut"));
-        }
-        throw new NonRetryableError(expectedFailure.code);
-      }
-      const output = outcome.result;
-      await step.sleep("settle-wait-v1", "1 second");
-      await step.do("persist-success-v1", () =>
-        persistSuccess(ctx.db, id, output),
-      );
-      return output;
-    } catch {
-      const raw: SafeError = expectedFailure ?? {
-        code: "EXECUTION_FAILED",
-        message: "The Execution could not complete. Inspect local runtime diagnostics.",
-      };
-      const safe: SafeError = scrubExecutionError(raw, id);
-      if (!timedOut) {
-        await step.do("persist-failure-v1", () => failExecution(ctx.db, id, safe));
-      }
-      throw new NonRetryableError(safe.code);
+      throw new NonRetryableError(outcome.error.code);
     }
+    const output = outcome.result;
+    await step.sleep("settle-wait-v1", "1 second");
+    await step.do("persist-success-v1", () =>
+      completeExecution(ctx, id, output),
+    );
+    return output;
   },
 });
 
@@ -253,11 +269,14 @@ export class EchoWorkflow extends makeSagaWorkflow(echoSagaDef) {}
 ```
 
 The sketch is deliberately not maximally short: every durable boundary
-(`prepare-input-v1`, `echo-http-v1`, `settle-wait-v1`, `persist-success-v1`,
-`timeout-mark-v1` / `persist-failure-v1`) remains legible in source, for
-humans and for agents. `defineSaga`, the manifest gate, the policy rejection
-list, and the determinism scanner all survive unchanged — no scanner update
-ships in v1 because nothing hides `step.do` structure anymore.
+(`prepare-input-v1`, `echo-http-v1`, `settle-wait-v1`, `persist-success-v1` /
+`persist-failure-v1`) remains legible in source, for humans and for agents —
+while the terminal and error *interiors* (scrub, terminal-state rules,
+timeout classification) live inside `completeExecution` /
+`failSagaExecution` rather than in author-owned plumbing. `defineSaga`, the
+manifest gate, the policy rejection list, and the determinism scanner all
+survive unchanged — no scanner update ships in v1 because nothing takes
+`step` and nothing hides `step.do` structure anymore.
 
 ### Explicitly deferred (not v1)
 
