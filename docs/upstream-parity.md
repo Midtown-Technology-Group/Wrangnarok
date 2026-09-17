@@ -673,11 +673,19 @@ visible fields (cleared fields send explicit null, which the server reads
 as a gap for defaults to fill).
 Unknown or stale handles dispatch nothing. Proven in
 workerd (`test/form-lifecycle.test.ts`: designer, startup, providers,
-submit, scheduled, file, drift) plus unit pins
+submit, scheduled, file, drift, oversized-payload 413) plus unit pins
 (`test/form-binding.test.ts`), SDK client + guards (`test/sdk.test.ts`),
 and renderer tests (`test/form-ui.test.tsx`). `GET
 /api/forms/:name/providers` exposes resolved options; the SDK
-`dynamic-forms` capability is supported.
+`dynamic-forms` capability is supported. Oversized-payload proof: the
+submit route reads its envelope through the shared 4 KiB `boundedJson`
+transport bound (`src/domain.ts` `BODY_LIMIT`), so an over-limit submit
+answers the canonical `413 BODY_TOO_LARGE` before handle validation and
+admits no Execution — the handle stays live for a corrected retry.
+Explicit Cloudflare-native divergence (not permanent parity): upstream
+caps form submissions at 256 KiB (`docs/upstream-spec.md` §17); the local
+route currently shares the stricter 4 KiB bound owned by LIMITS-01
+(#177, lane #428).
 
 Explicitly deferred (retain until verified): public/embed publication
 with capability fingerprints and origin fencing (EMBED-01); scheduled

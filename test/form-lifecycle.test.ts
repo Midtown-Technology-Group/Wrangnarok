@@ -414,6 +414,37 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
     );
     expect(crowdedRes.status).toBe(422);
   });
+  it("rejects an over-4-KiB submit body at the shared transport bound without dispatching", async () => {
+    // FORM-02 oversized-payload proof (#155 slice B): the submit route reads
+    // its envelope through the shared boundedJson gate (src/domain.ts
+    // BODY_LIMIT = 4096), so an over-limit body answers the canonical 413
+    // BODY_TOO_LARGE before handle validation — and admits nothing.
+    await createForm("greet", [{ name: "name", type: "text", required: true }]);
+    const started = await startup("greet");
+    const bigKey = "form-02-oversize-001";
+    const bigBody = { handle: started.handle, values: { name: "x".repeat(5000) } };
+    expect(JSON.stringify(bigBody).length).toBeGreaterThan(4096);
+    const big = await call("/api/forms/greet/submit", "POST", bigBody, ORG, OWNER, bigKey);
+    expect(big.status).toBe(413);
+    expect(await big.json()).toMatchObject({ error: { code: "BODY_TOO_LARGE" } });
+    // Nothing admitted under the oversized key ...
+    const missing = await bindings.DB.prepare("SELECT id FROM executions WHERE id=?")
+      .bind(await executionId({ orgId: ORG, userId: OWNER }, bigKey))
+      .first<{ id: string }>();
+    expect(missing).toBeNull();
+    // ... and the handle survives the transport rejection: the same session
+    // submits normally under a fresh key.
+    const retry = await call(
+      "/api/forms/greet/submit",
+      "POST",
+      { handle: started.handle, values: { name: "Ada" } },
+      ORG,
+      OWNER,
+      "form-02-oversize-002",
+    );
+    expect(retry.status).toBe(202);
+    expect(await retry.json()).toMatchObject({ replayed: false });
+  });
   it("re-checks provider membership at submit so stale client lists fail closed", async () => {
     expect((await call("/api/tables", "POST", { name: "teams" })).status).toBe(201);
     expect((await call("/api/tables/teams/rows/t1", "PUT", { data: { team: "red" } })).status).toBe(201);
