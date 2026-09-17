@@ -514,9 +514,7 @@ async function handlePublicDelivery(request: Request, env: Bindings): Promise<Re
       "Cache-Control": "no-store",
     });
   }
-  if (url.search) {
-    throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
-  }
+  rejectQuery(url);
   // Read the wire body exactly once: api-key deliveries parse it as JSON;
   // webhook deliveries keep the raw bytes for HMAC and parse from them.
   if (
@@ -886,7 +884,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // endpoint). The membership gate above already proved authorization, so
       // strangers and revoked callers never reach this view. Query strings
       // stay deny-by-default like every other single-resource route.
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({ caller: describeCaller(identity, request), role: ctx.role, kind: ctx.kind });
     }
     if (url.pathname === "/api/sagas" && request.method === "GET")
@@ -944,7 +942,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // TRG-01 schedule inventory (issue #137, ADR 012): org-scoped
       // summaries. Cadence, timezone, enablement, input, and run-as stay
       // persisted environment state, never Saga source metadata.
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({ schedules: await listSchedules(env.DB, caller, SAGA_DEFINITIONS) });
     }
     if (url.pathname === "/api/schedules" && request.method === "POST") {
@@ -959,7 +957,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const scheduleDetail = /^\/api\/schedules\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname);
     if (scheduleDetail?.[1] && (request.method === "GET" || request.method === "DELETE")) {
       const name = parseScheduleName(scheduleDetail[1]);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       if (request.method === "GET") {
         const row = await loadSchedule(env.DB, caller.orgId, name);
         if (!row) throw new Fault(404, "NOT_FOUND", "Not found.");
@@ -979,7 +977,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // Enablement is operator-managed environment state: disabling fences
       // future promotion while in-flight Executions run to terminal.
       await requireManageOrg(env.DB, ctx, caller.orgId);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       const name = parseScheduleName(scheduleEnable[1]);
       return json({
         schedule: await setScheduleEnabled(env.DB, caller, name, scheduleEnable[2] === "enable", SAGA_DEFINITIONS),
@@ -1018,7 +1016,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // schedule surface above. Subscriptions, fan-out, and operator replay
     // are deferred: this block owns the registry plus the log only.
     if (url.pathname === "/api/event-sources" && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({ sources: await listEventSources(env.DB, caller.orgId) });
     }
     if (url.pathname === "/api/event-sources" && request.method === "POST") {
@@ -1044,7 +1042,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const eventSourceDetail = /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname);
     if (eventSourceDetail?.[1] && (request.method === "GET" || request.method === "DELETE")) {
       const name = parseEventSourceName(eventSourceDetail[1]);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       if (request.method === "GET") {
         const [found] = await listEventSources(env.DB, caller.orgId).then((all) =>
           all.filter((entry) => entry.name === name),
@@ -1063,7 +1061,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // Enablement fences future emits and delivery appends while logged
       // events keep their rows and history.
       await requireManageOrg(env.DB, ctx, caller.orgId);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       const name = parseEventSourceName(eventSourceEnable[1]);
       return json({
         source: await setEventSourceEnabled(env.DB, caller, name, eventSourceEnable[2] === "enable"),
@@ -1102,7 +1100,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     if (sourceEvents?.[1] && request.method === "GET") {
       // Log history for replay visibility: newest first, bounded 50.
       const name = parseEventSourceName(sourceEvents[1]);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({ events: await listEvents(env.DB, caller.orgId, name, 50) });
     }
     if (url.pathname === "/api/executions" && request.method === "POST") {
@@ -1200,7 +1198,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const formList = url.pathname === "/api/forms";
     if (formList && request.method === "GET") {
       // FORM-02 designer list: org-scoped summaries (id, name, sagaId).
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({ forms: await listForms(env.DB, caller) });
     }
     if (formList && request.method === "POST") {
@@ -1237,7 +1235,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // foreign names answer 404 FORM_NOT_FOUND, never a leak.
       const name = formDetail[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       const def = await loadForm(env.DB, caller.orgId, name);
       if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
       // AUTH-02 (ADR 018): reading a Form declaration needs the form read
@@ -1256,7 +1254,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // re-validates; unknown or foreign names answer 404 FORM_NOT_FOUND).
       const name = formDetail[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       requireJson(request);
       const body: unknown = await boundedJson(request.body);
       if (body === null || typeof body !== "object" || Array.isArray(body)) {
@@ -1285,7 +1283,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // FORM-02 designer delete: unknown or foreign names answer 404 FORM_NOT_FOUND.
       const name = formDetail[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       // AUTH-02: Form deletion needs the form write grant on the target.
       await requireGrant(
         env.DB,
@@ -1304,7 +1302,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // gate). Query strings and display-only/unknown prefill fail closed.
       const name = formStartup[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       requireJson(request);
       const def = await loadForm(env.DB, caller.orgId, name);
       if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
@@ -1337,7 +1335,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // declaration).
       const name = formProviders[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       const def = await loadForm(env.DB, caller.orgId, name);
       if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
       // FORM-02 authorization (#155): provider resolution reads
@@ -1367,7 +1365,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // the form-to-Saga grant: no separate direct-Saga grant required.
       const name = formSubmit[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       const key = parseCallerKey(request.headers.get("Idempotency-Key"));
       requireJson(request);
       const def = await loadForm(env.DB, caller.orgId, name);
@@ -1717,7 +1715,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // Capability tokens arrive as ?token= on the byte routes only; every
     // other file route reads the standard Authorization header.
     if (url.pathname === "/api/file-locations" && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({ locations: await listLocations(env.DB, caller) });
     }
     if (url.pathname === "/api/file-locations" && request.method === "POST") {
@@ -2185,7 +2183,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // provider metrics answer unavailable, never fabricated. Query strings
     // stay deny-by-default: only the allowlisted keys below pass the gate.
     if (url.pathname === "/api/ops/version" && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({
         version: await opsVersion(env.DB, { sdkVersion: SDK_VERSION, catalog: SAGA_CATALOG }),
       });
@@ -2196,7 +2194,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // can serve traffic. No vendor, no metering, no secrets. A genuine
       // storage failure surfaces as 500 via the shared handler, never a
       // fabricated degraded payload.
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
       return json({ status: "ok", database: "ok", worker: "ok", checkedAt: new Date().toISOString() });
     }
@@ -2224,26 +2222,26 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // inventory plus the TRG-01 schedule inventory (the trigger surfaces
       // that actually exist); schedule rows report their cron/timezone or
       // one-off cadence.
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json(await opsScheduledTasks(env.DB, caller));
     }
     if (url.pathname === "/api/ops/jobs" && request.method === "GET") {
       // Upstream jobs.py + platform_jobs.py map to Execution backlog
       // counters plus per-app deploy-job aggregates with interrupted flags.
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json(scrubValueWithDeploymentSecrets({ jobs: await opsJobs(env.DB, caller) }, env));
     }
     if (url.pathname === "/api/ops/preflight" && request.method === "GET") {
       // Upstream maintenance.py preflight maps to static per-Integration
       // mapping/credential presence: no vendor HTTP, no secret values.
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json(await opsPreflight(env.DB, caller, env as unknown as Record<string, string | undefined>));
     }
     if (url.pathname === "/api/ops/connections" && request.method === "GET") {
       // Upstream platform/workers.py maps to per-Integration Connection
       // health with registry test hints; live probes stay on the explicit
       // per-Connection test route.
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json(await opsConnectionHealth(env.DB, caller));
     }
     // Operational repairs (OPS-02, issue #173): inspect-then-act behind the
@@ -2354,13 +2352,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       return json({ artifact }, created ? 201 : 200);
     }
     if (url.pathname === "/api/artifacts/formats" && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({
         formats: ARTIFACT_FORMATS.map((format) => ({ format, status: ARTIFACT_FORMAT_STATUS[format] })),
       });
     }
     if (url.pathname === "/api/artifacts/retention" && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({ retention: await getRetention(env.DB, caller.orgId) });
     }
     if (url.pathname === "/api/artifacts/retention" && request.method === "PUT") {
@@ -2369,11 +2367,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       return json({ retention: await setRetention(env.DB, caller, artifactAdmin, body?.maxAgeDays) });
     }
     if (url.pathname === "/api/artifacts/cleanup/preview" && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({ cleanup: await previewCleanup(env.DB, caller, Date.now()) });
     }
     if (url.pathname === "/api/artifacts/cleanup/run" && request.method === "POST") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({ cleanup: await runCleanup(artifactStore, caller, artifactAdmin, Date.now()) });
     }
     if (url.pathname === "/api/artifacts/bindings" && request.method === "GET") {
@@ -2424,7 +2422,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     const artifactPreview = /^\/api\/artifacts\/([0-9a-f-]{36})\/preview$/.exec(url.pathname);
     if (artifactPreview?.[1] && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       const served = await previewArtifact(artifactStore, caller, parseArtifactId(artifactPreview[1]), artifactAdmin);
       return apiBytes(served.bytes.slice().buffer as ArrayBuffer, 200, {
         "Content-Type": served.mime,
@@ -2434,7 +2432,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     const artifactDownload = /^\/api\/artifacts\/([0-9a-f-]{36})\/download$/.exec(url.pathname);
     if (artifactDownload?.[1] && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       const served = await downloadArtifact(artifactStore, caller, parseArtifactId(artifactDownload[1]), artifactAdmin);
       const filename = served.name.replace(/["\r\n]/g, "_");
       return apiBytes(served.bytes.slice().buffer as ArrayBuffer, 200, {
@@ -2679,11 +2677,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // tripwire fired for Connection credentials, issue #411; OAuth token
     // persistence stays shut). One explicit matcher per route.
     if (url.pathname === "/api/integrations" && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json(scrubConnectionPayload({ integrations: describeIntegrations() }, env));
     }
     if (url.pathname === "/api/connections" && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json(scrubConnectionPayload({ connections: await listConnections(env.DB, caller) }, env));
     }
     if (url.pathname === "/api/connections" && request.method === "POST") {
@@ -2782,7 +2780,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // tools/call path) share the registry gate: disabled and stale rows
     // vanish from both identically. Query strings stay deny-by-default.
     if (url.pathname === "/api/tools" && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json(scrubConnectionPayload({ tools: await toolRegistry.list(env.DB, caller, SAGA_CATALOG) }, env));
     }
     if (url.pathname === "/api/tools" && request.method === "POST") {
@@ -2873,7 +2871,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     const openapiInspect = /^\/api\/openapi\/operations\/([A-Za-z][A-Za-z0-9_.-]{0,127})$/.exec(url.pathname);
     if (openapiInspect?.[1] && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json(scrubConnectionPayload({ operation: inspectHaloOperation(openapiInspect[1]) }, env));
     }
     if (url.pathname === "/api/openapi/execute" && request.method === "POST") {
@@ -3078,7 +3076,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // deployment secret store); summaries never carry digests or secrets.
     // Bad names answer 404 (never a leak); foreign-Organization rows 404.
     if (url.pathname === "/api/endpoints" && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({ endpoints: await listEndpoints(env.DB, caller.orgId).catch(() => []) });
     }
     if (url.pathname === "/api/endpoints" && request.method === "POST") {
@@ -3125,7 +3123,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     const artifactExport = /^\/api\/artifacts\/([0-9a-f-]{36})\/export$/.exec(url.pathname);
     if (artifactExport?.[1] && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       // Metadata-only by construction: the manifest never carries bytes.
       return json(await exportManifest(env.DB, caller, parseArtifactId(artifactExport[1]), artifactAdmin));
     }
@@ -3150,13 +3148,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     if (endpointEvents?.[1] && request.method === "GET") {
       const name = parseEndpointName(endpointEvents[1]);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({ events: await listEndpointEvents(env.DB, caller.orgId, name, 50).catch(() => []) });
     }
     const endpointRotate = /^\/api\/endpoints\/([a-z0-9][a-z0-9-]{0,63})\/rotate$/.exec(url.pathname);
     if (endpointRotate?.[1] && request.method === "POST") {
       const name = parseEndpointName(endpointRotate[1]);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       // Codex #352: credential rotation is a state change, so it shares the
       // JSON-write gate: unencoded application/json rejects cross-origin
       // form posts against Access-authenticated browser sessions.
@@ -3173,7 +3171,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const endpointOne = /^\/api\/endpoints\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname);
     if (endpointOne?.[1] && (request.method === "GET" || request.method === "PATCH")) {
       const name = parseEndpointName(endpointOne[1]);
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       const row = await loadEndpoint(env.DB, caller.orgId, name).catch(() => null);
       if (!row) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
       if (request.method === "GET") return json({ endpoint: endpointSummary(row) });
@@ -3200,7 +3198,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // beats a shared capture. Realtime subscriptions are deferred per the
     // multi-slice note in issue #154; polling repeats the GET rows route.
     if (url.pathname === "/api/tables" && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       return json({ tables: await listTables(env.DB, caller) });
     }
     if (url.pathname === "/api/tables" && request.method === "POST") {
@@ -3336,7 +3334,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // visibility; none exists yet (no shipped Saga reads ctx.config), so the
     // gate stays uniform across reads and writes.
     if (url.pathname === "/api/config" && request.method === "GET") {
-      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      rejectQuery(url);
       await requireManageOrg(env.DB, ctx, caller.orgId);
       return json({ configs: await listConfigs(env.DB, caller) });
     }
