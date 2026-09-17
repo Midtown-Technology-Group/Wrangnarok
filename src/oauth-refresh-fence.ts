@@ -17,6 +17,9 @@
 // no token (persisted rows live in `src/oauth-tokens.ts`, migration 0031).
 import { Fault } from "./domain";
 
+function throwFenceInvalid(): never {
+  throw new Fault(400, "OAUTH_FENCE_INVALID", "The refresh fence request is invalid.");
+}
 const VALID_FENCE_PATH = /^\/refresh\/[A-Za-z0-9._%-]{1,400}$/u;
 const MAX_FORM_BYTES = 8192;
 
@@ -42,10 +45,10 @@ function fenceKeyFromUrl(url: string): string {
   try {
     path = new URL(url).pathname;
   } catch {
-    throw new Fault(400, "OAUTH_FENCE_INVALID", "The refresh fence request is invalid.");
+    throwFenceInvalid();
   }
   if (!VALID_FENCE_PATH.test(path)) {
-    throw new Fault(400, "OAUTH_FENCE_INVALID", "The refresh fence request is invalid.");
+    throwFenceInvalid();
   }
   return path.slice("/refresh/".length);
 }
@@ -53,17 +56,17 @@ function fenceKeyFromUrl(url: string): string {
 function shapeFaultTable(raw: string): FenceFaultTable {
   const parsed: unknown = JSON.parse(raw);
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Fault(400, "OAUTH_FENCE_INVALID", "The refresh fence request is invalid.");
+    throwFenceInvalid();
   }
   const table = parsed as Record<string, unknown>;
   const shape = (slot: string): FenceFaultText => {
     const entry = table[slot];
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Fault(400, "OAUTH_FENCE_INVALID", "The refresh fence request is invalid.");
+      throwFenceInvalid();
     }
     const shaped = entry as Record<string, unknown>;
     if (typeof shaped.status !== "number" || typeof shaped.code !== "string" || typeof shaped.message !== "string") {
-      throw new Fault(400, "OAUTH_FENCE_INVALID", "The refresh fence request is invalid.");
+      throwFenceInvalid();
     }
     return { status: shaped.status, code: shaped.code, message: shaped.message };
   };
@@ -136,18 +139,18 @@ export class OAuthRefreshFence {
       const faultsRaw = fields.get("faults");
       const timeoutRaw = fields.get("timeout_ms");
       if (tokenUrl === null || form === null || faultsRaw === null || timeoutRaw === null) {
-        throw new Fault(400, "OAUTH_FENCE_INVALID", "The refresh fence request is invalid.");
+        throwFenceInvalid();
       }
       let faults: FenceFaultTable;
       try {
         faults = shapeFaultTable(faultsRaw);
       } catch (error) {
         if (error instanceof Fault && error.code === "OAUTH_FENCE_INVALID") throw error;
-        throw new Fault(400, "OAUTH_FENCE_INVALID", "The refresh fence request is invalid.");
+        throwFenceInvalid();
       }
       const timeoutMs = Number(timeoutRaw);
       if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 30_000) {
-        throw new Fault(400, "OAUTH_FENCE_INVALID", "The refresh fence request is invalid.");
+        throwFenceInvalid();
       }
       let vendor: Response;
       try {

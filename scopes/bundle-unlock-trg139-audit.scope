@@ -1,0 +1,12 @@
+# bundle-unlock-trg139-audit lane scope (LIMITS-01 #177 follow-through).
+# Semantics-neutral bundle relief unlocking TRG-03 #139 S2 headroom without
+# raising the Worker budget: extend the existing rejectQuery(url) guard
+# across the 40 proven-equivalent query-rejection sites in src/index.ts, and
+# centralize the eight identical OAUTH_FENCE_INVALID Fault throws behind a
+# typed never-returning helper in src/oauth-refresh-fence.ts. No route/API/
+# domain change, no code/message/order/auth change, no new primitive,
+# dependency, budget, or FORM/TABLE change.
+src/index.ts
+src/oauth-refresh-fence.ts
+test/bundle-relief-guards.test.ts
+scopes/bundle-unlock-trg139-audit.scope
