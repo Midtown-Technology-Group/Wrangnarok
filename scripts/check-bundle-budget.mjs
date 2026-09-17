@@ -279,15 +279,24 @@ import { fileURLToPath } from "node:url";
 // 700963 bytes locally against the 670 KiB line: ~15 KiB of hand-written
 // migration code, no new dependencies (package.json unchanged versus main);
 // deliberate feature headroom only.
+// 2026-09-17 (TRG-02 follow-through, issue #138): 705 KiB. The webhook
+// hardening (canonical base64 HMAC decoder with strict alphabet/padding,
+// fail-closed rate-window and endpoint-lookup paths, single-verdict
+// signature compare after a shrink pass) measures 717659 bytes locally
+// (CI number governs) against the 700 KiB line: ~1.1 KiB of hand-written
+// security-boundary code, no new dependencies (package.json unchanged
+// versus main); deliberate feature headroom only.
 // 2026-09-17 (LIMITS-01, issue #177): 710 KiB plus a mechanical headroom
-// rule. Main measured 716545 bytes raw against the 700 KiB line — 255 bytes
-// of headroom (~0.04%): the soft budget had become a post-merge ratchet
-// (issue #177 comments 2026-09-14..16) instead of an early warning. The
-// 710 KiB raise restores ~10 KiB of real margin with the reason recorded
-// here and in docs/feasibility-envelope.md (same PR, LIMITS-META block);
-// the MIN_HEADROOM_BYTES gate below makes the next sub-margin state fail
-// closed instead of silently ratcheting again. Hand-written platform
-// governance, no new dependencies.
+// rule, stacked on the TRG-02 705 KiB main above. The 700 KiB line had
+// decayed to 255 bytes of headroom (~0.04%) — a post-merge ratchet (issue
+// #177 comments 2026-09-14..16) instead of an early warning — and the
+// TRG-02 raise to 705 KiB still left only ~4.2 KiB. The 710 KiB line
+// restores real margin with the reason recorded here and in
+// docs/feasibility-envelope.md (same PR, LIMITS-META block); the
+// MIN_HEADROOM_BYTES gate below makes the next sub-margin state fail
+// closed instead of silently ratcheting again. This lane adds zero Worker
+// bytes (docs/tests/governance only). Hand-written platform governance,
+// no new dependencies.
 const BUDGET_BYTES = 710 * 1024;
 // LIMITS-01 minimum operating headroom (issue #177): the budget must exceed
 // the measured bundle by at least this margin, so a `measured + a few

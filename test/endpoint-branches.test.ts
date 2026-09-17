@@ -14,6 +14,7 @@ import {
   authenticateWebhook,
   checkEndpointRateLimit,
   createEndpoint,
+  endpointIdempotencyKey,
   endpointSummary,
   executeEndpointDelivery,
   findChallengeEndpoint,
@@ -34,7 +35,7 @@ import {
   verifyWebhookSignature,
   type EndpointRow,
 } from "../src/endpoints";
-import { Fault, hash, helloSaga, parseHelloInput } from "../src/domain";
+import { executionId, Fault, hash, helloSaga, parseHelloInput } from "../src/domain";
 import { submit } from "../src/executions";
 import migration1 from "../migrations/0001_initial.sql?raw";
 import migration2 from "../migrations/0002_cancelling.sql?raw";
@@ -52,6 +53,41 @@ function authed(path: string, method: string, body?: unknown, query = ""): Reque
     method,
     headers: { ...LAB },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+}
+
+/** Wrap the test D1 binding so the listed statement methods on statements
+ * matching `match` reject asynchronously with `fault`, exactly like a
+ * transient/query-specific D1 failure. Every other method (including the
+ * counter UPSERT's `run`) still delegates to the real tables, so the fault
+ * proves fail-closed behavior under a fault the missing-table case cannot
+ * model. */
+function faultingDb(match: (sql: string) => boolean, fault: Error, methods: readonly string[]): D1Database {
+  const wrapStatement = (stmt: object): object =>
+    new Proxy(stmt, {
+      get(statementTarget, property) {
+        if (typeof property === "string" && methods.includes(property)) {
+          return () => Promise.reject(fault);
+        }
+        const value = (statementTarget as Record<string | symbol, unknown>)[property];
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          const out = (value as (...args: unknown[]) => unknown).apply(statementTarget, args);
+          return typeof out === "object" && out !== null ? wrapStatement(out) : out;
+        };
+      },
+    });
+  return new Proxy(bindings.DB, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (sql: string, ...rest: unknown[]) => {
+          const stmt = (target.prepare as (sql: string, ...rest: unknown[]) => object)(sql, ...rest);
+          return match(sql) ? wrapStatement(stmt) : stmt;
+        };
+      }
+      const value = (target as unknown as Record<string | symbol, unknown>)[property];
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
   });
 }
 
@@ -279,11 +315,36 @@ it("parses secret bindings and checks rate limits without a configured limit", a
   expect(parseWebhookSecrets(JSON.stringify({ id: "" })).size).toBe(0);
   // No limit configured: always passes, even without the rate table.
   await checkEndpointRateLimit(bindings.DB, row({ rate_limit_per_minute: null }));
-  // A pre-migration database (no rate table) fails open on the read miss but
-  // the counter write throws through: assert the miss path only.
+  // A pre-migration database (no rate table) fails closed on the read miss:
+  // a store error is not evidence that the bucket is empty, so the check
+  // throws instead of admitting under an invented zero count.
   await bindings.DB.exec('DROP TABLE "endpoint_rate_windows"');
   const limited = row({ rate_limit_per_minute: 5 });
   await expect(checkEndpointRateLimit(bindings.DB, limited)).rejects.toThrow();
+});
+
+it("fails the rate-limit check closed when the window read faults while writes would succeed", async () => {
+  await createEndpoint(
+    bindings.DB,
+    ORG,
+    { name: "faulty-limit", sagaId: helloSaga.id, kind: "api-key", rateLimitPerMinute: 1 },
+    [helloSaga.id],
+  );
+  const limited = (await loadEndpoint(bindings.DB, ORG, "faulty-limit")) as EndpointRow;
+  await checkEndpointRateLimit(bindings.DB, limited);
+  // Fault only the window SELECT's async result: the counter UPSERT still
+  // delegates to the real table, so a fail-open read would admit an
+  // over-limit endpoint here under an invented zero count.
+  const readFault = faultingDb(
+    (sql) => sql.includes("endpoint_rate_windows") && sql.trimStart().startsWith("SELECT"),
+    new Error("injected rate-window read fault"),
+    ["first"],
+  );
+  await expect(checkEndpointRateLimit(readFault, limited)).rejects.toThrow("injected rate-window read fault");
+  // The faulted check wrote nothing: a healthy retry still sees the one hit.
+  await expect(checkEndpointRateLimit(bindings.DB, limited)).rejects.toMatchObject({
+    code: "ENDPOINT_RATE_LIMITED",
+  });
 });
 
 it("validates endpoint creation, update, rotation, and event history inputs", async () => {
@@ -641,4 +702,175 @@ it("answers route-level fallbacks: bad bodies, bad names, cross-kind, and unknow
     withSecrets,
   );
   expect(off.status).toBe(410);
+});
+
+const B64ABC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/** Standard-alphabet padded base64 (what a vendor would send). */
+function toBase64(bytes: Uint8Array): string {
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i] ?? 0;
+    const has1 = i + 1 < bytes.length;
+    const has2 = i + 2 < bytes.length;
+    const b1 = has1 ? (bytes[i + 1] ?? 0) : 0;
+    const b2 = has2 ? (bytes[i + 2] ?? 0) : 0;
+    out += B64ABC.charAt(b0 >> 2) + B64ABC.charAt(((b0 & 3) << 4) | (b1 >> 4));
+    out += has1 ? B64ABC.charAt(((b1 & 15) << 2) | (b2 >> 6)) : "=";
+    out += has2 ? B64ABC.charAt(b2 & 63) : "=";
+  }
+  return out;
+}
+
+it("accepts canonical base64 HMAC signatures and rejects ambiguous encodings", async () => {
+  const secret = "webhook-secret-0002";
+  const live = row({
+    id: "endpoint-id-0002",
+    kind: "webhook",
+    key_hash: null,
+    signature_secret_hash: await hash(secret),
+  });
+  const rawBody = new TextEncoder().encode(JSON.stringify({ input: { name: "Ada" } }));
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const computed = new Uint8Array(await crypto.subtle.sign("HMAC", key, rawBody));
+  const canonical = toBase64(computed);
+  expect(canonical).toMatch(/^[A-Za-z0-9+/]{43}=$/);
+  const secrets = new Map([[live.id, secret]]);
+
+  // Canonical padded base64 verifies bare, prefixed, and in the HaloPSA
+  // spaced-prefix form (surrounding whitespace plus whitespace after the
+  // prefix are tolerated).
+  for (const signature of [canonical, `sha256=${canonical}`, `  sha256= ${canonical}  `]) {
+    expect((await verifyWebhookSignature(live, rawBody, signature, secrets)).endpointId).toBe(live.id);
+  }
+
+  // Ambiguous alternate encodings stay rejected: base64url alphabet,
+  // unpadded base64, base64-of-hex, and whitespace inside the digest.
+  const base64url = canonical.replaceAll("+", "-").replaceAll("/", "_");
+  const hexOfDigest = Array.from(computed, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const base64OfHex = toBase64(new TextEncoder().encode(hexOfDigest));
+  const tampered = `${canonical[0] === "A" ? "B" : "A"}${canonical.slice(1)}`;
+  for (const signature of [
+    base64url,
+    canonical.replace(/=+$/, ""),
+    base64OfHex,
+    `${canonical.slice(0, 20)} ${canonical.slice(20)}`,
+    tampered,
+  ]) {
+    await expect(verifyWebhookSignature(live, rawBody, signature, secrets)).rejects.toMatchObject({
+      code: "ENDPOINT_UNAUTHORIZED",
+    });
+  }
+});
+
+it("correlates concurrent redeliveries to the exact event created by the request", async () => {
+  const { row: created } = await createEndpoint(
+    bindings.DB,
+    ORG,
+    { name: "conc", sagaId: helloSaga.id, kind: "api-key" },
+    [helloSaga.id],
+  );
+  const principal = {
+    orgId: ORG,
+    userId: `endpoint:${created.id}`,
+    endpointId: created.id,
+    endpointName: created.name,
+  };
+  const saga = {
+    id: helloSaga.id,
+    name: helloSaga.name,
+    revision: helloSaga.revision,
+    description: "concurrency",
+    parse: parseHelloInput,
+  };
+  const delivery = {
+    saga,
+    eventId: "evt-conc",
+    payload: { input: { name: "Ada" } },
+  };
+  // Simultaneous arrivals of the same vendor event converge on one
+  // Execution: the immutable (endpoint, event) identity travels with each
+  // request, never recovered through a latest-for-source lookup.
+  const [first, second] = await Promise.all([
+    executeEndpointDelivery(bindings.DB, submit, bindings, principal, created, delivery),
+    executeEndpointDelivery(bindings.DB, submit, bindings, principal, created, delivery),
+  ]);
+  expect(first.executionId).toBe(second.executionId);
+  const events = await listEndpointEvents(bindings.DB, ORG, "conc", 50);
+  expect(events.filter((entry) => entry.eventId === "evt-conc")).toHaveLength(1);
+  // Distinct vendor events derive distinct delivery keys.
+  const same = await endpointIdempotencyKey(created.id, "evt-conc");
+  expect(same).toMatch(/^wep-[a-f0-9]{64}$/);
+  expect(await endpointIdempotencyKey(created.id, "evt-other")).not.toBe(same);
+});
+
+it("keeps the execution row durable across an unconfirmed dispatch, with no phantom event", async () => {
+  const { row: created } = await createEndpoint(
+    bindings.DB,
+    ORG,
+    { name: "ord", sagaId: helloSaga.id, kind: "api-key" },
+    [helloSaga.id],
+  );
+  const principal = {
+    orgId: ORG,
+    userId: `endpoint:${created.id}`,
+    endpointId: created.id,
+    endpointName: created.name,
+  };
+  const saga = {
+    id: helloSaga.id,
+    name: helloSaga.name,
+    revision: helloSaga.revision,
+    description: "ordering",
+    parse: parseHelloInput,
+  };
+  const delivery = { saga, eventId: "evt-ord", payload: { input: { name: "Ada" } } };
+  // The Workflow dispatch fails after the Execution row write: the delivery
+  // answers 503 and the caller must redeliver the same vendor event.
+  const dispatchFault = {
+    ...bindings,
+    HELLO_WORKFLOW: {
+      createBatch: async (): Promise<never> => {
+        throw new Error("injected dispatch fault");
+      },
+    },
+  } as unknown as Bindings;
+  await expect(
+    executeEndpointDelivery(bindings.DB, submit, dispatchFault, principal, created, delivery),
+  ).rejects.toMatchObject({ code: "DISPATCH_UNCONFIRMED", status: 503 });
+
+  // Durable authoritative state stayed visible: the Execution row persists
+  // undispatched, and no event row claims a delivery that never confirmed.
+  const key = await endpointIdempotencyKey(created.id, "evt-ord");
+  const id = await executionId(principal, key);
+  const kept = await bindings.DB.prepare('SELECT dispatched FROM "executions" WHERE id=?')
+    .bind(id)
+    .first<{ dispatched: number }>();
+  expect(kept?.dispatched).toBe(0);
+  expect(await listEndpointEvents(bindings.DB, ORG, "ord", 50)).toEqual([]);
+
+  // Caller redelivery of the same event converges on the durable row and
+  // records the event exactly once. No business mutation ran twice and no
+  // automatic retry invented a second Execution.
+  const recovered = await executeEndpointDelivery(bindings.DB, submit, bindings, principal, created, delivery);
+  expect(recovered.executionId).toBe(id);
+  expect(recovered.replayed).toBe(true);
+  expect((await listEndpointEvents(bindings.DB, ORG, "ord", 50)).map((entry) => entry.eventId)).toEqual(["evt-ord"]);
+
+  // Submit-level failures likewise record nothing: an invalid payload leaves
+  // no event row behind for the caller to mistake for a delivery.
+  await expect(
+    executeEndpointDelivery(bindings.DB, submit, bindings, principal, created, {
+      saga,
+      eventId: "evt-bad",
+      payload: { input: { name: "" } },
+    }),
+  ).rejects.toBeInstanceOf(Fault);
+  expect((await listEndpointEvents(bindings.DB, ORG, "ord", 50)).map((entry) => entry.eventId)).toEqual(["evt-ord"]);
 });

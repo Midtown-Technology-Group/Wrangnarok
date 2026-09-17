@@ -14,8 +14,10 @@ import {
   DEFAULT_SAGA_POLICY,
   digestSaga,
   echoSaga,
+  ECHO_INTEGRATION_ID,
   executionId,
   helloSaga,
+  parseInput,
   parseSagaPolicy,
   parseSubmission,
   POLICY_VERSION,
@@ -23,7 +25,16 @@ import {
   vendorDeadlineMs,
   vendorRetryLimit,
 } from "../src/domain";
-import { loadSagaPolicy, parseStoredPolicy, policySnapshot, storeSagaPolicy } from "../src/executions";
+import {
+  loadExecutionPolicy,
+  loadSagaPolicy,
+  parseStoredPolicy,
+  policySnapshot,
+  storeSagaPolicy,
+} from "../src/executions";
+import { integrationOperation, prepareInput } from "../src/saga-helpers";
+import type { SagaEventContext } from "../src/saga";
+import { echoSagaDef } from "../src/sagas/echo";
 import { retryLimitForStep } from "../src/saga";
 import { buildCatalog, defineSaga } from "../src/saga";
 import { parseRuntimePolicy } from "../src/sdk";
@@ -382,5 +393,206 @@ describe("RUN-01 saga submission still parses (identity intact)", () => {
   it("keeps stable IDs and catalog discovery untouched by policy", () => {
     expect(parseSubmission({ sagaId: echoSaga.id, input: { message: "hi" } }).saga.id).toBe(echoSaga.id);
     expect(echoSaga.revision).toBe("echo-v1");
+  });
+});
+
+describe("RUN-01 Slice A fail-closed loader (issue #135)", () => {
+  const someId = "f".repeat(64);
+  // Minimal D1 doubles: the loader only uses prepare/bind/first.
+  function fakeDb(firstImpl: () => Promise<unknown>): D1Database {
+    return {
+      prepare: () => ({ bind: () => ({ first: firstImpl }) }),
+    } as unknown as D1Database;
+  }
+  function throwingDb(message: string): D1Database {
+    return fakeDb(() => {
+      throw new Error(message);
+    });
+  }
+
+  it("keeps the legacy NULL snapshot on code defaults", async () => {
+    await expect(
+      loadExecutionPolicy(
+        fakeDb(async () => ({ policy_json: null })),
+        someId,
+      ),
+    ).resolves.toEqual(DEFAULT_SAGA_POLICY);
+  });
+
+  it("rejects unknown Executions instead of inventing a policy", async () => {
+    await expect(
+      loadExecutionPolicy(
+        fakeDb(async () => null),
+        someId,
+      ),
+    ).rejects.toThrow(/Unknown Execution/);
+  });
+
+  it("returns the stamped snapshot, failing closed on corrupt JSON to defaults", async () => {
+    const custom = policySnapshot(parseSagaPolicy({ timeout: { vendorTimeoutMs: 250 } }));
+    await expect(
+      loadExecutionPolicy(
+        fakeDb(async () => ({ policy_json: custom })),
+        someId,
+      ),
+    ).resolves.toMatchObject({
+      timeout: { vendorTimeoutMs: 250 },
+    });
+    await expect(
+      loadExecutionPolicy(
+        fakeDb(async () => ({ policy_json: "not-json" })),
+        someId,
+      ),
+    ).resolves.toEqual(DEFAULT_SAGA_POLICY);
+  });
+
+  it("never conflates a D1 read failure with a missing snapshot", async () => {
+    // A genuine read failure propagates: the caller must fail or retry
+    // before running Saga/vendor work, never execute under defaults.
+    await expect(loadExecutionPolicy(throwingDb("D1_UNAVAILABLE_SIM"), someId)).rejects.toThrow(/D1_UNAVAILABLE_SIM/);
+    // A pre-migration database without the column keeps the legacy default.
+    await expect(loadExecutionPolicy(throwingDb("D1_ERROR: no such column: policy_json"), someId)).resolves.toEqual(
+      DEFAULT_SAGA_POLICY,
+    );
+  });
+
+  it("recovers onto the original non-default snapshot after a transient read failure", async () => {
+    const custom = policySnapshot(parseSagaPolicy({ timeout: { vendorTimeoutMs: 250 } }));
+    let calls = 0;
+    const flaky = fakeDb(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("D1_UNAVAILABLE_SIM");
+      return { policy_json: custom };
+    });
+    await expect(loadExecutionPolicy(flaky, someId)).rejects.toThrow(/D1_UNAVAILABLE_SIM/);
+    await expect(loadExecutionPolicy(flaky, someId)).resolves.toMatchObject({
+      timeout: { vendorTimeoutMs: 250 },
+    });
+  });
+
+  it("fails submit-time policy loading closed except on a missing table", async () => {
+    await expect(
+      loadSagaPolicy(throwingDb("D1_ERROR: no such table: saga_policies"), principal.orgId, echoSaga.id),
+    ).resolves.toMatchObject({ policy: DEFAULT_SAGA_POLICY });
+    await expect(loadSagaPolicy(throwingDb("D1_UNAVAILABLE_SIM"), principal.orgId, echoSaga.id)).rejects.toThrow(
+      /D1_UNAVAILABLE_SIM/,
+    );
+  });
+});
+
+describe("RUN-01 Slice A submit-time fail-closed (workerd, issue #135)", () => {
+  // Throw for one SELECT shape while delegating every other statement to the
+  // real binding, so the failure is a read fault, not a broken database.
+  function selectiveFailure(matcher: RegExp, message: string): D1Database {
+    const real = bindings.DB;
+    return new Proxy(real, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: unknown, ...rest: unknown[]) => {
+            if (typeof sql === "string" && matcher.test(sql)) throw new Error(message);
+            return (target.prepare as (...args: unknown[]) => unknown)(sql, ...rest);
+          };
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  }
+
+  it("refuses to dispatch when the policy read fails: 500, no receipt mutation, zero vendor calls", async () => {
+    const vendor = mockEcho(async () => Response.json({ message: "hello" }));
+    const key = "run01-slicea-submitfail-001";
+    const failing = { ...bindings, DB: selectiveFailure(/FROM saga_policies/, "D1_UNAVAILABLE_SIM") };
+    const refused = await worker.fetch(submitRequest(key), failing);
+    expect(refused.status).toBe(500);
+    expect(await refused.json()).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
+    // The refusal lands before the Execution insert: no receipt to replay.
+    const row = await bindings.DB.prepare("SELECT id,dispatched FROM executions WHERE id=?")
+      .bind(await executionId(principal, key))
+      .first<{ id: string; dispatched: number }>();
+    expect(row).toBeNull();
+    expect(vendor).not.toHaveBeenCalled();
+    // Recovery uses the live policy surface, not an invented default: a
+    // normal submit right after still dispatches under operator policy.
+    const set = await worker.fetch(policyPut(echoSaga.id, { timeout: { vendorTimeoutMs: 5000 } }), bindings);
+    expect(set.status).toBe(200);
+    await worker.fetch(policyPut(echoSaga.id, { timeout: { vendorTimeoutMs: 0 } }), bindings);
+  });
+
+  it("refuses to over-admit when the admission count fails, keeping the stamped snapshot", async () => {
+    await worker.fetch(policyPut(echoSaga.id, { admission: { maxConcurrent: 1 } }), bindings);
+    const firstKey = "run01-slicea-countfail-01";
+    const firstId = await executionId(principal, firstKey);
+    // Never-settling vendor: the first Execution stays active to hold the slot.
+    const vendor = mockEcho(() => new Promise<Response>(() => {}));
+    expect((await worker.fetch(submitRequest(firstKey), bindings)).status).toBe(202);
+    await waitForExecutionStatus(firstId, "Running");
+    // A blind count fault must not read as zero and admit a second Execution.
+    const failing = { ...bindings, DB: selectiveFailure(/COUNT\(\*\)/, "D1_UNAVAILABLE_SIM") };
+    const refused = await worker.fetch(submitRequest("run01-slicea-countfail-02"), failing);
+    expect(refused.status).toBe(500);
+    expect(vendor).toHaveBeenCalledTimes(1);
+    // The held Execution keeps its original non-default snapshot after the
+    // fault: recovery replays stored behavior, never re-derived defaults.
+    expect((await loadExecutionPolicy(bindings.DB, firstId)).admission.maxConcurrent).toBe(1);
+    const cancelled = await worker.fetch(
+      new Request(`https://local.test/api/executions/${firstId}/cancel`, { method: "POST", headers: { ...auth } }),
+      bindings,
+    );
+    expect(cancelled.status).toBe(200);
+    await waitForExecutionStatus(firstId, "Cancelled");
+    await worker.fetch(policyPut(echoSaga.id, { admission: { maxConcurrent: 0 } }), bindings);
+  }, 25000);
+});
+
+describe("RUN-01 Slice A execution-time fail-closed (workerd, issue #135)", () => {
+  it("fails before any vendor work when the snapshot read fails", async () => {
+    const id = "e".repeat(64);
+    await bindings.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        id,
+        echoSaga.id,
+        echoSaga.name,
+        echoSaga.revision,
+        principal.orgId,
+        principal.userId,
+        JSON.stringify({ message: "hello" }),
+        1,
+        "Pending",
+        new Date().toISOString(),
+      )
+      .run();
+    const realCtx = { executionId: id, db: bindings.DB } as SagaEventContext;
+    // A stale row (NULL snapshot) still runs under code defaults: legacy.
+    const prepared = await prepareInput(realCtx, echoSaga, parseInput);
+    const real = bindings.DB;
+    const failingDb = new Proxy(real, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: unknown, ...rest: unknown[]) => {
+            if (typeof sql === "string" && sql.includes("policy_json")) throw new Error("D1_UNAVAILABLE_SIM");
+            return (target.prepare as (...args: unknown[]) => unknown)(sql, ...rest);
+          };
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const failingCtx = { executionId: id, db: failingDb } as SagaEventContext;
+    const vendorCall = vi.fn(async () => ({ message: "hello" }));
+    await expect(
+      integrationOperation(failingCtx, echoSagaDef, prepared, {
+        op: "echo-http-v1",
+        position: 1,
+        integrationId: ECHO_INTEGRATION_ID,
+        vendorDefaultMs: 1000,
+        failureCode: "ECHO_INTEGRATION_FAILED",
+        failureMessage: "The echo Integration could not complete.",
+        call: vendorCall,
+      }),
+    ).rejects.toThrow(/D1_UNAVAILABLE_SIM/);
+    expect(vendorCall).not.toHaveBeenCalled();
   });
 });

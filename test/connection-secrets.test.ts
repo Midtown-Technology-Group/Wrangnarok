@@ -185,6 +185,36 @@ describe("per-Organization secrets write path (SEC-02)", () => {
     });
   });
 
+  it("restores ciphertext-only backups only with the matching KEK (recovery drill)", async () => {
+    // ADR 005 loss/restore: D1 backups carry ciphertext and are
+    // unrecoverable without the matching KEK. Dump the rows (the backup),
+    // lose the table contents, re-insert the same bytes (the restore), and
+    // prove recovery depends on the KEK — never on the ciphertext alone.
+    const created = await seedCloudflareMapping();
+    await putConnectionSecrets(bindings.DB, caller, CLOUDFLARE_INTEGRATION_ID, { apiToken: VALUE }, KEK);
+    const backup = await storedRows();
+    expect(backup).toHaveLength(1);
+    expect(JSON.stringify(backup)).not.toContain(VALUE);
+    expect(JSON.stringify(backup)).not.toContain(KEK);
+    await bindings.DB.prepare("DELETE FROM connection_secrets WHERE connection_id=?").bind(created.id).run();
+    expect(await resolveConnectionSecrets(bindings.DB, ORG, created.id, { 1: KEK })).toEqual({});
+    const row = backup[0] as Record<string, unknown>;
+    await bindings.DB.prepare(
+      "INSERT INTO connection_secrets(connection_id,org_id,field,ciphertext,nonce,wrapped_dek,key_version,algorithm,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'2026-09-17T00:00:00.000Z','2026-09-17T00:00:00.000Z')",
+    )
+      .bind(created.id, ORG, "apiToken", row.ciphertext, row.nonce, row.wrapped_dek, row.key_version, row.algorithm)
+      .run();
+    // Restored rows without the KEK (or the wrong one) fail closed.
+    await expect(resolveConnectionSecrets(bindings.DB, ORG, created.id, {})).rejects.toMatchObject({
+      code: "CONNECTION_SECRET_UNREADABLE",
+    });
+    await expect(resolveConnectionSecrets(bindings.DB, ORG, created.id, { 1: OTHER_KEK })).rejects.toMatchObject({
+      code: "CONNECTION_SECRET_UNREADABLE",
+    });
+    // With the matching KEK the credential recovers exactly.
+    expect(await resolveConnectionSecrets(bindings.DB, ORG, created.id, { 1: KEK })).toEqual({ apiToken: VALUE });
+  });
+
   it("deletes provisioned secrets with the mapping", async () => {
     await seedCloudflareMapping();
     await putConnectionSecrets(bindings.DB, caller, CLOUDFLARE_INTEGRATION_ID, { apiToken: VALUE }, KEK);

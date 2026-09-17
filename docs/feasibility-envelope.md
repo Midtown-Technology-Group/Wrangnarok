@@ -2,7 +2,7 @@
 
 Dated: 2026-09-17. Baseline: upstream `gobifrost/bifrost@3543c7ebee0e1bd9a2cab6dfba080a30621b1c5f` vs Wrangnarok `origin/main@0331492` (lane `lane/parity-177-limits`).
 
-<!-- LIMITS-META {"budgetKiB":710,"measuredBytes":716545,"measuredDate":"2026-09-17","minHeadroomBytes":8192} -->
+<!-- LIMITS-META {"budgetKiB":710,"measuredBytes":716690,"measuredDate":"2026-09-17","minHeadroomBytes":8192} -->
 
 This is the dated capability-versus-limit matrix LIMITS-01 requires. It answers one question per capability:
 
@@ -50,7 +50,7 @@ Correction vs the 2026-09-12 matrix: the Free per-database cap is **500 MB**, no
 
 - `test/smoke.test.ts` pins the deterministic smoke path: D1 reads 4, writes 8, operation rows 4, Workflow steps 4, instances 1, with per-run budgets (reads ≤ 10, writes ≤ 20, rows ≤ 10, instances = 1, steps ≤ 10) failing closed on growth. These are application-observed counters, not D1 `meta.rows_read`/`meta.rows_written` billing telemetry.
 - `src/usage.ts` emits one `WRANGNAROK_USAGE` block per Execution (counts/IDs/durations only, SEC-01 scrubbed). Worker requests and CPU-ms are `null` locally (not exposed by workerd); a deployed smoke artifact using D1 `meta` plus Workers analytics is still required before claiming production metering accuracy.
-- Worker bundle: **716,545 bytes raw** measured 2026-09-17 via `npm run check:bundle` against a **710 KiB** soft budget (see headroom rule below). The provider hard cap is 3 MB, so the soft budget — not Cloudflare — is the binding constraint, by design: it is the early warning for CPU/memory pressure.
+- Worker bundle: **716,690 bytes raw** measured 2026-09-17 via `npm run check:bundle` on the TRG-02-union main (see headroom rule below) against a **710 KiB** soft budget. The provider hard cap is 3 MB, so the soft budget — not Cloudflare — is the binding constraint, by design: it is the early warning for CPU/memory pressure.
 - Client JS: 367,436 bytes raw / 105.12 kB gzip (measured 2026-09-17 via `npm run build:ui`). Served as Static Assets from the same Worker; asset requests are free and unlimited per Workers pricing.
 
 ### Soft-budget headroom rule (mechanical, not advisory)
@@ -63,7 +63,7 @@ Correction vs the 2026-09-12 matrix: the Free per-database cap is **500 MB**, no
 | --- | --- | --- | --- |
 | Workers requests | 100,000 requests/day | `null` locally (not exposed by workerd) | One request per API call plus one Cron tick per minute (1,440/day for the TRG-01 tick). Small deployments fit; high-frequency polling does not. |
 | Workers CPU | 10 ms CPU per invocation | `null` locally | Pure request shaping plus D1/Workflow calls; no measured pressure. Heavy per-request computation (embeddings, large transforms) is unproven. |
-| Workers bundle | 3 MB hard cap; 710 KiB soft budget + 8 KiB min headroom | 716,545 bytes raw of 727,040 | Soft budget binds first by design; ~10.3 KiB margin. Growth is deliberate per-lane headroom; no new dependencies. |
+| Workers bundle | 3 MB hard cap; 710 KiB soft budget + 8 KiB min headroom | 716,690 bytes raw of 727,040 | Soft budget binds first by design; ~10.1 KiB margin. Growth is deliberate per-lane headroom; no new dependencies. |
 | Workflows instances | 100,000 executions/day (shared with Workers) | 1 per smoke run | One instance per Execution by design. Fits unless per-minute schedules fan out across many orgs. |
 | Workflows steps | 3,000 steps/day (billing allowance) | 4 per smoke run | Bounded Operations per Saga (serial, fanout cap 8). ~750 smoke-runs/day is the first Free ceiling (see workloads). |
 | Workflows history retention | Completed state retained 3 days | Not archived by local/CI tests | The 15-minute same-revision refusal window plus retained D1 receipts carry recovery; native history older than retention surfaces as unavailable, never invented success (ADR 001). |
