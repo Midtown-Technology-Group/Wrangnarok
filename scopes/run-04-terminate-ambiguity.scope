@@ -1,0 +1,11 @@
+# RUN-04 failed-termination fault-injection slice (issue #151): a transient
+# or control-plane terminate failure is never reported as confirmed physical
+# cancellation. Centralizes the confirm-vs-ambiguous decision in
+# shouldConfirmCancel() beside the fenced terminal write, routes the single
+# authoritative cancel endpoint through it, and proves the whole native
+# control path (lookup + terminate) fails closed with an injected
+# control-lookup failure case. No new primitive; Worker + Workflows + D1 only.
+src/executions.ts
+src/index.ts
+test/cancel-confirmation.test.ts
+scopes/run-04-terminate-ambiguity.scope

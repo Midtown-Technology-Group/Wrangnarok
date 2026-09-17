@@ -130,6 +130,45 @@ it("does not confirm cancellation when native terminate fails transiently", asyn
   expect(await retry.json()).toMatchObject({ executionId: id, status: "Cancelled", cancelled: true });
 });
 
+it("does not confirm cancellation when the native control lookup fails", async () => {
+  // Fault injection one stage earlier: binding.get() itself throws a
+  // transient control-plane failure before terminate() is even reached. The
+  // whole native control path (lookup + terminate) must fail closed to
+  // ambiguous — 503 CANCELLATION_UNCONFIRMED, prior active status kept, no
+  // terminal or Operation writes — never a confirmed Cancelled.
+  const key = "run04-control-lookup-ambiguous-001";
+  const submitted = await worker.fetch(submitRequest(key), bindings);
+  expect(submitted.status).toBe(202);
+  const { executionId: id } = (await submitted.json()) as { executionId: string };
+  const live = {
+    ...bindings,
+    ECHO_WORKFLOW: {
+      createBatch: async () => {},
+      get: async () => {
+        throw new Error("control plane unavailable");
+      },
+    } as unknown as Bindings["ECHO_WORKFLOW"],
+  };
+  const response = await worker.fetch(cancelRequest(id), live);
+  expect(response.status).toBe(503);
+  const body = (await response.json()) as { error: { code: string } };
+  expect(body.error.code).toBe("CANCELLATION_UNCONFIRMED");
+  expect(response.headers.get("Retry-After")).toBe("5");
+  const row = await storedRow(id);
+  expect(row).toMatchObject({ status: "Pending", dispatched: 1, error_json: null });
+  // Retry-safe: the follow-up cancel re-runs the full control path and
+  // confirms once the native stop is actually delivered.
+  const retry = await worker.fetch(cancelRequest(id), {
+    ...bindings,
+    ECHO_WORKFLOW: {
+      createBatch: async () => {},
+      get: async () => ({ terminate: async () => {}, status: async () => ({ status: "terminated" }) }),
+    } as unknown as Bindings["ECHO_WORKFLOW"],
+  });
+  expect(retry.status).toBe(200);
+  expect(await retry.json()).toMatchObject({ executionId: id, status: "Cancelled", cancelled: true });
+});
+
 it("does not confirm cancellation when a dispatched native instance is gone", async () => {
   // Dispatched row + instance.not_found: the confirmed instance vanished, so
   // the outcome is ambiguous — 503 with no terminal write, plus a rollback to
