@@ -12,10 +12,12 @@
 // Retry gate (ADR 001, upstream finding 14): every step.do retry limit is
 // resolved by the adapter through stepRetryLimit — vendor steps 0, idempotent
 // D1 checkpoints up to the operator ceiling 2; all business/expected failures
-// throw NonRetryableError. Resilience (issue #16): native step.sleep wait on
-// the echo success path, and an explicit timeout-mark-v1 checkpoint that is
-// the sole writer of TimedOut. Cancelling is honored via the prepare guard +
-// conditional writes: a cancelled row never advances to Running here.
+// throw NonRetryableError. Resilience (issue #16): native step.sleep waits on
+// success paths; failSagaExecution (ADR-033-3, issue #414) is the sole writer
+// of TimedOut — surviving legacy timeout-mark-v1 steps in not-yet-migrated
+// Sagas resolve 0 retries (fail-closed) until their #416 migration lands.
+// Cancelling is honored via the prepare guard + conditional writes: a
+// cancelled row never advances to Running here.
 import { buildCatalog } from "../saga";
 import type { CatalogEntry } from "../saga";
 import { SAGA_DEFINITIONS } from "./definitions";
