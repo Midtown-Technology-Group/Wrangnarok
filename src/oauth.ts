@@ -5,12 +5,13 @@
 // on-demand authorization-code exchange, and rotating refresh-token refresh —
 // funnels through this module. Sagas never implement refresh independently
 // (ADR 003), and no database transaction is ever held over vendor HTTP: this
-// module performs no D1 I/O at all. Token values stay transient
-// fetch-and-discard per ADR 005 v0 (SEC-02 stays shut): results are returned
-// to the caller, registered with the execution-scoped scrub registry at the
-// Action boundary, and dropped. Only non-secret health transitions persist,
-// and persistence of those transitions is explicitly out of this slice (it
-// awaits the SEC-02 tripwire and its own migration number).
+// module performs no D1 I/O at all. Token values stay transient here:
+// results are returned to the caller, registered with the execution-scoped
+// scrub registry at the Action boundary, and dropped. Persisted token +
+// health rows live one layer up in `src/oauth-tokens.ts` (OAUTH-01 slice 1,
+// migration 0031, ADR 005 amendment): that module reads the persisted
+// generation into this module's fence key and writes replacements back with
+// conditional generation fencing, still with no D1 I/O on any path below.
 //
 // Concurrency fencing (upstream drift 2026-09-13, bifrost PR #741; fence
 // follow-up issue #149): upstream serializes concurrent SDK refreshes with a
@@ -644,9 +645,10 @@ export function isTokenExpired(
 // every caller — inline, on-demand, and any future justified scheduled path —
 // records the same lifecycle: success recovers to healthy, any failure marks
 // failed with a consecutive count, revocation marks revoked. Values carry no
-// secret material and are safe to audit, but persistence itself (a D1 row per
-// Connection) is out of this slice: it needs its own steward migration number
-// and rides with the SEC-02 tripwire decision, not ahead of it.
+// secret material and are safe to audit. The pure transitions stay here;
+// D1 persistence of the per-Connection health row lives in
+// `src/oauth-tokens.ts` (migration 0031), which applies these same functions
+// around its reads and writes.
 
 export type TokenHealthStatus = "healthy" | "failed" | "revoked";
 
