@@ -6,7 +6,7 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
 import { EXECUTION_ID, Fault, NINJA_INTEGRATION_ID, NINJA_TIMEOUT_MS, ninjaSaga, parseNinjaOrgsInput } from "../domain";
-import { parseStoredPolicy } from "../executions";
+import { loadExecutionPolicy } from "../executions";
 import { vendorDeadlineMs } from "../domain";
 import type { ExecutionParams, NinjaOrgsResult, SafeError } from "../domain";
 import { defineSaga, withOperation } from "../saga";
@@ -51,16 +51,10 @@ export const ninjaOrgsSagaDef = defineSaga<NinjaOrgsResult>({
       );
       const outcome = await step.do("ninja-list-orgs-v1", async () => {
         await beginOperation(ctx.db, id, "ninja-list-orgs-v1", 1);
-        // RUN-01 (ADR 018): vendor deadline from the Execution snapshot.
-        const applied = await ctx.db
-          .prepare("SELECT policy_json FROM executions WHERE id=?")
-          .bind(id)
-          .first<{ policy_json: string | null }>()
-          .catch(() => null);
-        const deadline = vendorDeadlineMs(
-          applied?.policy_json == null ? parseStoredPolicy(null) : parseStoredPolicy(applied.policy_json),
-          NINJA_TIMEOUT_MS,
-        );
+        // RUN-01 (ADR 018, Slice A issue #135): vendor deadline from the
+        // Execution snapshot. A snapshot read failure throws before any
+        // vendor work.
+        const deadline = vendorDeadlineMs(await loadExecutionPolicy(ctx.db, id), NINJA_TIMEOUT_MS);
         // Phase 1b (ADR 010): exact-org Connection resolution through the
         // step's own OrgCtx. NinjaOne is declared required, so a miss fails
         // loud with 424 as a structured step result (no retry via

@@ -131,8 +131,7 @@ function fail503(): Fault {
  * Shared D1 failure mapping for the role store (one site, not one per
  * function): domain Faults thrown inside a try pass through, missing
  * migration-0013 tables answer 503, and anything else rethrows. Callers with
- * duplicate-key semantics (createRole, addGrant) keep their own catch that
- * maps the residual to 409.
+ * duplicate-key callers map 409.
  */
 function storeError(error: unknown): never {
   if (error instanceof Fault) throw error;
@@ -642,9 +641,6 @@ export async function createPolicyRule(
   const id = crypto.randomUUID().toLowerCase();
   const stamp = now();
   try {
-    // SQLite UNIQUE ignores NULL org_id, so duplicates are refused here (409)
-    // instead of in DDL. Scoped to the exact scope: a global rule and an org
-    // rule for the same tuple are distinct rows, not conflicts.
     const existing =
       scopeOrgId === null
         ? await db
@@ -683,6 +679,9 @@ export async function createPolicyRule(
       )
       .run();
   } catch (error) {
+    // Race loser: answer 409, not a driver leak. Only UNIQUE violations map.
+    if (error instanceof Error && /unique constraint failed/i.test(`${error.message} ${error.cause ?? ""}`))
+      throw new Fault(409, "RULE_EXISTS", "This policy rule already exists.");
     storeError(error);
   }
   return {
@@ -807,7 +806,8 @@ export async function ensureRoleTables(db: D1Database): Promise<void> {
     "CREATE INDEX IF NOT EXISTS role_assignments_user ON role_assignments(org_id,user_id,status)",
     "CREATE INDEX IF NOT EXISTS role_assignments_role ON role_assignments(role_id,status)",
     "CREATE TABLE IF NOT EXISTS policy_rules(id TEXT PRIMARY KEY,org_id TEXT,resource_kind TEXT NOT NULL,resource_id TEXT NOT NULL,action TEXT NOT NULL,subject_type TEXT NOT NULL,subject_ref TEXT NOT NULL,created_at TEXT NOT NULL)",
-    "CREATE INDEX IF NOT EXISTS policy_rules_lookup ON policy_rules(resource_kind,resource_id,action,subject_type,subject_ref)",
+    // Mirrors migration 0013.
+    "CREATE UNIQUE INDEX IF NOT EXISTS policy_rules_unique ON policy_rules(COALESCE(org_id, ''),resource_kind,resource_id,action,subject_type,subject_ref)",
   ];
   for (const ddl of stmts) {
     try {
