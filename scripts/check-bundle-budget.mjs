@@ -6,9 +6,10 @@
 // The dev env is pinned (issue #331) so the measurement never drifts against
 // the default environment when wrangler.jsonc defines multiple envs.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // 2026-09-10: the bundle is ~62 KiB; 100 KiB leaves room for real features
 // while catching an accidental heavy dependency. Raise deliberately (with
@@ -278,7 +279,22 @@ import { join } from "node:path";
 // 700963 bytes locally against the 670 KiB line: ~15 KiB of hand-written
 // migration code, no new dependencies (package.json unchanged versus main);
 // deliberate feature headroom only.
-const BUDGET_BYTES = 700 * 1024;
+// 2026-09-17 (LIMITS-01, issue #177): 710 KiB plus a mechanical headroom
+// rule. Main measured 716545 bytes raw against the 700 KiB line — 255 bytes
+// of headroom (~0.04%): the soft budget had become a post-merge ratchet
+// (issue #177 comments 2026-09-14..16) instead of an early warning. The
+// 710 KiB raise restores ~10 KiB of real margin with the reason recorded
+// here and in docs/feasibility-envelope.md (same PR, LIMITS-META block);
+// the MIN_HEADROOM_BYTES gate below makes the next sub-margin state fail
+// closed instead of silently ratcheting again. Hand-written platform
+// governance, no new dependencies.
+const BUDGET_BYTES = 710 * 1024;
+// LIMITS-01 minimum operating headroom (issue #177): the budget must exceed
+// the measured bundle by at least this margin, so a `measured + a few
+// bytes` raise cannot pass. A feature PR that lands inside the budget but
+// below this margin fails closed: shrink the Worker surface first, or carry
+// a deliberate BUDGET_BYTES raise plus a same-PR LIMITS-META update.
+const MIN_HEADROOM_BYTES = 8 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");
@@ -293,13 +309,61 @@ try {
     },
   );
   const { size } = statSync(outfile);
-  console.log(`Worker bundle: ${size} bytes (budget ${BUDGET_BYTES} bytes).`);
+  const headroom = BUDGET_BYTES - size;
+  console.log(
+    `Worker bundle: ${size} bytes (budget ${BUDGET_BYTES} bytes, headroom ${headroom} bytes, minimum ${MIN_HEADROOM_BYTES} bytes).`,
+  );
   if (size > BUDGET_BYTES) {
     console.error(
       `Worker bundle budget exceeded: ${size} bytes > ${BUDGET_BYTES} bytes. Shrink the bundle or raise the budget deliberately.`,
     );
     process.exitCode = 1;
+  } else if (headroom < MIN_HEADROOM_BYTES) {
+    console.error(
+      `Worker bundle headroom exhausted: ${headroom} bytes < ${MIN_HEADROOM_BYTES} bytes minimum. ` +
+        `Shrink the Worker surface first, or raise BUDGET_BYTES deliberately with a same-PR docs/feasibility-envelope.md LIMITS-META update (issue #177).`,
+    );
+    process.exitCode = 1;
   }
+  checkLimitsMeta();
 } finally {
   rmSync(dir, { recursive: true, force: true });
+}
+
+// LIMITS-01 envelope sync (issue #177): the canonical feasibility record in
+// docs/feasibility-envelope.md carries a machine-readable LIMITS-META block
+// (budgetKiB, measuredBytes, measuredDate, minHeadroomBytes). A BUDGET_BYTES
+// change without a same-PR META update fails closed here, so prose cannot
+// silently trail code the way the 575 KiB matrix trailed the 700 KiB budget.
+// measuredBytes is advisory (local vs CI builds vary slightly); the budget
+// and headroom mirrors are exact.
+function checkLimitsMeta() {
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const envelope = readFileSync(join(root, "docs/feasibility-envelope.md"), "utf8");
+  const match = envelope.match(/<!-- LIMITS-META (\{.*?\}) -->/);
+  if (!match) {
+    console.error("LIMITS-META block missing from docs/feasibility-envelope.md (issue #177).");
+    process.exitCode = 1;
+    return;
+  }
+  let meta;
+  try {
+    meta = JSON.parse(match[1]);
+  } catch {
+    console.error("LIMITS-META block in docs/feasibility-envelope.md is not valid JSON.");
+    process.exitCode = 1;
+    return;
+  }
+  if (meta.budgetKiB * 1024 !== BUDGET_BYTES) {
+    console.error(
+      `LIMITS-META budgetKiB (${meta.budgetKiB}) disagrees with BUDGET_BYTES (${BUDGET_BYTES}). Update docs/feasibility-envelope.md in the same PR.`,
+    );
+    process.exitCode = 1;
+  }
+  if (meta.minHeadroomBytes !== MIN_HEADROOM_BYTES) {
+    console.error(
+      `LIMITS-META minHeadroomBytes (${meta.minHeadroomBytes}) disagrees with MIN_HEADROOM_BYTES (${MIN_HEADROOM_BYTES}). Update docs/feasibility-envelope.md in the same PR.`,
+    );
+    process.exitCode = 1;
+  }
 }

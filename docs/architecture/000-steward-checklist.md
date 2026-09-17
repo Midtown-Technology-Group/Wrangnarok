@@ -30,3 +30,4 @@ Pause new parity lanes. Open a consolidation issue naming the duplicated paths a
 ## History
 
 - 2026-09-11: checkpoint adopted per #193. Baseline: auth spine (AUTH-01 merged, AUTH-02 in flight), runtime policy (RUN-01/02), schedules (TRG-01), connections (CON-01), single D1 schema with steward-owned numbering, SEC-01 scrub baseline, Solution activation via SOL-01.
+- 2026-09-17: LIMITS-01 review per #177. One-diagram paths unchanged (no new primitive on this lane; the OAUTH-01 Durable Object fence is now explicitly classified free in `docs/feasibility-envelope.md`). LIMITS-01 classifications current: Free per-database cap corrected to 500 MB, DO row added, W1–W3 workload estimates published, soft bundle budget made mechanical (710 KiB + 8 KiB minimum headroom + LIMITS-META sync gate). Bundle/budget gates and targeted tests green locally; full coverage gate to be confirmed by CI on the lane PR. No second authoritative path; lane touches only its scope.
