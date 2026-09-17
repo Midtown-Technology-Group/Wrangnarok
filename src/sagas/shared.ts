@@ -2,6 +2,7 @@
 // Shared thin-platform glue for the per-saga modules: translate one Saga
 // definition onto the native Workflow contract. No Saga behavior lives here;
 // each module under src/sagas owns its definition plus its Workflow adapter.
+import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
@@ -154,4 +155,22 @@ export async function executeSaga<TOutput>(
   } finally {
     clearExecutionSecrets(id);
   }
+}
+
+/** Workflow adapter factory (ADR-033-1): returns the WorkflowEntrypoint
+ * subclass for one Saga definition, replacing the per-file adapter class
+ * body. Each Saga file keeps a one-line named subclass
+ * (`export class EchoWorkflow extends makeSagaWorkflow(echoSagaDef) {}`)
+ * because wrangler.jsonc class_name targets and the src/index.ts re-export
+ * require statically exported classes. The return type preserves the native
+ * (ctx, env) construct signature: a `new () => ...` type fails with TS2322
+ * because the native constructor takes 2 arguments. */
+export function makeSagaWorkflow<TOutput>(
+  def: SagaDefinition<TOutput>,
+): new (ctx: ExecutionContext, env: Bindings) => WorkflowEntrypoint<Bindings, ExecutionParams> {
+  return class extends WorkflowEntrypoint<Bindings, ExecutionParams> {
+    async run(event: WorkflowEvent<ExecutionParams>, step: WorkflowStep): Promise<TOutput> {
+      return executeSaga(this.env, event, step, def);
+    }
+  };
 }
