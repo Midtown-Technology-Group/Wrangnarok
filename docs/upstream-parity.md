@@ -728,7 +728,11 @@ admits no Execution — the handle stays live for a corrected retry.
 Explicit Cloudflare-native divergence (not permanent parity): upstream
 caps form submissions at 256 KiB (`docs/upstream-spec.md` §17); the local
 route currently shares the stricter 4 KiB bound owned by LIMITS-01
-(#177, lane #428).
+(#177, lane #428). Rationale and consequence: one shared transport bound
+keeps every route on the same Free-viable admission path with no
+per-route specialization, so form clients must keep submissions at or
+under 4 KiB — upstream-shaped payloads above that are rejected with 413
+and dispatch nothing.
 
 Explicit Cloudflare-native adaptation (not permanent parity): upstream
 projects declared metadata keys per provider option for interactive
