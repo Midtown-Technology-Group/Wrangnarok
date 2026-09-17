@@ -1,13 +1,18 @@
-# ADR TBD (RFC): Saga authoring ergonomics — less ceremony over the canonical contract
+# ADR 033: Saga authoring ergonomics — less ceremony over the canonical contract
 
-- **Status:** Proposed (RFC, not yet accepted — shape into ADR before any Saga rewrite)
-- **Date:** 2026-09-16 (revised 2026-09-16 per steward feedback on PR #404 and #408)
+- **Status:** Accepted (issue #416; steward-reserved number 033 — no
+  collision: 033 was free and the ADR-033 milestone already named it; the
+  wider renumber in issue #225 stays open and untouched by this lane)
+- **Date:** 2026-09-16 (RFC revised per steward feedback on PR #404 and #408;
+  accepted 2026-09-17)
 - **Extends:** ADR 002 (stable Saga identity), ADR 010 (source boundary), ADR 018 RUN-01/RUN-02 (runtime policy, child invocation), `docs/upstream-spec.md` findings 1, 3, 15, 18
-- **Implements:** nothing yet — no issue number assigned; no code changes ride this RFC
-- **Numbering note:** this document carries no ADR number until the steward
-  reserves one. It lives at a non-numeric filename deliberately; concurrent
-  ADR allocation has drifted before, and number governance is still being
-  reconciled.
+- **Implements:** ADR-033 Saga authoring ergonomics (issues #412–#416).
+  #412 landed interior helpers, #413 scanner/manifest gates, #414 terminal
+  outcome helpers, #415 Action vocabulary; #416 records this acceptance plus
+  the entrypoint/synthesis proofs and migrates the six in-scope Sagas.
+- **Renamed:** `TBD-saga-authoring-ergonomics.md` → `033-saga-authoring-ergonomics.md`
+  on acceptance; no content change rides the rename beyond the acceptance
+  record in this section and the proof outcomes below.
 
 ## Context
 
@@ -69,10 +74,11 @@ A single-Integration Saga is ~140 lines of which roughly **15 carry
 Saga-specific behavior** (the Action call and the output shape). Everything
 else is platform ceremony the author re-types per file.
 
-## Design principles (accepted decisions)
+## Decisions (accepted on issue #416)
 
-These collapse the RFC's former open questions into constraints. They are
-stated as decisions, not options:
+Principles 1–6 plus 2b–2c below are the recorded decisions. They collapse
+the RFC's former open questions into constraints and are stated as
+decisions, not options:
 
 1. **`defineSaga` remains the one canonical authoring contract.** Thin
    helpers desugar into the existing contract; they never create a peer
@@ -319,13 +325,19 @@ manifest gate, the policy rejection list, and the determinism scanner all
 survive unchanged — no scanner update ships in v1 because nothing takes
 `step` and nothing hides `step.do` structure anymore.
 
-### Explicitly deferred (not v1)
+### Explicitly deferred (not v1; re-deferred on issue #416)
 
 - The `sagaRun(...)` lifecycle wrapper: it would own the ID guard,
   try/catch, timeout-code routing, persist-success/failure, and scrub
   mapping — but it hides the durable Operation boundaries and forces the
-  scanner to learn a second blessed syntax. Deferred until it earns its
-  scanner diff with a demonstrated need beyond what interior helpers cover.
+  scanner to learn a second blessed syntax. Re-deferred on issue #416 with
+  a demonstrated reason: #413 pins a step-hiding wrapper failing the
+  scanner with no allowlist (`test/saga-contract.test.ts`, "fails a
+  wrapper that hides step.do from run source"), and #415 migrated all six
+  Integration legs onto `integrationOperation` with zero scanner change —
+  so the interior-helper shape is proven and `sagaRun` has no demonstrated
+  need beyond what interior helpers cover. It ships only after it earns
+  its scanner diff against this evidence, not before.
 - Class-decorator sugar (`@saga`): rejected as the contract surface (it
   trades a greppable, diffable, validatable object literal for class
   machinery with worse type inference and a second authoring path through
@@ -376,25 +388,29 @@ its body is covered by the same lint and test gates as any Saga.
   like runtime policy (timeout, retry, schedule, concurrency, backoff)
   fails review even before it reaches code.
 
-## Acceptance proof
+## Acceptance record (issue #416)
 
-1. Accept this as an ADR (with a steward-reserved number) with the design
-   principles above as decisions.
-2. Land helpers + extended contract tests with **zero** existing-Saga
-   rewrites in the same PR.
-3. Migrate Sagas one per PR (suggested order: smoke → hello → echo →
-   ninjaorgs → digest → hello-parent); each PR shows before/after line
-   counts and a green FULL gate (`npm run test:coverage`, typecheck, lint,
-   format, bundle, scope).
-4. Native-entrypoint proof for `makeSagaWorkflow`: a workerd/Wrangler
-   exercise showing the generated subclass dispatches as a valid native
-   Workflow entrypoint (binding + `class_name` + dispatch, not just
-   typecheck).
-5. **Agent synthesis proof:** give an agent a short natural-language Saga
-   spec, have it generate a Saga using the proposed helpers, and require
-   typecheck + contract tests + local runtime proof with no manual code
-   repair. Compare against the current authoring surface. Ship a tiny
-   canonical "Saga authoring for agents" guide with golden examples so
-   there is one obvious generation path.
-6. Steward checklist: confirm the platform diagram still shows one path per
-   concern after the migration lands.
+1. Accepted as ADR 033 with principles 1–6 + 2b–2c as decisions (this
+   section). No Saga rewrites rode the acceptance PR.
+2. Helpers + extended contract tests landed with **zero** existing-Saga
+   rewrites (#412–#415, all merged before acceptance).
+3. Sagas migrate one per PR in order smoke → hello → echo → ninjaorgs →
+   digest → hello-parent; each PR shows before/after line counts and a
+   green FULL gate (`npm run test:coverage`, typecheck, lint, format,
+   bundle, scope). The Cloudflare verify/inventory Sagas are out of scope
+   and keep their legacy terminals.
+4. Native-entrypoint proof for `makeSagaWorkflow`:
+   `test/entrypoint-proof/` boots a test-only workerd worker whose
+   `PROOF_WORKFLOW` binding targets `ProofWorkflow extends
+   makeSagaWorkflow(proofSagaDef)` and dispatches it to terminal success
+   against local D1 — binding + `class_name` + dispatch, not just
+   typecheck.
+5. **Agent synthesis proof:** `test/agent-synthesis-proof.test.ts`
+   generates a Saga from a short natural-language spec (recorded in
+   `docs/saga-authoring-for-agents.md`) using the helpers, with typecheck
+   + scanner gate + local D1 runtime proof and no manual repair; the
+   attempt count is recorded honestly in the test header. The tiny
+   canonical "Saga authoring for agents" guide ships with golden examples
+   so there is one obvious generation path.
+6. Steward checklist: the platform diagram still shows one path per
+   concern after the migration lands (recorded on issue #416).
