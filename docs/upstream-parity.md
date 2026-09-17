@@ -554,8 +554,9 @@ durable effect inside `step.do`) writes then reads an author row against real
 local D1, replaces it on a second pass, and keeps deny-by-absence for
 grantless strangers. Retention/partitioning note: retention is org-owned
 explicit deletion only (`deleteTable` drops rows and grants; no TTL, no
-partitioning); the D1 10 GB per-database cap needs a retention/partitioning
-policy before large Tables are production-shaped. TABLE-02 owns the remaining
+partitioning); the D1 500 MB Free per-database cap (10 GB Paid) needs a
+retention/partitioning policy before large Tables are production-shaped.
+TABLE-02 owns the remaining
 query/policy/realtime acceptance; this issue tracks the minimal-slice exit
 only.
 
@@ -585,12 +586,31 @@ results. Realtime table-change subscriptions (visibility transitions,
 revocation push, reconnect reconciliation) remain missing per the multi-slice
 note; retained until verified. TABLE-01 (#117) is subsumed by this slice.
 
+Physical document-ID batch filter (issue #154, upstream `8af322ac` PR #730):
+repeated `document_ids` query keys constrain rows and counts to the named IDs
+with set semantics (first-seen dedup; unknown IDs silently match nothing),
+AND-composed with JSON filters, prefix, cursor, ordering, pagination, and
+skip_count; results keep normal document-ID order, never input order.
+Cloudflare/D1 adaptations (labeled): the list caps at 25 IDs because D1 allows
+100 bound parameters per statement and every query already spends binds on
+table_id plus prefix/cursor/limit — 26+ fails closed with
+TOO_MANY_DOCUMENT_IDS; transport is repeated query keys instead of upstream
+JSON, and an explicitly present empty/blank ID fails closed with
+INVALID_DOCUMENT_IDS because query encoding cannot faithfully distinguish
+upstream JSON [] from a missing filter. Each ID is 1-255 chars and rides a
+bound `?` parameter (never interpolation) under the existing
+(table_id, doc_id) composite index — no migration, no new primitive. Policy
+and isolation are unchanged: the read grant is checked first (denied callers
+answer 404, never an empty page) and Organization scoping rides table_id.
+
 D1 bounds and blockers (explicit, Free-tier posture): 4 KB per document, 25
-items per batch, 1000-row scan caps, limit 1-50, 5 nested filters. Unsupported
+items per batch, 25 document_ids per query (255 chars each), 1000-row scan
+caps, limit 1-50, 5 nested filters. Unsupported
 query operators fail closed (UNSUPPORTED_QUERY / INVALID_ORDER / INVALID_CURSOR
 for offset or custom sorts: no offset pagination, no custom sorts, no
 projection, no managed indexes, no version tokens). D1 limits recorded as
-blockers: 10 GB per-database cap needs a retention/partitioning policy before
+blockers: 500 MB Free per-database cap (10 GB Paid) needs a
+retention/partitioning policy before
 large Tables are production-shaped (explicit deletion only in this slice);
 single-database transactions only (batch() is one-database atomic, no
 cross-database semantics); JSON filtering is application-side over the bounded
@@ -614,6 +634,19 @@ Upstream evidence (paths relative to upstream repo root):
 - Upstream tests:
   - `api/tests/e2e/api/test_tables_batch.py`
   - `api/tests/e2e/api-integration/test_tables.py`
+
+Upstream `8af322ac` (PR #730, bounded `document_ids` filter) evidence:
+
+- `api/src/models/contracts/tables.py`
+- `api/src/routers/tables.py`
+- `api/bifrost/tables.py`
+- Upstream tests:
+  - `api/tests/e2e/api-integration/test_tables.py`
+  - `api/tests/e2e/platform/test_policies.py`
+  - `api/tests/e2e/platform/test_tables.py`
+  - `api/tests/performance/test_table_document_id_pagination.py`
+  - `api/tests/unit/sdk/test_sdk_tables.py`
+  - `client/src/lib/app-sdk/tables.test.ts`
 
 ## FORM-01: Deliver the existing Forms-to-Saga input binding slice
 

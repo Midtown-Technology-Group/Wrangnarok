@@ -15,9 +15,12 @@
 // never a cross-tenant leak.
 //
 // Query semantics (TABLE-02 query/count slice): document-ID keyset scan with
-// an optional key prefix, nested-JSON equality filters (dot paths into the
-// stored document), ascending or descending document-ID order, and cursor
-// pagination. Counts run scoped and let the caller skip them: skip_count
+// an optional key prefix, a physical document-ID allowlist (repeated
+// document_ids keys, upstream 8af322ac/PR #730), nested-JSON equality
+// filters (dot paths into the stored document), ascending or descending
+// document-ID order, and cursor pagination. The allowlist ANDs with every
+// other constraint and keeps normal document-ID order, never input order.
+// Counts run scoped and let the caller skip them: skip_count
 // answers total=-1 (a true omitted upstream specific, per issue #154) instead
 // of scanning. Offset pagination, custom sorts, and projection/index
 // management are unsupported and fail closed with explicit codes; version
@@ -25,9 +28,12 @@
 //
 // D1 bounds (explicit, Free-tier viable): every document is capped at 4 KB of
 // JSON, every bounded list scans at most QUERY_ROW_CAP rows in one query,
-// and retention is org-owned deletion (see docs/upstream-parity.md TABLE-02).
-// The D1 10 GB per-database limit, single-database transactions, and
-// unsupported query operators are recorded there as explicit blockers.
+// the document_ids allowlist caps at 25 IDs of at most 255 chars each
+// (bound parameters, never interpolation), and retention is org-owned
+// deletion (see docs/upstream-parity.md TABLE-02).
+// The D1 500 MB Free per-database limit (10 GB Paid), single-database
+// transactions, and unsupported query operators are recorded there as
+// explicit blockers.
 //
 // Realtime table-change subscriptions are NOT in this slice (the multi-slice
 // note in issue #154 lets the query/count slice land first). Polling via
@@ -49,6 +55,13 @@ export const TABLE_QUERY_ROW_CAP = 1000;
 export const TABLE_BATCH_MAX = 25;
 /** Nested-filter ceiling: enough for authored queries, never a full scan DSL. */
 export const TABLE_FILTER_MAX = 5;
+/** Physical document-ID list ceiling: D1 allows 100 bound parameters per
+ * statement and every query already spends binds on table_id (plus
+ * prefix/cursor/limit), so 25 keeps the IN list far under the cap with
+ * headroom left. A Cloudflare/D1 adaptation of the upstream bound. */
+export const TABLE_DOCUMENT_IDS_MAX = 25;
+/** Per-ID character bound for the document_ids query filter. */
+export const TABLE_DOCUMENT_ID_QUERY_MAX = 255;
 
 export type TableAction = "read" | "insert" | "update" | "delete";
 
@@ -74,6 +87,10 @@ export interface TableFilter {
 
 export interface TableQuery {
   readonly filters: readonly TableFilter[];
+  /** Physical document-ID allowlist with set semantics (first-seen order).
+   * Missing or empty means no ID constraint. Results keep normal
+   * document-ID order, never input order. */
+  readonly documentIds?: readonly string[];
   readonly prefix?: string;
   readonly order: "asc" | "desc";
   /** When true the caller skips the count scan and total answers -1. */
@@ -165,10 +182,10 @@ function scalarEquals(actual: unknown, expected: unknown): boolean {
  * machine-readable codes; unit-tested without any runtime binding. */
 export function parseTableQuery(params: URLSearchParams): TableQuery {
   for (const key of params.keys()) {
-    if (!["filter", "prefix", "order", "skip_count", "limit", "cursor"].includes(key)) {
+    if (!["filter", "document_ids", "prefix", "order", "skip_count", "limit", "cursor"].includes(key)) {
       throw invalid(
         "UNSUPPORTED_QUERY",
-        "Only filter, prefix, order, skip_count, limit, and cursor are supported here.",
+        "Only filter, document_ids, prefix, order, skip_count, limit, and cursor are supported here.",
       );
     }
   }
@@ -193,6 +210,25 @@ export function parseTableQuery(params: URLSearchParams): TableQuery {
       throw invalid("INVALID_FILTER", "Filter values must be JSON scalars (string, number, boolean, or null).");
     }
     filters.push({ path, value });
+  }
+  // Physical document-ID allowlist (upstream 8af322ac/PR #730): repeated
+  // document_ids keys with set semantics (first-seen dedup). Unknown IDs
+  // silently match nothing. Transport adaptation: upstream spoke JSON, here
+  // the list rides repeated query keys, so an explicitly present empty/blank
+  // ID fails closed — query encoding cannot faithfully distinguish upstream
+  // JSON [] from a missing filter. Each ID is bound, never interpolated.
+  const documentIds: string[] = [];
+  for (const raw of params.getAll("document_ids")) {
+    if (raw.length === 0 || raw.trim().length === 0 || raw.length > TABLE_DOCUMENT_ID_QUERY_MAX) {
+      throw invalid(
+        "INVALID_DOCUMENT_IDS",
+        `document_ids entries must be 1 to ${TABLE_DOCUMENT_ID_QUERY_MAX} characters.`,
+      );
+    }
+    if (!documentIds.includes(raw)) documentIds.push(raw);
+  }
+  if (documentIds.length > TABLE_DOCUMENT_IDS_MAX) {
+    throw invalid("TOO_MANY_DOCUMENT_IDS", `At most ${TABLE_DOCUMENT_IDS_MAX} document_ids are accepted.`);
   }
   let prefix: string | undefined;
   const rawPrefix = params.get("prefix");
@@ -233,6 +269,7 @@ export function parseTableQuery(params: URLSearchParams): TableQuery {
   if (rawCursor !== null) parseDocId(rawCursor);
   return {
     filters,
+    documentIds,
     ...(prefix === undefined ? {} : { prefix }),
     order,
     skipCount,
@@ -544,6 +581,16 @@ function matchesFilters(data: Record<string, unknown>, filters: readonly TableFi
   return true;
 }
 
+/** Append the physical document-ID allowlist as bound IN parameters, never
+ * interpolated, so hostile IDs cannot escape the statement. Missing or empty
+ * means no ID constraint. The (table_id, doc_id) composite index serves the
+ * lookup; no migration is needed. */
+function applyDocumentIds(clauses: string[], binds: (string | number)[], ids: readonly string[] | undefined): void {
+  if (ids === undefined || ids.length === 0) return;
+  clauses.push(`doc_id IN (${ids.map(() => "?").join(",")})`);
+  binds.push(...ids);
+}
+
 /** Policy-safe bounded query (TABLE-02 query/count slice). Policy is checked
  * before any data is touched: denied callers answer like a missing Table
  * (404), never an empty page that leaks existence. The scan itself is a
@@ -562,6 +609,7 @@ export async function queryRows(
   const comparator = query.order === "desc" ? "<" : ">";
   const clauses = ["table_id=?"];
   const binds: (string | number)[] = [table.id];
+  applyDocumentIds(clauses, binds, query.documentIds);
   if (query.prefix !== undefined) {
     clauses.push("doc_id LIKE ? ESCAPE '\\'");
     binds.push(`${query.prefix.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`);
@@ -604,6 +652,7 @@ export async function queryRows(
     total = (
       await countRows(db, caller, table, {
         filters: query.filters,
+        documentIds: query.documentIds,
         ...(query.prefix === undefined ? {} : { prefix: query.prefix }),
         skipCount: false,
       })
@@ -626,12 +675,13 @@ export async function countRows(
   db: D1Database,
   caller: Principal,
   table: TableDefinition,
-  query: Pick<TableQuery, "filters" | "prefix" | "skipCount">,
+  query: Pick<TableQuery, "filters" | "documentIds" | "prefix" | "skipCount">,
 ): Promise<{ total: number }> {
   await requireAct(db, table, caller, "read");
   if (query.skipCount) return { total: -1 };
   const clauses = ["table_id=?"];
   const binds: (string | number)[] = [table.id];
+  applyDocumentIds(clauses, binds, query.documentIds);
   if (query.prefix !== undefined) {
     clauses.push("doc_id LIKE ? ESCAPE '\\'");
     binds.push(`${query.prefix.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`);

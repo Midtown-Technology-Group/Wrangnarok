@@ -12,8 +12,11 @@ import {
   batchInsert,
   countRows,
   loadTable,
+  parseTableQuery,
   requireVisibleTable,
   TABLE_BATCH_MAX,
+  TABLE_DOCUMENT_IDS_MAX,
+  TABLE_DOCUMENT_ID_QUERY_MAX,
   TABLE_QUERY_ROW_CAP,
   type TableDefinition,
 } from "../src/tables";
@@ -54,6 +57,16 @@ function stubDb(options: StubOptions = {}): D1Database {
       return statements.map(() => ({ success: true }));
     },
   } as unknown as D1Database;
+}
+
+function faultCode(fn: () => unknown): string {
+  try {
+    fn();
+  } catch (error) {
+    if (error !== null && typeof error === "object" && "code" in error) return String(error.code);
+    throw error;
+  }
+  throw new Error("expected a Fault");
 }
 
 describe("tables defensive branches", () => {
@@ -122,6 +135,28 @@ describe("tables defensive branches", () => {
         Array.from({ length: TABLE_BATCH_MAX + 1 }, (_, index) => `doc-${index}`),
       ),
     ).rejects.toMatchObject({ code: "INVALID_BATCH" });
+  });
+
+  it("parses document_ids with first-seen set semantics and explicit bounds (issue #154)", () => {
+    expect(TABLE_DOCUMENT_IDS_MAX).toBe(25);
+    expect(TABLE_DOCUMENT_ID_QUERY_MAX).toBe(255);
+    const params = new URLSearchParams();
+    params.append("document_ids", "b");
+    params.append("document_ids", "a");
+    params.append("document_ids", "b");
+    expect(parseTableQuery(params).documentIds).toEqual(["b", "a"]);
+    expect(parseTableQuery(new URLSearchParams()).documentIds).toEqual([]);
+    const tooMany = new URLSearchParams();
+    for (let i = 0; i < TABLE_DOCUMENT_IDS_MAX + 1; i += 1) tooMany.append("document_ids", `d${i}`);
+    expect(faultCode(() => parseTableQuery(tooMany))).toBe("TOO_MANY_DOCUMENT_IDS");
+    for (const bad of ["", "   ", "x".repeat(TABLE_DOCUMENT_ID_QUERY_MAX + 1)]) {
+      const single = new URLSearchParams();
+      single.append("document_ids", bad);
+      expect(faultCode(() => parseTableQuery(single))).toBe("INVALID_DOCUMENT_IDS");
+    }
+    const longest = new URLSearchParams();
+    longest.append("document_ids", "x".repeat(TABLE_DOCUMENT_ID_QUERY_MAX));
+    expect(parseTableQuery(longest).documentIds).toHaveLength(1);
   });
 
   it("shows the detail to owners and grantees, 404 to non-grantees (issue #353)", async () => {

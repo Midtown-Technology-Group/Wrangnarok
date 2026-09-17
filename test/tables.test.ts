@@ -31,6 +31,8 @@ import {
   parseTableQuery,
   readRow,
   TABLE_BATCH_MAX,
+  TABLE_DOCUMENT_IDS_MAX,
+  TABLE_DOCUMENT_ID_QUERY_MAX,
   TABLE_QUERY_ROW_CAP,
   updateRow,
 } from "../src/tables";
@@ -455,6 +457,136 @@ describe("TABLE-02 policy-safe querying, counts, and pagination", () => {
     expect(await skip.json()).toMatchObject({ error: { code: "INVALID_SKIP_COUNT" } });
     const countUnknown = await call("/api/tables/orders/count?offset=2", "GET");
     expect(countUnknown.status).toBe(400);
+  });
+});
+
+describe("TABLE-02 physical document_ids batch filter (issue #154)", () => {
+  beforeEach(async () => {
+    await createTable("docs");
+    const docs: Array<[string, Record<string, unknown>]> = [
+      ["ord-1", { status: "active", n: 1 }],
+      ["ord-2", { status: "archived", n: 2 }],
+      ["ord-3", { status: "active", n: 3 }],
+      ["inv-1", { status: "active", n: 4 }],
+    ];
+    for (const [id, data] of docs) expect((await putDoc("docs", id, data)).status).toBe(201);
+  });
+
+  const idsQuery = (ids: string[]): string => ids.map((id) => `document_ids=${encodeURIComponent(id)}`).join("&");
+
+  it("matches one and several IDs in normal order, deduping repeats", async () => {
+    const one = await call("/api/tables/docs/rows?document_ids=ord-1", "GET");
+    expect(await one.json()).toMatchObject({ rows: [{ id: "ord-1" }], hasMore: false, total: 1 });
+    // Input order is reversed: results still answer in document-ID order.
+    const several = await call(`/api/tables/docs/rows?${idsQuery(["ord-3", "ord-1"])}`, "GET");
+    expect(await several.json()).toMatchObject({
+      rows: [{ id: "ord-1" }, { id: "ord-3" }],
+      hasMore: false,
+      total: 2,
+    });
+    const dupes = await call(`/api/tables/docs/rows?${idsQuery(["ord-3", "ord-1", "ord-3", "ord-1"])}`, "GET");
+    expect(await dupes.json()).toMatchObject({
+      rows: [{ id: "ord-1" }, { id: "ord-3" }],
+      total: 2,
+    });
+    const counted = await call(`/api/tables/docs/count?${idsQuery(["ord-3", "ord-1", "ord-3"])}`, "GET");
+    expect(await counted.json()).toEqual({ total: 2 });
+  });
+
+  it("lets unknown IDs silently match nothing", async () => {
+    const ghost = await call("/api/tables/docs/rows?document_ids=ghost", "GET");
+    expect(await ghost.json()).toMatchObject({ rows: [], hasMore: false, nextCursor: null, total: 0 });
+    const mixed = await call(`/api/tables/docs/rows?${idsQuery(["ghost", "ord-1"])}`, "GET");
+    expect(await mixed.json()).toMatchObject({ rows: [{ id: "ord-1" }], total: 1 });
+    const ghostCount = await call("/api/tables/docs/count?document_ids=ghost", "GET");
+    expect(await ghostCount.json()).toEqual({ total: 0 });
+  });
+
+  it("ANDs the allowlist with JSON filters, prefix, and cursor", async () => {
+    const filtered = await call(
+      `/api/tables/docs/rows?filter=status%3D%22active%22&${idsQuery(["ord-1", "ord-2", "ord-3"])}`,
+      "GET",
+    );
+    expect(await filtered.json()).toMatchObject({ rows: [{ id: "ord-1" }, { id: "ord-3" }], total: 2 });
+    const prefixed = await call(`/api/tables/docs/rows?prefix=ord-&${idsQuery(["ord-1", "inv-1"])}`, "GET");
+    expect(await prefixed.json()).toMatchObject({ rows: [{ id: "ord-1" }], total: 1 });
+    // Cursor keyset pagination applies inside the constrained set.
+    const first = await call(`/api/tables/docs/rows?limit=2&${idsQuery(["ord-1", "ord-2", "ord-3"])}`, "GET");
+    const firstBody = (await first.json()) as { rows: { id: string }[]; hasMore: boolean; nextCursor: string };
+    expect(firstBody.rows.map((row) => row.id)).toEqual(["ord-1", "ord-2"]);
+    expect(firstBody.hasMore).toBe(true);
+    const second = await call(
+      `/api/tables/docs/rows?limit=2&cursor=${firstBody.nextCursor}&${idsQuery(["ord-1", "ord-2", "ord-3"])}`,
+      "GET",
+    );
+    expect(await second.json()).toMatchObject({ rows: [{ id: "ord-3" }], hasMore: false, total: 3 });
+  });
+
+  it("keeps ordering and pagination normal under the allowlist and honors skip_count", async () => {
+    const desc = await call(`/api/tables/docs/rows?order=desc&${idsQuery(["ord-1", "ord-3", "inv-1"])}`, "GET");
+    expect(await desc.json()).toMatchObject({
+      rows: [{ id: "ord-3" }, { id: "ord-1" }, { id: "inv-1" }],
+      total: 3,
+    });
+    const skippedRows = await call(`/api/tables/docs/rows?skip_count=true&${idsQuery(["ord-1", "ord-3"])}`, "GET");
+    expect(await skippedRows.json()).toMatchObject({ rows: [{ id: "ord-1" }, { id: "ord-3" }], total: -1 });
+    const skippedCount = await call(`/api/tables/docs/count?skip_count=true&${idsQuery(["ord-1"])}`, "GET");
+    expect(await skippedCount.json()).toEqual({ total: -1 });
+    const filtered = await call(
+      `/api/tables/docs/count?filter=status%3D%22active%22&${idsQuery(["ord-1", "ord-2", "ord-3"])}`,
+      "GET",
+    );
+    expect(await filtered.json()).toEqual({ total: 2 });
+  });
+
+  it("fails closed on 26, blank, and oversized IDs", async () => {
+    expect(TABLE_DOCUMENT_IDS_MAX).toBe(25);
+    expect(TABLE_DOCUMENT_ID_QUERY_MAX).toBe(255);
+    const tooMany = Array.from({ length: 26 }, (_, i) => `document_ids=d${i}`).join("&");
+    const rejected = await call(`/api/tables/docs/rows?${tooMany}`, "GET");
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toMatchObject({ error: { code: "TOO_MANY_DOCUMENT_IDS" } });
+    const rejectedCount = await call(`/api/tables/docs/count?${tooMany}`, "GET");
+    expect(rejectedCount.status).toBe(400);
+    expect(await rejectedCount.json()).toMatchObject({ error: { code: "TOO_MANY_DOCUMENT_IDS" } });
+    // The 25-ID boundary still lands.
+    const boundary = Array.from({ length: 25 }, (_, i) => `document_ids=d${i}`).join("&");
+    expect((await call(`/api/tables/docs/rows?${boundary}`, "GET")).status).toBe(200);
+    for (const blank of ["document_ids=", "document_ids=%20"]) {
+      const res = await call(`/api/tables/docs/rows?${blank}`, "GET");
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: { code: "INVALID_DOCUMENT_IDS" } });
+    }
+    const oversized = await call(`/api/tables/docs/rows?document_ids=${"x".repeat(256)}`, "GET");
+    expect(oversized.status).toBe(400);
+    expect(await oversized.json()).toMatchObject({ error: { code: "INVALID_DOCUMENT_IDS" } });
+    // A 255-char unknown ID is valid input that silently matches nothing.
+    const longest = await call(`/api/tables/docs/rows?document_ids=${"x".repeat(255)}`, "GET");
+    expect(await longest.json()).toMatchObject({ rows: [], total: 0 });
+  });
+
+  it("preserves Organization isolation and read-denied 404 behavior", async () => {
+    expect((await call("/api/tables/docs/rows?document_ids=ord-1", "GET", undefined, OTHER_ORG)).status).toBe(404);
+    expect((await call("/api/tables/docs/count?document_ids=ord-1", "GET", undefined, OTHER_ORG)).status).toBe(404);
+    const denied = await call("/api/tables/docs/rows?document_ids=ord-1", "GET", undefined, ORG, OTHER_USER);
+    expect(denied.status).toBe(404);
+    expect(await denied.json()).toMatchObject({ error: { code: "TABLE_NOT_FOUND" } });
+    expect((await call("/api/tables/docs/count?document_ids=ord-1", "GET", undefined, ORG, OTHER_USER)).status).toBe(
+      404,
+    );
+    // A read grant restores the allowlist for the grantee, scoped to this org.
+    await call("/api/tables/docs/grants", "POST", { action: "read", granteeUserId: OTHER_USER });
+    const granted = await call("/api/tables/docs/rows?document_ids=ord-1", "GET", undefined, ORG, OTHER_USER);
+    expect(await granted.json()).toMatchObject({ rows: [{ id: "ord-1" }], total: 1 });
+  });
+
+  it("binds IDs instead of interpolating them", async () => {
+    // Quote, percent, and backslash ride as bound values: no SQL error, no
+    // LIKE expansion, just a silent non-match. The table is untouched.
+    const hostile = await call(`/api/tables/docs/rows?${idsQuery(["o'rd-%\\_1"])}`, "GET");
+    expect(hostile.status).toBe(200);
+    expect(await hostile.json()).toMatchObject({ rows: [], total: 0 });
+    expect(await call("/api/tables/docs/count").then((res) => res.json())).toEqual({ total: 4 });
   });
 });
 
