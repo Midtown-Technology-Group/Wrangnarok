@@ -1,0 +1,4 @@
+# AUTH-02 security lane for issue #444 (parent #143): policy-rule uniqueness hardening.
+src/roles.ts
+test/resource-roles-unit.test.ts
+scopes/auth-444-policy-rule-hardening.scope

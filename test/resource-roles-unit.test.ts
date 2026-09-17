@@ -774,4 +774,38 @@ describe("role route validation branches", () => {
       status: 200,
     });
   });
+
+  it("answers 409 RULE_EXISTS on duplicate org and global rule posts", async () => {
+    // Issue #444: the deterministic duplicate contract holds over HTTP, not
+    // just behind domain calls — a second identical POST answers 409 with the
+    // stable code instead of leaking a D1 driver error as a 500.
+    const orgBody = {
+      resourceKind: "saga",
+      resourceId: echoSaga.id,
+      action: "execute",
+      subjectType: "user",
+      subjectRef: USER_ORDINARY,
+    };
+    expect(await call(`/api/orgs/${ORG_A}/policy-rules`, "POST", USER_ADMIN, orgBody)).toMatchObject({
+      status: 201,
+    });
+    expect(await call(`/api/orgs/${ORG_A}/policy-rules`, "POST", USER_ADMIN, orgBody)).toMatchObject({
+      status: 409,
+      body: { error: { code: "RULE_EXISTS" } },
+    });
+    // No twin row behind the 409: the org listing still shows one rule.
+    const orgListed = await call(`/api/orgs/${ORG_A}/policy-rules`, "GET", USER_ADMIN);
+    expect(orgListed.body.rules as unknown[]).toHaveLength(1);
+    // The same tuple as a global rule is a distinct scope, not a conflict —
+    // the org/global boundary survives the duplicate path.
+    expect(await call("/api/policy-rules", "POST", USER_ADMIN, orgBody)).toMatchObject({ status: 201 });
+    expect(await call("/api/policy-rules", "POST", USER_ADMIN, orgBody)).toMatchObject({
+      status: 409,
+      body: { error: { code: "RULE_EXISTS" } },
+    });
+    const globalListed = await call("/api/policy-rules", "GET", USER_ADMIN);
+    expect(globalListed.body.rules as unknown[]).toHaveLength(1);
+    const orgListedAfter = await call(`/api/orgs/${ORG_A}/policy-rules`, "GET", USER_ADMIN);
+    expect(orgListedAfter.body.rules as unknown[]).toHaveLength(2);
+  });
 });
