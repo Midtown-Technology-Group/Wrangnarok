@@ -1,0 +1,10 @@
+# sec-247 lane scope (issue #247): secret + supply-chain scanning beyond npm audit.
+# Minimal Gitleaks secrets wiring only: no dependency-scanner overlap, no
+# runtime/source changes, no bundle or migration impact.
+.github/workflows/secret-scan.yml
+.gitleaks.toml
+SECURITY.md
+test/secret-scan.test.ts
+test/raw.d.ts
+test/fixtures/secret-scan/
+scopes/sec-247-scanning.scope
