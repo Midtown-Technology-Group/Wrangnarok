@@ -15,7 +15,7 @@ Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 28 Par
 | RUN-01 | Persist and enforce per-Saga runtime policy without changing source identity | 2 | Partial | AUTH-02 | new |
 | RUN-02 | Invoke child Sagas with explicit context, completion and failure semantics | 2 | Missing | AUTH-02, RUN-01 | new |
 | TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented (gaps reopened, see #137) | AUTH-02, RUN-01 | #137 |
-| TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01 | #138 |
+| TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01, AUTH-03, CON-01 | #138 |
 | TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Missing | TRG-01, TRG-02, AUTH-02 | new |
 | DEV-01 | Provide a complete typed TypeScript author and automation SDK | 1+4 | Partial | — | new |
 | DEV-02 | Preview, sync and deploy author source with explicit dependency compatibility | 5 | Partial | DEV-01, SOL-01 | new |
@@ -141,9 +141,9 @@ Related Wrangnarok issues: #76
 
 Phase 2; **Partial**; existing issue: #138
 
-Local status: Scoped api-key endpoints (`POST /api/endpoints/:name`) and HMAC webhook endpoints (`POST /hooks/:name`) bind a name to a deployed Saga (ADR 018, migration 0021). Deliveries verify per-endpoint keys (expiry, disable/rotate revocation) or HMAC signatures against deployment-store secrets, answer echo-param vendor challenges in plaintext, rate-limit per endpoint, and submit through the standard protocol with derived `wep-` keys (202 receipt, 200 replay, 409 mismatch). Operator create/list/read/update/rotate/history ride the AUTH-01 membership gate. Upstream sync-mode inline results stay deferred to RUN-03; per-tenant webhook secrets stay deployment-scoped per ADR 005 v0 (SEC-02 tripwire).
+Local status: Scoped api-key endpoints (`POST /api/endpoints/:name`) and HMAC webhook endpoints (`POST /hooks/:name`) bind a name to a deployed Saga (ADR 018, migration 0021). Deliveries verify per-endpoint keys (expiry, disable/rotate revocation) or HMAC signatures against deployment-store secrets, answer echo-param vendor challenges in plaintext, rate-limit per endpoint, and submit through the standard protocol with derived `wep-` keys (202 receipt, 200 replay, 409 mismatch). Operator create/list/read/update/rotate/history ride the AUTH-01 membership gate. Follow-through (2026-09-17): HMAC accepts canonical hex or standard padded base64 with the evidenced whitespace rules (base64url/unpadded/base64-of-hex/inner-whitespace rejected); rate-window read faults and endpoint-lookup faults fail closed to sanitized 5xx; concurrent redeliveries converge on the exact created event; unconfirmed dispatches record no event row and converge on caller redelivery with no automatic mutation retry; webhook rotate revocation pinned at route level. Upstream sync-mode inline results stay deferred to RUN-03; per-tenant webhook secrets stay deployment-scoped per ADR 005 v0 (SEC-02 tripwire).
 
-Depends: AUTH-01
+Depends: AUTH-01, AUTH-03, CON-01 (both closed)
 
 Acceptance:
 

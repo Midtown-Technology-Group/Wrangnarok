@@ -81,3 +81,34 @@ shown once), list/get summaries (never digests or secrets), PATCH policy
   them into per-Organization ciphertext needs the SEC-02 tripwire first.
 - Schedule Triggers (Cron plus durable Scheduled state) are untouched and
   stay with TRG-01.
+
+## Amendments (issue #138 follow-through, 2026-09-17)
+
+Upstream drift plus failure/recovery review, no new primitive and no
+contract widening beyond the evidenced surface:
+
+- HMAC verification accepts canonical hex or standard padded base64 of the
+  raw digest, tolerating surrounding whitespace plus whitespace after the
+  `sha256=` prefix (HaloPSA form), per `gobifrost/bifrost@070235e0`.
+  base64url, unpadded base64, base64-of-hex, and inner whitespace stay
+  rejected; all comparisons stay constant-time (`src/endpoints.ts`,
+  `test/endpoint-branches.test.ts`).
+- The rate limiter fails closed: the window-SELECT fault propagates
+  instead of admitting under an invented zero count. The counter stays
+  advisory under concurrency; Execution idempotency owns correctness.
+- Public endpoint lookup fails closed: a D1/query/schema fault takes the
+  sanitized 5xx path (retryable for vendors), never a permanent-looking
+  404. Genuine empty results still answer 404 (`src/index.ts`,
+  `test/endpoints.test.ts`).
+- Ordering and correlation: the submit protocol writes the Execution row
+  before Workflow dispatch, so durable state is visible before async work
+  begins; each delivery carries its immutable (endpoint, event) identity
+  into a derived `wep-` key, so concurrent redeliveries converge on the
+  exact created event with no latest-for-source lookup. Unconfirmed
+  dispatches (503) and submit Faults record no event row; the vendor
+  redelivers the same event ID and the retry converges. Requests never
+  retry unsafe business mutations automatically.
+- Revocation matrix: api-key expiry/disable/rotate plus webhook
+  disable/rotate/missing-binding, each pinned at route level. AUTH-03 and
+  CON-01 are closed; endpoint principals (`endpoint:<id>`) stay invisible
+  to operator sessions and carry only the endpoint row's Organization.
