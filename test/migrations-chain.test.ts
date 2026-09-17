@@ -1,5 +1,5 @@
 // Migration-chain fidelity (issue #302, Slice C): applies every migration
-// 0001->0033 in order against a scratch database and proves table rebuilds
+// 0001->0034 in order against a scratch database and proves table rebuilds
 // carry all previously added columns. Guards the 0026 regression, which
 // rebuilt executions without policy_json (0012) and parent_execution_id /
 // parent_step (0015), breaking child lineage statements on fully migrated
@@ -40,6 +40,7 @@ import migration30 from "../migrations/0030_events.sql?raw";
 import migration31 from "../migrations/0031_oauth_tokens.sql?raw";
 import migration32 from "../migrations/0032_executions_column_restore.sql?raw";
 import migration33 from "../migrations/0033_event_subscriptions.sql?raw";
+import migration34 from "../migrations/0034_branding_profile.sql?raw";
 
 const bindings = env as unknown as Bindings;
 
@@ -76,6 +77,7 @@ const CHAIN = [
   migration31,
   migration32,
   migration33,
+  migration34,
 ];
 
 beforeEach(async () => {

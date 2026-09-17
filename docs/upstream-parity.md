@@ -1412,7 +1412,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase 4; **Partial**; existing issue: new
 
-Local status: Static Wrangnarok brand/Nav exists. There is no admin brand configuration, own profile/avatar or complete settings navigation.
+Local status: Slice 1 shipped (issue #176): per-Organization branding (admin-only name/color write, reset, logo upload over the FILES R2 bucket with D1 metadata, safe unauthenticated public read for pre-auth shells) plus caller-scoped own profile (display name, light/dark/system theme applied to the shell, avatar upload) at /profile and /admin/branding, with the shell header rendering loaded branding. Password/security settings stay IdP-owned (Access) with no local store. Nav IA corrected: the stale disabled Integrations entry (closed #160) is removed — the family is served by the enabled Connections page — and the remaining disabled entries (Triggers -> #139, Tables -> #154) name real open parity owners. Upload caps adopt the upstream pins (logos 5 MiB, avatars 2 MiB). Remaining: SVG logo/avatar support (needs a sanitizer), cross-user avatar/directory reads, full-console brand reskin with contrast safeguards, and any further settings families.
 
 Depends: AUTH-01, FILE-01
 

@@ -42,6 +42,7 @@ must update every importing test in the same commit.
 | 0031   | 0031_oauth_tokens.sql           | OAUTH-01 #149 | per-Connection encrypted OAuth tokens + health (envelope columns, monotonic generation, FK-cascaded off connections) |
 | 0032   | 0032_executions_column_restore.sql | #302 | restore execution policy and child-lineage columns after rebuild |
 | 0033   | 0033_event_subscriptions.sql      | TRG-03  | org-scoped event subscriptions + per-subscription delivery receipts (issue #139, S2) |
+| 0034   | 0034_branding_profile.sql         | UX-01   | org_branding + user_profiles: branding metadata, profile/theme, logo/avatar metadata with R2 bytes (issue #176, slice 1) |
 
 ## Stuck-database recovery (codex findings #381, #367-371)
 

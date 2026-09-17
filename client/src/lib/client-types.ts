@@ -515,3 +515,59 @@ export interface FormSubmitResponse {
   scheduled?: boolean;
   scheduleAt?: string;
 }
+
+// Organization branding + own profile (UX-01 slice 1, issue #176). The
+// branding view is the safe public shape (name, colors, logo metadata);
+// the profile view is caller-scoped. Neither carries credentials.
+
+export interface BrandingLogo {
+  contentType: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
+export interface BrandingView {
+  orgId: string;
+  appName: string;
+  primaryColor: string;
+  accentColor: string;
+  logo: BrandingLogo | null;
+  updatedAt: string | null;
+}
+
+export interface BrandingResponse {
+  branding: BrandingView;
+}
+
+export type ProfileTheme = "light" | "dark" | "system";
+
+export interface ProfileAvatar {
+  contentType: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
+export interface ProfileView {
+  orgId: string;
+  userId: string;
+  displayName: string;
+  theme: ProfileTheme;
+  avatar: ProfileAvatar | null;
+  updatedAt: string | null;
+}
+
+export interface ProfileResponse {
+  profile: ProfileView;
+}
+
+export interface CallerResponse {
+  caller: {
+    userId: string;
+    orgId: string;
+    credentialClass: string;
+    viaAccess: boolean;
+    fixture: boolean;
+  };
+  role: "member" | "admin" | null;
+  kind: "ordinary" | "external" | null;
+}
