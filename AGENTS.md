@@ -53,7 +53,17 @@ When studying Bifrost, record observable behavior and invariants in `docs/upstre
 
 ## Collaboration
 
-One lane per worktree. Parallel agents (human or AI) must work on separate branches checked out in separate `git worktree` directories — never two lanes in one checkout. Name worktrees after the branch. Remove the worktree (`git worktree remove`) when its PR merges. Git defines no default worktree location, so this project fixes one: create ephemeral lane worktrees under the harness's pre-approved scratch root (`$env:TEMP\opencode`, currently `C:\Users\ThomasBray\AppData\Local\Temp\opencode`), one subdirectory per branch named after the branch (slashes sanitized) — never inside the main checkout. Windows lane note: the MSYS spawn layer rewrites `git` `<rev>:.dotpath` arguments (e.g. `origin/main:.opencode/...` arrives as `origin\main;...`), while `cmd` passes them cleanly — read dotfiles from a checkout, or run such commands via `cmd /c`, never via Git Bash.
+One lane per worktree. Parallel agents (human or AI) must work on separate branches checked out in separate `git worktree` directories — never two lanes in one checkout. One writer per checkout: the main checkout is shared ground, so never do lane file edits in it — work only in your assigned lane worktree. Two agents editing files in the same checkout is the same violation as two lanes in one checkout. Name worktrees after the branch. Remove the worktree (`git worktree remove`) when its PR merges. Git defines no default worktree location, so this project fixes one: create ephemeral lane worktrees under the harness's pre-approved scratch root (`$env:TEMP\opencode`, currently `C:\Users\ThomasBray\AppData\Local\Temp\opencode`), one subdirectory per branch named after the branch (slashes sanitized) — never inside the main checkout. Windows lane note: the MSYS spawn layer rewrites `git` `<rev>:.dotpath` arguments (e.g. `origin/main:.opencode/...` arrives as `origin\main;...`), while `cmd` passes them cleanly — read dotfiles from a checkout, or run such commands via `cmd /c`, never via Git Bash.
+
+## Lane ownership
+
+A lane owner is responsible for their issue end to end: from branch to MERGED. Opening a PR is not done — a finished local task list with an open PR means the job is still open. Do not go idle on a PR you own.
+
+- Red CI: fix forward on your branch (never force-push a shared lane branch), re-run the gate locally, push.
+- Conflicts: merge `origin/main`, resolve keeping your slice's code, re-run the gate, push.
+- Open review threads block merging. Address every thread: fix the code where the reviewer is right (bot reviewers included), reply where they are wrong, then resolve. Never resolve a thread without a code fix or a written rebuttal.
+- Once checks are green and threads are resolved, queue the PR via **Merge when ready** / merge-queue control and watch it until it shows MERGED. Enabling Merge-when-ready on your own green, thread-free PR is standing authorization for the lane owner — it needs no separate explicit ask.
+- Heartbeat: make a first visible move (commit, PR comment, or status report) within minutes of starting, and report status at least every 30 minutes while the PR is open — checks state, open thread count, next action. If blocked on another lane, say so immediately; do not wait silently.
 
 ## Merging
 
