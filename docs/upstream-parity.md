@@ -278,7 +278,7 @@ Related Wrangnarok issues: #78
 
 Phase 3; **Implemented**; existing issue: #143
 
-Local status: ADR 018 (resource roles, claims-as-subjects, policy rules, deny-by-absence) ships on Worker + D1 (migration 0013, `src/roles.ts`, `test/resource-roles.test.ts`): direct Saga execution (including the provider ingress), form/app delegation, caller matrices, next-request revocation, hidden-reference 404s, and role/policy administration with consumer inspection. Open follow-through lives on #143 (tables/files spine composition, shared non-request authority resolver, policy-rule store hardening per #430, provider-route composition proof, live-subscription enforcement deferred to TRG-03/OBS-02).
+Local status: ADR 018 (resource roles, claims-as-subjects, policy rules, deny-by-absence) ships on Worker + D1 (migration 0013, `src/roles.ts`, `test/resource-roles.test.ts`): direct Saga execution (including the provider ingress), form/app delegation, caller matrices, next-request revocation, hidden-reference 404s, and role/policy administration with consumer inspection. Open follow-through lives on #143 (tables/files spine composition; live-subscription enforcement deferred to TRG-03/OBS-02). Closed since: shared non-request authority resolver plus schedule-dispatch saga-grant wiring (#459 and #143 S3), policy-rule store hardening per #430 (shipped via #444/#447), provider-route composition proof (shipped via #457).
 
 Depends: AUTH-01
 

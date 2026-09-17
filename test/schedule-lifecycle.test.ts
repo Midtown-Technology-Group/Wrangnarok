@@ -582,4 +582,141 @@ describe("TRG-01 promotion semantics (workerd)", () => {
       await bindings.DB.prepare("UPDATE organizations SET status='active' WHERE id=?").bind(principal.orgId).run();
     }
   }, 25000);
+  it("fences the real tick on saga execute-grant loss: revoked and demoted run-as dispatch zero work, restored grants dispatch (AUTH-02 S3 wiring)", async () => {
+    // S3 wiring remainder (issue #143): promoteWindow passes the saga
+    // execute RoleCheck for the scheduled Saga into the canonical resolver,
+    // so the production tick revalidates resource authority — not just
+    // org/user/membership lifecycle. Grant revocation with live membership
+    // and an admin-to-member demotion with no execute grant both fence the
+    // tick as safe skips (zero submit, zero new Execution rows, quarantine
+    // accrual like every other persistent de-authorization); restoring the
+    // grant lets the next eligible window dispatch.
+    const REVOKE = "00000000-0000-4000-8000-000000000013";
+    const DEMOTE = "00000000-0000-4000-8000-000000000014";
+    await ensureRoleTables(bindings.DB);
+    const stamp = new Date().toISOString();
+    for (const [userId, role] of [
+      [REVOKE, "member"],
+      [DEMOTE, "admin"],
+    ] as const) {
+      await bindings.DB.prepare(
+        "INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?) ON CONFLICT(user_id) DO NOTHING",
+      )
+        .bind(userId, stamp)
+        .run();
+      await bindings.DB.prepare(
+        "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,'member','active','ordinary',?,?) ON CONFLICT(org_id,user_id) DO NOTHING",
+      )
+        .bind(principal.orgId, userId, stamp, stamp)
+        .run();
+      await bindings.DB.prepare(
+        "UPDATE org_memberships SET role=?,status='active',kind='ordinary' WHERE org_id=? AND user_id=?",
+      )
+        .bind(role, principal.orgId, userId)
+        .run();
+    }
+    const executionCount = async (userId: string): Promise<number> =>
+      (
+        await bindings.DB.prepare("SELECT COUNT(*) AS n FROM executions WHERE org_id=? AND user_id=?")
+          .bind(principal.orgId, userId)
+          .first<{ n: number }>()
+      )?.n ?? 0;
+    const makeDue = async (name: string, agoMs: number): Promise<void> => {
+      await bindings.DB.prepare("UPDATE schedules SET next_due_at=? WHERE org_id=? AND name=?")
+        .bind(new Date(Date.now() - agoMs).toISOString(), principal.orgId, name)
+        .run();
+    };
+    let revokeRoleId: string | null = null;
+    let demoteRoleId: string | null = null;
+    try {
+      // The revoked run-as holds an explicit saga execute grant; the
+      // demoted run-as starts as org admin and relies on the admin bypass.
+      revokeRoleId = (await createRole(bindings.DB, principal.orgId, "s3-tick-grant-revoked")).id;
+      await addGrant(bindings.DB, principal.orgId, revokeRoleId, "saga", helloSaga.id, "execute");
+      await assignRole(bindings.DB, principal.orgId, revokeRoleId, REVOKE);
+      const parseProbe = (name: string) =>
+        parseScheduleBody(
+          { name, sagaId: helloSaga.id, kind: "recurring", cron: "* * * * *", input: { name: "sched" } },
+          SAGA_DEFINITIONS,
+        );
+      await createSchedule(
+        bindings.DB,
+        { orgId: principal.orgId, userId: REVOKE },
+        parseProbe("tick-grant-revoked-probe"),
+        SAGA_DEFINITIONS,
+      );
+      await createSchedule(
+        bindings.DB,
+        { orgId: principal.orgId, userId: DEMOTE },
+        parseProbe("tick-grant-demoted-probe"),
+        SAGA_DEFINITIONS,
+      );
+      const tickEnv = { DB: bindings.DB, HELLO_WORKFLOW: bindings.HELLO_WORKFLOW } as never;
+      let submits: Record<string, number> = {};
+      const countingSubmit: typeof submit = async (...args) => {
+        submits[args[1].userId] = (submits[args[1].userId] ?? 0) + 1;
+        return submit(...args);
+      };
+      // Sanity: live authority on both run-as identities promotes.
+      await makeDue("tick-grant-revoked-probe", 3_600_000);
+      await makeDue("tick-grant-demoted-probe", 3_500_000);
+      submits = {};
+      const live = await promoteDueSchedules(bindings.DB, tickEnv, SAGA_DEFINITIONS, countingSubmit, new Date());
+      expect(live.promoted.map((entry) => entry.scheduleName)).toContain("tick-grant-revoked-probe");
+      expect(live.promoted.map((entry) => entry.scheduleName)).toContain("tick-grant-demoted-probe");
+      expect(submits[REVOKE]).toBe(1);
+      expect(submits[DEMOTE]).toBe(1);
+      // Authority loss: revoke the grant (membership stays live) and demote
+      // the admin to an ordinary member with no execute grant.
+      await revokeAssignment(bindings.DB, principal.orgId, revokeRoleId, REVOKE);
+      await bindings.DB.prepare("UPDATE org_memberships SET role='member' WHERE org_id=? AND user_id=?")
+        .bind(principal.orgId, DEMOTE)
+        .run();
+      await makeDue("tick-grant-revoked-probe", 7_200_000);
+      await makeDue("tick-grant-demoted-probe", 7_100_000);
+      const beforeRevoke = await executionCount(REVOKE);
+      const beforeDemote = await executionCount(DEMOTE);
+      submits = {};
+      const fenced = await promoteDueSchedules(bindings.DB, tickEnv, SAGA_DEFINITIONS, countingSubmit, new Date());
+      expect(fenced.promoted.map((entry) => entry.scheduleName)).not.toContain("tick-grant-revoked-probe");
+      expect(fenced.promoted.map((entry) => entry.scheduleName)).not.toContain("tick-grant-demoted-probe");
+      expect(fenced.skipped).toContain("tick-grant-revoked-probe");
+      expect(fenced.skipped).toContain("tick-grant-demoted-probe");
+      expect(submits[REVOKE] ?? 0).toBe(0);
+      expect(submits[DEMOTE] ?? 0).toBe(0);
+      expect(await executionCount(REVOKE)).toBe(beforeRevoke);
+      expect(await executionCount(DEMOTE)).toBe(beforeDemote);
+      // Restore: the revoked assignment returns and the demoted member gets
+      // the exact saga execute grant — the next eligible windows dispatch.
+      await assignRole(bindings.DB, principal.orgId, revokeRoleId, REVOKE);
+      demoteRoleId = (await createRole(bindings.DB, principal.orgId, "s3-tick-grant-demoted")).id;
+      await addGrant(bindings.DB, principal.orgId, demoteRoleId, "saga", helloSaga.id, "execute");
+      await assignRole(bindings.DB, principal.orgId, demoteRoleId, DEMOTE);
+      await makeDue("tick-grant-revoked-probe", 1_800_000);
+      await makeDue("tick-grant-demoted-probe", 1_700_000);
+      submits = {};
+      const restored = await promoteDueSchedules(bindings.DB, tickEnv, SAGA_DEFINITIONS, countingSubmit, new Date());
+      expect(restored.promoted.map((entry) => entry.scheduleName)).toContain("tick-grant-revoked-probe");
+      expect(restored.promoted.map((entry) => entry.scheduleName)).toContain("tick-grant-demoted-probe");
+      expect(submits[REVOKE]).toBe(1);
+      expect(submits[DEMOTE]).toBe(1);
+    } finally {
+      for (const name of ["tick-grant-revoked-probe", "tick-grant-demoted-probe"]) {
+        const probeId = await bindings.DB.prepare("SELECT id FROM schedules WHERE org_id=? AND name=?")
+          .bind(principal.orgId, name)
+          .first<{ id: string }>();
+        if (probeId) {
+          await bindings.DB.prepare("DELETE FROM schedule_deliveries WHERE schedule_id=?").bind(probeId.id).run();
+          await bindings.DB.prepare("DELETE FROM schedules WHERE id=?").bind(probeId.id).run();
+        }
+      }
+      if (revokeRoleId) await deleteRole(bindings.DB, principal.orgId, revokeRoleId).catch(() => undefined);
+      if (demoteRoleId) await deleteRole(bindings.DB, principal.orgId, demoteRoleId).catch(() => undefined);
+      for (const userId of [REVOKE, DEMOTE]) {
+        await bindings.DB.prepare("DELETE FROM org_memberships WHERE org_id=? AND user_id=?")
+          .bind(principal.orgId, userId)
+          .run();
+      }
+    }
+  }, 30000);
 });
