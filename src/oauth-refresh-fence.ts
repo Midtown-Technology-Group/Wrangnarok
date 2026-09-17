@@ -13,7 +13,8 @@
 // `storage` writes, no D1 I/O, no token material retained after the flight
 // settles. The caller posts the refresh form fields opaquely; the object
 // runs one volatile vendor POST per fence key at a time, streams the shaped
-// token body back, and drops everything on settle. SEC-02 stays shut.
+// token body back, and drops everything on settle. The object itself persists
+// no token (persisted rows live in `src/oauth-tokens.ts`, migration 0031).
 import { Fault } from "./domain";
 
 const VALID_FENCE_PATH = /^\/refresh\/[A-Za-z0-9._%-]{1,400}$/u;
