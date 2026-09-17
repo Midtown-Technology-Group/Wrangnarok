@@ -315,6 +315,11 @@ import { fileURLToPath } from "node:url";
 // over the AI-01-union main, no new dependencies (package.json unchanged
 // versus origin/main); deliberate feature headroom only. The 730 KiB line
 // restores ~11.5 KiB of real margin above the 8 KiB minimum headroom.
+// 2026-09-17 (LIMITS-01 META sync, issue #177): no budget change. The
+// #462 saga-epilogue relief (-4,109 B) plus the #463 FORM-02 auto-fill
+// slice net to 739082 bytes locally against the 730 KiB line (CI number
+// governs): 8438 bytes of headroom, 246 bytes above the 8 KiB minimum.
+// LIMITS-META measuredBytes only; BUDGET_BYTES/MIN_HEADROOM_BYTES untouched.
 const BUDGET_BYTES = 730 * 1024;
 // LIMITS-01 minimum operating headroom (issue #177): the budget must exceed
 // the measured bundle by at least this margin, so a `measured + a few
