@@ -1,0 +1,8 @@
+# LIMITS-01 local load/isolation evidence (issue #177, lane limits-177-local-load).
+# Dependency-ready workload: 3 Organizations x 3 system.smoke executions
+# against the real local workerd/D1/Workflow harness. No production src,
+# packages, CI workflows, migrations, bindings, primitives, budgets, or
+# deployment configuration. The scope file itself rides along so
+# lane-scope.mjs can verify the lane touches only its slice.
+test/limits-load.test.ts
+scopes/limits-177-local-load.scope
