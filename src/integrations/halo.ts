@@ -33,6 +33,8 @@ import type {
   OpenApiDocument,
   OperationPolicy,
   OperationRisk,
+  PinnedContract,
+  SpecOverlay,
 } from "../openapi";
 import { getConnection } from "../connections";
 import { requestClientCredentialsToken } from "../oauth";
@@ -48,6 +50,43 @@ export const HALO_ALLOWED_ORIGIN = "https://halo-lab.example.com";
 /** Pinned lab spec revision for the proof contract. Real pins record the
  * upstream source plus overlay digest; the proof spec is local fixture. */
 export const HALO_SPEC_VERSION = "halo-lab-1";
+
+/** Authoritative real HaloPSA OpenAPI pin (TOOL-01 S2, issue #170): the
+ * vendor-served document retrieved 2026-09-17 from the Halo-hosted tenant
+ * swagger endpoint below (OpenAPI 3.0.1, info.version "v2", 927 paths /
+ * 1455 operations). The full 4,873,914-byte document is pinned by digest
+ * here so any checkout can re-verify it by re-downloading from the source;
+ * only the proof subset travels in the repo (see
+ * test/fixtures/halo-real-spec-excerpt.json, whose provenance block records
+ * the same digest plus the evidenced defect). No runtime fetch reads this
+ * source: pinning is metadata, never a network dependency. Halo API spec
+ * (c) HaloPSA, served by the vendor for API consumers; see
+ * https://www.usehalo.com/guides/1853. */
+export const HALO_REAL_SPEC_SOURCE = "https://soundit.halopsa.com/api/swagger/v2/swagger.json";
+export const HALO_REAL_SPEC_RETRIEVED_AT = "2026-09-17";
+export const HALO_REAL_SPEC_DIGEST = "d6659a0828653b42b2fa42b00ba6fd55c3c10ee9b79635cd4bf57ef4b358eee2";
+export const HALO_REAL_SPEC_BYTES = 4873914;
+export const HALO_REAL_SPEC_VERSION = "v2";
+export const HALO_REAL_SPEC_PATH_COUNT = 927;
+export const HALO_REAL_SPEC_OPERATION_COUNT = 1455;
+export const HALO_REAL_SPEC_MISSING_OPERATION_ID_COUNT = 1452;
+
+/** Local overlay over the real HaloPSA spec (TOOL-01 S2): assigns the
+ * stable operationIds the vendor document omits for the proof operations.
+ * Every key names a real METHOD + path from the pinned bytes above (with
+ * the verbatim vendor summary kept); the operationId values are local
+ * patch identifiers — never vendor claims — reusing the lab proof's
+ * vocabulary so the same risk policy and classifications apply. Applying
+ * this overlay yields a non-null overlayDigest while the source bytes keep
+ * their own specDigest (nothing upstream is silently mutated). */
+export const HALO_REAL_OVERLAY: SpecOverlay = Object.freeze({
+  operations: Object.freeze({
+    "GET /Actions": Object.freeze({ operationId: "Action_Search" }),
+    "GET /Tickets/{id}": Object.freeze({ operationId: "Ticket_Get" }),
+    "POST /Actions": Object.freeze({ operationId: "Ticket_AddNote" }),
+    "DELETE /Tickets/{id}": Object.freeze({ operationId: "Ticket_Delete" }),
+  }),
+});
 
 /** HaloPSA OAuth token endpoint (public vendor contract: POST /auth/token on
  * the Halo origin with grant_type=client_credentials; the returned access
@@ -91,6 +130,7 @@ export const HALO_DEFAULT_POLICY: OperationPolicy = {
  * Ticket_Delete is the destructive denial proof. Anything unlisted fails
  * closed at execution time. */
 export const HALO_CLASSIFICATIONS: Readonly<Record<string, OperationRisk>> = Object.freeze({
+  Action_Search: "read",
   Ticket_Get: "read",
   Ticket_Search: "read",
   Ticket_AddNote: "mutation",
@@ -184,6 +224,30 @@ export async function executeHaloOperation(
   vendor: { readonly fetchImpl?: typeof fetch } = {},
   auth: HaloAuthCtx = { isInstanceAdmin: false, isOrgAdmin: false },
 ): Promise<CodeModeResult> {
+  const spec = haloLabSpec();
+  const pinned = await pinContract({ id: HALO_INTEGRATION_ID, name: "halo" }, JSON.stringify(spec), [
+    HALO_ALLOWED_ORIGIN,
+  ]);
+  return executeHaloOperationOnContract(db, caller, secrets, call, { doc: spec, pinned }, vendor, auth);
+}
+
+/** Host-mediated execution against an explicitly pinned contract (TOOL-01
+ * S2, issue #170): the real-spec overlay proof pins source bytes plus a
+ * local overlay digest, then executes through this same host, so Connection
+ * resolution, policy, origin enforcement, auth injection, bounded reads,
+ * scrubbing, and provenance stay identical to the lab path. Provenance
+ * carries the source specDigest/specVersion — the overlay corrects the
+ * executed doc, never the provenance chain. */
+export async function executeHaloOperationOnContract(
+  db: D1Database,
+  caller: Principal,
+  secrets: HaloSecrets,
+  call: CodeModeCall,
+  contract: { readonly doc: OpenApiDocument; readonly pinned: PinnedContract },
+  vendor: { readonly fetchImpl?: typeof fetch } = {},
+  auth: HaloAuthCtx = { isInstanceAdmin: false, isOrgAdmin: false },
+): Promise<CodeModeResult> {
+  const { doc: spec, pinned } = contract;
   const { clientId, clientSecret } = requireHaloSecrets(secrets);
   // Only genuine absence maps to the 424 operator diagnosis. getConnection
   // answers CONNECTION_NOT_FOUND for a missing mapping; D1/driver/query
@@ -200,10 +264,6 @@ export async function executeHaloOperation(
   if (!view.enabled) {
     throw new Fault(404, "OPENAPI_CONNECTION_MISSING", "The Halo Connection is disabled.");
   }
-  const spec = haloLabSpec();
-  const pinned = await pinContract({ id: HALO_INTEGRATION_ID, name: "halo" }, JSON.stringify(spec), [
-    HALO_ALLOWED_ORIGIN,
-  ]);
   const operations = indexOperations(spec, HALO_CLASSIFICATIONS);
   const operation: ContractOperation = inspectOperation(operations, call.operationId);
   authorizeOperation(operation, HALO_DEFAULT_POLICY);

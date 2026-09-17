@@ -8,7 +8,10 @@ import { runGenerateIntegration } from "../scripts/wrangnarok-core.mjs";
 import { Fault } from "../src/domain";
 import { GENERATOR_EMBED_BYTES_MAX, generateIntegrationModule } from "../src/generate-integration";
 import { defineIntegration } from "../src/integrations/index";
-import { detectGeneratorAuthKind, indexOperations, integrationUuidV5 } from "../src/openapi";
+import { applySpecOverlay, detectGeneratorAuthKind, indexOperations, integrationUuidV5 } from "../src/openapi";
+import type { OpenApiDocument } from "../src/openapi";
+import { HALO_REAL_OVERLAY } from "../src/integrations/halo";
+import haloRealFixtureText from "./fixtures/halo-real-spec-excerpt.json?raw";
 
 const DIGEST = "ab".repeat(32);
 
@@ -97,6 +100,28 @@ describe("INT-01 generator (issue #229)", () => {
     expect(out.source).toContain('export const HALO_TOKEN_PATH = "/auth/token";');
     expect(out.source).toContain("Authorization: `Bearer ${token}`");
     expect(out.source).not.toContain("Bearer ${clientId}:${clientSecret}");
+  });
+
+  it("generates from the overlay-corrected real HaloPSA excerpt (TOOL-01 S2)", async () => {
+    const raw = JSON.parse(haloRealFixtureText) as { spec: OpenApiDocument };
+    // The real excerpt declares the vendor's http Bearer [REDACTED] so the auth kind
+    // is detected from the bytes, never assumed.
+    expect(detectGeneratorAuthKind(raw.spec)).toBe("apiToken");
+    // Uncorrected, the real bytes fail closed (missing operationIds).
+    expect(() => generateIntegrationModule(JSON.stringify(raw.spec), { ...opts(), id: "halo-real" }, DIGEST)).toThrow(
+      expect.objectContaining({ code: "GENERATOR_INVALID_SPEC" }),
+    );
+    // Overlay-corrected, the same bytes generate deterministically.
+    const overlaid = await applySpecOverlay(raw.spec, HALO_REAL_OVERLAY);
+    expect(overlaid.overlayDigest).toMatch(/^[a-f0-9]{64}$/);
+    const specText = JSON.stringify(overlaid.doc);
+    const first = generateIntegrationModule(specText, { ...opts(), id: "halo-real" }, DIGEST);
+    const second = generateIntegrationModule(specText, { ...opts(), id: "halo-real" }, DIGEST);
+    expect(second.source).toBe(first.source);
+    expect(first.operationCount).toBe(4);
+    expect(first.source).toContain("// Auth kind: apiToken");
+    expect(first.source).toContain("Authorization: `Bearer ${apiToken}`");
+    expect(first.source).toContain(`"Ticket_Delete": "destructive"`);
   });
 
   it("is deterministic: same spec plus same options yields identical source", () => {

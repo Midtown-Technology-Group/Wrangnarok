@@ -1,0 +1,15 @@
+# TOOL-01 S2 lane scope (issue #170): real HaloPSA OpenAPI contract pin plus
+# overlay proof. Pins the authoritative vendor bytes by digest/version
+# metadata, proves a local overlay correcting the evidenced missing-
+# operationId defect (non-null overlayDigest, source digest preserved), and
+# extends the lab proof through host-mediated read plus allowed mutation.
+# The shared generator emitter is owned for overlay compatibility (proven
+# through test/generate-integration.test.ts; no emitter change needed).
+# No runtime network, no new primitive, no MCP auth change.
+scopes/tool-170-halo-spec-overlay.scope
+src/integrations/halo.ts
+src/openapi.ts
+src/generate-integration-source.mjs
+test/tool-01-halo-proof.test.ts
+test/generate-integration.test.ts
+test/fixtures/halo-real-spec-excerpt.json

@@ -21,13 +21,33 @@ import type { Bindings } from "../src/bindings";
 import { HALO_INTEGRATION_ID } from "../src/domain";
 import {
   HALO_ALLOWED_ORIGIN,
+  HALO_CLASSIFICATIONS,
+  HALO_REAL_OVERLAY,
+  HALO_REAL_SPEC_BYTES,
+  HALO_REAL_SPEC_DIGEST,
+  HALO_REAL_SPEC_MISSING_OPERATION_ID_COUNT,
+  HALO_REAL_SPEC_OPERATION_COUNT,
+  HALO_REAL_SPEC_PATH_COUNT,
+  HALO_REAL_SPEC_RETRIEVED_AT,
+  HALO_REAL_SPEC_SOURCE,
+  HALO_REAL_SPEC_VERSION,
   HALO_SPEC_VERSION,
   HALO_TIMEOUT_MS,
   executeHaloOperation,
+  executeHaloOperationOnContract,
   inspectHaloOperation,
   requireHaloSecrets,
   searchHaloOperations,
 } from "../src/integrations/halo";
+import {
+  applySpecOverlay,
+  indexOperations,
+  inspectOperation,
+  pinContractWithOverlay,
+  searchOperations,
+  validateContractDocument,
+} from "../src/openapi";
+import haloRealFixtureText from "./fixtures/halo-real-spec-excerpt.json?raw";
 import migration1 from "../migrations/0001_initial.sql?raw";
 import migration2 from "../migrations/0002_cancelling.sql?raw";
 import migration4 from "../migrations/0004_solutions_install.sql?raw";
@@ -80,6 +100,21 @@ function mockHalo() {
     // Only the exchanged access token authorizes resource calls: the raw
     // deployment pair (or a pseudo-Bearer of id:secret) is rejected.
     if (auth !== `Bearer ${HALO_ACCESS_TOKEN}`) return Response.json({ error: "unauthorized" }, { status: 401 });
+    // TOOL-01 S2: the real HaloPSA path shapes (no /api prefix — the
+    // vendor serves them under the relative servers url "/api"). Matched on
+    // exact pathname so lab-fixture URLs never collide with real ones.
+    const pathname = new URL(url).pathname;
+    if (request.method === "GET" && pathname === "/Actions") {
+      return Response.json({
+        actions: [{ id: 11, ticketid: 7, outcome: "Firewall replacement scheduled for Friday." }],
+      });
+    }
+    if (request.method === "GET" && pathname === "/Tickets/7") {
+      return Response.json({ id: 7, title: "Firewall replacement", team: "networking", status: "open" });
+    }
+    if (request.method === "POST" && pathname === "/Actions") {
+      return Response.json({ id: 7, noteId: 99, noted: true });
+    }
     if (request.method === "GET" && url.includes("/api/Tickets?")) {
       return Response.json({
         tickets: [{ id: 7, title: "Firewall replacement", team: "networking", status: "open" }],
@@ -917,5 +952,233 @@ describe("HaloPSA Code Mode proof (TOOL-01 acceptance)", () => {
     expect(dumped).not.toContain(HALO_SECRET);
     expect(dumped).not.toContain(HALO_ID);
     expect(dumped).not.toContain(HALO_ACCESS_TOKEN);
+  });
+
+  describe("Real HaloPSA spec pin + overlay (TOOL-01 S2)", () => {
+    interface RealFixture {
+      readonly provenance: {
+        readonly source: string;
+        readonly retrieved: string;
+        readonly fullDocument: {
+          readonly sha256: string;
+          readonly bytes: number;
+          readonly paths: number;
+          readonly operations: number;
+          readonly missingOperationId: number;
+        };
+      };
+      readonly spec: Record<string, unknown>;
+    }
+
+    const fixture = JSON.parse(haloRealFixtureText) as RealFixture;
+    const sourceText = JSON.stringify(fixture.spec);
+    const caller = { orgId: ORG, userId: "00000000-0000-4000-8000-000000000002" };
+    const secrets = { clientId: HALO_ID, clientSecret: HALO_SECRET };
+    const admin = { isInstanceAdmin: true, isOrgAdmin: false };
+
+    async function pinReal() {
+      const { pinned, doc } = await pinContractWithOverlay(
+        { id: HALO_INTEGRATION_ID, name: "halo" },
+        sourceText,
+        [HALO_ALLOWED_ORIGIN],
+        HALO_REAL_OVERLAY,
+      );
+      return { doc, pinned };
+    }
+
+    it("records the authoritative pin metadata without vendoring the full document", () => {
+      expect(fixture.provenance.source).toBe(HALO_REAL_SPEC_SOURCE);
+      expect(fixture.provenance.retrieved).toBe(HALO_REAL_SPEC_RETRIEVED_AT);
+      expect(fixture.provenance.fullDocument.sha256).toBe(HALO_REAL_SPEC_DIGEST);
+      expect(fixture.provenance.fullDocument.bytes).toBe(HALO_REAL_SPEC_BYTES);
+      expect(fixture.provenance.fullDocument.paths).toBe(HALO_REAL_SPEC_PATH_COUNT);
+      expect(fixture.provenance.fullDocument.operations).toBe(HALO_REAL_SPEC_OPERATION_COUNT);
+      expect(fixture.provenance.fullDocument.missingOperationId).toBe(HALO_REAL_SPEC_MISSING_OPERATION_ID_COUNT);
+      expect(HALO_REAL_SPEC_DIGEST).toMatch(/^[a-f0-9]{64}$/);
+      expect(HALO_REAL_SPEC_VERSION).toBe("v2");
+      // The excerpt preserves the evidenced defect: all four operations
+      // lack operationIds, exactly as served by the vendor.
+      const paths = fixture.spec["paths"] as Record<string, Record<string, { operationId?: unknown }>>;
+      expect(Object.keys(paths).sort()).toEqual(["/Actions", "/Tickets/{id}"]);
+      for (const methods of Object.values(paths)) {
+        for (const op of Object.values(methods)) {
+          expect(op.operationId).toBeUndefined();
+        }
+      }
+    });
+
+    it("fails closed pinning the real excerpt without the overlay", () => {
+      expect(() => validateContractDocument(JSON.parse(sourceText))).toThrow(
+        expect.objectContaining({ code: "OPENAPI_CONTRACT_INVALID" }),
+      );
+    });
+
+    it("applies the overlay deterministically with a non-null digest", async () => {
+      const first = await applySpecOverlay(
+        fixture.spec as unknown as Parameters<typeof applySpecOverlay>[0],
+        HALO_REAL_OVERLAY,
+      );
+      const second = await applySpecOverlay(
+        fixture.spec as unknown as Parameters<typeof applySpecOverlay>[0],
+        HALO_REAL_OVERLAY,
+      );
+      expect(first.overlayDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(second.overlayDigest).toBe(first.overlayDigest);
+      // The corrected document validates as the real revision; the source
+      // bytes are untouched (defect preserved, never silently mutated).
+      expect(validateContractDocument(first.doc)).toMatchObject({ operationCount: 4, version: "v2" });
+      expect(JSON.stringify(fixture.spec)).not.toContain("Ticket_Get");
+      const operations = indexOperations(first.doc, HALO_CLASSIFICATIONS);
+      expect(inspectOperation(operations, "Ticket_Get")).toMatchObject({
+        method: "get",
+        path: "/Tickets/{id}",
+        risk: "read",
+      });
+      expect(inspectOperation(operations, "Ticket_AddNote")).toMatchObject({
+        method: "post",
+        path: "/Actions",
+        risk: "mutation",
+      });
+      // Progressive discovery works over real path shapes: "action" narrows
+      // to the overlaid Actions operations without a pre-authored tool.
+      const hits = searchOperations(operations, "action").map((entry) => entry.operationId);
+      expect(hits).toContain("Action_Search");
+      expect(hits).toContain("Ticket_AddNote");
+    });
+
+    it("rejects overlays that cannot reconcile or would rename vendor IDs", async () => {
+      const doc = fixture.spec as unknown as Parameters<typeof applySpecOverlay>[0];
+      await expect(
+        applySpecOverlay(doc, { operations: { "GET /Missing": { operationId: "X_Y" } } }),
+      ).rejects.toMatchObject({ code: "OPENAPI_CONTRACT_INVALID" });
+      await expect(
+        applySpecOverlay(doc, { operations: { "POST /Missing": { operationId: "X_Y" } } }),
+      ).rejects.toMatchObject({ code: "OPENAPI_CONTRACT_INVALID" });
+      await expect(
+        applySpecOverlay(doc, { operations: { "GET /Actions": { operationId: "bad id!" } } }),
+      ).rejects.toMatchObject({ code: "OPENAPI_CONTRACT_INVALID" });
+      await expect(
+        applySpecOverlay(doc, { operations: { " malformed": { operationId: "X_Y" } } }),
+      ).rejects.toMatchObject({ code: "OPENAPI_CONTRACT_INVALID" });
+      // Renaming a vendor-supplied operationId is refused: overlays fill
+      // missing IDs only.
+      const renamed = JSON.parse(sourceText) as {
+        paths: Record<string, Record<string, { operationId?: string }>>;
+      };
+      renamed["paths"]!["/Actions"]!["get"]!.operationId = "Vendor_Supplied";
+      await expect(
+        applySpecOverlay(renamed as unknown as Parameters<typeof applySpecOverlay>[0], {
+          operations: { "GET /Actions": { operationId: "Action_Search" } },
+        }),
+      ).rejects.toMatchObject({ code: "OPENAPI_CONTRACT_INVALID" });
+    });
+
+    it("pins source bytes plus overlay through one fail-closed composition", async () => {
+      const first = await pinReal();
+      const second = await pinReal();
+      // The pin records both digests: source bytes plus the applied overlay,
+      // deterministically across pins.
+      expect(first.pinned.overlayDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(second.pinned.overlayDigest).toBe(first.pinned.overlayDigest);
+      expect(second.pinned.specDigest).toBe(first.pinned.specDigest);
+      expect(first.pinned.specVersion).toBe(HALO_REAL_SPEC_VERSION);
+      // Fail-closed branches: oversized, malformed, and non-object sources,
+      // unreconciled overlays, and missing origins never pin.
+      const integration = { id: HALO_INTEGRATION_ID, name: "halo" };
+      await expect(
+        pinContractWithOverlay(integration, " ".repeat(2 * 1024 * 1024 + 1), [HALO_ALLOWED_ORIGIN], HALO_REAL_OVERLAY),
+      ).rejects.toMatchObject({ code: "OPENAPI_CONTRACT_TOO_LARGE" });
+      await expect(
+        pinContractWithOverlay(integration, "not-json", [HALO_ALLOWED_ORIGIN], HALO_REAL_OVERLAY),
+      ).rejects.toMatchObject({ code: "OPENAPI_CONTRACT_INVALID" });
+      await expect(
+        pinContractWithOverlay(integration, "[1,2]", [HALO_ALLOWED_ORIGIN], HALO_REAL_OVERLAY),
+      ).rejects.toMatchObject({ code: "OPENAPI_CONTRACT_INVALID" });
+      await expect(pinContractWithOverlay(integration, sourceText, [], HALO_REAL_OVERLAY)).rejects.toMatchObject({
+        code: "OPENAPI_CONTRACT_INVALID",
+      });
+      await expect(
+        pinContractWithOverlay(integration, sourceText, [HALO_ALLOWED_ORIGIN], {
+          operations: { "GET /Missing": { operationId: "X_Y" } },
+        }),
+      ).rejects.toMatchObject({ code: "OPENAPI_CONTRACT_INVALID" });
+    });
+
+    it("executes a read and an allowed mutation through the host on the overlaid real contract", async () => {
+      await createHaloConnection();
+      const halo = mockHalo();
+      const { doc, pinned } = await pinReal();
+      // The pin records both digests: source bytes plus the applied overlay.
+      expect(pinned.overlayDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(pinned.specVersion).toBe(HALO_REAL_SPEC_VERSION);
+      expect(pinned.specVersion).toBe(HALO_REAL_SPEC_VERSION);
+      const read = await executeHaloOperationOnContract(
+        bindings.DB,
+        caller,
+        secrets,
+        { operationId: "Ticket_Get", path: { id: "7" } },
+        { doc, pinned },
+      );
+      expect((read.result as { title: string }).title).toBe("Firewall replacement");
+      // Provenance preserves the source chain: the source digest and the
+      // real revision ride the result, never a silently-mutated doc digest.
+      expect(read.provenance).toMatchObject({
+        orgId: ORG,
+        integrationId: HALO_INTEGRATION_ID,
+        operationId: "Ticket_Get",
+        specDigest: pinned.specDigest,
+        specVersion: HALO_REAL_SPEC_VERSION,
+      });
+      expect(read.provenance.specDigest).not.toBe(pinned.overlayDigest);
+      expect(JSON.stringify(read)).not.toContain(HALO_SECRET);
+      expect(JSON.stringify(read)).not.toContain(HALO_ACCESS_TOKEN);
+      // The explicitly-authorized non-destructive mutation on the real
+      // POST /Actions shape, executed by an admin caller.
+      const mutated = await executeHaloOperationOnContract(
+        bindings.DB,
+        caller,
+        secrets,
+        { operationId: "Ticket_AddNote", body: { ticketid: 7, note: "Firewall replacement scheduled." } },
+        { doc, pinned },
+        {},
+        admin,
+      );
+      expect((mutated.result as { noted: boolean }).noted).toBe(true);
+      expect(mutated.provenance.operationId).toBe("Ticket_AddNote");
+      expect(JSON.stringify(mutated)).not.toContain(HALO_SECRET);
+      // Exactly one token exchange per execution, as on the lab path.
+      expect(halo.tokenCalls()).toBe(2);
+    });
+
+    it("keeps denial and admin-gate invariants on the overlaid contract", async () => {
+      await createHaloConnection();
+      mockHalo();
+      const { doc, pinned } = await pinReal();
+      const contract = { doc, pinned };
+      // Destructive without explicit enablement: deny-by-default.
+      await expect(
+        executeHaloOperationOnContract(
+          bindings.DB,
+          caller,
+          secrets,
+          { operationId: "Ticket_Delete", path: { id: "7" } },
+          contract,
+        ),
+      ).rejects.toMatchObject({ code: "OPENAPI_OPERATION_DENIED", status: 403 });
+      // Mutation without an admin caller fails closed before vendor contact.
+      await expect(
+        executeHaloOperationOnContract(
+          bindings.DB,
+          caller,
+          secrets,
+          { operationId: "Ticket_AddNote", body: { ticketid: 7, note: "x" } },
+          contract,
+        ),
+      ).rejects.toMatchObject({ code: "OPENAPI_OPERATION_FORBIDDEN", status: 403 });
+      // Unknown operations fail closed: the overlay adds four IDs, nothing else.
+      await expect(
+        executeHaloOperationOnContract(bindings.DB, caller, secrets, { operationId: "Ticket_Search" }, contract),
+      ).rejects.toMatchObject({ code: "OPENAPI_UNKNOWN_OPERATION" });
+    });
   });
 });

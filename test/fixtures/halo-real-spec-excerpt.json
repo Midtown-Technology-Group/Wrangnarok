@@ -1,0 +1,667 @@
+{
+  "provenance": {
+    "source": "https://soundit.halopsa.com/api/swagger/v2/swagger.json",
+    "retrieved": "2026-09-17",
+    "authority": "Halo-hosted tenant swagger endpoint (vendor-served OpenAPI for the Halo API)",
+    "upstream": {
+      "openapi": "3.0.1",
+      "info": {
+        "title": "Halo API",
+        "version": "v2"
+      }
+    },
+    "fullDocument": {
+      "sha256": "d6659a0828653b42b2fa42b00ba6fd55c3c10ee9b79635cd4bf57ef4b358eee2",
+      "bytes": 4873914,
+      "paths": 927,
+      "operations": 1455,
+      "missingOperationId": 1452
+    },
+    "excerpt": {
+      "paths": ["/Actions", "/Tickets/{id}"],
+      "operations": 4,
+      "note": "Verbatim operation objects for the proof subset only. components.schemas omitted (excerpt $refs dangle; the Code Mode host never resolves $refs). No operationId values were added or altered: the excerpt preserves the evidenced defect.",
+      "defect": "1452 of 1455 upstream operations carry no operationId, so validateContractDocument rejects the excerpt with OPENAPI_CONTRACT_INVALID until the local overlay assigns stable operationIds.",
+      "attribution": "Halo API spec (c) HaloPSA, served by the vendor for API consumers; excerpt vendored for interoperability testing. See https://www.usehalo.com/guides/1853."
+    }
+  },
+  "spec": {
+    "openapi": "3.0.1",
+    "info": {
+      "title": "Halo API",
+      "description": "The HaloITSM, HaloPSA and HaloCRM REST API",
+      "version": "v2"
+    },
+    "servers": [
+      {
+        "url": "/api"
+      }
+    ],
+    "security": [
+      {
+        "Bearer": []
+      }
+    ],
+    "components": {
+      "securitySchemes": {
+        "Bearer": {
+          "type": "http",
+          "description": "Please insert an API access token.",
+          "scheme": "Bearer"
+        }
+      }
+    },
+    "paths": {
+      "/Actions": {
+        "get": {
+          "tags": ["Actions"],
+          "summary": "List of Actions",
+          "description": "Use this to return multiple Actions.<br>\r\n\t\t\t\tRequires authentication.",
+          "parameters": [
+            {
+              "name": "actoutcome",
+              "in": "query",
+              "description": "(string) Filter on the name of the action.",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "actoutcomenum",
+              "in": "query",
+              "description": "(int) Filter on the system field ID.",
+              "schema": {
+                "type": "integer"
+              }
+            },
+            {
+              "name": "agentonly",
+              "in": "query",
+              "description": "(bool) Only get actions done by Agents.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "conversationonly",
+              "in": "query",
+              "description": "(bool) Only get actions relating to the Agent to End User conversation.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "count",
+              "in": "query",
+              "description": "(int) Number of actions to return in the response.",
+              "schema": {
+                "type": "integer"
+              }
+            },
+            {
+              "name": "datesearch",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "enddate",
+              "in": "query",
+              "description": "(string) Specifies the search parameter in which actions will have occured before this date.",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "excludebilling",
+              "in": "query",
+              "description": "(bool) Excludes any actions associated with billing (e.g. Send Invoice by Email).",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "excludehiddenfrominternalit",
+              "in": "query",
+              "description": "(bool) Excludes any action marked at action level to be hidden from Agents with Client Group set.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "excludeprivate",
+              "in": "query",
+              "description": "(bool) Only get public actions.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "excludesys",
+              "in": "query",
+              "description": "(bool) Exclude system actions.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "importantonly",
+              "in": "query",
+              "description": "(bool) Only get important actions.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "importanttop",
+              "in": "query",
+              "description": "(bool) Orders the response by important actions first.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includeagentdetails",
+              "in": "query",
+              "description": "(bool) Include agent details in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includeattachments",
+              "in": "query",
+              "description": "(bool) Include attachment details in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includefacebookfields",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includehtmlemail",
+              "in": "query",
+              "description": "(bool) Include the action email HTML as part of the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includehtmlnote",
+              "in": "query",
+              "description": "(bool) Include the action note HTML as part of the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includenonactionattachments",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includetranslations",
+              "in": "query",
+              "description": "(bool) Includes the translation count in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includetwitterfields",
+              "in": "query",
+              "description": "(bool) Include Twitter fields in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "intraticketonly",
+              "in": "query",
+              "description": "(bool) Get actions that are part of the .",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "ischildnotes",
+              "in": "query",
+              "description": "(bool) Only get actions from child tickets.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "isrelatednotes",
+              "in": "query",
+              "description": "(bool) Only get actions from related tickets.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "slaonly",
+              "in": "query",
+              "description": "(bool) Only get SLA hold and release actions.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "startdate",
+              "in": "query",
+              "description": "(string) Specifies the search parameter in which actions will have occured after this date.",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "supplieronly",
+              "in": "query",
+              "description": "(bool) Only get actions relating to Suppliers.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "ticket_id",
+              "in": "query",
+              "description": "(int) The ID of the Ticket to get actions for.",
+              "schema": {
+                "type": "integer"
+              }
+            },
+            {
+              "name": "timeentriesonly",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "OK",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/Actions_View"
+                  }
+                }
+              }
+            },
+            "401": {
+              "description": "Unauthorized"
+            },
+            "400": {
+              "description": "Bad Request"
+            },
+            "429": {
+              "description": "Too Many Requests"
+            }
+          }
+        },
+        "post": {
+          "tags": ["Actions"],
+          "requestBody": {
+            "content": {
+              "application/json-patch+json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Actions"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Actions"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Actions"
+                  }
+                }
+              },
+              "application/*+json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Actions"
+                  }
+                }
+              }
+            }
+          },
+          "responses": {
+            "201": {
+              "description": "Created",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/Actions"
+                  }
+                }
+              }
+            },
+            "401": {
+              "description": "Unauthorized"
+            },
+            "400": {
+              "description": "Bad Request"
+            },
+            "429": {
+              "description": "Too Many Requests"
+            }
+          }
+        }
+      },
+      "/Tickets/{id}": {
+        "get": {
+          "tags": ["Faults"],
+          "summary": "Get one Faults",
+          "description": "Use this to return a single instance of Faults.<br>\r\n\t\t\t\tRequires authentication.",
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "integer",
+                "format": "int32"
+              }
+            },
+            {
+              "name": "amailentryid",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "assignedto",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "integer"
+              }
+            },
+            {
+              "name": "consignablelines",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "debug",
+              "in": "query",
+              "description": "(bool) Include debug information in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "debug",
+              "in": "query",
+              "description": "(bool) Include debug information in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "dodatabaselookup",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "email",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "include_auditing",
+              "in": "query",
+              "description": "(bool) Include auditing in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includeagent",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includechildids",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includedetails",
+              "in": "query",
+              "description": "(bool) Include extra objects in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includelastaction",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includelastappointment",
+              "in": "query",
+              "description": "(bool) Include the last appointment in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includelinkedobjects",
+              "in": "query",
+              "description": "(bool) Include linked objects in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includenextappointment",
+              "in": "query",
+              "description": "(bool) Include the next appointment in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includeparentchangeinfo",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includeparentsubject",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "includeseenby",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "is_portal",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "isdetailscreen",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "ishalolink",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "ispreview",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "isteams",
+              "in": "query",
+              "description": "(bool) Returns only teams tickets in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "nocache",
+              "in": "query",
+              "description": "(bool) Whether to cache the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "subject",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "string"
+              }
+            },
+            {
+              "name": "ticketidonly",
+              "in": "query",
+              "description": "(bool) Include only details related to the ticket specified in the response.",
+              "schema": {
+                "type": "boolean"
+              }
+            },
+            {
+              "name": "utcoffset",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "OK",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/Faults"
+                  }
+                }
+              }
+            },
+            "401": {
+              "description": "Unauthorized"
+            },
+            "400": {
+              "description": "Bad Request"
+            },
+            "404": {
+              "description": "Not Found"
+            },
+            "429": {
+              "description": "Too Many Requests"
+            }
+          }
+        },
+        "delete": {
+          "tags": ["Faults"],
+          "summary": "Delete one Faults",
+          "description": "Delete specific Faults.<br>\r\n\t\t\t\tRequires authentication.",
+          "parameters": [
+            {
+              "name": "id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "integer",
+                "format": "int32"
+              }
+            },
+            {
+              "name": "reason",
+              "in": "query",
+              "description": "",
+              "schema": {
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "OK"
+            }
+          }
+        }
+      }
+    }
+  }
+}
