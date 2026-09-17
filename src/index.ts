@@ -328,6 +328,7 @@ import {
   loadSagaPolicy,
   parseStoredPolicy,
   policySnapshot,
+  shouldConfirmCancel,
   storeSagaPolicy,
   submit,
   summary,
@@ -1688,16 +1689,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       } catch (error) {
         terminateOutcome = classifyTerminateError(error);
       }
-      // Known terminal outcomes confirm the logical cancel (ADR 001): a
-      // delivered stop; an engine that already settled (complete/errored/
-      // terminated — the terminal fence already guards racing checkpoints); or
-      // a vacuous stop on an undispatched Pending row (dispatch was never
-      // confirmed, so the native side has nothing left running).
-      if (
-        terminateOutcome === "stopped" ||
-        terminateOutcome === "already-settled" ||
-        (terminateOutcome === "not-found" && priorStatus === "Pending" && priorDispatched === 0)
-      ) {
+      // Known terminal outcomes confirm the logical cancel; anything else
+      // rolls back and answers 503 (RUN-04, issue #151). The decision lives
+      // in shouldConfirmCancel() next to the fenced terminal write it gates.
+      if (shouldConfirmCancel(terminateOutcome, priorStatus, priorDispatched)) {
         // Best-effort child fan-out (RUN-02, ADR 018): still-active direct
         // children get the same mark-terminate-classify treatment. Ambiguous
         // children stay active and inspectable; parent confirmation never

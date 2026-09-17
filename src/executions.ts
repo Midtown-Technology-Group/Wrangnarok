@@ -18,7 +18,15 @@ import {
   RECOVERY_WINDOW_MS,
   smokeSaga,
 } from "./domain";
-import type { ExecutionStatus, HistoryQuery, Principal, SafeError, SagaDef, SagaRuntimePolicy } from "./domain";
+import type {
+  ExecutionStatus,
+  HistoryQuery,
+  Principal,
+  SafeError,
+  SagaDef,
+  SagaRuntimePolicy,
+  TerminateOutcome,
+} from "./domain";
 import { executionId as hashExecutionId } from "./domain";
 import type { Connection } from "./integrations";
 import { buildOrgCtx } from "./saga";
@@ -566,6 +574,24 @@ export async function persistRunFailure(
     await step.do("persist-failure-v1", () => failExecution(ctx.db, id, safe));
   }
   throw new NonRetryableError(safe.code);
+}
+/** RUN-04 confirm decision (issue #151, ADR 001): known native terminal
+ * outcomes confirm the logical cancel — a delivered stop, an engine that
+ * already settled (the terminal fence guards racing checkpoints), or a
+ * vacuous stop on an undispatched Pending row (dispatch was never confirmed,
+ * so the native side has nothing left running). Every other outcome
+ * (transient/control-plane failure anywhere on the lookup + terminate path,
+ * vanished dispatched instance) is ambiguous: the caller must roll back to
+ * the prior active status and answer 503 CANCELLATION_UNCONFIRMED, never
+ * report a confirmed stop. Pure, next to the fenced terminal write it gates,
+ * so the single authoritative cancel route cannot drift from the contract. */
+export function shouldConfirmCancel(
+  outcome: TerminateOutcome,
+  priorStatus: ExecutionStatus,
+  priorDispatched: number,
+): boolean {
+  if (outcome === "stopped" || outcome === "already-settled") return true;
+  return outcome === "not-found" && priorStatus === "Pending" && priorDispatched === 0;
 }
 export async function cancelExecution(db: D1Database, id: string): Promise<void> {
   // Second half of Running/Pending -> Cancelling -> Cancelled. Conditional on
