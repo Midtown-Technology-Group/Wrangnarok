@@ -86,6 +86,27 @@ execution path (the submit protocol stays the single dispatch path).
 Subscriptions, fan-out, operator replay, and built-in platform events stay
 deferred to later TRG-03 slices.
 
+### TRG-03 S2 implementation (2026-09-17, issue #139)
+
+The second slice adds scoped subscriptions plus bounded fan-out in the same
+`src/events.ts` (migration 0033: `event_subscriptions` plus
+`event_deliveries`): one subscription binds one source to one target Saga
+through a typed topic filter (exact dot-namespaced topics, or a trailing
+`.*` namespace prefix). One accepted operator event fans out through the
+existing submit protocol to every eligible subscriber — exact-org rows in
+deterministic name order, stable per-(subscription, event) `evt-`
+idempotency keys (caller squatting rejected at `parseCallerKey`), and
+per-subscriber fencing copied from `promoteWindow`: disable/delete fences
+via re-read-by-id plus pre-dispatch authority revalidation through the
+canonical `resolveCurrentAuthority`/saga-grant path, so revoked authority
+never resurrects. The per-event admission bound is `EVENT_FANOUT_LIMIT`
+(10 dispatches; overflow reports as an explicit count, never silently
+dropped). Delivery receipts give per-subscription replay visibility;
+re-emitting the same event converges via same-key replay, which is also
+the restart-recovery story. Operator replay/retry APIs, built-in platform
+events, and retention policy stay deferred to S3. Still Worker + Workflows
++ D1 only: no Queue, no Durable Object, no second auth or execution path.
+
 ### Same-window deduplication is not cross-window overlap policy
 
 **Audit correction (2026-09-11, [#132](https://github.com/MTG-Thomas/Wrangnarok/issues/132)):** the rules below suppress duplicate delivery of the same window only. Current upstream `api/src/jobs/schedulers/cron_scheduler.py:166-203` skips a new window while an earlier delivery for the same source remains active. A deterministic key for W does not prevent W+1 from overlapping W. The schedule implementation must test both cases and decide cross-window policy explicitly; this investigation still implements neither. Upstream enum alternatives do not establish working queue/parallel overlap modes.

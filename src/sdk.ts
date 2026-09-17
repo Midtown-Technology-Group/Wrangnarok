@@ -293,6 +293,11 @@ export const SDK_ERROR_CODES = [
   "EVENT_SOURCE_DISABLED",
   "INVALID_EVENT",
   "EVENT_CONFLICT",
+  "INVALID_SUBSCRIPTION",
+  "SUBSCRIPTION_EXISTS",
+  "SUBSCRIPTION_DISABLED",
+  "SUBSCRIPTION_GONE",
+  "SUBSCRIPTION_MISCONFIGURED",
   "INVALID_CHALLENGE",
   "LOCAL_AUTH_NOT_CONFIGURED",
   "ACCESS_NOT_CONFIGURED",
@@ -2769,6 +2774,42 @@ export function describeContract(): SdkContractDescriptor {
       },
       {
         method: "GET",
+        path: "/api/event-sources/:name/subscriptions",
+        description: "Subscription summaries bound to one source in dispatch order (TRG-03 S2).",
+      },
+      {
+        method: "POST",
+        path: "/api/event-sources/:name/subscriptions",
+        description:
+          "Register a subscription binding a topic filter to a target Saga (TRG-03 S2; 409 on duplicate name).",
+      },
+      {
+        method: "GET",
+        path: "/api/event-sources/:name/subscriptions/:subscription",
+        description: "Subscription detail with topic filter and enablement (TRG-03 S2).",
+      },
+      {
+        method: "DELETE",
+        path: "/api/event-sources/:name/subscriptions/:subscription",
+        description: "Delete a subscription; its delivery receipts go with it (TRG-03 S2).",
+      },
+      {
+        method: "POST",
+        path: "/api/event-sources/:name/subscriptions/:subscription/enable",
+        description: "Re-enable a subscription for fan-out (TRG-03 S2).",
+      },
+      {
+        method: "POST",
+        path: "/api/event-sources/:name/subscriptions/:subscription/disable",
+        description: "Disable a subscription; dispatched Executions run to terminal (TRG-03 S2).",
+      },
+      {
+        method: "GET",
+        path: "/api/event-sources/:name/subscriptions/:subscription/deliveries",
+        description: "Newest-first bounded delivery receipts for replay visibility (TRG-03 S2).",
+      },
+      {
+        method: "GET",
         path: "/api/logs",
         description:
           "OBS-02 operator log search across the caller's own rows (level, sagaId, sagaName, startDate, endDate, limit, cursor).",
@@ -3393,7 +3434,7 @@ export function describeContract(): SdkContractDescriptor {
         name: "event-sources",
         status: "tracked",
         detail:
-          "Event-source registry plus durable org-scoped event log (TRG-03 S1, issue #139): operator create/enable/disable, typed dot-namespaced topics, deterministic (source, event) emit with same-content replay and 409 on mismatched content, best-effort delivery appends from schedule promotion and endpoint delivery, bounded newest-first history. Subscriptions, fan-out, operator replay, and built-in platform events stay deferred.",
+          "Event-source registry plus durable org-scoped event log (TRG-03 S1, issue #139): operator create/enable/disable, typed dot-namespaced topics, deterministic (source, event) emit with same-content replay and 409 on mismatched content, best-effort delivery appends from schedule promotion and endpoint delivery, bounded newest-first history. S2 adds scoped subscriptions binding topic filters to a target Saga with bounded fan-out through the submit protocol (stable evt- keys, per-subscriber disable/authority fencing, explicit overflow, delivery receipts). Operator replay and built-in platform events stay deferred to S3.",
       },
       {
         name: "dynamic-forms",
