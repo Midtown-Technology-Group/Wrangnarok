@@ -63,7 +63,7 @@ export const NAV_ENTRIES: NavEntry[] = [
   {
     label: "Integrations",
     enabled: false,
-    issue: `${REPO}/issues/18`,
+    issue: `${REPO}/issues/160`,
     phase: "Phase 2 / Phase 3",
   },
   {
@@ -81,7 +81,7 @@ export const NAV_ENTRIES: NavEntry[] = [
   {
     label: "Triggers",
     enabled: false,
-    issue: `${REPO}/issues/16`,
+    issue: `${REPO}/issues/139`,
     phase: "Phase 2 / Phase 4",
   },
   {
@@ -99,7 +99,7 @@ export const NAV_ENTRIES: NavEntry[] = [
   {
     label: "Tables",
     enabled: false,
-    issue: `${REPO}/issues/15`,
+    issue: `${REPO}/issues/154`,
     phase: "Phase 4",
   },
 ];
