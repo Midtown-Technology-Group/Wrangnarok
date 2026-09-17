@@ -268,6 +268,65 @@ export function digestTextSync(text: string): Promise<string> {
   return digestBytes(new TextEncoder().encode(text));
 }
 
+/** Pin a defective provider contract together with its correcting overlay:
+ * digest the exact source bytes, apply the overlay, then strictly validate
+ * the corrected document. The pin records the source specDigest (never a
+ * silently-mutated doc digest) alongside the non-null overlayDigest, so the
+ * provenance chain stays anchored to the upstream artifact. Fail-closed
+ * when the source does not parse, the overlay does not reconcile, the
+ * corrected document is still invalid, or no allowed origin is configured. */
+export async function pinContractWithOverlay(
+  integration: { readonly id: string; readonly name: string },
+  sourceText: string,
+  allowedOrigins: readonly string[],
+  overlay: SpecOverlay,
+): Promise<{ pinned: PinnedContract; doc: OpenApiDocument }> {
+  if (new TextEncoder().encode(sourceText).length > SPEC_BYTES_MAX) {
+    throw invalid("OPENAPI_CONTRACT_TOO_LARGE", "The OpenAPI contract exceeds the 2 MiB pin bound.");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(sourceText);
+  } catch {
+    throw invalid("OPENAPI_CONTRACT_INVALID", "The OpenAPI contract must parse as JSON.");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw invalid("OPENAPI_CONTRACT_INVALID", "The OpenAPI contract must be a JSON object.");
+  }
+  const overlaid = await applySpecOverlay(parsed as OpenApiDocument, overlay);
+  const { version } = validateContractDocument(overlaid.doc);
+  checkAllowedOrigins(allowedOrigins);
+  return {
+    pinned: Object.freeze({
+      integrationId: integration.id,
+      integrationName: integration.name,
+      specDigest: await digestTextSync(sourceText),
+      specVersion: version,
+      allowedOrigins: Object.freeze([...allowedOrigins]),
+      overlayDigest: overlaid.overlayDigest,
+      pinnedAt: new Date().toISOString(),
+    }),
+    doc: overlaid.doc,
+  };
+}
+
+function checkAllowedOrigins(allowedOrigins: readonly string[]): void {
+  if (allowedOrigins.length === 0) {
+    throw invalid("OPENAPI_CONTRACT_INVALID", "Pinning needs at least one allowed origin.");
+  }
+  for (const origin of allowedOrigins) {
+    let url: URL;
+    try {
+      url = new URL(origin);
+    } catch {
+      throw invalid("OPENAPI_CONTRACT_INVALID", `Allowed origin ${JSON.stringify(origin)} is not a URL.`);
+    }
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
+      throw invalid("OPENAPI_CONTRACT_INVALID", `Allowed origin ${JSON.stringify(origin)} is not an http(s) origin.`);
+    }
+  }
+}
+
 /** Pin a validated contract: digest the exact bytes, record the version and
  * the Integration-configured origin allowlist. Enforces the spec size bound
  * before hashing so oversized specs fail before they cost hashing work. */
@@ -287,20 +346,7 @@ export async function pinContract(
     throw invalid("OPENAPI_CONTRACT_INVALID", "The OpenAPI contract must parse as JSON.");
   }
   const { version } = validateContractDocument(parsed);
-  if (allowedOrigins.length === 0) {
-    throw invalid("OPENAPI_CONTRACT_INVALID", "Pinning needs at least one allowed origin.");
-  }
-  for (const origin of allowedOrigins) {
-    let url: URL;
-    try {
-      url = new URL(origin);
-    } catch {
-      throw invalid("OPENAPI_CONTRACT_INVALID", `Allowed origin ${JSON.stringify(origin)} is not a URL.`);
-    }
-    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
-      throw invalid("OPENAPI_CONTRACT_INVALID", `Allowed origin ${JSON.stringify(origin)} is not an http(s) origin.`);
-    }
-  }
+  checkAllowedOrigins(allowedOrigins);
   return Object.freeze({
     integrationId: integration.id,
     integrationName: integration.name,
@@ -310,6 +356,74 @@ export async function pinContract(
     overlayDigest,
     pinnedAt: new Date().toISOString(),
   });
+}
+
+/** Local overlay entry: the stable operationId Code Mode uses for one
+ * provider operation whose spec entry is defective (missing operationId).
+ * Keys are `"METHOD /path"` (method case-insensitive), for example
+ * `"GET /Tickets/{id}"`. Overlays never rename a vendor-supplied
+ * operationId and never touch `servers`/security blocks: egress authority
+ * stays Integration configuration, never spec content. */
+export interface SpecOverlayOperation {
+  readonly operationId: string;
+}
+
+/** Local patch over a pinned provider spec (ADR 022 contract handling):
+ * corrects known provider-spec defects without silently mutating the
+ * upstream artifact. The source bytes keep their own digest; the applied
+ * overlay carries a separate deterministic digest recorded alongside. */
+export interface SpecOverlay {
+  readonly operations: Readonly<Record<string, SpecOverlayOperation>>;
+}
+
+/** Apply a local overlay to a provider spec document. Returns a new
+ * document (the input is never mutated) plus the deterministic overlay
+ * digest: SHA-256 over the canonical overlay JSON (entries sorted by key),
+ * so the same overlay always records the same non-null digest. Fail-closed
+ * with OPENAPI_CONTRACT_INVALID when an entry names an unknown path or
+ * method, targets a non-object operation, carries a malformed operationId,
+ * or would rename an operationId the vendor already supplied. */
+export async function applySpecOverlay(
+  doc: OpenApiDocument,
+  overlay: SpecOverlay,
+): Promise<{ doc: OpenApiDocument; overlayDigest: string }> {
+  const keys = Object.keys(overlay.operations).sort();
+  const canonical = JSON.stringify(
+    keys.map((key) => ({ key, operationId: overlay.operations[key]?.operationId ?? "" })),
+  );
+  const overlayDigest = await digestTextSync(canonical);
+  const paths = doc.paths ?? {};
+  const patched: Record<string, Record<string, OperationDef>> = {};
+  for (const [path, methods] of Object.entries(paths)) {
+    patched[path] = { ...(methods as Record<string, OperationDef>) };
+  }
+  for (const key of keys) {
+    const entry = overlay.operations[key];
+    const separator = key.indexOf(" ");
+    const method = separator < 0 ? "" : key.slice(0, separator).toLowerCase();
+    const path = separator < 0 ? "" : key.slice(separator + 1);
+    const operationId = entry?.operationId;
+    if (typeof operationId !== "string" || !OPERATION_ID.test(operationId)) {
+      throw invalid("OPENAPI_CONTRACT_INVALID", `Overlay entry ${JSON.stringify(key)} needs a stable operationId.`);
+    }
+    const methods = path ? patched[path] : undefined;
+    const target = methods && method ? methods[method] : undefined;
+    if (!target || target === null || typeof target !== "object" || Array.isArray(target)) {
+      throw invalid(
+        "OPENAPI_CONTRACT_INVALID",
+        `Overlay entry ${JSON.stringify(key)} does not reconcile with the pinned contract.`,
+      );
+    }
+    const existing = (target as OperationDef).operationId;
+    if (typeof existing === "string" && existing.length > 0) {
+      throw invalid(
+        "OPENAPI_CONTRACT_INVALID",
+        `Overlay entry ${JSON.stringify(key)} would rename a vendor operationId.`,
+      );
+    }
+    patched[path]![method] = Object.freeze({ ...(target as OperationDef), operationId });
+  }
+  return { doc: Object.freeze({ ...doc, paths: Object.freeze(patched) }), overlayDigest };
 }
 
 /** Distill searchable operations from a validated contract document with
