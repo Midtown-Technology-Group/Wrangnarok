@@ -87,12 +87,8 @@ describe("MVP slice contracts", () => {
     expect(stepRetryLimit("some-future-mutation-v1")).toBe(0);
   });
   it("restricts execution transitions to the canonical table", () => {
-    expect(canTransition("Scheduled", "Pending")).toBe(true);
-    expect(canTransition("Scheduled", "Cancelling")).toBe(true);
-    expect(canTransition("Scheduled", "Running")).toBe(false);
-    expect(canTransition("Scheduled", "Scheduled")).toBe(false);
-    expect(canTransition("Pending", "Scheduled")).toBe(false);
-    expect(canTransition("Running", "Scheduled")).toBe(false);
+    // TRG-01 (issue #436): no Scheduled execution state exists — schedule
+    // promotion submits directly to Pending, so no transition touches it.
     expect(canTransition("Pending", "Running")).toBe(true);
     expect(canTransition("Pending", "Cancelling")).toBe(true);
     expect(canTransition("Running", "Succeeded")).toBe(true);
@@ -112,7 +108,6 @@ describe("MVP slice contracts", () => {
         "TimedOut",
         "Cancelling",
         "Cancelled",
-        "Scheduled",
       ] as const) {
         expect(canTransition(terminal, next)).toBe(false);
       }
@@ -217,6 +212,9 @@ describe("MVP slice contracts", () => {
       throw new Error(`expected parseHistoryQuery(${query}) to throw`);
     };
     expect(queryError("status=Bogus")).toBe("INVALID_STATUS");
+    // TRG-01 (issue #436): Scheduled is not an execution state, so the
+    // history filter rejects it instead of silently matching nothing.
+    expect(queryError("status=Scheduled")).toBe("INVALID_STATUS");
     expect(queryError("status=Failed,")).toBe("INVALID_STATUS");
     expect(queryError("status=")).toBe("INVALID_STATUS");
     expect(queryError("status=,,")).toBe("INVALID_STATUS");

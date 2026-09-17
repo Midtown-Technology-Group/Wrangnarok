@@ -2,9 +2,8 @@
 // Adapted from upstream gobifrost/bifrost client/src/lib/client-types.ts
 // (reference: vendor/upstream). Structure borrowed; Wrangnarök shapes only.
 
-/** Execution status values served by the Wrangnarök Worker (ADR 001 CHECK, plus Scheduled per TRG-01/ADR 012). */
-export type ExecutionStatus =
-  "Pending" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelling" | "Cancelled" | "Scheduled";
+/** Execution status values served by the Wrangnarök Worker (ADR 001 CHECK; TRG-01 promotes schedules directly to Pending). */
+export type ExecutionStatus = "Pending" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelling" | "Cancelled";
 
 /** One durable unit of Saga execution (maps to a Workflow step). */
 export interface OperationSummary {

@@ -3350,7 +3350,7 @@ export function describeContract(): SdkContractDescriptor {
         name: "schedule-triggers",
         status: "supported",
         detail:
-          "One-off and recurring schedules (TRG-01): create, preview UTC windows, disable/enable/delete, cancel Scheduled intents; Cron tick promotes due windows through submit with per-window idempotency.",
+          "One-off and recurring schedules (TRG-01): create, preview UTC windows, disable/enable/delete schedules; cancel Pending/Running Executions; Cron tick promotes due windows through submit with per-window idempotency.",
       },
       {
         name: "runtime-policy",
