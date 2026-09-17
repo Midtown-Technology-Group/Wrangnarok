@@ -103,6 +103,98 @@ lifecycle semantics onto D1 (Worker + Workflows + D1 only; no new primitive).
 - **Old-database tolerance**: counts and deletes for tables that postdate AUTH-01 treat a missing table as zero
   rows, so old databases preview and delete cleanly. Real query errors still throw.
 
+### Org-delete graph completion (issue #226, 2026-09-17)
+
+Follow-up decision for the deletion-preview slice of AUTH-01 ("cascading
+deletion behavior must preview retained ExecutionHistory and owned
+resources"). At the time, `deleteOrg` already cascaded artifact rows plus R2
+version objects, but the preview failed open on the managed-config count and
+the delete graph had drifted past the preview: schedules, event sources and
+subscriptions, and the AI profile/config tables were unhandled, so an org
+could preview `canDelete: true` and then fail at the D1 FK boundary with a
+raw 500-class driver error (local workerd D1 enforces foreign keys:
+`PRAGMA foreign_keys = 1`, verified by worker-runtime probe).
+
+- **Cascade, not block, for every drifted table.** Schedules plus
+  deliveries, event sources plus events, subscriptions plus deliveries,
+  `ai_model_profiles`, `ai_assignments`, `ai_embedding_config`,
+  `ai_behavior`, plus the same-defect-class `saga_policies` and
+  `tool_enrollments` (loose org-owned config with no `managed_by`
+  semantics, found by the same inventory), all cascade with the org.
+  Artifacts keep the implemented cascade (rows plus every R2 version
+  object) rather than converting to block. Rationale is Cloudflare-native
+  and boring: these are environment-state rows in the single D1 schema,
+  owned by exactly one Organization, with no Solution ownership and no
+  cross-org references, so deleting them with the tenant matches the
+  existing endpoints/configs/forms precedent. No new primitive, no
+  migration: app-level child-first deletes in the established `deleteOrg`
+  order (AI assignments before profiles, all AI rows before Connections
+  for the `ON DELETE RESTRICT` links; R2 bytes before D1 rows,
+  idempotent, missing buckets still 503 `ORG_DELETE_STORE_MISSING`).
+- **Single delete path via TRG reuse.** Schedules and event sources delete
+  one owned row at a time through the owning modules' source-local
+  functions (`deleteSchedule`, `deleteEventSource`) — the same functions
+  the operator routes use — instead of a forked cascade in `orgs.ts`. A
+  row vanishing mid-loop (concurrent operator delete) reads as already
+  gone, matching the idempotent deletes elsewhere in the cascade. This
+  adds a static import edge from `orgs.ts` to `events.ts`/`schedules.ts`;
+  it is runtime-safe (all cross-module calls happen at request time,
+  never at module evaluation) and it preserves one authoritative delete
+  path rather than two SQL texts that can drift.
+- **Fail-closed preview.** The terminal `.catch(() => 0)` on the
+  managed-config count is removed: the configs table has carried
+  `managed_by` since migration 0023, so `optionalCount()`'s missing-table
+  tolerance is the only old-schema case and every other fault rethrows. A
+  fault-injection test forces the count to fail with a non-`no such
+  table` error and asserts preview and delete fail closed with org and
+  config rows intact. (The older Connections/bundle-install `catch-0`
+  fallbacks stay: they serve genuine pre-0004 schemas with test-covered
+  fallbacks, and narrowing them to old-schema-only errors is an optional
+  follow-up.)
+- **Structured drift backstop.** An FK failure on the final
+  `organizations` delete — an owned table a newer migration added that
+  this version does not remove yet — answers 409 `DELETE_BLOCKED` with a
+  fixed message instead of a raw driver error, and the org row survives
+  so the delete retries cleanly once the drift is handled. Non-FK faults
+  still fail loud. Mid-cascade FK failures stay loud deliberately: with
+  the handled tables ordered correctly they can only be implementation
+  bugs, which must surface as bugs, not as drift.
+- **Inventory drift guard.** A worker-runtime test reads the live
+  `sqlite_master` DDL for every `REFERENCES organizations(id)` table and
+  requires each to be handled (previewed plus cascaded-or-blocked),
+  auto-cascaded (`connection_secrets`, `oauth_tokens`, with their
+  `ON DELETE CASCADE` pinned in DDL — verified to fire on connection
+  delete), or explicitly known-residual. A future migration adding an
+  org FK fails this test until its cascade-or-block decision is made. A
+  full-graph test seeds one row per handled table and proves preview and
+  delete agree with zero orphans and retained history intact.
+- **Worst-case statement counts (LIMITS-01).** Preview grows by nine
+  constant counts. Delete grows by six constant deletes (AI, policies,
+  enrollments) plus, per owned row, one name-list SELECT shared across
+  rows and then per schedule one SELECT plus one 2-statement batch, per
+  event source one SELECT plus one batch of at most four. No new
+  primitive, no Cron/Queue/DO, no per-request fan-out beyond the org's
+  own row counts: Free-tier neutral.
+- **Known residuals (follow-ups, not this slice).** `execution_logs`
+  keeps its org FK while its retention-vs-cascade decision is pending
+  (issue #494) — it is ExecutionHistory-adjacent (Saga-emitted author
+  logs over retained executions), so neither cascade nor retain is
+  unilateral here; orgs holding log rows get structured 409 via the
+  backstop until the follow-up lands. Separately, migration 0026 rebuilt
+  `executions` with an org FK that 0008 had dropped, which blocks
+  retention-pattern deletes on full-chain databases; that
+  repair-migration regression needs a steward-numbered migration of its
+  own (issue #493).
+- **Steward one-diagram check (Phase 4 gate, recorded here).**
+  Authentication/authorization: unchanged (instance-admin gate on
+  preview/delete, exact-org reads). Execution: untouched. Persistence:
+  single D1 schema, no migration, steward numbering untouched; one delete
+  path (TRG reuse, no forked cascade). Secrets: untouched (secret rows
+  ride connection cascade; no storage change). Deployment/recovery:
+  unchanged (R2-first, idempotent, retryable). No second authoritative
+  path; coverage gate green; lane touches only its scope. Verdict: PASS,
+  fan-out continues.
+
 ### Claim boundary (what this ADR does not do)
 
 Upstream exposes granular Role/Permission/Claim/policy-rule management (`roles.py`, `claims.py`, `policy_rules.py`,
