@@ -131,7 +131,7 @@ function fail503(): Fault {
  * Shared D1 failure mapping for the role store (one site, not one per
  * function): domain Faults thrown inside a try pass through, missing
  * migration-0013 tables answer 503, and anything else rethrows. Callers with
- * duplicate-key callers map 409.
+ * duplicate-key semantics map the residual to 409.
  */
 function storeError(error: unknown): never {
   if (error instanceof Fault) throw error;
