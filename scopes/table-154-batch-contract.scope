@@ -1,0 +1,10 @@
+# TABLE-02 canonical batch-write lane scope (issue #154, upstream #735).
+# Single canonical write_mode executor; compat shims share the path.
+# No migration, no new primitive, no auth change, no event wiring.
+src/tables.ts
+src/index.ts
+src/sdk.ts
+test/tables.test.ts
+test/tables-unit.test.ts
+docs/upstream-parity.md
+scopes/table-154-batch-contract.scope

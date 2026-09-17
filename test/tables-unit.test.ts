@@ -8,10 +8,11 @@
 // src/tables.ts code.
 import { describe, expect, it } from "vitest";
 import {
-  batchDelete,
-  batchInsert,
   countRows,
+  executeBatchDelete,
+  executeBatchWrite,
   loadTable,
+  parseBatchRequest,
   parseTableQuery,
   requireVisibleTable,
   TABLE_BATCH_MAX,
@@ -108,10 +109,17 @@ describe("tables defensive branches", () => {
   it("retries a raced batch row by row so each item keeps its own outcome", async () => {
     const db = stubDb({ batchThrows: true, runThrowsFor: new Set(["taken"]) });
     await expect(
-      batchInsert(db, caller, table, [
-        { docId: "fresh", data: { n: 1 } },
-        { docId: "taken", data: { n: 2 } },
-      ]),
+      executeBatchWrite(
+        db,
+        caller,
+        table,
+        parseBatchRequest({
+          items: [
+            { id: "fresh", data: { n: 1 } },
+            { id: "taken", data: { n: 2 } },
+          ],
+        }),
+      ),
     ).resolves.toEqual({
       results: [
         { docId: "fresh", ok: true, error: null },
@@ -121,20 +129,68 @@ describe("tables defensive branches", () => {
           error: { code: "DOCUMENT_CONFLICT", message: 'Document "taken" already exists.' },
         },
       ],
+      count: 1,
     });
   });
 
-  it("refuses empty and oversized batch deletes before touching policy or rows", async () => {
-    const db = stubDb();
-    await expect(batchDelete(db, caller, table, [])).rejects.toMatchObject({ code: "INVALID_BATCH" });
+  it("reconciles a raced upsert row by row without losing writes", async () => {
+    const db = stubDb({ batchThrows: true, allRows: [{ doc_id: "kept" }] });
     await expect(
-      batchDelete(
+      executeBatchWrite(
+        db,
+        caller,
+        table,
+        parseBatchRequest({
+          write_mode: "merge_upsert",
+          items: [
+            { id: "kept", data: { n: 9 } },
+            { id: "fresh", data: { n: 1 } },
+          ],
+        }),
+      ),
+    ).resolves.toEqual({
+      results: [
+        { docId: "kept", ok: true, error: null },
+        { docId: "fresh", ok: true, error: null },
+      ],
+      count: 2,
+    });
+  });
+
+  it("accepts empty batch deletes and still bounds oversized ones", async () => {
+    const db = stubDb();
+    await expect(executeBatchDelete(db, caller, table, [])).resolves.toEqual({ results: [], count: 0 });
+    await expect(
+      executeBatchDelete(
         db,
         caller,
         table,
         Array.from({ length: TABLE_BATCH_MAX + 1 }, (_, index) => `doc-${index}`),
       ),
     ).rejects.toMatchObject({ code: "INVALID_BATCH" });
+  });
+
+  it("denies the whole batch before any write when the caller holds no grant", async () => {
+    const stranger = { userId: "stranger-9", orgId: "org-1" };
+    const db = stubDb();
+    await expect(
+      executeBatchWrite(db, stranger, table, parseBatchRequest({ items: [{ id: "a", data: { n: 1 } }] })),
+    ).rejects.toMatchObject({ code: "TABLE_BATCH_DENIED" });
+    await expect(
+      executeBatchWrite(
+        db,
+        stranger,
+        table,
+        parseBatchRequest({ write_mode: "merge_upsert", items: [{ id: "a", data: { n: 1 } }] }),
+      ),
+    ).rejects.toMatchObject({ code: "TABLE_BATCH_DENIED" });
+    await expect(executeBatchDelete(db, stranger, table, ["a"])).rejects.toMatchObject({
+      code: "TABLE_BATCH_DENIED",
+    });
+    // Policy precedes execution even for empty batches: no grant, no success.
+    await expect(executeBatchWrite(db, stranger, table, parseBatchRequest({ items: [] }))).rejects.toMatchObject({
+      code: "TABLE_BATCH_DENIED",
+    });
   });
 
   it("parses document_ids with first-seen set semantics and explicit bounds (issue #154)", () => {

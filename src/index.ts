@@ -275,25 +275,25 @@ import {
   type OrgRole,
 } from "./orgs";
 import {
-  batchDelete,
-  batchInsert,
-  batchUpdate,
   countRows,
   createTable,
   deleteRow,
   deleteTable,
+  executeBatchDelete,
+  executeBatchWrite,
   grantTable,
   insertRow,
   listTables,
   loadTable,
-  parseBatchBody,
   parseBatchDeleteBody,
+  parseBatchRequest,
   parseTableName,
   parseTableQuery,
   queryRows,
   readRow,
   requireVisibleTable,
   revokeTable,
+  TABLE_BATCH_BODY_LIMIT,
   TABLE_NAME,
   updateRow,
 } from "./tables";
@@ -3364,27 +3364,59 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     const tableBatchInsert = /^\/api\/tables\/([a-z0-9][a-z0-9-]{0,63})\/rows\/batch$/.exec(url.pathname);
     if (tableBatchInsert?.[1] && request.method === "POST") {
-      // All-or-denied batch insert: policy/attribution denials fail the whole
-      // batch first (403 TABLE_BATCH_DENIED); operational per-item failures
-      // ride per-item results after the surviving writes land atomically.
+      // Canonical batch-write endpoint (TABLE-02, upstream #735
+      // POST /documents/batch): { write_mode, items } over 0-1000 documents
+      // through the single executor. Legacy { items } bodies read as insert.
+      // Whole-request order: org isolation (404), validation incl. the size
+      // bound (400), policy preflight (403 TABLE_BATCH_DENIED), then
+      // per-item operational results with an ok count. The transport cap is
+      // batch-scoped (TABLE_BATCH_BODY_LIMIT); what persists still answers
+      // to the per-document CHECK.
       requireJson(request);
       const table = await loadTable(env.DB, caller.orgId, tableBatchInsert[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
-      return json(await batchInsert(env.DB, caller, table, parseBatchBody(await boundedJson(request.body))), 201);
+      return json(
+        await executeBatchWrite(
+          env.DB,
+          caller,
+          table,
+          parseBatchRequest(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT)),
+        ),
+        201,
+      );
     }
     const tableBatchUpdate = /^\/api\/tables\/([a-z0-9][a-z0-9-]{0,63})\/rows\/batch-update$/.exec(url.pathname);
     if (tableBatchUpdate?.[1] && request.method === "PUT") {
+      // Compatibility alias: update-only semantics through the same
+      // canonical executor (no second batch path). Prefer POST rows/batch
+      // with write_mode for new callers.
       requireJson(request);
       const table = await loadTable(env.DB, caller.orgId, tableBatchUpdate[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
-      return json(await batchUpdate(env.DB, caller, table, parseBatchBody(await boundedJson(request.body))));
+      return json(
+        await executeBatchWrite(
+          env.DB,
+          caller,
+          table,
+          parseBatchRequest(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT), "update"),
+        ),
+      );
     }
     const tableBatchDelete = /^\/api\/tables\/([a-z0-9][a-z0-9-]{0,63})\/rows\/batch-delete$/.exec(url.pathname);
     if (tableBatchDelete?.[1] && request.method === "POST") {
+      // Compatibility alias: batch delete through the same canonical
+      // executor family. Prefer POST rows/batch with write_mode for writes.
       requireJson(request);
       const table = await loadTable(env.DB, caller.orgId, tableBatchDelete[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
-      return json(await batchDelete(env.DB, caller, table, parseBatchDeleteBody(await boundedJson(request.body))));
+      return json(
+        await executeBatchDelete(
+          env.DB,
+          caller,
+          table,
+          parseBatchDeleteBody(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT)),
+        ),
+      );
     }
     const tableRow = /^\/api\/tables\/([a-z0-9][a-z0-9-]{0,63})\/rows\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/.exec(
       url.pathname,

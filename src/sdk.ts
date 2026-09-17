@@ -178,6 +178,7 @@ export const SDK_ERROR_CODES = [
   "DOCUMENT_TOO_LARGE",
   "DOCUMENT_WRITE_FAILED",
   "INVALID_BATCH",
+  "INVALID_WRITE_MODE",
   "INVALID_FILTER",
   "TOO_MANY_FILTERS",
   "INVALID_PREFIX",
@@ -3220,17 +3221,20 @@ export function describeContract(): SdkContractDescriptor {
       {
         method: "POST",
         path: "/api/tables/:name/rows/batch",
-        description: "Batch insert: all-or-denied policy preflight, per-item operational results.",
+        description:
+          "Canonical batch write (upstream #735 documents/batch): write_mode insert, merge_upsert, or replace_upsert over 0-1000 documents; legacy upsert:true reads as merge_upsert; return_documents:false answers count-only. All-or-denied policy preflight, per-item operational results with an ok count. Never auto-chunks.",
       },
       {
         method: "PUT",
         path: "/api/tables/:name/rows/batch-update",
-        description: "Batch update: all-or-denied policy preflight, per-item operational results.",
+        description:
+          "Compatibility alias: update-only batch through the canonical executor. Prefer POST rows/batch with write_mode.",
       },
       {
         method: "POST",
         path: "/api/tables/:name/rows/batch-delete",
-        description: "Batch delete: all-or-denied policy preflight, per-item operational results.",
+        description:
+          "Compatibility alias: batch delete through the canonical executor family. Prefer POST rows/batch with write_mode for writes.",
       },
       {
         method: "POST",
@@ -3410,7 +3414,7 @@ export function describeContract(): SdkContractDescriptor {
         name: "author-tables",
         status: "supported",
         detail:
-          "Author Tables over D1 (TABLE-02 query/count/batch slice): declarations, deny-by-absence per-action grants, bounded keyset queries, scoped counts with skip_count, all-or-denied batches. Realtime subscriptions stay deferred.",
+          "Author Tables over D1 (TABLE-02 query/count/canonical-batch slice): declarations, deny-by-absence per-action grants, bounded keyset queries, scoped counts with skip_count, canonical write_mode batches (insert, merge_upsert, replace_upsert over 0-1000 documents, count-only option, no auto-chunk). Realtime subscriptions stay deferred.",
       },
       {
         name: "author-config",

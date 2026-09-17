@@ -582,9 +582,18 @@ Local status: The query/count/batch slice landed (`src/tables.ts`, migration
 deny-by-absence per-action grants, policy-safe keyset queries (nested-JSON
 filters, prefix, order, cursor pagination), scoped counts with skip_count
 (total=-1), and all-or-denied batch mutations with per-item operational
-results. Realtime table-change subscriptions (visibility transitions,
-revocation push, reconnect reconciliation) remain missing per the multi-slice
-note; retained until verified. TABLE-01 (#117) is subsumed by this slice.
+results. The canonical batch-write contract (upstream `0428e0fb` PR #735)
+ships on top: `POST /api/tables/:name/rows/batch` accepts `write_mode`
+insert, merge_upsert, or replace_upsert over 0 through 1000 documents with
+per-item submission-order results plus an ok count; legacy `{ items }`
+bodies read as insert and legacy `upsert:true` reads as merge_upsert;
+`return_documents:false` answers count-only; 1001+ is rejected before any
+write and the caller never auto-chunks. The `rows/batch-update` and
+`rows/batch-delete` routes remain as compatibility aliases through the same
+canonical executor (no second batch semantics path). Realtime table-change
+subscriptions (visibility transitions, revocation push, reconnect
+reconciliation) remain missing per the multi-slice note; retained until
+verified. TABLE-01 (#117) is subsumed by this slice.
 
 Physical document-ID batch filter (issue #154, upstream `8af322ac` PR #730):
 repeated `document_ids` query keys constrain rows and counts to the named IDs
@@ -603,9 +612,19 @@ bound `?` parameter (never interpolation) under the existing
 and isolation are unchanged: the read grant is checked first (denied callers
 answer 404, never an empty page) and Organization scoping rides table_id.
 
-D1 bounds and blockers (explicit, Free-tier posture): 4 KB per document, 25
-items per batch, 25 document_ids per query (255 chars each), 1000-row scan
-caps, limit 1-50, 5 nested filters. Unsupported
+D1 bounds and blockers (explicit, Free-tier posture): 4 KB per document, 0
+through 1000 documents per batch, 25 document_ids per query (255 chars each),
+1000-row scan caps, limit 1-50, 5 nested filters. The 1000-document bound is
+viable on Free by construction: preflight IN-lists chunk at 90 IDs (90 plus
+table_id stays under the 100-bound-parameter cap), writes chunk at 100
+statements per batch() call (each INSERT carries at most ~4.6 KB against the
+100 KB statement cap; no documented cap bounds one call's statement count),
+and a full-size request spends about 25 D1 calls (load, policy, 12
+preflights, 10 writes) against the 50-queries-per-invocation Free cap — each
+method call counts once, the same reading `docs/feasibility-envelope.md`
+uses. The batch route body caps at 5 MB (1000 capped documents plus ids and
+envelope fit; what persists still answers to the per-document CHECK).
+Unsupported
 query operators fail closed (UNSUPPORTED_QUERY / INVALID_ORDER / INVALID_CURSOR
 for offset or custom sorts: no offset pagination, no custom sorts, no
 projection, no managed indexes, no version tokens). D1 limits recorded as
@@ -615,6 +634,23 @@ large Tables are production-shaped (explicit deletion only in this slice);
 single-database transactions only (batch() is one-database atomic, no
 cross-database semantics); JSON filtering is application-side over the bounded
 keyset window (no PostgreSQL JSONB assumptions, no managed indexes yet).
+
+Canonical batch adaptations (labeled, Cloudflare-driven): upsert modes
+compose insert plus update grants fail-closed — upstream row-policies have no
+local per-action split, so an insert-only caller must not gain update power
+through upsert, and vice versa. Merge and replace upsert share one wholesale
+effect because local documents are whole objects; both modes stay accepted
+for SDK portability. Idless rows take a server UUID before the preflight.
+Tables are never auto-created on write: the declaration must exist, so
+writes cannot bypass owner attribution. Post-commit table-change events stay
+with the retained realtime subcase (TRG-03 owns the event log); no event
+wiring in this slice. The response carries `{ results, count }` with
+submission ordering; `return_documents:false` answers `{ results: [], count }`
+(the local results never embed documents, so the flag suppresses per-item
+detail). Whole-request order is deterministic: org isolation (404),
+validation including the size bound (400), policy preflight (403
+TABLE_BATCH_DENIED), then per-item operational results with a raced writer
+reconciled per item.
 
 Depends: TABLE-01, AUTH-02, OBS-02
 
@@ -647,6 +683,19 @@ Upstream `8af322ac` (PR #730, bounded `document_ids` filter) evidence:
   - `api/tests/performance/test_table_document_id_pagination.py`
   - `api/tests/unit/sdk/test_sdk_tables.py`
   - `client/src/lib/app-sdk/tables.test.ts`
+
+Upstream `0428e0fb` (PR #735, canonical batch-write contract) evidence:
+
+- `api/src/models/contracts/tables.py`
+- `api/src/routers/tables.py`
+- `api/shared/table_batch_writes.py`
+- `api/bifrost/tables.py`
+- Upstream tests:
+  - `api/tests/unit/test_table_batch_contract.py`
+  - `api/tests/unit/test_table_bulk_upsert_route.py`
+  - `api/tests/e2e/test_table_batch_write_engine.py`
+  - `api/tests/e2e/api/test_tables_batch.py`
+  - `api/tests/e2e/platform/test_policies.py` batch cases
 
 ## FORM-01: Deliver the existing Forms-to-Saga input binding slice
 
