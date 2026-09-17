@@ -140,9 +140,19 @@ function requireAuthorizeEndpoint(value: unknown): string {
  * Connection endpoint by the exchange primitive, so the client secret only
  * ever travels to the Connection's own vendor host. Absolute URLs are
  * rejected — a separate auth host is a documented non-goal for this slice,
- * matching the existing derived-token-host posture. */
+ * matching the existing derived-token-host posture. A second leading slash
+ * (protocol-relative URLs change the host) and backslashes (WHATWG URL
+ * treats them as slashes for http(s) bases) are rejected for the same
+ * reason: with a single leading slash and neither, resolution provably
+ * stays on the Connection's host. */
 function requireTokenPath(value: unknown): string {
-  if (typeof value !== "string" || !value.startsWith("/") || value.length > 512) {
+  if (
+    typeof value !== "string" ||
+    !value.startsWith("/") ||
+    value.startsWith("//") ||
+    value.includes("\\") ||
+    value.length > 512
+  ) {
     throw invalid("OAUTH_REQUEST_INVALID", "The OAuth token path is invalid.");
   }
   return value;

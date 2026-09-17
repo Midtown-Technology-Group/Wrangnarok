@@ -581,8 +581,11 @@ describe("consent callback (single-use exchange plus fenced persist)", () => {
       { body: { ...base, redirectUri: "ftp://hooks-in-test.invalid/callback" }, code: "OAUTH_REQUEST_INVALID" },
       // Absolute token URLs are rejected: the exchange resolves a
       // same-host path only, so the client secret cannot be steered to an
-      // operator-chosen host.
+      // operator-chosen host. Protocol-relative and backslash paths would
+      // change the host under WHATWG URL resolution, so they fail too.
       { body: { ...base, tokenPath: "https://evil-in-test.invalid/oauth/token" }, code: "OAUTH_REQUEST_INVALID" },
+      { body: { ...base, tokenPath: "//evil-in-test.invalid/oauth/token" }, code: "OAUTH_REQUEST_INVALID" },
+      { body: { ...base, tokenPath: "/\\evil-in-test.invalid/oauth/token" }, code: "OAUTH_REQUEST_INVALID" },
       { body: { ...base, tokenPath: "oauth/token" }, code: "OAUTH_REQUEST_INVALID" },
       { body: { ...base, clientId: "" }, code: "OAUTH_REQUEST_INVALID" },
       { body: { ...base, clientId: "c".repeat(257) }, code: "OAUTH_REQUEST_INVALID" },
