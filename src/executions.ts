@@ -25,6 +25,7 @@ import { buildOrgCtx } from "./saga";
 import type { OrgCtx, SagaEventContext, SagaStep } from "./saga";
 import { requireActiveInstall } from "./solutions";
 import type { Bindings } from "./bindings";
+import { observeD1 } from "./d1-observe";
 import { scrubExecutionError, scrubExecutionValue } from "./secrets";
 export interface ExecutionRow {
   id: string;
@@ -642,12 +643,20 @@ export async function listHistory(db: D1Database, caller: Principal, query: Hist
     clauses.push("((created_at < ?) OR (created_at = ? AND id < ?))");
     binds.push(query.cursor.createdAt, query.cursor.createdAt, query.cursor.id);
   }
-  const rows = await db
-    .prepare(
-      `SELECT ${HISTORY_COLUMNS} FROM executions WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC,id DESC LIMIT ?`,
-    )
-    .bind(...binds, query.limit + 1)
-    .all<Omit<ExecutionRow, "input_json" | "result_json" | "error_json">>();
+  const filtered =
+    query.statuses.length > 0 ||
+    query.sagaId !== undefined ||
+    query.sagaName !== undefined ||
+    query.startAt !== undefined ||
+    query.endBefore !== undefined;
+  const rows = await observeD1(filtered ? "executions.history-filtered" : "executions.history", "all", () =>
+    db
+      .prepare(
+        `SELECT ${HISTORY_COLUMNS} FROM executions WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC,id DESC LIMIT ?`,
+      )
+      .bind(...binds, query.limit + 1)
+      .all<Omit<ExecutionRow, "input_json" | "result_json" | "error_json">>(),
+  );
   const page = rows.results.slice(0, query.limit);
   const hasMore = rows.results.length > query.limit;
   const last = page[page.length - 1];
