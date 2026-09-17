@@ -120,6 +120,70 @@ export interface ConnectionTestResponse {
   test: ConnectionTestResult;
 }
 
+/** Model profile identity for GET /api/ai/profiles (AI-01, issue #164):
+ * stable IDs, operator-authored capability overrides, chat flag, transport
+ * label, capability state — provider model ids and key material never
+ * appear (the server excludes them by construction). */
+export interface AiProfileSummary {
+  id: string;
+  name: string;
+  connectionId: string;
+  integrationId: string;
+  integrationName: string;
+  enabledForChat: boolean;
+  capabilities: Record<string, unknown>;
+  capabilityState: "unknown" | "supported" | "unsupported";
+  openaiTransport: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AiProfilesResponse {
+  profiles: AiProfileSummary[];
+}
+
+export interface AiProfileResponse {
+  profile: AiProfileSummary;
+}
+
+/** One capability assignment key with its mapped profile identity (AI-01):
+ * null when unmapped or no longer resolving. */
+export interface AiAssignmentSummary {
+  key: string;
+  profile: AiProfileSummary | null;
+  updatedAt: string | null;
+}
+
+export interface AiAssignmentsResponse {
+  assignments: AiAssignmentSummary[];
+}
+
+export interface AiAssignmentResponse {
+  assignment: AiAssignmentSummary;
+}
+
+export interface AiResolutionResponse {
+  resolution: { key: string; profile: AiProfileSummary };
+}
+
+/** Embedding singleton identity (AI-01): connection identity plus
+ * dimensions only — the model id never leaves the server. */
+export interface AiEmbeddingSummary {
+  connectionId: string;
+  integrationId: string;
+  integrationName: string;
+  dimensions: number | null;
+  updatedAt: string;
+}
+
+export interface AiEmbeddingResponse {
+  embedding: AiEmbeddingSummary | null;
+}
+
+export interface AiBehaviorResponse {
+  behavior: { defaultSystemPrompt: string; updatedAt: string } | null;
+}
+
 /** Detail shape for GET /api/executions/:id. */
 export interface ExecutionDetail extends ExecutionSummary {
   runtimeStatus: string | null;

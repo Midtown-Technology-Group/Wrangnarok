@@ -7,6 +7,15 @@
 // Secrets are never bundled in client code.
 import { parseApiError } from "./api-error";
 import type {
+  AiAssignmentResponse,
+  AiAssignmentsResponse,
+  AiAssignmentSummary,
+  AiBehaviorResponse,
+  AiEmbeddingResponse,
+  AiEmbeddingSummary,
+  AiProfilesResponse,
+  AiProfileSummary,
+  AiResolutionResponse,
   AppDependency,
   AppDetail,
   AppFile,
@@ -822,6 +831,126 @@ export async function testConnection(integrationId: string): Promise<ConnectionT
     throw new Error("Unexpected connection test response shape.");
   }
   return { test: test as ConnectionTestResponse["test"] };
+}
+
+function isAiProfileSummary(value: unknown): value is AiProfileSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["name"] === "string" &&
+    typeof v["connectionId"] === "string" &&
+    typeof v["integrationId"] === "string" &&
+    typeof v["integrationName"] === "string" &&
+    typeof v["enabledForChat"] === "boolean" &&
+    typeof v["capabilities"] === "object" &&
+    v["capabilities"] !== null &&
+    (v["capabilityState"] === "unknown" ||
+      v["capabilityState"] === "supported" ||
+      v["capabilityState"] === "unsupported") &&
+    (v["openaiTransport"] === null || typeof v["openaiTransport"] === "string") &&
+    typeof v["createdAt"] === "string" &&
+    typeof v["updatedAt"] === "string"
+  );
+}
+
+function isAiAssignmentSummary(value: unknown): value is AiAssignmentSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["key"] === "string" &&
+    (v["profile"] === null || isAiProfileSummary(v["profile"])) &&
+    (v["updatedAt"] === null || typeof v["updatedAt"] === "string")
+  );
+}
+
+function isAiEmbeddingSummary(value: unknown): value is AiEmbeddingSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["connectionId"] === "string" &&
+    typeof v["integrationId"] === "string" &&
+    typeof v["integrationName"] === "string" &&
+    (v["dimensions"] === null || typeof v["dimensions"] === "number") &&
+    typeof v["updatedAt"] === "string"
+  );
+}
+
+/** GET /api/ai/profiles — model profile identities (never model ids or keys). */
+export async function listAiProfiles(): Promise<AiProfilesResponse> {
+  const data = await get("/api/ai/profiles");
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { profiles?: unknown }).profiles)) {
+    throw new Error("Unexpected AI profiles response shape.");
+  }
+  const profiles = (data as { profiles: unknown[] }).profiles;
+  if (!profiles.every(isAiProfileSummary)) throw new Error("Unexpected AI profiles response shape.");
+  return { profiles };
+}
+
+/** GET /api/ai/assignments — the six capability keys with mapped identities. */
+export async function listAiAssignments(): Promise<AiAssignmentsResponse> {
+  const data = await get("/api/ai/assignments");
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { assignments?: unknown }).assignments)) {
+    throw new Error("Unexpected AI assignments response shape.");
+  }
+  const assignments = (data as { assignments: unknown[] }).assignments;
+  if (!assignments.every(isAiAssignmentSummary)) throw new Error("Unexpected AI assignments response shape.");
+  return { assignments };
+}
+
+const AI_ASSIGNMENT_KEY = /^(primary|summarization|tuning|image_generation|video_generation|chat_default)$/;
+
+/** PUT /api/ai/assignments/:key — set (profile id) or clear (null); the
+ * server rejects clearing primary/chat_default. Admin-gated. */
+export async function setAiAssignment(key: string, profileId: string | null): Promise<AiAssignmentResponse> {
+  if (!AI_ASSIGNMENT_KEY.test(key)) throw new Error("Unexpected AI assignment key shape.");
+  if (profileId !== null && !INTEGRATION_ID.test(profileId)) throw new Error("Unexpected AI profile ID shape.");
+  const data = await putJson(`/api/ai/assignments/${key}`, { profileId });
+  const assignment = (data as { assignment?: unknown }).assignment;
+  if (!isAiAssignmentSummary(assignment)) throw new Error("Unexpected AI assignment response shape.");
+  return { assignment };
+}
+
+/** GET /api/ai/resolve/:key — fail-closed read-only resolution. */
+export async function resolveAiAssignment(key: string): Promise<AiResolutionResponse> {
+  if (!AI_ASSIGNMENT_KEY.test(key)) throw new Error("Unexpected AI assignment key shape.");
+  const data = await get(`/api/ai/resolve/${key}`);
+  const resolution = (data as { resolution?: unknown }).resolution;
+  if (
+    typeof resolution !== "object" ||
+    resolution === null ||
+    typeof (resolution as { key?: unknown }).key !== "string" ||
+    !isAiProfileSummary((resolution as { profile?: unknown }).profile)
+  ) {
+    throw new Error("Unexpected AI resolution response shape.");
+  }
+  return { resolution: resolution as AiResolutionResponse["resolution"] };
+}
+
+/** GET /api/ai/embedding — embedding singleton identity (or null). */
+export async function getAiEmbedding(): Promise<AiEmbeddingResponse> {
+  const data = await get("/api/ai/embedding");
+  const embedding = (data as { embedding?: unknown }).embedding;
+  if (embedding !== null && !isAiEmbeddingSummary(embedding)) {
+    throw new Error("Unexpected AI embedding response shape.");
+  }
+  return { embedding };
+}
+
+/** GET /api/ai/behavior — behavior row (or null when unconfigured). */
+export async function getAiBehavior(): Promise<AiBehaviorResponse> {
+  const data = await get("/api/ai/behavior");
+  const behavior = (data as { behavior?: unknown }).behavior;
+  if (
+    behavior !== null &&
+    (typeof behavior !== "object" ||
+      behavior === null ||
+      typeof (behavior as { defaultSystemPrompt?: unknown }).defaultSystemPrompt !== "string" ||
+      typeof (behavior as { updatedAt?: unknown }).updatedAt !== "string")
+  ) {
+    throw new Error("Unexpected AI behavior response shape.");
+  }
+  return { behavior: behavior as AiBehaviorResponse["behavior"] };
 }
 
 const FORM_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;

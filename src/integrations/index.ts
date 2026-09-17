@@ -534,7 +534,9 @@ function aiProviderDef(
   return defineIntegration({
     id,
     name,
-    description,
+    // Cost honesty (AI-01 acceptance): every AI Connection carries its own
+    // vendor inference cost; the platform tier never covers model calls.
+    description: `${description} Model inference is vendor-paid per Connection; Cloudflare Free never includes external model inference.`,
     secretFields: ["apiKey"],
     configSchema: [
       {

@@ -1,0 +1,22 @@
+# AI-01 build slice 2 lane scope (issue #164, Brief 2): profiles,
+# assignments, embedding/behavior entity + admin-gated routes, fail-closed
+# resolver, bounded verify/discovery, identities-only browser surface,
+# ADR 013 egress rows, parity refresh, deliberate bundle record.
+# Reuses migration 0028 — no new migration. No live inference, no
+# per-tenant keys, no new primitive.
+scopes/ai-01-build-slice2.scope
+src/ai-profiles.ts
+src/index.ts
+src/sdk.ts
+src/integrations/index.ts
+client/src/pages/AiProfiles.tsx
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+client/src/components/Nav.tsx
+client/src/App.tsx
+test/ai-01-profile-routes.test.ts
+test/ai-01-profile-ui.test.tsx
+docs/architecture/013-phase2-egress-limits.md
+docs/upstream-parity.md
+docs/feasibility-envelope.md
+scripts/check-bundle-budget.mjs

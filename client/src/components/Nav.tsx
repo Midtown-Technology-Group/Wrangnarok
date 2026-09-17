@@ -105,6 +105,12 @@ export const NAV_ENTRIES: NavEntry[] = [
     phase: "Phase 4",
   },
   {
+    label: "AI profiles",
+    to: "/ai-profiles",
+    enabled: true,
+    phase: "Phase 6 (#164)",
+  },
+  {
     label: "Profile",
     to: "/profile",
     enabled: true,
