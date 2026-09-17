@@ -1,0 +1,4 @@
+# test-250 lifecycle lane (issue #250): adversarial Workflow lifecycle tests + testing.md track docs.
+test/workflow-lifecycle.test.ts
+docs/testing.md
+scopes/lane-test-250-lifecycle.scope

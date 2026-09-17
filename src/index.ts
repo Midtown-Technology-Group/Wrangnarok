@@ -144,7 +144,6 @@ import {
   updateEndpoint,
   vendorChallenge,
 } from "./endpoints";
-import type { EndpointRow } from "./endpoints";
 import {
   createSchedule,
   deleteSchedule,
@@ -224,6 +223,7 @@ import {
   deleteConnection,
   getConnection,
   listConnections,
+  putConnectionSecrets,
   scrubConnectionPayload,
   testConnection,
   updateConnection,
@@ -493,7 +493,10 @@ async function handlePublicDelivery(request: Request, env: Bindings): Promise<Re
   if (queryKeys.some((entry) => entry !== "challenge")) {
     throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
   }
-  const rows = await loadEndpointsByName(env.DB, name).catch(() => [] as EndpointRow[]);
+  // Fail closed: a D1/query/schema fault propagates to the sanitized 5xx
+  // path (a retryable infrastructure error for vendors), never to a
+  // permanent-looking 404. Only a genuine empty result answers NOT_FOUND.
+  const rows = await loadEndpointsByName(env.DB, name);
   if (rows.length === 0) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
   const challengeRow = findChallengeEndpoint(rows.filter((row) => row.kind === "webhook"));
   const challenge = challengeRow ? vendorChallenge(challengeRow, url) : null;
@@ -2577,7 +2580,8 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // authorized boundary. Every response is scrubbed with the deployment
     // secrets before send; views carry required-secret names only, never
     // values. Secret values are never accepted on any path here (SEC-02
-    // tripwire stays shut). One explicit matcher per route.
+    // tripwire fired for Connection credentials, issue #411; OAuth token
+    // persistence stays shut). One explicit matcher per route.
     if (url.pathname === "/api/integrations" && request.method === "GET") {
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
       return json(scrubConnectionPayload({ integrations: describeIntegrations() }, env));
@@ -2661,6 +2665,20 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       }
       await deleteConnection(env.DB, caller, connOne[1]);
       return json({ deleted: true });
+    }
+    // Per-Organization secrets (SEC-02, issue #411): the exclusive route
+    // that accepts secret values. Values arrive in the POST body only
+    // (stdin-fed by the CLI in P2); the response carries the masked view,
+    // never values. Same admin rule as the mapping writes above.
+    const connSecrets = /^\/api\/connections\/([0-9a-f-]{36})\/secrets$/.exec(url.pathname);
+    if (connSecrets?.[1] && request.method === "PUT") {
+      requireJson(request);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CONNECTION_FORBIDDEN", "Only an admin may manage Connections.");
+      }
+      const body = (await boundedJson(request.body)) as { secrets?: unknown };
+      const stored = await putConnectionSecrets(env.DB, caller, connSecrets[1], body.secrets, env.SECRETS_KEK);
+      return json(scrubConnectionPayload({ connection: stored }, env));
     }
     // TOOL-01 opt-in Saga tools (issue #170, ADR 022): explicit enrollment
     // with stable identity, collision-safe names, and distinctive

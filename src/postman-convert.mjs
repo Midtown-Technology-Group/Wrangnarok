@@ -153,6 +153,12 @@ export function convertPostmanCollection(collection) {
       openapi: "3.0.3",
       info: { title: infoName.slice(0, 120), version: "postman-v2.1" },
       paths,
+      components: {
+        securitySchemes: {
+          PostmanApiToken: { type: "http", scheme: "bearer", bearerFormat: "token" },
+        },
+      },
+      security: [{ PostmanApiToken: [] }],
     },
     converterVersion: CONVERTER_VERSION,
     synthesized,

@@ -97,6 +97,12 @@ export interface PostmanConvertResult {
     readonly openapi: string;
     readonly info: { readonly title: string; readonly version: string };
     readonly paths: Record<string, Record<string, { readonly operationId: string; readonly summary: string }>>;
+    readonly components: {
+      readonly securitySchemes: {
+        readonly PostmanApiToken: { readonly type: string; readonly scheme: string; readonly bearerFormat: string };
+      };
+    };
+    readonly security: ReadonlyArray<Record<string, readonly string[]>>;
   };
   readonly converterVersion: string;
   readonly synthesized: number;
@@ -106,7 +112,10 @@ export interface PostmanConvertResult {
 /** Convert a Postman Collection v2.1 document to a minimal OpenAPI 3.x
  * document the Code Mode validator accepts. Folder nesting flattens in
  * document order; duplicate operationIds (after synthesis) fail closed;
- * items without a method or path are dropped and counted, never guessed. */
+ * items without a method or path are dropped and counted, never guessed.
+ * Collections carry no auth metadata, so the converted document declares a
+ * bearer ApiToken scheme: the generator emits the bearer shape and the
+ * operator supplies the token via Connection credentials (never embedded). */
 export function convertPostmanCollection(collection: unknown): PostmanConvertResult {
   if (collection === null || typeof collection !== "object" || Array.isArray(collection)) {
     throw new Error("The Postman collection must be a JSON object.");
@@ -192,6 +201,12 @@ export function convertPostmanCollection(collection: unknown): PostmanConvertRes
       openapi: "3.0.3",
       info: { title: infoName.slice(0, 120), version: "postman-v2.1" },
       paths,
+      components: {
+        securitySchemes: {
+          PostmanApiToken: { type: "http", scheme: "bearer", bearerFormat: "token" },
+        },
+      },
+      security: [{ PostmanApiToken: [] }],
     },
     converterVersion: CONVERTER_VERSION,
     synthesized,

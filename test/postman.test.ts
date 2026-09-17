@@ -38,6 +38,10 @@ describe("INT-01 Postman converter (issue #229)", () => {
       "/api/Tickets/{id}": { get: { operationId: "Get_One_Ticket" } },
       "/api/Tickets/{id}/Notes": { post: { operationId: "Post_Api_Tickets_Id_Notes" } },
     });
+    // Collections carry no auth metadata: the converted document declares a
+    // bearer scheme so the generator emits the bearer shape (never OAuth).
+    expect(out.doc.components.securitySchemes.PostmanApiToken).toMatchObject({ type: "http", scheme: "bearer" });
+    expect(out.doc.security).toEqual([{ PostmanApiToken: [] }]);
     expect(out.synthesized).toBe(1);
     expect(out.dropped).toBe(1);
   });

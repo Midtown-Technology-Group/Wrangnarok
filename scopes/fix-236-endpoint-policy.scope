@@ -1,0 +1,7 @@
+# Lane scope: fix/236-endpoint-policy (issue #236).
+# Per-Integration endpoint safe-URL policy: halo lab-origin allowlist,
+# explicit ninjaone branch, fail-closed default; tests; arch spec line.
+scopes/fix-236-endpoint-policy.scope
+src/integrations/index.ts
+test/integrations.test.ts
+docs/architecture/003-integrations-connections.md

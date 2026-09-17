@@ -136,6 +136,37 @@ Files with intentional partial-migration coverage (pre-migration 503 gates,
 DROP-rebuild sequences) keep their hand-built setup and must NOT adopt the
 harness: applying the full set would mask the gate under test.
 
+## Adversarial lifecycle track (issue #250)
+
+`test/workflow-lifecycle.test.ts` provokes mid-lifecycle death against the
+real local Workflow engine and pins the two invariants nothing else covers:
+
+- terminating an instance mid-run never reads as success: detail keeps the
+  engine `runtimeStatus` (`"terminated"`) beside the D1 checkpoint, `result`
+  stays null, and operation checkpoints stay inspectable for reproduction;
+- a same-key resubmit after mid-flight death replays the receipt without
+  redispatching: the `dispatched` marker holds, so no second Workflow
+  instance and no second vendor call.
+
+Technique: the mocked vendor fetch is gated on a deferred promise, so
+termination always lands with a vendor call provably in flight (scripted
+interleaving, no sleeps, no timing assumptions); termination goes through
+the native binding handle (`binding.get(id).terminate()`), the same call
+the cancel route makes. `terminate` prints workerd `Aborting engine` noise
+to stderr — expected, covered by the harness drain, not a failure.
+
+Explicitly out of scope: duplicate/out-of-order *events*. `waitForEvent`
+is not part of the Saga contract (`src/saga.ts`), so there is no
+event-driven path to exercise; the determinism scanner already fails
+closed on it.
+
+Local-emulation limits: Miniflare runs real Workflow code but termination,
+restart, and history-expiry timing are emulated — a green local run proves
+the D1/engine contract, not production timing. The real-edge subset (retry
+and durability behavior that depends on production Workflow semantics) is
+periodic, uses only disposable test data and synthetic credentials, and is
+never required for ordinary development or merges.
+
 ## CI direction
 
 Initial CI should require:

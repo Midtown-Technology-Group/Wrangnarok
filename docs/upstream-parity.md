@@ -15,7 +15,7 @@ Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 28 Par
 | RUN-01 | Persist and enforce per-Saga runtime policy without changing source identity | 2 | Partial | AUTH-02 | new |
 | RUN-02 | Invoke child Sagas with explicit context, completion and failure semantics | 2 | Missing | AUTH-02, RUN-01 | new |
 | TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented (gaps reopened, see #137) | AUTH-02, RUN-01 | #137 |
-| TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01 | #138 |
+| TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01, AUTH-03, CON-01 | #138 |
 | TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Missing | TRG-01, TRG-02, AUTH-02 | new |
 | DEV-01 | Provide a complete typed TypeScript author and automation SDK | 1+4 | Partial | — | new |
 | DEV-02 | Preview, sync and deploy author source with explicit dependency compatibility | 5 | Partial | DEV-01, SOL-01 | new |
@@ -141,9 +141,9 @@ Related Wrangnarok issues: #76
 
 Phase 2; **Partial**; existing issue: #138
 
-Local status: Scoped api-key endpoints (`POST /api/endpoints/:name`) and HMAC webhook endpoints (`POST /hooks/:name`) bind a name to a deployed Saga (ADR 018, migration 0021). Deliveries verify per-endpoint keys (expiry, disable/rotate revocation) or HMAC signatures against deployment-store secrets, answer echo-param vendor challenges in plaintext, rate-limit per endpoint, and submit through the standard protocol with derived `wep-` keys (202 receipt, 200 replay, 409 mismatch). Operator create/list/read/update/rotate/history ride the AUTH-01 membership gate. Upstream sync-mode inline results stay deferred to RUN-03; per-tenant webhook secrets stay deployment-scoped per ADR 005 v0 (SEC-02 tripwire).
+Local status: Scoped api-key endpoints (`POST /api/endpoints/:name`) and HMAC webhook endpoints (`POST /hooks/:name`) bind a name to a deployed Saga (ADR 018, migration 0021). Deliveries verify per-endpoint keys (expiry, disable/rotate revocation) or HMAC signatures against deployment-store secrets, answer echo-param vendor challenges in plaintext, rate-limit per endpoint, and submit through the standard protocol with derived `wep-` keys (202 receipt, 200 replay, 409 mismatch). Operator create/list/read/update/rotate/history ride the AUTH-01 membership gate. Follow-through (2026-09-17): HMAC accepts canonical hex or standard padded base64 with the evidenced whitespace rules (base64url/unpadded/base64-of-hex/inner-whitespace rejected); rate-window read faults and endpoint-lookup faults fail closed to sanitized 5xx; concurrent redeliveries converge on the exact created event; unconfirmed dispatches record no event row and converge on caller redelivery with no automatic mutation retry; webhook rotate revocation pinned at route level. Upstream sync-mode inline results stay deferred to RUN-03; per-tenant webhook secrets stay deployment-scoped per ADR 005 v0 (SEC-02 tripwire).
 
-Depends: AUTH-01
+Depends: AUTH-01, AUTH-03, CON-01 (both closed)
 
 Acceptance:
 
@@ -276,9 +276,9 @@ Related Wrangnarok issues: #78
 
 ## AUTH-02: Enforce resource roles, claims and explicit delegated authorization end to end
 
-Phase 3; **Missing**; existing issue: new
+Phase 3; **Implemented**; existing issue: #143
 
-Local status: org_id/owner checks are present but there is no Role/Permission/Claim/policy model or resource-sharing control plane.
+Local status: ADR 018 (resource roles, claims-as-subjects, policy rules, deny-by-absence) ships on Worker + D1 (migration 0013, `src/roles.ts`, `test/resource-roles.test.ts`): direct Saga execution (including the provider ingress), form/app delegation, caller matrices, next-request revocation, hidden-reference 404s, and role/policy administration with consumer inspection. Open follow-through lives on #143 (tables/files spine composition, shared non-request authority resolver, policy-rule store hardening per #430, provider-route composition proof, live-subscription enforcement deferred to TRG-03/OBS-02).
 
 Depends: AUTH-01
 
@@ -402,7 +402,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase 3; **Gated**; existing issue: new
 
-Local status: Accepted v0 deliberately uses deployment-global credentials for provider-global vendors. Per-org ciphertext/key lifecycle is not implemented and is not authorized merely by a parity audit.
+Local status: ADR 005 tripwire FIRED per owner stamp 2026-09-17 (issue #411, general operator velocity). Per-Organization envelope backend merged (#419, renumbered #424): migration 0029 `connection_secrets` (ciphertext/nonce/wrapped_dek/key_version/algorithm, FK-cascaded), `src/envelope.ts` AES-GCM-256 envelope (per-Connection DEK, per-environment KEK, AAD-bound org+Connection+field, encrypt-with-latest/decrypt-with-version), admin-only `PUT /api/connections/:id/secrets` with masked views, execution resolution preferring per-org over deployment. P4 matrix green in local workerd (wrong-org/key, per-column tamper, 25x nonce uniqueness, staged re-wrap rotation, ciphertext-only D1 scans, 403/404 isolation, delete cascade, per-org-wins e2e) plus dev/prod KEK separation and ciphertext-only backup/restore recovery drill (issue #148). Provider-global v0 retained, no forced migration. Stays shut: OAuth token persistence (fetch-and-discard) and CLI P2 / UI P3 operator slices.
 
 Depends: SEC-01, CON-01
 
@@ -420,7 +420,7 @@ Upstream evidence (paths relative to upstream repo root):
 - Upstream tests:
   - `api/tests/e2e/api/test_oauth.py`
 
-Related Wrangnarok issues: #110
+Related Wrangnarok issues: #110, #411
 
 ## OAUTH-01: Complete OAuth authorization, centralized refresh and credential health lifecycle
 

@@ -8,19 +8,22 @@
 // schema validation, stable identity, managed-versus-loose ownership, and
 // secret-free views.
 //
-// Hard boundaries (SEC-02 tripwire stays shut):
-// - Non-secret config only. Secret values are never accepted, persisted,
-//   logged, or returned on any path here.
+// Hard boundaries (SEC-02, issue #411; ADR 005 firing amendment):
+// - Non-secret config only on the mapping paths below. Per-Organization
+//   secret values are accepted exclusively through putConnectionSecrets:
+//   encrypted at rest in `connection_secrets`, masked in every view, never
+//   logged, never returned.
 // - Provider-global credential requirements are declared (names + env vars)
 //   and presence-checked at test time. A missing requirement fails loud;
 //   there is no global Connection fallback, no cross-org lookup, and no
-//   per-tenant secret storage.
+//   plaintext secret storage anywhere.
 import { Fault, UUID } from "./domain";
 import type { Principal } from "./domain";
 import { assertSafeEndpoint, integrationById, validateConnectionConfig } from "./integrations";
 import type { ConnectionView } from "./integrations";
 import { scrubValueWithDeploymentSecrets } from "./secrets";
 import type { AiProviderCredentials, CloudflareCredentials, HaloCredentials, NinjaCredentials } from "./bindings";
+import { decryptConnectionSecret, encryptConnectionSecret, ENVELOPE_MAX_PLAINTEXT } from "./envelope";
 
 /** Deployment credential surface read by the management test path (CON-01).
  * Required-secret values are presence-checked only — never persisted,
@@ -63,10 +66,34 @@ function parseDisplayName(value: unknown): string | null {
   return value;
 }
 
+/** True when the per-Organization secrets table exists. Suites on partial
+ * migration chains (pre-0029) skip secrets reads; every other D1 failure
+ * still throws — a missing table is tolerated, never a real error. An
+ * explicit existence check (not error-message matching) keeps both sides
+ * honest and coverable. */
+async function hasSecretsTable(db: D1Database): Promise<boolean> {
+  const found = await db
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='connection_secrets'")
+    .first<{ ok: number }>();
+  return found !== null;
+}
+
+/** Provisioned per-Organization secret-field names for one Connection
+ * (names only, ordered; empty when none). */
+async function provisionedFields(db: D1Database, connectionId: string): Promise<string[]> {
+  if (!(await hasSecretsTable(db))) return [];
+  const found = await db
+    .prepare("SELECT field FROM connection_secrets WHERE connection_id=? ORDER BY field")
+    .bind(connectionId)
+    .all<{ field: string }>();
+  return found.results.map((entry) => entry.field);
+}
+
 /** Shape one D1 row into the secret-free management view. Redaction is by
  * construction: the view carries non-secret config plus required-secret
- * names only — no secret values exist on this path to leak. */
-function toView(row: ConnectionRow): ConnectionView {
+ * names only — no secret values exist on this path to leak. Provisioned
+ * per-Organization fields arrive as names via `provisioned`. */
+function toView(row: ConnectionRow, provisioned: readonly string[]): ConnectionView {
   const def = integrationById(row.integration_id);
   const config: Record<string, string> = { endpoint: row.endpoint };
   if (def) {
@@ -90,6 +117,7 @@ function toView(row: ConnectionRow): ConnectionView {
     managedBy: row.managed_by,
     ownerKind: row.managed_by === null ? "loose" : "managed",
     secretsRequired: def ? [...def.requiredSecrets] : [],
+    secretsProvisioned: Object.freeze([...provisioned]),
     updatedAt: row.updated_at,
   };
   return view;
@@ -122,7 +150,7 @@ export async function listConnections(db: D1Database, caller: Principal): Promis
   const views: ConnectionView[] = [];
   for (const row of rows.results) {
     if (!integrationById(row.integration_id)) continue;
-    views.push(toView(row));
+    views.push(toView(row, await provisionedFields(db, row.id)));
   }
   return Object.freeze(views);
 }
@@ -135,7 +163,7 @@ export async function getConnection(db: D1Database, caller: Principal, integrati
   if (!def) throw invalid("UNKNOWN_INTEGRATION", "Unknown Integration id.", 404);
   const row = await ownedRow(db, caller, integrationId);
   if (!row) throw invalid("CONNECTION_NOT_FOUND", "No Connection exists for this Organization and Integration.", 404);
-  return toView(row);
+  return toView(row, await provisionedFields(db, row.id));
 }
 
 export interface ConnectionWrite {
@@ -192,7 +220,7 @@ export async function createConnection(
     .run();
   const row = await ownedRow(db, caller, integrationId);
   if (!row) throw invalid("CONNECTION_NOT_FOUND", "The Connection could not be read after create.", 500);
-  return toView(row);
+  return toView(row, await provisionedFields(db, row.id));
 }
 
 /** Update a loose Connection mapping (CON-01). Managed rows reject with
@@ -237,13 +265,160 @@ export async function updateConnection(
     .run();
   const next = await ownedRow(db, caller, integrationId);
   if (!next) throw invalid("CONNECTION_NOT_FOUND", "The Connection could not be read after update.", 500);
-  return toView(next);
+  return toView(next, await provisionedFields(db, next.id));
+}
+
+/** Provision (or rotate) per-Organization secret values for the caller's
+ * Connection mapping (SEC-02, issue #411). The exclusive path that accepts
+ * secret values: each declared field encrypts into `connection_secrets`
+ * (ciphertext only) and the returned view carries provisioned names, never
+ * values. Omitted or empty fields preserve existing ciphertext (UI
+ * edit-preserve contract); undeclared fields, non-string values, managed
+ * rows, and foreign mappings all fail loud. */
+export async function putConnectionSecrets(
+  db: D1Database,
+  caller: Principal,
+  integrationId: string,
+  secrets: unknown,
+  kekMaterial: string | undefined,
+): Promise<ConnectionView> {
+  if (!UUID.test(integrationId)) throw invalid("UNKNOWN_INTEGRATION", "Unknown Integration id.", 404);
+  const def = integrationById(integrationId);
+  if (!def) throw invalid("UNKNOWN_INTEGRATION", "Unknown Integration id.", 404);
+  const row = await ownedRow(db, caller, integrationId);
+  if (!row) throw invalid("CONNECTION_NOT_FOUND", "No Connection exists for this Organization and Integration.", 404);
+  if (row.managed_by !== null) {
+    throw invalid(
+      "MANAGED_RESOURCE",
+      `Connection is managed by bundle install ${row.managed_by}: live mutation outside install is rejected.`,
+      409,
+    );
+  }
+  if (typeof kekMaterial !== "string" || kekMaterial.length === 0) {
+    throw invalid(
+      "SECRET_STORE_NOT_CONFIGURED",
+      "The per-Organization secret store is not configured for this environment.",
+      502,
+    );
+  }
+  if (secrets === null || typeof secrets !== "object" || Array.isArray(secrets)) {
+    throw invalid("INVALID_CONNECTION", "A secrets write needs a secrets object.");
+  }
+  const entries = Object.entries(secrets as Record<string, unknown>);
+  if (entries.length === 0) throw invalid("INVALID_CONNECTION", "A secrets write needs at least one secret field.");
+  const declared = new Set(def.secretFields);
+  const now = new Date().toISOString();
+  let wrote = 0;
+  for (const [field, value] of entries) {
+    if (!declared.has(field)) {
+      throw invalid("INVALID_CONNECTION", `Unknown secret field "${field}" for this Integration.`);
+    }
+    if (value === undefined || value === "") continue;
+    if (typeof value !== "string" || value.length > ENVELOPE_MAX_PLAINTEXT) {
+      throw invalid("INVALID_CONNECTION", `Secret field "${field}" must be a non-empty string.`);
+    }
+    // No try/catch: inputs are validated above to the envelope's own
+    // contract (non-empty, bounded, KEK present), so encrypt cannot fail on
+    // bad input here. An unexpected subtle failure propagates to the global
+    // 500 path with a fixed message — envelope errors carry codes, never
+    // values, so nothing secret can leak through that path either.
+    const envelope = await encryptConnectionSecret({
+      orgId: caller.orgId,
+      connectionId: row.id,
+      field,
+      plaintext: value,
+      kekMaterial,
+    });
+    await db
+      .prepare(
+        "INSERT INTO connection_secrets(connection_id,org_id,field,ciphertext,nonce,wrapped_dek,key_version,algorithm,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(connection_id,field) DO UPDATE SET ciphertext=excluded.ciphertext,nonce=excluded.nonce,wrapped_dek=excluded.wrapped_dek,key_version=excluded.key_version,algorithm=excluded.algorithm,updated_at=excluded.updated_at",
+      )
+      .bind(
+        row.id,
+        caller.orgId,
+        field,
+        envelope.ciphertext,
+        envelope.nonce,
+        envelope.wrappedDek,
+        envelope.keyVersion,
+        envelope.algorithm,
+        now,
+        now,
+      )
+      .run();
+    wrote += 1;
+  }
+  if (wrote === 0) {
+    // Keys present but all empty/undefined: edit-preserve no-op — existing
+    // ciphertext stands and the current masked view is returned. (An empty
+    // object with no keys at all is rejected above.)
+    return toView(row, await provisionedFields(db, row.id));
+  }
+  return toView(row, await provisionedFields(db, row.id));
+}
+
+interface ConnectionSecretRow {
+  readonly field: string;
+  readonly ciphertext: string;
+  readonly nonce: string;
+  readonly wrapped_dek: string;
+  readonly key_version: number;
+  readonly algorithm: string;
+}
+
+/** Decrypt a Connection's per-Organization secrets for server-side use
+ * (SEC-02, issue #411). Exact org + Connection scoping: foreign rows never
+ * load, so a wrong org resolves to no secrets rather than someone else's.
+ * Corrupt rows fail loud (never partial maps, never plaintext fallbacks).
+ * Callers register returned values with the execution-scoped registry and
+ * drop them after the Action call. */
+export async function resolveConnectionSecrets(
+  db: D1Database,
+  orgId: string,
+  connectionId: string,
+  keks: Readonly<Record<number, string>>,
+): Promise<Readonly<Record<string, string>>> {
+  if (!(await hasSecretsTable(db))) return Object.freeze({});
+  const found = await db
+    .prepare(
+      "SELECT field,ciphertext,nonce,wrapped_dek,key_version,algorithm FROM connection_secrets WHERE org_id=? AND connection_id=?",
+    )
+    .bind(orgId, connectionId)
+    .all<ConnectionSecretRow>();
+  const out: Record<string, string> = {};
+  for (const entry of found.results) {
+    try {
+      out[entry.field] = await decryptConnectionSecret({
+        orgId,
+        connectionId,
+        field: entry.field,
+        row: {
+          ciphertext: entry.ciphertext,
+          nonce: entry.nonce,
+          wrappedDek: entry.wrapped_dek,
+          keyVersion: entry.key_version,
+          algorithm: entry.algorithm,
+        },
+        keks,
+      });
+    } catch {
+      // decryptConnectionSecret throws only EnvelopeError (every subtle
+      // failure is wrapped at the throw site), so any failure here means
+      // the stored credential is unreadable — never a partial map, never
+      // a plaintext fallback. Envelope codes carry no values.
+      throw invalid("CONNECTION_SECRET_UNREADABLE", "A stored Connection credential could not be decrypted.", 500);
+    }
+  }
+  return Object.freeze(out);
 }
 
 /** Delete a loose Connection mapping (CON-01). Managed rows reject with
  * MANAGED_RESOURCE; missing rows 404. Deleting the last mapping for a
  * required Integration is allowed here — the Execution path fails loud
- * (424) on next use, which is the observable contract. */
+ * (424) on next use, which is the observable contract. Provisioned
+ * per-Organization secrets are deleted explicitly with the mapping (belt
+ * beside the FK cascade, which D1 may not enforce). Pre-0028 chains skip
+ * the secrets delete via the table check. */
 export async function deleteConnection(db: D1Database, caller: Principal, integrationId: string): Promise<void> {
   if (!UUID.test(integrationId)) throw invalid("UNKNOWN_INTEGRATION", "Unknown Integration id.", 404);
   const def = integrationById(integrationId);
@@ -256,6 +431,9 @@ export async function deleteConnection(db: D1Database, caller: Principal, integr
       `Connection is managed by bundle install ${row.managed_by}: live mutation outside install is rejected.`,
       409,
     );
+  }
+  if (await hasSecretsTable(db)) {
+    await db.prepare("DELETE FROM connection_secrets WHERE connection_id=?").bind(row.id).run();
   }
   await db
     .prepare("DELETE FROM connections WHERE org_id=? AND integration_id=?")

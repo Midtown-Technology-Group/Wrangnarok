@@ -54,6 +54,10 @@ export interface ContractOperation {
   readonly path: string;
   readonly summary: string;
   readonly risk: OperationRisk;
+  /** True when the spec marks this operation `deprecated: true`. Deprecated
+   * operations are excluded from progressive search and execution unless the
+   * caller opts in explicitly. */
+  readonly deprecated: boolean;
 }
 
 export interface OperationPolicy {
@@ -66,12 +70,18 @@ export interface OperationPolicy {
 }
 
 /** Minimal OpenAPI 3.x shape the host validates before pinning. Only the
- * fields Code Mode reads are modeled; everything else is ignored. */
+ * fields Code Mode reads are modeled; everything else is ignored.
+ * `components.securitySchemes` plus `security` blocks are modeled for the
+ * INT-01 generator auth-kind detection (never trusted as egress authority). */
 export interface OpenApiDocument {
   readonly openapi?: unknown;
   readonly info?: { readonly version?: unknown; readonly title?: unknown };
   readonly servers?: readonly { readonly url?: unknown }[];
   readonly paths?: Record<string, Record<string, OperationDef>>;
+  readonly components?: {
+    readonly securitySchemes?: Record<string, unknown>;
+  };
+  readonly security?: unknown;
 }
 
 export interface OperationDef {
@@ -80,6 +90,117 @@ export interface OperationDef {
   readonly description?: unknown;
   readonly tags?: unknown;
   readonly parameters?: unknown;
+  readonly deprecated?: unknown;
+  readonly security?: unknown;
+}
+
+/** Generator auth kinds (INT-01, issue #229): how the emitted Integration
+ * obtains its Authorization header at execution time. `apiToken` sends a
+ * bearer token resolved from Connection credentials (`Authorization: Bearer
+ * <token>`); `clientCredentials` exchanges a deployment pair for a transient
+ * token first (the HaloPSA shape); `unknown` means the spec's securitySchemes
+ * declared nothing recognizable and generation must fail closed. */
+export type GeneratorAuthKind = "apiToken" | "clientCredentials" | "unknown";
+
+/** Detect the generator auth kind from the spec's effective security
+ * requirements. Only schemes actually referenced by a `security` block
+ * (top-level, defaulting every operation, or per-operation override) select
+ * the kind: `http` bearer, `apiKey`, and `http` basic reference yield
+ * `apiToken` (bearer shape); `oauth2` with an explicit
+ * clientCredentials-capable grant yields `clientCredentials`. Unresolved
+ * references, heterogeneous requirements (operations needing different
+ * credential shapes under one host), and anything unrecognized yield
+ * `unknown` so generation fails closed instead of stamping the wrong
+ * credential shape. A spec with no security blocks at all is also `unknown`:
+ * never guess bearer from silence. */
+export function detectGeneratorAuthKind(doc: OpenApiDocument): GeneratorAuthKind {
+  const raw = doc as unknown as Record<string, unknown>;
+  const components = raw["components"];
+  const schemesRaw =
+    components !== null && typeof components === "object" && !Array.isArray(components)
+      ? (components as Record<string, unknown>)["securitySchemes"]
+      : undefined;
+  const schemes: Record<string, unknown> =
+    schemesRaw !== null && typeof schemesRaw === "object" && !Array.isArray(schemesRaw)
+      ? (schemesRaw as Record<string, unknown>)
+      : {};
+  const referenced = referencedSchemeNames(raw);
+  if (referenced.size === 0) return "unknown";
+  const lowered: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schemes)) lowered[key.toLowerCase()] = value;
+  let sawBearer = false;
+  let sawOAuth = false;
+  for (const name of referenced) {
+    const scheme = lowered[name];
+    if (scheme === null || typeof scheme !== "object" || Array.isArray(scheme)) return "unknown";
+    const entry = scheme as Record<string, unknown>;
+    const type = typeof entry["type"] === "string" ? entry["type"].toLowerCase() : "";
+    if (type === "oauth2") {
+      if (oauthGrantsClientCredentials(entry["flows"])) sawOAuth = true;
+      else return "unknown";
+      continue;
+    }
+    if (type === "http" && typeof entry["scheme"] === "string" && entry["scheme"].toLowerCase() === "bearer") {
+      sawBearer = true;
+      continue;
+    }
+    if (type === "apikey") {
+      sawBearer = true;
+      continue;
+    }
+    // Basic auth: token rides as a single bearer credential at execution
+    // time, so it shares the apiToken shape (never OAuth client fields).
+    if (type === "http" && typeof entry["scheme"] === "string" && entry["scheme"].toLowerCase() === "basic") {
+      sawBearer = true;
+      continue;
+    }
+    return "unknown";
+  }
+  // One generated host carries one credential shape: heterogeneous
+  // requirements fail closed rather than emitting a host that fits half
+  // the operations.
+  if (sawBearer && sawOAuth) return "unknown";
+  if (sawBearer) return "apiToken";
+  if (sawOAuth) return "clientCredentials";
+  return "unknown";
+}
+
+/** Every scheme name referenced by any top-level or per-operation `security`
+ * block (lowercased). Per-operation blocks override the top-level default
+ * for that operation; an empty array means anonymous for that operation.
+ * Malformed blocks contribute nothing (fail closed downstream). */
+function referencedSchemeNames(raw: Record<string, unknown>): Set<string> {
+  const names = new Set<string>();
+  const collect = (value: unknown): void => {
+    if (!Array.isArray(value)) return;
+    for (const requirement of value) {
+      if (requirement === null || typeof requirement !== "object" || Array.isArray(requirement)) continue;
+      for (const name of Object.keys(requirement as Record<string, unknown>)) names.add(name.toLowerCase());
+    }
+  };
+  collect(raw["security"]);
+  const paths = raw["paths"];
+  if (paths !== null && typeof paths === "object" && !Array.isArray(paths)) {
+    for (const methods of Object.values(paths as Record<string, unknown>)) {
+      if (methods === null || typeof methods !== "object" || Array.isArray(methods)) continue;
+      for (const def of Object.values(methods as Record<string, unknown>)) {
+        if (def === null || typeof def !== "object" || Array.isArray(def)) continue;
+        collect((def as Record<string, unknown>)["security"]);
+      }
+    }
+  }
+  return names;
+}
+
+/** True only when `flows` explicitly declares a clientCredentials-capable
+ * grant (`clientCredentials`, `client_credentials`, or `application`).
+ * Missing, malformed, or empty flows fail closed: an oauth2 scheme without
+ * an explicit grant never selects the client-credentials shape. */
+function oauthGrantsClientCredentials(flows: unknown): boolean {
+  if (flows === null || typeof flows !== "object" || Array.isArray(flows)) return false;
+  const keys = Object.keys(flows as Record<string, unknown>);
+  if (keys.length === 0) return false;
+  return keys.some((key) => ["clientcredentials", "client_credentials", "application"].includes(key.toLowerCase()));
 }
 
 const OPERATION_ID = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
@@ -195,10 +316,14 @@ export async function pinContract(
  * per-operation risk. Method-level defaults apply (safe methods read,
  * everything else mutation); the caller-supplied classification map refines
  * individual operationIds. Unknown operationIds without a classification
- * stay at their method default — writes therefore still need policy. */
+ * stay at their method default — writes therefore still need policy.
+ * Operations marked `deprecated: true` in the spec are excluded unless
+ * `includeDeprecated` is true: deprecated endpoints are never callable by
+ * default. */
 export function indexOperations(
   doc: OpenApiDocument,
   classifications: Readonly<Record<string, OperationRisk>> = {},
+  options: { readonly includeDeprecated?: boolean } = {},
 ): readonly ContractOperation[] {
   const operations: ContractOperation[] = [];
   for (const [path, methods] of Object.entries(doc.paths ?? {})) {
@@ -207,6 +332,8 @@ export function indexOperations(
       if (def === null || typeof def !== "object" || Array.isArray(def)) continue;
       const operationId = (def as OperationDef).operationId;
       if (typeof operationId !== "string" || !OPERATION_ID.test(operationId)) continue;
+      const deprecated = (def as OperationDef).deprecated === true;
+      if (deprecated && options.includeDeprecated !== true) continue;
       const summaryRaw = (def as OperationDef).summary;
       const summary = typeof summaryRaw === "string" ? summaryRaw.slice(0, 280) : "";
       const classified = classifications[operationId];
@@ -216,7 +343,7 @@ export function indexOperations(
           : SAFE_METHODS.has(method.toLowerCase())
             ? "read"
             : "mutation";
-      operations.push(Object.freeze({ operationId, method: method.toLowerCase(), path, summary, risk }));
+      operations.push(Object.freeze({ operationId, method: method.toLowerCase(), path, summary, risk, deprecated }));
     }
   }
   return Object.freeze(operations);
@@ -436,4 +563,103 @@ export interface CodeModeProvenance {
 
 export function buildProvenance(entry: Omit<CodeModeProvenance, "executedAt">): CodeModeProvenance {
   return Object.freeze({ ...entry, executedAt: new Date().toISOString() });
+}
+
+/** UUIDv5 namespace for generated Integration IDs (INT-01, issue #229):
+ * SHA-1(namespace || name) per RFC 9562 section 6.5. This namespace is a
+ * fixed project constant (randomly generated once, never derived from
+ * tenant data), so every lane and checkout derives the same ID from the
+ * same pinned spec digest. */
+export const INTEGRATION_ID_NAMESPACE = "7f3a2c1e-9b4d-4f8a-8e6c-1d5a3b9c7e2f";
+
+/** Deterministic Integration ID for a generated provider (INT-01 fix 2):
+ * UUIDv5 over the pinned spec digest hex (lowercase SHA-256 of the exact
+ * spec bytes). Same spec bytes yield the same ID across regenerations and
+ * checkouts, so Saga identity survives ordinary source edits; any spec byte
+ * change yields a different Integration (drift is visible, never silent).
+ * Throws on a malformed digest instead of minting an unstable ID. Pure and
+ * synchronous so the Node CLI mirror can share the exact algorithm. */
+export function integrationUuidV5(specDigestHex: string): string {
+  if (!/^[a-f0-9]{64}$/.test(specDigestHex)) {
+    throw new Fault(400, "GENERATOR_INVALID_OPTIONS", "The spec digest must be 64 lowercase hex chars.");
+  }
+  const namespace = INTEGRATION_ID_NAMESPACE.replace(/-/g, "");
+  const name = new TextEncoder().encode(`wrangnarok.integration.v1:${specDigestHex}`);
+  const nsBytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i += 1) nsBytes[i] = parseInt(namespace.slice(i * 2, i * 2 + 2), 16);
+  const input = new Uint8Array(16 + name.length);
+  input.set(nsBytes, 0);
+  input.set(name, 16);
+  const hash = sha1(input);
+  // RFC 9562 section 6.5: version 5 plus RFC 4122 variant bits.
+  hash[6] = (hash[6]! & 0x0f) | 0x50;
+  hash[8] = (hash[8]! & 0x3f) | 0x80;
+  const hex = Array.from(hash.slice(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+/** Minimal SHA-1 over bytes (RFC 3174) for the UUIDv5 derivation above.
+/// Kept local — no new dependency — and shared with the Node CLI mirror.
+/// Returns the 20-byte digest. */
+function sha1(input: Uint8Array): Uint8Array {
+  let h0 = 0x67452301;
+  let h1 = 0xefcdab89;
+  let h2 = 0x98badcfe;
+  let h3 = 0x10325476;
+  let h4 = 0xc3d2e1f0;
+  const bitLength = input.length * 8;
+  const paddedLength = (((input.length + 8) >> 6) + 1) << 6;
+  const padded = new Uint8Array(paddedLength);
+  padded.set(input, 0);
+  padded[input.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(paddedLength - 4, bitLength >>> 0, false);
+  view.setUint32(paddedLength - 8, Math.floor(bitLength / 2 ** 32), false);
+  const w = new Uint32Array(80);
+  const rotl = (value: number, bits: number): number => (value << bits) | (value >>> (32 - bits));
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    for (let i = 0; i < 16; i += 1) w[i] = view.getUint32(offset + i * 4, false);
+    for (let i = 16; i < 80; i += 1) w[i] = rotl(w[i - 3]! ^ w[i - 8]! ^ w[i - 14]! ^ w[i - 16]!, 1);
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    for (let i = 0; i < 80; i += 1) {
+      let f: number;
+      let k: number;
+      if (i < 20) {
+        f = (b & c) | (~b & d);
+        k = 0x5a827999;
+      } else if (i < 40) {
+        f = b ^ c ^ d;
+        k = 0x6ed9eba1;
+      } else if (i < 60) {
+        f = (b & c) | (b & d) | (c & d);
+        k = 0x8f1bbcdc;
+      } else {
+        f = b ^ c ^ d;
+        k = 0xca62c1d6;
+      }
+      const temp = (rotl(a, 5) + f + e + k + w[i]!) >>> 0;
+      e = d;
+      d = c;
+      c = rotl(b, 30) >>> 0;
+      b = a;
+      a = temp;
+    }
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+  }
+  const out = new Uint8Array(20);
+  const outView = new DataView(out.buffer);
+  outView.setUint32(0, h0, false);
+  outView.setUint32(4, h1, false);
+  outView.setUint32(8, h2, false);
+  outView.setUint32(12, h3, false);
+  outView.setUint32(16, h4, false);
+  return out;
 }

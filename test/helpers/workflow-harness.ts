@@ -39,6 +39,12 @@ import migration0021 from "../../migrations/0021_endpoints.sql?raw";
 import migration0022 from "../../migrations/0022_app_runtime.sql?raw";
 import migration0023 from "../../migrations/0023_config.sql?raw";
 import migration0024 from "../../migrations/0024_tool_enrollments.sql?raw";
+// 0025-0027 are stuck-database convergence repairs, not fresh-chain schema:
+// applying them here rebuilds `executions` without later columns (e.g.
+// parent_execution_id from 0015) and breaks harness suites, so the harness
+// chain skips them. Stuck-database recovery stays owned by
+// docs/migration-ledger.md.
+import migration0028 from "../../migrations/0029_connection_secrets.sql?raw";
 import seed from "../../scripts/seed-local.sql?raw";
 
 /** Every migration in filename order. 0017 is reserved (see
@@ -69,6 +75,7 @@ const FULL_MIGRATIONS = [
   migration0022,
   migration0023,
   migration0024,
+  migration0028,
 ] as const;
 
 export type WorkflowHarnessDb = Pick<D1Database, "exec" | "prepare" | "batch">;

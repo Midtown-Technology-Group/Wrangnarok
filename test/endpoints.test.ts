@@ -384,6 +384,148 @@ it("rate-limits a second delivery in the same minute window with 429", async () 
   expect(await second.json()).toMatchObject({ error: { code: "ENDPOINT_RATE_LIMITED" } });
 });
 
+/** Wrap the test D1 binding so the listed statement methods on statements
+ * matching `match` reject asynchronously with `fault`, exactly like a
+ * transient/query-specific D1 failure. Every other method (including the
+ * counter UPSERT's `run`) still delegates to the real tables, so the fault
+ * proves fail-closed behavior rather than a dead database. */
+function faultingDb(match: (sql: string) => boolean, fault: Error, methods: readonly string[]): D1Database {
+  const wrapStatement = (stmt: object): object =>
+    new Proxy(stmt, {
+      get(statementTarget, property) {
+        if (typeof property === "string" && methods.includes(property)) {
+          return () => Promise.reject(fault);
+        }
+        const value = (statementTarget as Record<string | symbol, unknown>)[property];
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          const out = (value as (...args: unknown[]) => unknown).apply(statementTarget, args);
+          return typeof out === "object" && out !== null ? wrapStatement(out) : out;
+        };
+      },
+    });
+  return new Proxy(bindings.DB, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (sql: string, ...rest: unknown[]) => {
+          const stmt = (target.prepare as (sql: string, ...rest: unknown[]) => object)(sql, ...rest);
+          return match(sql) ? wrapStatement(stmt) : stmt;
+        };
+      }
+      const value = (target as unknown as Record<string | symbol, unknown>)[property];
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+}
+
+it("fails closed when the rate-window read faults: 500, never an invented zero count", async () => {
+  const frozenNow = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(frozenNow);
+  const created = await worker.fetch(
+    authed("/api/endpoints", "POST", {
+      name: "throttled-fault",
+      sagaId: helloSaga.id,
+      kind: "api-key",
+      rateLimitPerMinute: 1,
+    }),
+    bindings,
+  );
+  expect(created.status).toBe(201);
+  const { apiKey } = (await created.json()) as { apiKey: string };
+
+  // Only the window SELECT faults; the counter UPSERT would still succeed,
+  // so a fail-open read would admit this delivery under a zero count.
+  const faulty = {
+    ...bindings,
+    DB: faultingDb(
+      (sql) => sql.includes("endpoint_rate_windows") && sql.trimStart().startsWith("SELECT"),
+      new Error("injected rate-window read fault"),
+      ["first"],
+    ),
+  };
+  const faulted = await worker.fetch(
+    endpointRequest("throttled-fault", { input: { name: "Ada" } }, apiKey, "rl-fault-001"),
+    faulty,
+  );
+  expect(faulted.status).toBe(500);
+  expect(await faulted.json()).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
+
+  // The faulted check admitted nothing and wrote nothing: a healthy retry
+  // of the same vendor event still admits exactly once.
+  const retry = await worker.fetch(
+    endpointRequest("throttled-fault", { input: { name: "Ada" } }, apiKey, "rl-fault-001"),
+    bindings,
+  );
+  expect(retry.status).toBe(202);
+  const retryBody = (await retry.json()) as { executionId: string };
+  await trackWorkflowInstance(bindings.HELLO_WORKFLOW, retryBody.executionId);
+});
+
+it("fails closed when the endpoint lookup faults: sanitized 5xx on both receivers, never 404", async () => {
+  const { raw } = await seedEndpoint("api-key", "greet");
+  const faulty = {
+    ...bindings,
+    DB: faultingDb((sql) => sql.includes('"endpoints"'), new Error("injected endpoints lookup fault"), [
+      "all",
+      "first",
+    ]),
+  };
+  // A D1/query/schema fault is an infrastructure error, not a missing row:
+  // vendors must see a retryable 5xx, never a permanent-looking 404.
+  const api = await worker.fetch(endpointRequest("greet", { input: { name: "Ada" } }, raw, "evt-500"), faulty);
+  expect(api.status).toBe(500);
+  expect(await api.json()).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
+
+  const hook = await worker.fetch(
+    new Request("https://local.test/hooks/greet", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Endpoint-Event-Id": "evt-501" },
+      body: JSON.stringify({ input: { name: "Ada" } }),
+    }),
+    faulty,
+  );
+  expect(hook.status).toBe(500);
+  expect(await hook.json()).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
+});
+
+it("revokes webhook secrets on rotate: stale secrets fail, fresh secrets verify", async () => {
+  const { raw, id } = await seedEndpoint("webhook", "vendor");
+  const payload = { input: { name: "Ada" } };
+
+  const before = await worker.fetch(await hookRequest("vendor", payload, raw, "wh-r1"), {
+    ...bindings,
+    ENDPOINT_WEBHOOK_SECRETS: JSON.stringify({ [id]: raw }),
+  });
+  expect(before.status).toBe(202);
+  const beforeBody = (await before.json()) as { executionId?: string };
+  if (beforeBody.executionId) {
+    await trackWorkflowInstance(bindings.HELLO_WORKFLOW, beforeBody.executionId);
+  }
+
+  const rotated = await worker.fetch(authed("/api/endpoints/vendor/rotate", "POST", {}), bindings);
+  expect(rotated.status).toBe(200);
+  const { webhookSecret } = (await rotated.json()) as { webhookSecret: string };
+  expect(webhookSecret).not.toBe(raw);
+
+  // The old secret no longer verifies even though the binding still plants
+  // it; the rotated secret verifies once planted.
+  const stale = await worker.fetch(await hookRequest("vendor", payload, raw, "wh-r2"), {
+    ...bindings,
+    ENDPOINT_WEBHOOK_SECRETS: JSON.stringify({ [id]: raw }),
+  });
+  expect(stale.status).toBe(401);
+
+  const fresh = await worker.fetch(await hookRequest("vendor", payload, webhookSecret, "wh-r3"), {
+    ...bindings,
+    ENDPOINT_WEBHOOK_SECRETS: JSON.stringify({ [id]: webhookSecret }),
+  });
+  expect(fresh.status).toBe(202);
+  const freshBody = (await fresh.json()) as { executionId?: string };
+  if (freshBody.executionId) {
+    await trackWorkflowInstance(bindings.HELLO_WORKFLOW, freshBody.executionId);
+  }
+});
+
 it("reserves the wep- namespace for endpoint keys and keeps unit helpers pure", async () => {
   expect(() => parseCallerKey("wep-abc1234567890123")).toThrow(/reserved/);
   expect(parseCallerKey("caller-key-00000001")).toBe("caller-key-00000001");

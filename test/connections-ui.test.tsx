@@ -49,6 +49,7 @@ const connectionsPayload: ConnectionsResponse = {
       managedBy: null,
       ownerKind: "loose",
       secretsRequired: [],
+      secretsProvisioned: [],
       updatedAt: null,
     },
     {
@@ -63,6 +64,7 @@ const connectionsPayload: ConnectionsResponse = {
       managedBy: "bundle@1.0.0",
       ownerKind: "managed",
       secretsRequired: ["clientSecret"],
+      secretsProvisioned: ["clientSecret"],
       updatedAt: "2026-09-11T00:00:00.000Z",
     },
   ],

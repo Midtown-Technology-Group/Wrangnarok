@@ -5,8 +5,10 @@
 // Pure unit tests — no D1, no Workflow bindings.
 import { describe, expect, it } from "vitest";
 import {
+  cloudflareIntegrationDef,
   defineIntegration,
   echoIntegrationDef,
+  haloIntegrationDef,
   INTEGRATION_DEFINITIONS,
   integrationById,
   integrationByName,
@@ -16,7 +18,8 @@ import {
   openaiIntegrationDef,
   validateConnectionConfig,
 } from "../src/integrations";
-import { ECHO_INTEGRATION_ID, NINJA_INTEGRATION_ID } from "../src/domain";
+import { CLOUDFLARE_API_BASE, ECHO_INTEGRATION_ID, NINJA_INTEGRATION_ID } from "../src/domain";
+import { HALO_ALLOWED_ORIGIN } from "../src/integrations/halo";
 
 const BASE = {
   id: "aaaaaaaa-1111-4111-8111-111111111111",
@@ -378,6 +381,53 @@ describe("Connection config validation (CON-01)", () => {
       field: "endpoint",
       code: "ENDPOINT_NOT_ALLOWED",
     });
+  });
+
+  it("gates halo, cloudflare, and unknown Integrations per policy (issue #236)", () => {
+    const detailsOf = (run: () => unknown): { field: string; code: string }[] => {
+      try {
+        run();
+        expect.unreachable();
+      } catch (error) {
+        expect(error).toMatchObject({ code: "CONNECTION_SCHEMA_INVALID" });
+        return (error as { details: { field: string; code: string }[] }).details;
+      }
+    };
+    // Halo is lab-origin-only: the runtime pins the exact origin, so
+    // persist-time validation admits nothing else routable.
+    expect(validateConnectionConfig(haloIntegrationDef, { endpoint: HALO_ALLOWED_ORIGIN })).toEqual({
+      endpoint: HALO_ALLOWED_ORIGIN,
+    });
+    expect(validateConnectionConfig(haloIntegrationDef, { endpoint: `${HALO_ALLOWED_ORIGIN}/api` })).toEqual({
+      endpoint: `${HALO_ALLOWED_ORIGIN}/api`,
+    });
+    for (const [endpoint, code] of [
+      ["http://halo-lab.example.com/api", "INVALID_SCHEME"],
+      ["https://evil.example.com/api", "ENDPOINT_NOT_ALLOWED"],
+      ["https://us2.ninjarmm.com/api", "ENDPOINT_NOT_ALLOWED"],
+      ["https://halo.invalid/api", "ENDPOINT_NOT_ALLOWED"],
+      ["http://127.0.0.1:8788/echo", "ENDPOINT_NOT_ALLOWED"],
+      ["not-a-url", "INVALID_URL"],
+    ] as const) {
+      expect(detailsOf(() => validateConnectionConfig(haloIntegrationDef, { endpoint }))?.[0]).toMatchObject({
+        field: "endpoint",
+        code,
+      });
+    }
+    // Cloudflare admits its API base; unknown Integrations fail closed
+    // instead of inheriting another vendor's allowlist.
+    expect(validateConnectionConfig(cloudflareIntegrationDef, {})).toMatchObject({
+      endpoint: CLOUDFLARE_API_BASE,
+    });
+    expect(
+      detailsOf(() =>
+        validateConnectionConfig(cloudflareIntegrationDef, { endpoint: "https://evil.example.com/v4" }),
+      )?.[0],
+    ).toMatchObject({ field: "endpoint", code: "ENDPOINT_NOT_ALLOWED" });
+    const newVendor = defineIntegration({ ...BASE, name: "newvendor" });
+    expect(
+      detailsOf(() => validateConnectionConfig(newVendor, { endpoint: "https://api.example.com/" }))?.[0],
+    ).toMatchObject({ field: "endpoint", code: "ENDPOINT_NOT_ALLOWED" });
   });
 
   it("classifies loopback and internal literal hosts (issue #236)", () => {
