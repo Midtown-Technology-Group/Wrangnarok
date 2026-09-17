@@ -23,6 +23,21 @@ question, not just a latency question.
 - Avoid `ORDER BY RANDOM()` on large sets, leading-wildcard `LIKE` on
   large tables, and N+1 D1 calls where a join works.
 
+## Query-plan review
+
+- `node scripts/d1-plan.mjs [--operation <name>]` runs `EXPLAIN QUERY PLAN`
+  for the registered hot-path queries against the local D1 (run
+  `npm run db:migrate:local` first) and prints a coarse SCAN/SEARCH
+  verdict per query. Baseline (2026-09-17): `saga-policy.load` and
+  `executions.admission-count` both SEARCH.
+- A `REVIEW` verdict means a human looks at the plan, not a CI failure:
+  EQP output is debugging-oriented and not a stable machine API, so this
+  script stays a local aid and out of CI gates.
+- When adding a hot-path query, register its exact SQL plus representative
+  bind values in `scripts/d1-plan.mjs` and record the confirmed expectation.
+- Programmatic callers use `explainQueryPlan` / `reviewHotPaths` from
+  `src/d1-plan.ts`, covered by `test/d1-plan.test.ts`.
+
 ## Do not
 
 - Recreate PostgreSQL coordination (advisory locks, job claiming,
