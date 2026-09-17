@@ -31,6 +31,32 @@ const QUERIES = [
     params: ["00000000-0000-4000-8000-000000000001", "smoke", "00000000-0000-4000-8000-000000000003"],
     expect: "search",
   },
+  {
+    operation: "children.list",
+    sql: "SELECT id,saga_id,status,dispatched FROM executions WHERE parent_execution_id=? AND org_id=? AND user_id=?",
+    params: [
+      "00000000-0000-4000-8000-000000000003",
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+    ],
+    expect: "search",
+  },
+  {
+    operation: "executions.detail",
+    sql: "SELECT saga_id,input_json FROM executions WHERE id=? AND org_id=? AND user_id=?",
+    params: [
+      "00000000-0000-4000-8000-000000000003",
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+    ],
+    expect: "search",
+  },
+  {
+    operation: "executions.history",
+    sql: "SELECT id FROM executions WHERE org_id=? AND user_id=? ORDER BY created_at DESC,id DESC LIMIT 50",
+    params: ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"],
+    expect: "search",
+  },
 ];
 
 function literal(value) {
