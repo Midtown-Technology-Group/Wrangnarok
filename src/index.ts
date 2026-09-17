@@ -145,6 +145,15 @@ import {
   vendorChallenge,
 } from "./endpoints";
 import {
+  createEventSource,
+  deleteEventSource,
+  emitEvent,
+  listEventSources,
+  listEvents,
+  parseEventSourceName,
+  setEventSourceEnabled,
+} from "./events";
+import {
   createSchedule,
   deleteSchedule,
   deliveryForWindow,
@@ -1013,6 +1022,100 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const delivery = await deliveryForWindow(env.DB, row.id, window);
       if (!delivery) throw new Fault(404, "NOT_FOUND", "Not found.");
       return json({ delivery: { schedule: name, window, executionId: delivery.execution_id } });
+    }
+    // TRG-03 S1 event sources (issue #139): org-scoped source registry plus
+    // a durable append-only event log. Registration and emission are
+    // operator-managed environment state (requireManageOrg), reads are
+    // member-open, and foreign rows answer 404 — the same posture as the
+    // schedule surface above. Subscriptions, fan-out, and operator replay
+    // are deferred: this block owns the registry plus the log only.
+    if (url.pathname === "/api/event-sources" && request.method === "GET") {
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json({ sources: await listEventSources(env.DB, caller.orgId) });
+    }
+    if (url.pathname === "/api/event-sources" && request.method === "POST") {
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
+      const body = await boundedJson(request.body);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(400, "INVALID_EVENT_SOURCE", "Provide name and kind.");
+      }
+      const record = body as Record<string, unknown>;
+      if (typeof record.name === "string") parseEventSourceName(record.name);
+      return json(
+        {
+          source: await createEventSource(env.DB, caller, {
+            name: record.name,
+            kind: record.kind,
+            ...(record.refId === undefined ? {} : { refId: record.refId }),
+          }),
+        },
+        201,
+      );
+    }
+    const eventSourceDetail = /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname);
+    if (eventSourceDetail?.[1] && (request.method === "GET" || request.method === "DELETE")) {
+      const name = parseEventSourceName(eventSourceDetail[1]);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      if (request.method === "GET") {
+        const [found] = await listEventSources(env.DB, caller.orgId).then((all) =>
+          all.filter((entry) => entry.name === name),
+        );
+        if (!found) throw new Fault(404, "NOT_FOUND", "Not found.");
+        return json({ source: found });
+      }
+      // Deleting removes the source plus its log rows; ExecutionHistory
+      // provenance survives on the executions rows. Gone-or-foreign 404s.
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      await deleteEventSource(env.DB, caller, name);
+      return json({ deleted: true });
+    }
+    const eventSourceEnable = /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/(enable|disable)$/.exec(url.pathname);
+    if (eventSourceEnable?.[1] && eventSourceEnable?.[2] && request.method === "POST") {
+      // Enablement fences future emits and delivery appends while logged
+      // events keep their rows and history.
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      const name = parseEventSourceName(eventSourceEnable[1]);
+      return json({
+        source: await setEventSourceEnabled(env.DB, caller, name, eventSourceEnable[2] === "enable"),
+      });
+    }
+    const sourceEvents = /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/events$/.exec(url.pathname);
+    // Unknown name shapes answer 404 like parseEventSourceName does — never
+    // UNIMPLEMENTED theater.
+    if (
+      /^\/api\/event-sources\/[^/]+(\/[^/]+)?$/.exec(url.pathname) &&
+      !sourceEvents &&
+      !/^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname) &&
+      !/^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/(enable|disable)$/.exec(url.pathname)
+    ) {
+      return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+    }
+    if (sourceEvents?.[1] && request.method === "POST") {
+      // Operator emission into the log: deterministic (source, event) key,
+      // same-content replays, mismatched content 409s. The tick and endpoint
+      // delivery paths append internally without passing through here.
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
+      const name = parseEventSourceName(sourceEvents[1]);
+      const body = await boundedJson(request.body);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(400, "INVALID_EVENT", "Provide eventId, topic, and payload.");
+      }
+      const record = body as Record<string, unknown>;
+      const emitted = await emitEvent(env.DB, caller, name, {
+        eventId: record.eventId,
+        topic: record.topic,
+        payload: record.payload,
+      });
+      return json({ event: emitted.event, replayed: emitted.replayed }, emitted.replayed ? 200 : 201);
+    }
+    if (sourceEvents?.[1] && request.method === "GET") {
+      // Log history for replay visibility: newest first, bounded 50.
+      const name = parseEventSourceName(sourceEvents[1]);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json({ events: await listEvents(env.DB, caller.orgId, name, 50) });
     }
     if (url.pathname === "/api/executions" && request.method === "POST") {
       const key = parseCallerKey(request.headers.get("Idempotency-Key"));

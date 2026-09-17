@@ -1,0 +1,13 @@
+# TRG-03 S1 lane scope (issue #139): event-source registry + durable event log.
+migrations/0028_events.sql
+docs/migration-ledger.md
+src/events.ts
+src/index.ts
+src/schedules.ts
+src/endpoints.ts
+src/sdk.ts
+test/events.test.ts
+test/helpers/workflow-harness.ts
+docs/architecture/012-phase2-triggers.md
+scopes/trg-03.scope
+package.json

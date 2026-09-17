@@ -39,6 +39,7 @@
 // fields, which are rejected loudly.
 import { BODY_LIMIT, Fault, hash, parseKey, parseSubmission, UUID } from "./domain";
 import type { Principal, SagaDef } from "./domain";
+import { WEBHOOK_DELIVERED_TOPIC, recordSourceDelivery } from "./events";
 import { submit } from "./executions";
 
 export const ENDPOINT_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -747,5 +748,16 @@ export async function executeEndpointDelivery(
     // endpoint_events is replay visibility only: a missing table (old DB
     // before migration 0021) must not fail the Execution itself.
   }
+  // TRG-03 S1 (issue #139): best-effort delivery append. When the operator
+  // registered an enabled `webhook` source observing this endpoint, the
+  // vendor event lands in the event log with its Execution attribution;
+  // otherwise (or on any fault) this resolves to silence and delivery is
+  // unaffected.
+  await recordSourceDelivery(db, endpoint.org_id, "webhook", endpoint.id, {
+    eventId: opts.eventId,
+    topic: WEBHOOK_DELIVERED_TOPIC,
+    payloadJson: JSON.stringify(input),
+    executionId: accepted.executionId,
+  });
   return { ...accepted, eventReplayed };
 }

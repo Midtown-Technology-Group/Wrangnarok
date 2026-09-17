@@ -72,6 +72,20 @@ is insufficient before any Queue or Durable Object is earned — per
 AGENTS.md constraint 7, the primitive needs the requirement, not the
 other way around.
 
+### TRG-03 S1 implementation (2026-09-17, issue #139)
+
+The first slice registers sources without building subscriptions: an
+`event_sources` table plus CRUD (`src/events.ts`, migration 0028), a typed
+append-only `events` log (dot-namespaced topics, deterministic
+(source, event) identity with same-content replay and 409 on mismatched
+content), operator-owned emit/list routes, and best-effort delivery appends
+from schedule promotion (`schedule.delivered`) and endpoint delivery
+(`webhook.delivered`) that never gate the delivery itself. Worker +
+Workflows + D1 only: no Queue, no Durable Object, no second auth or
+execution path (the submit protocol stays the single dispatch path).
+Subscriptions, fan-out, operator replay, and built-in platform events stay
+deferred to later TRG-03 slices.
+
 ### Same-window deduplication is not cross-window overlap policy
 
 **Audit correction (2026-09-11, [#132](https://github.com/MTG-Thomas/Wrangnarok/issues/132)):** the rules below suppress duplicate delivery of the same window only. Current upstream `api/src/jobs/schedulers/cron_scheduler.py:166-203` skips a new window while an earlier delivery for the same source remains active. A deterministic key for W does not prevent W+1 from overlapping W. The schedule implementation must test both cases and decide cross-window policy explicitly; this investigation still implements neither. Upstream enum alternatives do not establish working queue/parallel overlap modes.
