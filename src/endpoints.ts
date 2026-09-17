@@ -193,9 +193,9 @@ function decodeDigestBase64(input: string): Uint8Array | null {
  * or standard padded base64 of the raw digest, tolerating surrounding
  * whitespace plus whitespace after the `sha256=` prefix (notably HaloPSA's
  * `sha256= <base64>` form). base64url, unpadded base64, base64-of-hex, and
- * whitespace inside the digest stay rejected. All comparisons are
- * constant-time. Throws 401 on missing/invalid signatures, 410 on disabled
- * endpoints. */
+ * whitespace inside the digest stay rejected. The hex digest compares in
+ * constant time and the base64 digest verifies through `crypto.subtle.verify`.
+ * Throws 401 on missing/invalid signatures, 410 on disabled endpoints. */
 export async function verifyWebhookSignature(
   endpoint: EndpointRow,
   rawBody: Uint8Array,
@@ -229,11 +229,7 @@ export async function verifyWebhookSignature(
   } else {
     const decoded = decodeDigestBase64(candidate);
     if (decoded !== null && decoded.byteLength === computed.byteLength) {
-      let difference = 0;
-      for (let i = 0; i < decoded.byteLength; i++) {
-        difference |= (decoded[i] as number) ^ (computed[i] as number);
-      }
-      verified = difference === 0;
+      verified = await crypto.subtle.verify("HMAC", key, decoded as BufferSource, rawBody as BufferSource);
     }
   }
   if (!verified) throw new Fault(401, "ENDPOINT_UNAUTHORIZED", "A valid webhook signature is required.");
