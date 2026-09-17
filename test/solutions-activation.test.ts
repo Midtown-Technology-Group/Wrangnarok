@@ -396,6 +396,17 @@ it("bumps a stale same-bundle marker even when content already matches", async (
   expect((await connectionRow("default", ECHO_INTEGRATION_ID))?.managed_by).toBe(`${BUNDLE_ID}@1.0.0`);
 });
 
+it("bumps markers on a version-only upgrade instead of skipping identical content (#479)", async () => {
+  await installBundle(bindings.DB, manifest("1.0.0", ENDPOINT_V1));
+  // v2 declares byte-identical desired state: endpoint, manifest config,
+  // and saga pins all unchanged. Every row must reconcile (marker moves to
+  // v2), never skip under the stale v1 marker.
+  const result = await installBundle(bindings.DB, manifest("2.0.0", ENDPOINT_V1));
+  expect(result.drift).toEqual({ created: 0, updated: 3, skipped: 0, deleted: 0 });
+  expect((await connectionRow("default", ECHO_INTEGRATION_ID))?.managed_by).toBe(`${BUNDLE_ID}@2.0.0`);
+  expect(await pointer()).toMatchObject({ version: "2.0.0", manifestHash: result.manifestHash });
+});
+
 it("derives org installs from saga pins alone for saga-only bundles", async () => {
   const sagaOnly = {
     manifestVersion: 1,
