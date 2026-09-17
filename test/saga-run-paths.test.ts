@@ -288,7 +288,7 @@ it("marks a digest Execution TimedOut when the echo leg is slow", async () => {
   expect(error).toMatchObject({ code: "ECHO_VENDOR_TIMEOUT" });
 });
 
-it("marks an echo Execution TimedOut and persists the timeout marker", async () => {
+it("marks an echo Execution TimedOut via failSagaExecution classification", async () => {
   await insertExecution(bindings.DB, ID, echoSaga, "Pending", '{"message":"hi"}');
   await insertConnection(
     bindings.DB,

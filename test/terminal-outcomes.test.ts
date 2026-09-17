@@ -297,13 +297,13 @@ describe("timeout-mark-v1 retirement (fail-closed-0)", () => {
       expect(retryLimitForStep(step, DEFAULT_SAGA_POLICY)).toBe(2);
     }
   });
-  it("still lands TimedOut through the byte-identical legacy echo path", async () => {
-    // The six timeout-mark-v1 Saga call sites stay untouched until #416.
-    // The retired table entry only drops their native retry budget to 0 —
-    // the checkpoint write itself is the same conditional UPDATE, so the
-    // legacy path still lands TimedOut (representative echo leg pinned
-    // here; the other five legs plus the native-step suites stay green in
-    // the full gate as the post-retirement behavior proof).
+  it("still lands TimedOut through the migrated echo path", async () => {
+    // ADR-033-5 (issue #416, echo migration): the echo timeout-mark-v1 step
+    // is gone — failSagaExecution classifies ECHO_VENDOR_TIMEOUT as TimedOut
+    // inside persist-failure-v1. Same terminal row as the retired explicit
+    // marker wrote (representative echo leg pinned here; the surviving
+    // legacy legs plus the native-step suites stay green in the full gate
+    // as the behavior proof until their migrations land).
     const id = "6c".repeat(32);
     await bindings.DB.prepare(
       "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
