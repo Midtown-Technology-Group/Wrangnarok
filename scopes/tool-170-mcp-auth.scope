@@ -1,0 +1,12 @@
+# TOOL-01 S1 lane scope (issue #170): inbound-MCP authorization mapping.
+# Records the Access-compatible flow (option b) with RFC 9728 discovery in
+# ADR 022, implements it on POST /api/mcp without forking the membership
+# gate (401 challenge + public metadata only; no token mint, no
+# registration, no new primitive, no new migration), and extends the real
+# JSON-RPC client tests. Does not touch src/tools.ts, src/openapi.ts, the
+# halo integration, or generate-integration-source.mjs.
+scopes/tool-170-mcp-auth.scope
+src/mcp.ts
+src/index.ts
+test/tool-01-mcp.test.ts
+docs/architecture/022-openapi-codemode-mcp.md

@@ -82,7 +82,11 @@ import {
   HALO_SPEC_VERSION,
 } from "./integrations/halo";
 import {
+  MCP_PROTECTED_RESOURCE_MCP_PATH,
+  MCP_PROTECTED_RESOURCE_PATH,
+  mcpProtectedResourceMetadata,
   mcpResult,
+  mcpUnauthorizedChallenge,
   parseMcpCallParams,
   parseMcpDescribeParams,
   parseMcpRequest,
@@ -755,6 +759,27 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
   // Single-Worker full-stack app (ADR 008): the browser UI ships as Static
   // Assets and needs no auth; only /api/* is authenticated JSON.
   if (!url.pathname.startsWith("/api/")) {
+    // TOOL-01 S1 (issue #170, ADR 022): public OAuth protected-resource
+    // metadata (RFC 9728) for the inbound MCP gateway. Unauthenticated by
+    // design — resource identity only, never Organization data — so a
+    // standards-shaped MCP client can discover how to authenticate. Only
+    // GET serves; anything else falls through to the static/404 path
+    // below. Faults serialize like the /hooks/* path: the gateway itself
+    // stays behind authenticate plus the membership gate, and this route
+    // grants nothing.
+    if (
+      request.method === "GET" &&
+      (url.pathname === MCP_PROTECTED_RESOURCE_PATH || url.pathname === MCP_PROTECTED_RESOURCE_MCP_PATH)
+    ) {
+      try {
+        rejectQuery(url);
+        return json(mcpProtectedResourceMetadata(url.origin, env));
+      } catch (error) {
+        const fault =
+          error instanceof Fault ? error : new Fault(500, "INTERNAL_ERROR", "The request could not be completed.");
+        return json({ error: { code: fault.code, message: fault.message } }, fault.status);
+      }
+    }
     // Public vendor receivers live outside /api/* precisely so they do not
     // require the operator session (ADR 019): /hooks/:name for webhooks.
     if (url.pathname.startsWith("/hooks/")) {
@@ -3554,7 +3579,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const fault =
       error instanceof Fault ? error : new Fault(500, "INTERNAL_ERROR", "The request could not be completed.");
     const headers: Record<string, string> = {};
-    if (fault.status === 401) headers["WWW-Authenticate"] = "Bearer";
+    // TOOL-01 S1: MCP clients learn the discovery document URL from the
+    // rejection itself (RFC 9728 resource_metadata pointer). Every other
+    // route keeps the bare bearer challenge.
+    if (fault.status === 401)
+      headers["WWW-Authenticate"] = url.pathname === "/api/mcp" ? mcpUnauthorizedChallenge(url.origin) : "Bearer";
     if (fault.status === 503) headers["Retry-After"] = "5";
     // Outward error path: a secret substring embedded in a Fault message
     // (caller input echoed back, miswired env text) is replaced before send.
