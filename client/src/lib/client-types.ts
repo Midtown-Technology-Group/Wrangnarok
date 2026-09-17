@@ -609,6 +609,53 @@ export interface EmbedGrantResponse {
   grant: EmbedGrantSummary;
 }
 
+// Signed app embeds + anonymous public forms (EMBED-01 slice 2, issue
+// #156). App summaries carry identity, policy, and binding state only —
+// never secret material. Publications carry no secrets at all: the
+// publication ID is a public link identifier, and the summary adds the
+// live staleness bit the review UX keys on.
+
+export interface AppEmbedGrantSummary {
+  id: string;
+  appSlug: string;
+  allowedOrigins: string[];
+  fingerprint: string;
+  enabled: boolean;
+  expiresAt: string | null;
+  createdAt: string;
+  rotatedAt: string | null;
+  lastUsedAt: string | null;
+}
+
+export interface AppEmbedGrantsResponse {
+  embeds: AppEmbedGrantSummary[];
+}
+
+export interface AppEmbedGrantIssuedResponse {
+  grant: AppEmbedGrantSummary;
+  secret: string;
+}
+
+export interface AppEmbedGrantResponse {
+  grant: AppEmbedGrantSummary;
+}
+
+export interface FormPublicationSummary {
+  id: string;
+  formName: string;
+  honeypotField: string;
+  fingerprint: string;
+  enabled: boolean;
+  stale: boolean;
+  createdAt: string;
+  reviewedAt: string | null;
+  lastUsedAt: string | null;
+}
+
+export interface FormPublicationResponse {
+  publication: FormPublicationSummary | null;
+}
+
 // Organization branding + own profile (UX-01 slice 1, issue #176). The
 // branding view is the safe public shape (name, colors, logo metadata);
 // the profile view is caller-scoped. Neither carries credentials.

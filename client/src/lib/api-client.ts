@@ -51,11 +51,17 @@ import type {
   FileLocationsResponse,
   FileMeta,
   FilesResponse,
+  AppEmbedGrantIssuedResponse,
+  AppEmbedGrantResponse,
+  AppEmbedGrantsResponse,
+  AppEmbedGrantSummary,
   EmbedGrantIssuedResponse,
   EmbedGrantResponse,
   EmbedGrantsResponse,
   EmbedGrantSummary,
   FormDetail,
+  FormPublicationResponse,
+  FormPublicationSummary,
   FormProvidersResponse,
   FormStartupResponse,
   FormSubmitResponse,
@@ -1239,6 +1245,141 @@ export async function revokeFormEmbed(name: string, grantId: string): Promise<Em
   const grant = (data as { grant?: unknown }).grant;
   if (!isEmbedGrantSummary(grant)) throw new Error("Unexpected embed grant response shape.");
   return { grant };
+}
+
+function isAppEmbedGrantSummary(value: unknown): value is AppEmbedGrantSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    STABLE_UUID.test(v["id"]) &&
+    typeof v["appSlug"] === "string" &&
+    Array.isArray(v["allowedOrigins"]) &&
+    (v["allowedOrigins"] as unknown[]).every((entry) => typeof entry === "string") &&
+    typeof v["fingerprint"] === "string" &&
+    typeof v["enabled"] === "boolean" &&
+    (v["expiresAt"] === null || typeof v["expiresAt"] === "string") &&
+    typeof v["createdAt"] === "string" &&
+    (v["rotatedAt"] === null || typeof v["rotatedAt"] === "string") &&
+    (v["lastUsedAt"] === null || typeof v["lastUsedAt"] === "string")
+  );
+}
+
+function checkAppId(appId: string): void {
+  if (!STABLE_UUID.test(appId)) throw new Error("Unexpected app ID shape.");
+}
+
+/** GET /api/apps/:id/embeds — admin grant inventory (summaries only,
+ * never secret material). */
+export async function listAppEmbeds(appId: string): Promise<AppEmbedGrantsResponse> {
+  checkAppId(appId);
+  const data = await get(`/api/apps/${appId}/embeds`);
+  const embeds = (data as { embeds?: unknown }).embeds;
+  if (!Array.isArray(embeds) || !embeds.every(isAppEmbedGrantSummary)) {
+    throw new Error("Unexpected app embed grants response shape.");
+  }
+  return { embeds };
+}
+
+/** POST /api/apps/:id/embeds — issue a grant. The raw secret renders
+ * once from this response and is never fetched again. */
+export async function createAppEmbed(
+  appId: string,
+  body: { allowedOrigins: string[]; expiresAt?: string | null },
+): Promise<AppEmbedGrantIssuedResponse> {
+  checkAppId(appId);
+  const data = await postJson(`/api/apps/${appId}/embeds`, body);
+  const grant = (data as { grant?: unknown }).grant;
+  const secret = (data as { secret?: unknown }).secret;
+  if (!isAppEmbedGrantSummary(grant) || typeof secret !== "string") {
+    throw new Error("Unexpected app embed grant response shape.");
+  }
+  return { grant, secret };
+}
+
+/** POST /api/apps/:id/embeds/:id/rotate — fresh secret plus a
+ * re-fingerprint against the live deployment (secret shown once). */
+export async function rotateAppEmbed(appId: string, grantId: string): Promise<AppEmbedGrantIssuedResponse> {
+  checkAppId(appId);
+  checkGrantId(grantId);
+  const data = await postJson(`/api/apps/${appId}/embeds/${grantId}/rotate`, {});
+  const grant = (data as { grant?: unknown }).grant;
+  const secret = (data as { secret?: unknown }).secret;
+  if (!isAppEmbedGrantSummary(grant) || typeof secret !== "string") {
+    throw new Error("Unexpected app embed grant response shape.");
+  }
+  return { grant, secret };
+}
+
+/** POST /api/apps/:id/embeds/:id/revoke — terminal disable. */
+export async function revokeAppEmbed(appId: string, grantId: string): Promise<AppEmbedGrantResponse> {
+  checkAppId(appId);
+  checkGrantId(grantId);
+  const data = await postJson(`/api/apps/${appId}/embeds/${grantId}/revoke`, {});
+  const grant = (data as { grant?: unknown }).grant;
+  if (!isAppEmbedGrantSummary(grant)) throw new Error("Unexpected app embed grant response shape.");
+  return { grant };
+}
+
+function isPublicationSummary(value: unknown): value is FormPublicationSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    STABLE_UUID.test(v["id"]) &&
+    typeof v["formName"] === "string" &&
+    FORM_NAME.test(v["formName"]) &&
+    typeof v["honeypotField"] === "string" &&
+    typeof v["fingerprint"] === "string" &&
+    typeof v["enabled"] === "boolean" &&
+    typeof v["stale"] === "boolean" &&
+    typeof v["createdAt"] === "string" &&
+    (v["reviewedAt"] === null || typeof v["reviewedAt"] === "string") &&
+    (v["lastUsedAt"] === null || typeof v["lastUsedAt"] === "string")
+  );
+}
+
+/** GET /api/forms/:name/publication — admin publication summary (or null
+ * when never published). No secret material exists in this class. */
+export async function getFormPublication(name: string): Promise<FormPublicationResponse> {
+  checkFormName(name);
+  const data = await get(`/api/forms/${name}/publication`);
+  const publication = (data as { publication?: unknown }).publication;
+  if (publication !== null && !isPublicationSummary(publication)) {
+    throw new Error("Unexpected publication response shape.");
+  }
+  return { publication };
+}
+
+/** POST /api/forms/:name/publication — publish (or re-publish, healing
+ * drift) with an optional honeypotField. */
+export async function publishForm(name: string, body: { honeypotField?: string }): Promise<FormPublicationResponse> {
+  checkFormName(name);
+  const data = await postJson(`/api/forms/${name}/publication`, body);
+  const publication = (data as { publication?: unknown }).publication;
+  if (!isPublicationSummary(publication)) throw new Error("Unexpected publication response shape.");
+  return { publication };
+}
+
+/** DELETE /api/forms/:name/publication — block the publication. */
+export async function unpublishForm(name: string): Promise<FormPublicationResponse> {
+  checkFormName(name);
+  const data = await deleteJson(`/api/forms/${name}/publication`);
+  const publication = (data as { publication?: unknown }).publication;
+  if (publication !== null && !isPublicationSummary(publication)) {
+    throw new Error("Unexpected publication response shape.");
+  }
+  return { publication };
+}
+
+/** POST /api/forms/:name/publication/review — re-bind the publication to
+ * the live declaration after a capability change. */
+export async function reviewPublication(name: string): Promise<FormPublicationResponse> {
+  checkFormName(name);
+  const data = await postJson(`/api/forms/${name}/publication/review`, { approve: true });
+  const publication = (data as { publication?: unknown }).publication;
+  if (!isPublicationSummary(publication)) throw new Error("Unexpected publication response shape.");
+  return { publication };
 }
 
 const ORG_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
