@@ -1,0 +1,2 @@
+CREATE TABLE form_embeds(id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), form_id TEXT NOT NULL, form_name TEXT NOT NULL, secret_hash TEXT NOT NULL, allowed_origins_json TEXT NOT NULL, capability_fingerprint TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)), expires_at TEXT, created_at TEXT NOT NULL, rotated_at TEXT, last_used_at TEXT);
+CREATE INDEX form_embeds_org_form ON form_embeds(org_id, form_name);
