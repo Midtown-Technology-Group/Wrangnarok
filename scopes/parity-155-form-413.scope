@@ -1,0 +1,8 @@
+# parity-155-form-413 lane scope (issue #155, FORM-02 slice B):
+# oversized-payload proof — the form submission route rejects an over-4-KiB
+# request with the canonical 413 behavior and dispatches/creates nothing,
+# plus the explicit 4 KiB-vs-256 KiB divergence note. No production limit,
+# form-semantics, auth, migration, or unrelated-test changes.
+test/form-lifecycle.test.ts
+docs/upstream-parity.md
+scopes/parity-155-form-413.scope
