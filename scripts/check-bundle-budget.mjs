@@ -623,6 +623,13 @@ function runSelftest() {
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+  // Advisory META reporting never throws: null, arrays, and strings warn
+  // instead of failing the run; matching bookkeeping stays silent.
+  for (const bad of [null, [], "730"]) {
+    check(`advisory meta ${JSON.stringify(bad)}`, describeLimitsMeta(bad).length === 1);
+  }
+  check("advisory meta match silent", describeLimitsMeta({ budgetKiB: 730, minHeadroomBytes: 8192 }).length === 0);
+  check("advisory meta drift warns", describeLimitsMeta({ budgetKiB: 700, minHeadroomBytes: 0 }).length === 2);
   // Argument validation rejects bad --top without running anything.
   for (const bad of ["0", "-3", "2.5", "many", undefined]) {
     let error = null;
@@ -653,6 +660,26 @@ function runSelftest() {
 // cannot silently trail code the way the 575 KiB matrix trailed the 700 KiB
 // budget — but stale bookkeeping never fails the run. measuredBytes is
 // informational (local vs CI builds vary slightly).
+// Pure reporter for the parsed LIMITS-META value: returns advisory
+// warning lines, never throws, so malformed or stale bookkeeping (null,
+// arrays, strings, drift) warns instead of failing the run.
+function describeLimitsMeta(meta) {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+    return ["ADVISORY: LIMITS-META block in docs/feasibility-envelope.md must be a JSON object. Not a merge gate."];
+  }
+  const warnings = [];
+  if (meta.budgetKiB * 1024 !== BUDGET_BYTES) {
+    warnings.push(
+      `ADVISORY: LIMITS-META budgetKiB (${meta.budgetKiB}) disagrees with BUDGET_BYTES (${BUDGET_BYTES}). Not a merge gate; update docs/feasibility-envelope.md when convenient.`,
+    );
+  }
+  if (meta.minHeadroomBytes !== MIN_HEADROOM_BYTES) {
+    warnings.push(
+      `ADVISORY: LIMITS-META minHeadroomBytes (${meta.minHeadroomBytes}) disagrees with MIN_HEADROOM_BYTES (${MIN_HEADROOM_BYTES}). Not a merge gate; update docs/feasibility-envelope.md when convenient.`,
+    );
+  }
+  return warnings;
+}
 function checkLimitsMeta() {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const envelope = readFileSync(join(root, "docs/feasibility-envelope.md"), "utf8");
@@ -670,14 +697,7 @@ function checkLimitsMeta() {
     console.error("ADVISORY: LIMITS-META block in docs/feasibility-envelope.md is not valid JSON. Not a merge gate.");
     return;
   }
-  if (meta.budgetKiB * 1024 !== BUDGET_BYTES) {
-    console.error(
-      `ADVISORY: LIMITS-META budgetKiB (${meta.budgetKiB}) disagrees with BUDGET_BYTES (${BUDGET_BYTES}). Not a merge gate; update docs/feasibility-envelope.md when convenient.`,
-    );
-  }
-  if (meta.minHeadroomBytes !== MIN_HEADROOM_BYTES) {
-    console.error(
-      `ADVISORY: LIMITS-META minHeadroomBytes (${meta.minHeadroomBytes}) disagrees with MIN_HEADROOM_BYTES (${MIN_HEADROOM_BYTES}). Not a merge gate; update docs/feasibility-envelope.md when convenient.`,
-    );
+  for (const line of describeLimitsMeta(meta)) {
+    console.error(line);
   }
 }
