@@ -4,7 +4,7 @@
 // encryption under a random per-(Connection, field) DEK, DEK wrapped by the
 // per-environment KEK. No custom construction, no new primitive.
 //
-// Layout of one stored row (migrations/0028_connection_secrets.sql):
+// Layout of one stored row (migrations/0029_connection_secrets.sql):
 // - nonce: base64(12 random bytes), the content-encryption IV. Fresh per
 //   encryption via crypto.getRandomValues — never reused, never derived.
 // - ciphertext: base64(AES-GCM content) under the DEK with associated data

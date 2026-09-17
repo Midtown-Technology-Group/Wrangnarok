@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0
-// SEC-02 pre-0028 compatibility (issue #411): Connection management keeps
+// SEC-02 pre-0029 compatibility (issue #411): Connection management keeps
 // working on databases that predate the `connection_secrets` table —
 // secrets reads resolve to none and deletes skip the secrets delete —
 // while a wrong-shaped table fails loud instead of being mistaken for an
@@ -41,7 +41,7 @@ async function seedMapping() {
     .run();
 }
 
-describe("pre-0028 chains (SEC-02 tolerance)", () => {
+describe("pre-0029 chains (SEC-02 tolerance)", () => {
   it("reads resolve to no per-org secrets and deletes skip the secrets delete", async () => {
     await seedMapping();
     expect(await listConnections(bindings.DB, caller)).toMatchObject([{ id: ROW, secretsProvisioned: [] }]);

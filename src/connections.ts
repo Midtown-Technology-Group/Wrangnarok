@@ -67,7 +67,7 @@ function parseDisplayName(value: unknown): string | null {
 }
 
 /** True when the per-Organization secrets table exists. Suites on partial
- * migration chains (pre-0028) skip secrets reads; every other D1 failure
+ * migration chains (pre-0029) skip secrets reads; every other D1 failure
  * still throws — a missing table is tolerated, never a real error. An
  * explicit existence check (not error-message matching) keeps both sides
  * honest and coverable. */
