@@ -30,7 +30,7 @@ Distinct coverage with low noise; no two scanners report the same dependency CVE
 
 Tool choice: Gitleaks CLI (pinned `GITLEAKS_VERSION`) over the `gitleaks-action` wrapper (the wrapper needs a `GITLEAKS_LICENSE` org secret, which would break credential-free PR CI) and over Trivy (Trivy vulnerability/config findings would duplicate `npm audit`/Dependabot with extra maintenance and noise). Gitleaks adds unique secrets coverage and nothing else.
 
-Suppression: `.gitleaks.toml` extends Gitleaks defaults with two narrow entries: the `test/fixtures/secret-scan/` path (the controlled canary) and a `generic-api-key`-only rule allowlist for `test/` paths (idempotency-key scaffolding such as `const key = "run02-parent-happy-001"` is not a credential; vendor-specific rules still apply everywhere). Add new suppressions as narrow path/regex entries with a comment citing the reason and issue; never blanket-exclude source dirs or file types.
+Suppression: `.gitleaks.toml` extends Gitleaks defaults with two narrow entries: the `test/fixtures/secret-scan/` path (the controlled canary) and a `generic-api-key`-only rule allowlist for `test/` paths (test idempotency scaffolding values are not credentials; vendor-specific rules still apply everywhere). Add new suppressions as narrow path/regex entries with a comment citing the reason and issue; never blanket-exclude source dirs or file types.
 
 Fixtures: use the synthetic `wrangnarok_canary_<32 alphanumerics>` shape for scanner tests. Never commit real-format tokens (`ghp_…`, `sk_live_…`, `AKIA…`); GitHub push protection may block them and Gitleaks would flag them on every run.
 

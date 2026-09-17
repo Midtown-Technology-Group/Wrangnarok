@@ -35,7 +35,7 @@ description = "Controlled #247 canary fixtures (scanned in isolation by the cana
 paths = ['''test/fixtures/secret-scan/.*''']
 
 # generic-api-key is the noisy heuristic: test scaffolding assigns key-shaped
-# idempotency strings (e.g. const key = "run02-parent-happy-001") that are not
+# idempotency strings (e.g. run02-parent-happy-001 style values) that are not
 # credentials. Suppress it ONLY under test/ paths; src/scripts/client keep
 # generic coverage, and all vendor-specific high-confidence rules still apply
 # everywhere (a real PAT/AWS/Stripe key pasted into a test still fails).
