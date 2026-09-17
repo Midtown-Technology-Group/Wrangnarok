@@ -1,0 +1,6 @@
+# Lane scope: lane/adr033-2-scanner-gates (issue #413).
+# Scanner + manifest contract-test gates only: proves interior-helper Sagas
+# pass the scanner unchanged, pins the wrapper-hides-step.do failure and
+# helper purity. No scanner behavior change in v1 (src/saga.ts untouched).
+scopes/adr033-2-scanner-gates.scope
+test/saga-contract.test.ts

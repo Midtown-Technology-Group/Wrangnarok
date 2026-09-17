@@ -9,10 +9,12 @@ import {
   assertJsonSerializable,
   buildCatalog,
   defineSaga,
+  schemaOf,
   stripStepDoBodies,
 } from "../src/saga";
 import type { SagaEventContext, SagaStep } from "../src/saga";
-import { SAGA_CATALOG, SAGA_DEFINITIONS } from "../src/sagas";
+import { integrationOperation, prepareInput } from "../src/saga-helpers";
+import { echoSagaDef, SAGA_CATALOG, SAGA_DEFINITIONS } from "../src/sagas";
 import {
   BODY_LIMIT,
   CLOUDFLARE_INTEGRATION_ID,
@@ -42,6 +44,74 @@ const CHURN_MESSAGE =
   "(Triggers, history, and API callers break silently). If this change is deliberate, update " +
   "sagas.manifest.json in the same PR with justification per ADR 002; if it is accidental, " +
   "restore the previous stable id.";
+
+/** Declared parameter names of a helper function, read from its own source.
+ * Bracket- and quote-aware so generic/union/function-typed parameters with
+ * interior commas do not split into phantom names. */
+function helperParameterNames(fn: (...args: never[]) => unknown): string[] {
+  const source = Function.prototype.toString.call(fn);
+  const open = source.indexOf("(");
+  let depth = 0;
+  let end = -1;
+  let quote: string | null = null;
+  for (let index = open; index < source.length; index += 1) {
+    const char = source[index] as string;
+    if (quote !== null) {
+      if (char === "\\") {
+        index += 1;
+        continue;
+      }
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "(" || char === "[" || char === "{" || char === "<") depth += 1;
+    else if (char === ")" || char === "]" || char === "}" || char === ">") {
+      depth -= 1;
+      if (depth === 0) {
+        end = index;
+        break;
+      }
+    }
+  }
+  if (open === -1 || end === -1) throw new Error(`Cannot read parameter list of ${fn.name}.`);
+  const names: string[] = [];
+  let segment = "";
+  let nested = 0;
+  let segmentQuote: string | null = null;
+  const flush = (): void => {
+    const name = segment.split("=")[0]?.split(":")[0]?.trim();
+    if (name) names.push(name);
+    segment = "";
+  };
+  for (let index = open + 1; index < end; index += 1) {
+    const char = source[index] as string;
+    if (segmentQuote !== null) {
+      segment += char;
+      if (char === "\\") {
+        segment += source[index + 1] ?? "";
+        index += 1;
+        continue;
+      }
+      if (char === segmentQuote) segmentQuote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      segmentQuote = char;
+      segment += char;
+      continue;
+    }
+    if (char === "(" || char === "[" || char === "{" || char === "<") nested += 1;
+    else if (char === ")" || char === "]" || char === "}" || char === ">") nested -= 1;
+    if (char === "," && nested === 0) flush();
+    else segment += char;
+  }
+  flush();
+  return names;
+}
 
 describe("Saga authoring contract (issue #57)", () => {
   it("keeps all I/O and nondeterminism inside step.do() for every registered Saga", () => {
@@ -335,6 +405,75 @@ describe("Saga authoring contract (issue #57)", () => {
         manifest.sagas.some((snap) => snap.id === entry.id),
         `${CHURN_MESSAGE} Unregistered stable ID ${entry.id} ("${entry.name}").`,
       ).toBe(true);
+    }
+  });
+});
+
+describe("Scanner + manifest gates (issue #413)", () => {
+  it("passes interior-helper Sagas through the scanner unchanged (no v1 scanner change)", () => {
+    // ADR-033-2: prepareInput/integrationOperation own Operation interiors
+    // and are always invoked inside a visible step.do, so the scanner blanks
+    // those call bodies and the run source stays clean with no scanner edit.
+    async function helperInteriorRun(ctx: SagaEventContext, step: SagaStep): Promise<unknown> {
+      const prepared = await step.do("prepare-input-v1", () => prepareInput(ctx, echoSaga, parseInput));
+      const outcome = await step.do("echo-http-v1", () =>
+        integrationOperation(ctx, echoSagaDef, prepared, {
+          op: "echo-http-v1",
+          position: 1,
+          integrationId: ECHO_INTEGRATION_ID,
+          vendorDefaultMs: 1000,
+          failureCode: "ECHO_INTEGRATION_FAILED",
+          failureMessage: "The echo Integration could not complete.",
+          call: async () => ({ message: "hello" }),
+        }),
+      );
+      return outcome;
+    }
+    expect(() => assertDeterministicRun("helper-interior", helperInteriorRun)).not.toThrow();
+  });
+
+  it("fails a wrapper that hides step.do from run source (pre-allowlist, see #416)", () => {
+    // The scanner reads only the run function's own source: a durable
+    // boundary owned by a callee is invisible, so the gate fails closed.
+    async function durableWrapper(_ctx: SagaEventContext, step: SagaStep): Promise<unknown> {
+      return step.do("wrapped-v1", async () => ({ ok: true }));
+    }
+    async function hidingRun(ctx: SagaEventContext, step: SagaStep): Promise<unknown> {
+      return durableWrapper(ctx, step);
+    }
+    // The wrapper itself is scanner-clean when read directly ...
+    expect(() => assertDeterministicRun("durable-wrapper", durableWrapper)).not.toThrow();
+    // ... but a run that hides every step.do behind it fails the gate.
+    expect(() => assertDeterministicRun("hiding-run", hidingRun)).toThrow(/never calls step\.do/);
+  });
+
+  it("pins interior-helper purity: no step parameter, no nondeterminism origins", () => {
+    // ADR-033 principle 2: interior helpers never receive `step` — the Saga
+    // owns every visible step.do/step.sleep boundary.
+    for (const helper of [prepareInput, integrationOperation]) {
+      expect(helperParameterNames(helper), `${helper.name} must not take step`).not.toContain("step");
+    }
+    // Anchor the parser against vacuous passes: the first parameter is ctx.
+    expect(helperParameterNames(prepareInput)[0]).toBe("ctx");
+    expect(helperParameterNames(integrationOperation)[0]).toBe("ctx");
+    // Helpers execute inside a visible step.do at the call site, so they may
+    // use the passed-in ctx handles — but they must never originate
+    // nondeterminism or I/O themselves (no fetch/clock/random/uuid/signal).
+    const ORIGIN_TOKENS = [
+      /\bfetch\s*\(/,
+      /Date\s*\.\s*now/,
+      /new\s+Date\s*\(/,
+      /Math\s*\.\s*random/,
+      /randomUUID/,
+      /AbortSignal/,
+      /crypto\s*\./,
+      /process\s*\.\s*env/,
+    ];
+    for (const helper of [schemaOf, prepareInput, integrationOperation]) {
+      const source = Function.prototype.toString.call(helper);
+      for (const token of ORIGIN_TOKENS) {
+        expect(source, `${helper.name} must not originate ${token}`).not.toMatch(token);
+      }
     }
   });
 });
