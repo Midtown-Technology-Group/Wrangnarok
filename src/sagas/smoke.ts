@@ -5,11 +5,18 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
-import { EXECUTION_ID, parseSmokeInput, smokeSaga } from "../domain";
+import { parseSmokeInput, smokeSaga } from "../domain";
 import type { ExecutionParams, SafeError, SmokeResult } from "../domain";
 import { defineSaga } from "../saga";
-import { getExecutionSecrets, scrubExecutionError, scrubExecutionValue } from "../secrets";
-import { beginOperation, failExecution, finishOperation, prepareExecution } from "../executions";
+import { getExecutionSecrets } from "../secrets";
+import {
+  assertRunExecutionId,
+  beginOperation,
+  finishOperation,
+  persistRunFailure,
+  persistRunSuccess,
+  prepareExecution,
+} from "../executions";
 import { buildUsage, logUsage, persistUsage } from "../usage";
 import { executeSaga } from "./shared";
 
@@ -43,10 +50,7 @@ export const smokeSagaDef = defineSaga<SmokeResult>({
   }),
   parse: parseSmokeInput,
   run: async (ctx, step): Promise<SmokeResult> => {
-    const id = ctx.executionId;
-    if (typeof id !== "string" || !EXECUTION_ID.test(id)) {
-      throw new NonRetryableError("Invalid local Execution invocation.");
-    }
+    const id = assertRunExecutionId(ctx.executionId);
     let expectedFailure: SafeError | undefined;
     try {
       // startedMs is captured inside the shared prepare Operation
@@ -117,12 +121,7 @@ export const smokeSagaDef = defineSaga<SmokeResult>({
       }
       const output: SmokeResult = verified.result.shaped;
       await step.do("persist-success-v1", async () => {
-        await ctx.db
-          .prepare(
-            "UPDATE executions SET status='Succeeded',completed_at=?,result_json=? WHERE id=? AND status='Running'",
-          )
-          .bind(new Date().toISOString(), JSON.stringify(scrubExecutionValue(output, id)), id)
-          .run();
+        await persistRunSuccess(ctx.db, id, output);
         const count = await ctx.db
           .prepare("SELECT COUNT(*) AS n FROM operations WHERE execution_id=?")
           .bind(id)
@@ -144,13 +143,7 @@ export const smokeSagaDef = defineSaga<SmokeResult>({
       });
       return output;
     } catch {
-      const raw: SafeError = expectedFailure ?? {
-        code: "EXECUTION_FAILED",
-        message: "The Execution could not complete. Inspect local runtime diagnostics.",
-      };
-      const safe: SafeError = scrubExecutionError(raw, id);
-      await step.do("persist-failure-v1", () => failExecution(ctx.db, id, safe));
-      throw new NonRetryableError(safe.code);
+      return persistRunFailure(ctx, step, id, expectedFailure, false);
     }
   },
 });

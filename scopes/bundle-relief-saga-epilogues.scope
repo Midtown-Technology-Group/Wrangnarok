@@ -1,0 +1,14 @@
+# bundle-relief-saga-epilogues lane scope (issue #438 bundle-relief audit).
+# Semantics-neutral extraction of the repeated Saga run epilogues into three
+# helpers next to failExecution in src/executions.ts. No route/API/domain
+# change, no step renames, no SQL/message/code change, no new primitive,
+# dependency, budget, auth-path, or FORM/TABLE change.
+src/executions.ts
+src/sagas/echo.ts
+src/sagas/smoke.ts
+src/sagas/hello.ts
+src/sagas/hello-parent.ts
+src/sagas/ninjaorgs.ts
+src/sagas/digest.ts
+src/sagas/cloudflare.ts
+scopes/bundle-relief-saga-epilogues.scope
