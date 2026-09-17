@@ -20,7 +20,12 @@ export interface HostileRequest {
 
 export type HostileBehavior =
   | { readonly kind: "ok"; readonly message?: string }
-  | { readonly kind: "status"; readonly status: number; readonly body?: unknown }
+  | {
+      readonly kind: "status";
+      readonly status: number;
+      readonly body?: unknown;
+      readonly headers?: Record<string, string>;
+    }
   | { readonly kind: "redirect"; readonly location: string }
   | { readonly kind: "malformed"; readonly raw: string; readonly contentType?: string }
   | {
@@ -34,7 +39,10 @@ function toResponse(behavior: HostileBehavior, message: string): Response {
     case "ok":
       return Response.json({ message: behavior.message ?? message });
     case "status":
-      return Response.json(behavior.body ?? { error: "hostile" }, { status: behavior.status });
+      return Response.json(behavior.body ?? { error: "hostile" }, {
+        status: behavior.status,
+        headers: behavior.headers,
+      });
     case "redirect":
       return new Response(null, { status: 302, headers: { Location: behavior.location } });
     case "malformed":

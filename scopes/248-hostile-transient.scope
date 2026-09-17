@@ -1,0 +1,8 @@
+# Hostile-transient pin slice (issue #248, brief 2): extend the hostile
+# status behavior with header support (Retry-After) and prove 429 with /
+# without the header plus 503-transient map to the intended fault with no
+# blind retry and exact request counts. Test-only; no src/ changes, no new
+# primitive. Must not touch test/dispatch-recovery.test.ts or src/executions.ts.
+scopes/248-hostile-transient.scope
+test/helpers/hostile-provider.ts
+test/hostile-provider.test.ts
