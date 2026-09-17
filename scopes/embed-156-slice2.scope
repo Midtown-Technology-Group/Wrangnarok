@@ -1,0 +1,30 @@
+# EMBED-01 anonymous public forms + app embeds lane scope (issue #156,
+# slice 2): signed app-embed grants as a distinct grant class (per-org/app
+# secrets, exact-match origins, deployment-fingerprint rotation, pre-gate
+# asset reads, terminal revocation, admin-only inventory with no secret
+# readback), anonymous public-form publication (confirmation-only submit
+# through the shared core, honeypot + single-use startup nonce, file-ref
+# refusal, capability-changing republish review, blocking), the app-detail
+# and form-detail admin sections, migration 0036 + ledger + chain entry,
+# EMBED-01 parity row, and the slice-2 capability-model ADR (numbering per
+# #225). No Saga framework, execution, helper, or Saga-definition change;
+# no new Cloudflare primitive; no auth login-path change; no
+# CAPTCHA/Turnstile binding.
+migrations/0036_anon_app_embeds.sql
+src/app-embeds.ts
+src/public-forms.ts
+src/index.ts
+client/src/components/AppEmbeds.tsx
+client/src/components/FormPublication.tsx
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+client/src/pages/Applications.tsx
+client/src/pages/Forms.tsx
+test/app-embeds.test.ts
+test/form-publication.test.ts
+test/anon-app-embeds-ui.test.tsx
+test/migrations-chain.test.ts
+docs/architecture/TBD-anon-app-embeds.md
+docs/upstream-parity.md
+docs/migration-ledger.md
+scopes/embed-156-slice2.scope

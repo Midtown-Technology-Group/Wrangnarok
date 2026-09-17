@@ -44,6 +44,7 @@ must update every importing test in the same commit.
 | 0033   | 0033_event_subscriptions.sql      | TRG-03  | org-scoped event subscriptions + per-subscription delivery receipts (issue #139, S2) |
 | 0034   | 0034_branding_profile.sql         | UX-01   | org_branding + user_profiles: branding metadata, profile/theme, logo/avatar metadata with R2 bytes (issue #176, slice 1) |
 | 0035   | 0035_embeds.sql                   | EMBED-01 | form_embeds: signed form-embed grants (secret digest, exact-match origins, capability fingerprint, enable/expiry) (issue #156, slice 1) |
+| 0036   | 0036_anon_app_embeds.sql          | EMBED-01 | app_embeds: signed app-embed grants (secret digest, exact-match origins, deployment fingerprint, enable/expiry) + form_publications: anonymous publication (honeypot field, capability fingerprint, enable) (issue #156, slice 2) |
 
 ## Stuck-database recovery (codex findings #381, #367-371)
 

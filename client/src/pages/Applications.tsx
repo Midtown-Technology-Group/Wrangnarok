@@ -26,6 +26,7 @@ import {
 } from "../lib/api-client";
 import { getErrorMessage } from "../lib/api-error";
 import type { AppDetail, AppJob, AppSummary, AppsResponse } from "../lib/client-types";
+import { AppEmbedsSection } from "../components/AppEmbeds";
 import { StatusBadge } from "../components/StatusBadge";
 
 function shortId(id: string): string {
@@ -486,6 +487,7 @@ export function ApplicationDetailView(props: { initial?: AppDetail }): React.JSX
               Swap slugs
             </button>
           </form>
+          {id ? <AppEmbedsSection appId={id} /> : null}
           <h2>Danger</h2>
           <p>
             <button type="button" disabled={working || owned} onClick={() => void run("Delete", () => deleteApp(id))}>

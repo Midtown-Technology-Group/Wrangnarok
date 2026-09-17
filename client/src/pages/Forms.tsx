@@ -22,6 +22,7 @@ import {
 } from "../lib/api-client";
 import { getErrorMessage } from "../lib/api-error";
 import { FormEmbedsSection } from "../components/FormEmbeds";
+import { FormPublicationSection } from "../components/FormPublication";
 import type {
   FormDetail,
   FormFieldDef,
@@ -639,6 +640,7 @@ export function FormDetailView(props: { name: string; initial?: FormDetail }): R
             </p>
           ) : null}
           <FormEmbedsSection formName={props.name} />
+          <FormPublicationSection formName={props.name} />
         </>
       ) : null}
     </section>
