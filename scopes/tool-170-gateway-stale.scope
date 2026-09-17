@@ -1,0 +1,6 @@
+# TOOL-01 G2 stale-gateway regression lane (issue #170): a real JSON-RPC
+# regression proving a previously valid gateway revision is rejected
+# (TOOL_STALE) after the underlying enrollment revision goes stale.
+# Test-only; no production contract, primitive, or auth-model change.
+scopes/tool-170-gateway-stale.scope
+test/tool-01-mcp.test.ts
