@@ -11,8 +11,9 @@
 // - Token rotation: exactly one 401 refresh + one retry, then 401 surfaces
 //   and onAuthFailure runs (no refresh loop).
 // - subscribeTable polls revisions, re-lists from the last revision on
-//   reconnect, and halts on unsubscribe; subscribeFiles re-emits the
-//   authoritative list after an outage.
+//   reconnect, replaces (never merges) rows on the authoritative refetch
+//   after a server-side burst, and halts on unsubscribe; subscribeFiles
+//   re-emits the authoritative list after an outage.
 // - useAppTable returns FLAT rows vs the nested imperative shape;
 //   provider covers basename, theme/logout, repeat mount/unmount.
 import { afterEach, expect, it, vi } from "vitest";
@@ -224,6 +225,66 @@ it("polls Table revisions, resumes from the last revision, and halts on unsubscr
   const settled = calls.length;
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(calls.length).toBe(settled);
+});
+
+it("replaces poller rows with the authoritative page after a server-side burst", async () => {
+  // Upstream v2 delivers one table_invalidated frame per batch commit; this
+  // client polls revisions instead. A server-side burst (several revision
+  // bumps between polls) must surface as one authoritative replacement with
+  // no stale rows retained — the poller never merges pages.
+  const row = (id: string, sku: string, revision: number) => ({
+    id,
+    data: { sku },
+    tableRevision: revision,
+    createdAt: "t",
+    updatedAt: "t",
+  });
+  const calls: string[] = [];
+  const fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    calls.push(url);
+    if (url.endsWith("/sdk")) return jsonResponse(HANDSHAKE);
+    const seen = calls.filter((entry) => entry.includes("/rows")).length;
+    if (seen <= 1) {
+      return jsonResponse({
+        rows: [row("a", "a", 4), row("b", "b", 4)],
+        hasMore: false,
+        nextCursor: null,
+        tableRevision: 4,
+      });
+    }
+    // Burst landed between polls: a deleted, b rewritten, c inserted (rev 7).
+    return jsonResponse({
+      rows: [row("b", "b", 7), row("c", "c", 7)],
+      hasMore: false,
+      nextCursor: null,
+      tableRevision: 7,
+    });
+  }) as unknown as typeof globalThis.fetch;
+  const client = createAppRuntimeClient({
+    baseUrl: BASE,
+    token: "tok",
+    appId: APP_ID,
+    fetchImpl: fetch,
+    sleep: async () => {},
+  });
+  const pages: { rows: { id: string }[]; tableRevision: number }[] = [];
+  const stop = client.subscribeTable(
+    "orders",
+    {},
+    (next) => {
+      pages.push(next);
+      if (pages.length >= 2) stop();
+    },
+    (cause) => {
+      throw cause;
+    },
+  );
+  await vi.waitFor(() => expect(pages.length).toBeGreaterThanOrEqual(2));
+  const rowCalls = calls.filter((entry) => entry.includes("/rows"));
+  expect(rowCalls[1]).toContain("sinceRevision=4");
+  expect(pages[1]?.tableRevision).toBe(7);
+  expect(pages[1]?.rows.map((entry) => entry.id).sort()).toEqual(["b", "c"]);
 });
 
 it("re-emits the authoritative file list after an outage", async () => {

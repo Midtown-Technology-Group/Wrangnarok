@@ -44,6 +44,35 @@ ADR 019; this page is operator and migration notes.
   (one header, one call, never query strings). Stale versions conflict (409):
   re-list and retry with the fresh version.
 
+## Upstream v1.4.0 divergence (contract v2 `table_invalidated`)
+
+Upstream `bbc882a` (Bifrost v1.4.0) bumped `sdk-contract.json` 1 → 2: batch
+Table writes/deletes no longer publish one realtime row event per changed
+row; after commit they publish one `{type: "table_invalidated", table_id}`
+frame, and v2 Table hooks coalesce concurrent invalidations then refetch the
+authoritative visible page before replacing rows and totals. Older deployed
+SDKs ignore the unknown frame and stay stale until reload/manual refresh.
+
+Wrangnarök does not consume `table_invalidated` frames — there is no
+WebSocket transport here (polling instead, per ADR 019 exception 1) — and
+there is no batch endpoint to emit them from (TABLE-02 owns batch). For the
+currently supported single-row surface, revision polling gives the same
+observable freshness: every insert/patch/delete bumps the per-Table revision
+exactly once, and a poller holding a stale `sinceRevision` refetches the full
+authoritative page with no stale rows retained. Proven by
+`test/app-runtime.test.ts` ("converges batch-adjacent writes…", real local
+workerd/D1) and `test/app-sdk-client.test.tsx` ("replaces poller rows…",
+stub-fetch poller replacement).
+
+Handshake implications: `APP_SDK_VERSION` stays `"1"`. It bumps only on a
+breaking change to the runtime routes, the handshake shape, or these client
+exports — the v2 frame break changes none of those, so no bump is owed.
+Migration note: apps written against revision polling need no change for this
+divergence. When TABLE-02 lands a batch path, its writes must advance the
+same per-Table revision so existing pollers converge without client changes;
+consuming `table_invalidated` frames stays a non-goal until a socket
+transport earns its own ADR.
+
 ## Host bootstrap checklist
 
 1. Create the app (author API), declare Tables/files, create grants.

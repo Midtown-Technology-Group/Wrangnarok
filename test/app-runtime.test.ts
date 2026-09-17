@@ -17,6 +17,10 @@
 //   hidden Tables 404 on runtime paths; revoked grants fail immediately
 //   (including outstanding token redeem); foreign-Organization apps 404;
 //   query-only filters 422; version conflicts 409; token reuse 401.
+// - Freshness: a burst of sequential single-row writes (the only
+//   batch-adjacent path; no batch endpoint exists) bumps the revision once
+//   per write, and a poller holding a stale sinceRevision converges to the
+//   exact authoritative row set with no stale rows.
 // - SDK contract: every served APP_* code is in SDK_ERROR_CODES, and the
 //   descriptor lists the runtime routes plus the app-runtime capability.
 import { env } from "cloudflare:workers";
@@ -216,6 +220,62 @@ it("reads/writes Table rows with filters, pages, and live revision polling", asy
   const stray = await call(`/api/apps/${appId}/runtime/tables/orders/rows?sort=amount`);
   expect(stray.status).toBe(400);
   expect(await stray.json()).toMatchObject({ error: { code: "UNSUPPORTED_QUERY" } });
+});
+
+it("converges batch-adjacent writes to one authoritative revision with no stale rows", async () => {
+  // No batch endpoint exists on this surface (TABLE-02 owns batch): a burst
+  // is sequential single-row writes, each bumping the revision exactly once.
+  // A poller holding the pre-burst revision must refetch the full
+  // authoritative page — the upstream v2 table_invalidated equivalent for a
+  // polling client — with deleted rows gone and nothing stale retained.
+  const appId = await createApp("burst", "burst");
+  await declareTable(appId, "orders");
+  await grant(appId, "table", "orders", "read");
+  await grant(appId, "table", "orders", "write");
+  async function insert(data: Record<string, unknown>) {
+    const response = await call(`/api/apps/${appId}/runtime/tables/orders/rows`, "POST", { data });
+    expect(response.status).toBe(201);
+    return ((await response.json()) as { row: { id: string; tableRevision: number } }).row;
+  }
+  const a = await insert({ sku: "a", status: "open" });
+  const b = await insert({ sku: "b", status: "open" });
+  const c = await insert({ sku: "c", status: "open" });
+  expect([a.tableRevision, b.tableRevision, c.tableRevision]).toEqual([
+    a.tableRevision,
+    a.tableRevision + 1,
+    a.tableRevision + 2,
+  ]);
+  const staleRevision = c.tableRevision;
+  // Burst in immediate succession: patch one row, delete another, insert new.
+  const patched = await call(`/api/apps/${appId}/runtime/tables/orders/rows/${b.id}`, "PATCH", {
+    data: { sku: "b", status: "paid" },
+  });
+  expect(patched.status).toBe(200);
+  const deleted = await call(`/api/apps/${appId}/runtime/tables/orders/rows/${a.id}`, "DELETE");
+  expect(deleted.status).toBe(200);
+  const d = await insert({ sku: "d", status: "open" });
+  expect(d.tableRevision).toBe(staleRevision + 3);
+  // Reconnect from the stale revision: full authoritative page, no tombstones.
+  const refetch = (await (
+    await call(
+      `/api/apps/${appId}/runtime/tables/orders/rows?${new URLSearchParams({ sinceRevision: String(staleRevision), limit: "100" })}`,
+    )
+  ).json()) as { rows: { id: string; data: { sku: string; status: string } }[]; tableRevision: number };
+  expect(refetch.tableRevision).toBe(d.tableRevision);
+  expect(refetch.rows.map((row) => `${row.data.sku}:${row.data.status}`).sort()).toEqual([
+    "b:paid",
+    "c:open",
+    "d:open",
+  ]);
+  expect(refetch.rows.some((row) => row.id === a.id)).toBe(false);
+  // Holding the current revision stays quiet.
+  const quiet = (await (
+    await call(
+      `/api/apps/${appId}/runtime/tables/orders/rows?${new URLSearchParams({ sinceRevision: String(d.tableRevision) })}`,
+    )
+  ).json()) as { rows: unknown[]; tableRevision: number };
+  expect(quiet.rows).toEqual([]);
+  expect(quiet.tableRevision).toBe(d.tableRevision);
 });
 
 it("fails revoked grants immediately on the next runtime call", async () => {
