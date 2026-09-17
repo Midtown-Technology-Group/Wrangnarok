@@ -1345,3 +1345,140 @@ describe("token revocation", () => {
     expect(globalStub).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("fence scope-collision regression (issue #149, 32-bit hash pair)", () => {
+  // Exact collision pair from the follow-up: both scopes digest to 4f518f45
+  // through the 32-bit FNV-1a fence routing hash, so both rotations route to
+  // the same fence object under the same path key. The fence separates
+  // flights by SHA-256 of the posted body (which carries the scope), so the
+  // two rotations serialize as independent flights — never coalesce onto one
+  // shared vendor response bearing the wrong scope's token.
+  const SCOPE_A = "scope-Wgz/7hZZIX/5";
+  const SCOPE_B = "scope- Hq.yRqcqqKb";
+
+  function sharedFenceNamespace(instance: OAuthRefreshFence): OAuthRefreshFenceBinding {
+    return {
+      getByName: () => ({
+        fetch: async (input: RequestInfo | URL): Promise<Response> => {
+          const url = input instanceof Request ? input.url : String(input);
+          const body = input instanceof Request ? await input.text() : "";
+          return instance.fetch(new Request(url, { method: "POST", body }));
+        },
+      }),
+    };
+  }
+
+  function fencedVendor(
+    vendorCalls: string[],
+    gate: Promise<void>,
+  ): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
+    return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const url = input instanceof Request ? input.url : String(input);
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (url.startsWith("https://oauth-in-test.invalid/")) {
+        const scope = new URLSearchParams(body).get("scope") ?? "";
+        vendorCalls.push(scope);
+        await gate;
+        return tokenJson({ access_token: `access-for-${scope}`, refresh_token: `next-for-${scope}` });
+      }
+      throw new Error(`Unexpected fenced vendor call: ${url}`);
+    }) as typeof fetch;
+  }
+
+  it("keeps colliding scopes on independent flights with scope-correct tokens", async () => {
+    const vendorCalls: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const namespace = sharedFenceNamespace(new OAuthRefreshFence());
+    const origFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = fencedVendor(vendorCalls, gate);
+    try {
+      // Isolated module copies: racers share no module-global single-flight
+      // map (the separate-Worker-instance analogue); only the fence is shared.
+      const copyA = "../src/oauth.ts?scope-collision=copy-a";
+      const copyB = "../src/oauth.ts?scope-collision=copy-b";
+      vi.resetModules();
+      const first = (await import(/* @vite-ignore */ copyA)) as typeof import("../src/oauth");
+      vi.resetModules();
+      const second = (await import(/* @vite-ignore */ copyB)) as typeof import("../src/oauth");
+      expect(first.refreshRotatingToken).not.toBe(second.refreshRotatingToken);
+      const base = {
+        endpoint: ENDPOINT,
+        tokenPath: TOKEN_PATH,
+        refreshToken: REFRESH_SENTINEL,
+        tenantKey: "org-tenant-collision",
+        generation: "v3",
+        credentials: { clientId: CLIENT_ID, clientSecret: SECRET_SENTINEL },
+        faults: FAULTS,
+        fence: namespace,
+      };
+      const pending = [
+        first.refreshRotatingToken({ ...base, scope: SCOPE_A }),
+        second.refreshRotatingToken({ ...base, scope: SCOPE_B }),
+      ];
+      // Let both racers register their flights before releasing the vendor
+      // gate; otherwise the first settles before the other starts.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      release();
+      const [tokenA, tokenB] = await Promise.all(pending);
+      // Independent flights: one vendor POST per scope, each caller holding
+      // the token minted for its own scope — never one shared response.
+      expect(vendorCalls.slice().sort()).toEqual([SCOPE_A, SCOPE_B].sort());
+      expect(tokenA?.token.accessToken).toBe(`access-for-${SCOPE_A}`);
+      expect(tokenB?.token.accessToken).toBe(`access-for-${SCOPE_B}`);
+      expect(tokenA?.refreshToken).toBe(`next-for-${SCOPE_A}`);
+      expect(tokenB?.refreshToken).toBe(`next-for-${SCOPE_B}`);
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = origFetch;
+    }
+  });
+
+  it("still coalesces same-scope racers into exactly one vendor POST", async () => {
+    const vendorCalls: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const namespace = sharedFenceNamespace(new OAuthRefreshFence());
+    const origFetch = globalThis.fetch;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = fencedVendor(vendorCalls, gate);
+    try {
+      const copyA = "../src/oauth.ts?scope-collision=same-a";
+      const copyB = "../src/oauth.ts?scope-collision=same-b";
+      vi.resetModules();
+      const first = (await import(/* @vite-ignore */ copyA)) as typeof import("../src/oauth");
+      vi.resetModules();
+      const second = (await import(/* @vite-ignore */ copyB)) as typeof import("../src/oauth");
+      const base = {
+        endpoint: ENDPOINT,
+        tokenPath: TOKEN_PATH,
+        refreshToken: REFRESH_SENTINEL,
+        tenantKey: "org-tenant-same-scope",
+        generation: "v3",
+        scope: SCOPE_A,
+        credentials: { clientId: CLIENT_ID, clientSecret: SECRET_SENTINEL },
+        faults: FAULTS,
+        fence: namespace,
+      };
+      const pending = [
+        first.refreshRotatingToken({ ...base }),
+        second.refreshRotatingToken({ ...base }),
+        first.refreshRotatingToken({ ...base }),
+      ];
+      first.clearOAuthInflight();
+      second.clearOAuthInflight();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      release();
+      const results = await Promise.all(pending);
+      expect(vendorCalls).toEqual([SCOPE_A]);
+      for (const result of results) {
+        expect(result?.token.accessToken).toBe(`access-for-${SCOPE_A}`);
+        expect(result?.refreshToken).toBe(`next-for-${SCOPE_A}`);
+      }
+    } finally {
+      (globalThis as unknown as { fetch: typeof fetch }).fetch = origFetch;
+    }
+  });
+});

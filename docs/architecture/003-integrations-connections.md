@@ -151,7 +151,7 @@ Cloudflare Worker secrets and Secrets Store are suitable for deployment/account-
 
 D1 encryption at rest does not make plaintext credential columns acceptable. **ADR 005 v0 is accepted:** explicitly declared provider-global deployment credentials plus Organization-scoped non-secret Connection mappings. NinjaOne currently uses transient client-credentials tokens without persistence; echo has no credentials. Missing required org mappings still fail closed rather than invoking a generic global fallback.
 
-Per-Organization envelope encryption, token persistence, key lifecycle and rotation remain behind ADR 005's first genuinely per-tenant-secret/compliance tripwire. They are not requirements to replace the accepted v0 prematurely. Execution-scoped secret registration and universal substring scrubbing remain production-readiness gates under #110; selected sentinel tests and shaped results do not establish that mechanism. The audit also distinguishes actual Worker secret strings from the ADR's intended Secrets Store binding choice, which needs explicit reconciliation.
+Per-Organization envelope encryption fired under ADR 005 (issue #411) and per-Connection OAuth token persistence landed as OAUTH-01 slice 1 (issue #149, migration 0031); key lifecycle and rotation follow the ADR 005 amendment. Execution-scoped secret registration and universal substring scrubbing remain production-readiness gates under #110; selected sentinel tests and shaped results do not establish that mechanism. The audit also distinguishes actual Worker secret strings from the ADR's intended Secrets Store binding choice, which needs explicit reconciliation.
 
 ### OAuth
 
@@ -171,7 +171,7 @@ OAuth token mechanics are centralized in `src/oauth.ts` (OAUTH-01, issue
   caller supplies the `OAUTH_REFRESH_FENCE` binding, because a module-global
   map alone cannot serialize refreshes across Worker instances (issue #149
   follow-up). The object holds no storage, performs no D1 I/O, and persists
-  no token (SEC-02 stays shut). The vendor sees exactly one refresh POST per
+  no token itself (persisted rows live in `src/oauth-tokens.ts`). The vendor sees exactly one refresh POST per
   rotation no matter how many 401 retries race — the Cloudflare-native
   equivalent of upstream's serialized refresh (bifrost PR #741 row-lock pin,
   recorded in `docs/upstream-spec.md` section 15). Authorization-code
@@ -182,16 +182,22 @@ OAuth token mechanics are centralized in `src/oauth.ts` (OAUTH-01, issue
   enforcement. OAuth resource scopes are never Organization authorization
   scope. `resolveTokenScope` is pure and test-pinned against Graph/Exchange/
   SharePoint-style audiences.
-- Tokens stay transient fetch-and-discard per ADR 005 v0 (SEC-02 stays shut):
-  no token columns, no ciphertext, no cached refresh tokens in D1.
-- Credential health is a pure non-secret lifecycle (`healthy`/`failed`/
-  `revoked`, consecutive-failure counting, visible failed-to-recovered
-  transitions, fail-closed use). Persistence of health rows awaits the SEC-02
-  tripwire and its own steward migration number; Connection identity never
-  moves on a token transition.
-- Token replacement without replacing Connection identity, per-tenant
-  authorization-code consent storage, and any scheduled refresh path remain
-  deferred (see below).
+- Token persistence (OAUTH-01 slice 1, issue #149, post-#148): per-Connection
+  OAuth tokens persist encrypted in `oauth_tokens` (migration 0031) reusing
+  the ADR 005 envelope/KEK path, with a monotonic persisted generation wired
+  to the refresh fence and conditional replacement writes, and no D1
+  transaction held over vendor HTTP. See `src/oauth-tokens.ts` and the
+  ADR 005 slice-1 amendment.
+- Credential health is a non-secret lifecycle (`healthy`/`failed`/`revoked`,
+  consecutive-failure counting, visible failed-to-recovered transitions,
+  fail-closed use) with the same pure transitions as before, now persisted
+  per Connection beside the token row (migration 0031): vendor Faults mark
+  failed, successful rotation recovers, explicit revocation marks revoked.
+  Connection identity never moves on a token transition.
+- Token replacement persists without replacing Connection identity
+  (conditional generation-fenced writes in `src/oauth-tokens.ts`).
+  Per-tenant authorization-code consent storage and any scheduled refresh
+  path remain deferred (see below).
 
 Token refresh must not be implemented independently in every Saga.
 
@@ -234,4 +240,4 @@ Per issue #75 (lanes A: PRs #80, #83, #85, #88), extended by CON-01 (issue #146)
 - Secret-field declarations: `secretFields` on each `IntegrationDefinition` (`echo`: none; `ninjaone`: `clientSecret`), with selected output-shaping/sentinel tests. Universal output scrubbing remains the separate ADR 005/#110 mechanism gate.
 - Upstream 424 adaptation: upstream Bifrost serves declared-missing requirements as HTTP 424 at the API boundary (`SolutionConnectionSchema` resolution, org → defaults fallback). Wrangnarök keeps the stricter MVP posture — no global/default fallback — and the 424 surfaces in two places: as the structured step error inside ExecutionHistory on the submit path (existing ADR 010 contract), and as the HTTP status of `POST /api/connections/:integrationId/test` when the mapping is missing (CON-01 management parity for the same code).
 
-What stays deferred (not implemented by this closeout): per-tenant authorization-code consent storage, health-row D1 persistence (awaits the SEC-02 tripwire and its own migration number), token replacement persistence, any scheduled refresh path, per-Organization envelope encryption behind ADR 005's tripwire, generic global/default credential fallback, provider-organization mapping enumeration beyond the caller's own Organization, and cross-org mapping administration. Provider-global v0 credentials are accepted, not a claim that these broader features or production gates are complete.
+What stays deferred (not implemented by this closeout): per-tenant authorization-code consent storage (operator callback route plus consent rows), any scheduled refresh path, the Integration-list health aggregate (PR #762 semantics), generic global/default credential fallback, provider-organization mapping enumeration beyond the caller's own Organization, and cross-org mapping administration. Provider-global v0 credentials are accepted, not a claim that these broader features or production gates are complete.

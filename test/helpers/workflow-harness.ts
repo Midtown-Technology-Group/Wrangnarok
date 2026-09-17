@@ -46,6 +46,7 @@ import migration0024 from "../../migrations/0024_tool_enrollments.sql?raw";
 // docs/migration-ledger.md.
 import migration0029 from "../../migrations/0029_connection_secrets.sql?raw";
 import migration0030 from "../../migrations/0030_events.sql?raw";
+import migration0031 from "../../migrations/0031_oauth_tokens.sql?raw";
 import seed from "../../scripts/seed-local.sql?raw";
 
 /** Every migration in filename order. 0017 is reserved (see
@@ -78,6 +79,7 @@ const FULL_MIGRATIONS = [
   migration0024,
   migration0029,
   migration0030,
+  migration0031,
 ] as const;
 
 export type WorkflowHarnessDb = Pick<D1Database, "exec" | "prepare" | "batch">;

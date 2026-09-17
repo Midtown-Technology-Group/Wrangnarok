@@ -251,6 +251,56 @@ ciphertext (fired) under one registry/scrub discipline — two stores, one
 discipline, one diagram. If a third storage story appears, consolidate
 before new parity lanes.
 
+### OAuth token persistence slice 1 (issue #149, post-#148 amendment)
+
+SEC-02 closed (issue #148; PR #427 merged), so the "OAuth token
+persistence stays fetch-and-discard" line above is now superseded for
+per-Connection OAuth tokens only. This slice persists encrypted
+per-Organization, per-Connection OAuth tokens plus non-secret health in a
+new `oauth_tokens` table (migration 0031, `src/oauth-tokens.ts`) — and
+explicitly adds no second secret store:
+
+- Same envelope, same KEK: AES-GCM-256 rows via `src/envelope.ts`
+  (`ciphertext` / `nonce` / `wrapped_dek` / `key_version` / `algorithm`
+  per token value), per-environment KEK from Secrets Store, associated
+  data binding org_id + Connection id + field (`oauth_access` /
+  `oauth_refresh` bindings so the two values never decrypt under each
+  other). Encrypt-with-latest, decrypt-with-version, staged re-wrap
+  rotation, and dev/prod KEK separation are unchanged from the firing
+  amendment above.
+- Same discipline: D1 holds ciphertext only (sentinel-audited); decrypted
+  tokens exist transiently at the Integration Action call boundary,
+  register with the execution-scoped registry for write-time substring
+  scrubbing, then drop. No token material in D1 rows, ExecutionHistory,
+  Workflow state, logs, errors, or HTTP responses.
+- Same fence: every rotation funnels through the existing centralized
+  `refreshRotatingToken` primitive plus the `OAuthRefreshFence` object
+  with the persisted generation as the fence generation. Replacement
+  writes are conditional on the expected persisted generation
+  (`UPDATE ... WHERE generation=?`): a superseded writer observes
+  OAUTH_TOKEN_GENERATION_STALE instead of overwriting the newer token.
+  No D1 transaction is held across vendor HTTP — D1 read, vendor call,
+  and D1 conditional write are separate phases.
+- Health persists honestly per Connection (`healthy` / `failed` /
+  `revoked` with consecutive-failure counting via the pure lifecycle in
+  `src/oauth.ts`): vendor Faults mark failed, successful rotation
+  recovers to healthy, explicit revocation marks revoked without moving
+  Connection identity. Raw transport errors propagate without a health
+  write (reachability unknown). Deleting a Connection deletes its token
+  row (explicit delete beside the FK cascade; pre-0031 chains skip it).
+- No new operator surface: no callback route, no consent UI, no secret
+  value echoed on any path. No scheduled refresh (still needs its own
+  demonstrated need and ADR). No Integration-list health aggregate (the
+  PR #762 effective-Connection semantics stay deferred until cached
+  tokens plus consent rows exist to aggregate over).
+
+Steward checkpoint (one-diagram test, 2026-09-17): still one secrets
+path — deployment secrets plus per-Organization envelope ciphertext
+(Connection credentials and now OAuth tokens, same mechanism, same KEK
+lifecycle, same registry/scrub discipline). No third storage story;
+Free-tier posture unchanged (one D1 table, no new primitive, no new
+binding).
+
 ## Why Secrets Store alone is insufficient for per-org secrets (tripwire rationale)
 
 This is why the envelope — not more deployment secrets — is the upgrade

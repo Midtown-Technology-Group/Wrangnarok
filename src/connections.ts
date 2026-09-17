@@ -24,6 +24,7 @@ import type { ConnectionView } from "./integrations";
 import { scrubValueWithDeploymentSecrets } from "./secrets";
 import type { AiProviderCredentials, CloudflareCredentials, HaloCredentials, NinjaCredentials } from "./bindings";
 import { decryptConnectionSecret, encryptConnectionSecret, ENVELOPE_MAX_PLAINTEXT } from "./envelope";
+import { deleteOAuthTokens } from "./oauth-tokens";
 
 /** Deployment credential surface read by the management test path (CON-01).
  * Required-secret values are presence-checked only — never persisted,
@@ -416,9 +417,9 @@ export async function resolveConnectionSecrets(
  * MANAGED_RESOURCE; missing rows 404. Deleting the last mapping for a
  * required Integration is allowed here — the Execution path fails loud
  * (424) on next use, which is the observable contract. Provisioned
- * per-Organization secrets are deleted explicitly with the mapping (belt
- * beside the FK cascade, which D1 may not enforce). Pre-0028 chains skip
- * the secrets delete via the table check. */
+ * per-Organization secrets and stored OAuth tokens are deleted explicitly
+ * with the mapping (belt beside the FK cascade, which D1 may not enforce).
+ * Pre-0029/pre-0031 chains skip the respective deletes via table checks. */
 export async function deleteConnection(db: D1Database, caller: Principal, integrationId: string): Promise<void> {
   if (!UUID.test(integrationId)) throw invalid("UNKNOWN_INTEGRATION", "Unknown Integration id.", 404);
   const def = integrationById(integrationId);
@@ -435,6 +436,7 @@ export async function deleteConnection(db: D1Database, caller: Principal, integr
   if (await hasSecretsTable(db)) {
     await db.prepare("DELETE FROM connection_secrets WHERE connection_id=?").bind(row.id).run();
   }
+  await deleteOAuthTokens(db, row.id);
   await db
     .prepare("DELETE FROM connections WHERE org_id=? AND integration_id=?")
     .bind(caller.orgId, integrationId)

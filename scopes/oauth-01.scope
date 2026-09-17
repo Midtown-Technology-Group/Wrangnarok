@@ -3,18 +3,31 @@
 # persistence), auth-code/PKCE/callback contracts, audience/scope override
 # semantics, non-secret health lifecycle. NinjaOne wired onto the primitive;
 # halo auth shape unchanged.
+# Persistence slice 1 (post-#148, migration 0031): encrypted per-org/per-Connection
+# OAuth token + health rows reusing the ADR 005 envelope/KEK path, monotonic
+# persisted generation with stale-generation fencing, no D1 tx over vendor HTTP.
+# No callback/operator UI, no scheduled refresh, no new primitives, no
+# integration-health aggregation.
 src/oauth.ts
+src/oauth-tokens.ts
 src/oauth-refresh-fence.ts
 src/bindings.ts
+src/connections.ts
+src/envelope.ts
 src/index.ts
 wrangler.jsonc
 src/integrations/ninjaone.ts
+migrations/0031_oauth_tokens.sql
 test/oauth.test.ts
+test/oauth-tokens.test.ts
 test/ninjaone.test.ts
 # integration-faults pins the NinjaOne Action fault/deadline mapping the
 # shared primitive must preserve (added by this lane for the review fix).
 test/integration-faults.test.ts
+test/helpers/workflow-harness.ts
 docs/architecture/003-integrations-connections.md
+docs/architecture/005-secret-storage.md
+docs/migration-ledger.md
 docs/upstream-parity.md
 scripts/check-bundle-budget.mjs
 scopes/oauth-01.scope
