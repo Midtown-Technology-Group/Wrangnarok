@@ -2,17 +2,25 @@
 // TOOL-01 (issue #170): inbound MCP gateway tests with a real JSON-RPC
 // client over the local Worker. Pins discovery, invoke, result/error,
 // unauthorized/hidden/cross-org calls, revocation, and stale-registry
-// behavior. Runs in real workerd with a real D1 binding (migrations
-// 0001-0002 plus 0011 + 0024); only outbound vendor HTTP is intercepted.
+// behavior, plus the S1 authorization mapping (ADR 022): the
+// Access-compatible flow with RFC 9728 discovery metadata on the same
+// membership gate as every /api/* route. Runs in real workerd with a
+// real D1 binding (migrations 0001-0002 plus 0011 + 0024); only outbound
+// vendor HTTP is intercepted.
 import { env } from "cloudflare:workers";
 import { reset } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
+import { clearAccessCertCache } from "../src/access";
 import { HALO_INTEGRATION_ID, echoSaga, helloSaga } from "../src/domain";
 import { Fault } from "../src/domain";
 import {
+  MCP_PROTECTED_RESOURCE_MCP_PATH,
+  MCP_PROTECTED_RESOURCE_PATH,
+  mcpProtectedResourceMetadata,
   mcpResult,
+  mcpUnauthorizedChallenge,
   parseMcpCallParams,
   parseMcpDescribeParams,
   parseMcpRequest,
@@ -38,6 +46,16 @@ import seed from "../scripts/seed-local.sql?raw";
 const bindings = env as unknown as Bindings;
 const TOKEN = "a".repeat(64);
 const ORG = "00000000-0000-4000-8000-000000000001";
+const FIXTURE_USER = "00000000-0000-4000-8000-000000000002";
+const USER_B = "00000000-0000-4000-8000-00000000000b";
+const ORG_B = "00000000-0000-4000-8000-00000000000c";
+const ACCESS_TEAM = "https://tool-170-s1.cloudflareaccess.com";
+const ACCESS_AUD = "tool-170-s1-aud";
+const ACCESS_EMAIL = "mcp-operator@example.com";
+
+/** Per-test outbound override for Access cert fetches (outbound vendor
+ * HTTP only, like the echo stub below). Reset in beforeEach. */
+let extraOutbound: ((url: string) => Response | null) | null = null;
 
 /** Minimal real MCP client: JSON-RPC 2.0 over POST /api/mcp. */
 async function mcp(method: string, params: unknown, id: string | number | null = 1, token: string = TOKEN) {
@@ -53,6 +71,102 @@ async function mcp(method: string, params: unknown, id: string | number | null =
     status: response.status,
     body: (await response.json()) as { result?: Record<string, unknown>; error?: unknown },
   };
+}
+
+/** Real MCP client with caller-controlled headers and env (swapped
+ * LAB users, Access assertions, scope selection). The default client
+ * above stays untouched; this one proves the auth mapping. */
+async function mcpCall(options: {
+  method: string;
+  params?: unknown;
+  headers?: Record<string, string>;
+  env?: Bindings;
+}): Promise<{
+  status: number;
+  headers: Headers;
+  body: { result?: Record<string, unknown>; error?: unknown };
+}> {
+  const response = await worker.fetch(
+    new Request("https://local.test/api/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options.headers },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: options.method,
+        ...(options.params === undefined ? {} : { params: options.params }),
+      }),
+    }),
+    options.env ?? bindings,
+  );
+  return {
+    status: response.status,
+    headers: response.headers,
+    body: (await response.json()) as { result?: Record<string, unknown>; error?: unknown },
+  };
+}
+
+/** Distinct LAB identity per caller (org-lifecycle precedent): the
+ * swapped user never bootstraps — LAB_FIXTURE_USER_ID preserves the
+ * configured fixture identity for the bootstrap comparison. */
+function asUser(userId: string): Bindings {
+  return { ...bindings, LAB_USER_ID: userId, LAB_FIXTURE_USER_ID: FIXTURE_USER };
+}
+
+/** Seed one org/user/membership triple, creating only missing rows (the
+ * LAB fixture bootstrap may already own the org and user rows). */
+async function seedMembership(
+  orgId: string,
+  userId: string,
+  orgName: string,
+  status: "active" | "revoked" = "active",
+  role: "member" | "admin" = "member",
+): Promise<void> {
+  const stamp = new Date().toISOString();
+  const org = await bindings.DB.prepare("SELECT id FROM organizations WHERE id=?").bind(orgId).first<{ id: string }>();
+  if (!org) {
+    await bindings.DB.prepare(
+      "INSERT INTO organizations(id,name,status,created_at,disabled_at) VALUES (?,?, 'active',?,NULL)",
+    )
+      .bind(orgId, orgName, stamp)
+      .run();
+  }
+  const user = await bindings.DB.prepare("SELECT user_id FROM users WHERE user_id=?")
+    .bind(userId)
+    .first<{ user_id: string }>();
+  if (!user) {
+    await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?)")
+      .bind(userId, stamp)
+      .run();
+  }
+  await bindings.DB.prepare(
+    "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,?,?,'ordinary',?,?)",
+  )
+    .bind(orgId, userId, role, status, stamp, stamp)
+    .run();
+}
+
+function b64url(bytes: Uint8Array): string {
+  let s = "";
+  for (const byte of bytes) s += String.fromCharCode(byte);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function accessKeypair() {
+  return crypto.subtle.generateKey(
+    { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+    true,
+    ["sign", "verify"],
+  );
+}
+
+async function mintAccessAssertion(priv: CryptoKey, kid: string, payload: Record<string, unknown>): Promise<string> {
+  const head = b64url(new TextEncoder().encode(JSON.stringify({ alg: "RS256", kid, typ: "JWT" })));
+  const body = b64url(new TextEncoder().encode(JSON.stringify(payload)));
+  const sig = new Uint8Array(
+    await crypto.subtle.sign("RSASSA-PKCS1-v1_5", priv, new TextEncoder().encode(`${head}.${body}`)),
+  );
+  return `${head}.${body}.${b64url(sig)}`;
 }
 
 async function enrollHello(): Promise<string> {
@@ -77,9 +191,13 @@ beforeEach(async () => {
   await bindings.DB.exec(migration11);
   await bindings.DB.exec(migration24);
   await bindings.DB.prepare("DELETE FROM tool_enrollments").run();
+  clearAccessCertCache();
+  extraOutbound = null;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = input instanceof Request ? input.url : String(input);
     if (url === "http://127.0.0.1:8788/echo") return Response.json({ message: "connection-test" });
+    const extra = extraOutbound === null ? null : extraOutbound(url);
+    if (extra) return extra;
     throw new Error(`Unexpected outbound request: ${url}`);
   });
 });
@@ -133,6 +251,34 @@ describe("MCP envelope parsing (pure)", () => {
     expect(envelopeCode(() => parseMcpDescribeParams(null))).toBe("MCP_INVALID_PARAMS");
     expect(envelopeCode(() => parseMcpDescribeParams({ name: "" }))).toBe("MCP_INVALID_PARAMS");
     expect(envelopeCode(() => parseMcpDescribeParams({ name: "x".repeat(129) }))).toBe("MCP_INVALID_PARAMS");
+  });
+});
+
+describe("MCP discovery metadata (pure)", () => {
+  it("builds RFC 9728 metadata with and without an Access team", () => {
+    expect(mcpProtectedResourceMetadata("https://local.test", {})).toEqual({
+      resource: "https://local.test/api/mcp",
+      resource_name: "Wrangnarok MCP gateway",
+      bearer_methods_supported: ["header"],
+    });
+    // Blank teams advertise no authorization server, never an empty string.
+    expect(mcpProtectedResourceMetadata("https://local.test", { ACCESS_TEAM_DOMAIN: "   " })).toEqual(
+      mcpProtectedResourceMetadata("https://local.test", {}),
+    );
+    expect(
+      mcpProtectedResourceMetadata("https://local.test", {
+        ACCESS_TEAM_DOMAIN: "https://team.cloudflareaccess.com///",
+      }),
+    ).toEqual({
+      resource: "https://local.test/api/mcp",
+      resource_name: "Wrangnarok MCP gateway",
+      bearer_methods_supported: ["header"],
+      authorization_servers: ["https://team.cloudflareaccess.com"],
+    });
+    expect(mcpUnauthorizedChallenge("https://local.test")).toBe(
+      'Bearer resource_metadata="https://local.test/.well-known/oauth-protected-resource/api/mcp"',
+    );
+    expect(MCP_PROTECTED_RESOURCE_MCP_PATH).toBe(`${MCP_PROTECTED_RESOURCE_PATH}/api/mcp`);
   });
 });
 
@@ -334,5 +480,133 @@ describe("MCP gateway over the local Worker (real client)", () => {
       bindings,
     );
     expect(queryInspect.status).toBe(400);
+  });
+
+  it("serves public protected-resource metadata for MCP discovery (no auth)", async () => {
+    for (const path of [MCP_PROTECTED_RESOURCE_PATH, MCP_PROTECTED_RESOURCE_MCP_PATH]) {
+      const res = await worker.fetch(new Request(`https://local.test${path}`), bindings);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        resource: "https://local.test/api/mcp",
+        resource_name: "Wrangnarok MCP gateway",
+        bearer_methods_supported: ["header"],
+      });
+    }
+    // Access-configured deployments advertise the team as authorization server.
+    const configured = await worker.fetch(new Request(`https://local.test${MCP_PROTECTED_RESOURCE_PATH}`), {
+      ...bindings,
+      ACCESS_TEAM_DOMAIN: "https://team.cloudflareaccess.com/",
+    });
+    expect(await configured.json()).toMatchObject({
+      authorization_servers: ["https://team.cloudflareaccess.com"],
+    });
+    // Query strings stay deny-by-default like every other single-resource route.
+    const queried = await worker.fetch(new Request(`https://local.test${MCP_PROTECTED_RESOURCE_PATH}?x=1`), bindings);
+    expect(queried.status).toBe(400);
+    // Only GET serves: anything else falls through to the static/404 path.
+    const posted = await worker.fetch(
+      new Request(`https://local.test${MCP_PROTECTED_RESOURCE_PATH}`, { method: "POST" }),
+      { ...bindings, ASSETS: undefined },
+    );
+    expect(posted.status).toBe(404);
+    // A backend fault behind the metadata serializes 500 JSON, never a throw.
+    const hostile = { ...bindings };
+    Object.defineProperty(hostile, "ACCESS_TEAM_DOMAIN", {
+      get() {
+        throw new Error("boom");
+      },
+    });
+    const broken = await worker.fetch(new Request(`https://local.test${MCP_PROTECTED_RESOURCE_PATH}`), hostile);
+    expect(broken.status).toBe(500);
+  });
+
+  it("points unauthorized MCP callers at the discovery document (401 challenge)", async () => {
+    const res = await worker.fetch(
+      new Request("https://local.test/api/mcp", {
+        method: "POST",
+        headers: { Authorization: "Bearer wrong-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      }),
+      bindings,
+    );
+    expect(res.status).toBe(401);
+    expect(res.headers.get("WWW-Authenticate")).toBe(
+      'Bearer resource_metadata="https://local.test/.well-known/oauth-protected-resource/api/mcp"',
+    );
+  });
+
+  it("serves an Access-authenticated MCP caller through the same membership gate", async () => {
+    const name = await enrollHello();
+    const { publicKey, privateKey } = await accessKeypair();
+    const pub = await crypto.subtle.exportKey("jwk", publicKey);
+    extraOutbound = (url) =>
+      url === `${ACCESS_TEAM}/cdn-cgi/access/certs`
+        ? Response.json({ keys: [{ ...pub, kid: "mcp-s1-k1", alg: "RS256" }] })
+        : null;
+    const now = Math.floor(Date.now() / 1000);
+    const assertion = await mintAccessAssertion(privateKey, "mcp-s1-k1", {
+      aud: [ACCESS_AUD],
+      exp: now + 300,
+      iat: now - 10,
+      email: ACCESS_EMAIL,
+    });
+    await seedMembership(ORG, ACCESS_EMAIL.toLowerCase(), "lab", "active", "admin");
+    const accessBindings: Bindings = {
+      ...bindings,
+      ACCESS_TEAM_DOMAIN: ACCESS_TEAM,
+      ACCESS_AUD,
+      ACCESS_ORG_ID: ORG,
+      ACCESS_ALLOWED_EMAILS: ACCESS_EMAIL,
+    };
+    const headers = { "Cf-Access-Jwt-Assertion": assertion };
+    const listed = await mcpCall({ method: "tools/list", params: {}, headers, env: accessBindings });
+    expect(listed.status).toBe(200);
+    const names = ((listed.body.result?.tools as { name: string }[] | undefined) ?? []).map((entry) => entry.name);
+    expect(names).toContain(name);
+    const called = await mcpCall({
+      method: "tools/call",
+      params: { tool: name, input: { input: { name: "Access" }, idempotencyKey: "mcp-access-call-0001" } },
+      headers,
+      env: accessBindings,
+    });
+    expect(called.status).toBe(200);
+    expect((called.body.result as { tool: string }).tool).toBe(name);
+  });
+
+  it("keeps cross-organization tools invisible to a real MCP client (never a leak)", async () => {
+    const name = await enrollHello();
+    await seedMembership(ORG_B, USER_B, "org-b");
+    const foreign = asUser(USER_B);
+    const headers = { Authorization: `Bearer ${TOKEN}`, "X-Organization-Id": ORG_B };
+    const listed = await mcpCall({ method: "tools/list", params: {}, headers, env: foreign });
+    expect(listed.status).toBe(200);
+    const names = ((listed.body.result?.tools as { name: string }[] | undefined) ?? []).map((entry) => entry.name);
+    expect(names).not.toContain(name);
+    const called = await mcpCall({ method: "tools/call", params: { tool: name, input: {} }, headers, env: foreign });
+    expect(called.status).toBe(200);
+    expect((called.body.result as { error: { code: string } }).error.code).toBe("TOOL_NOT_FOUND");
+    // Org A is not even selectable (stranger 404, never a leak).
+    const stranger = await mcpCall({
+      method: "tools/list",
+      params: {},
+      headers: { Authorization: `Bearer ${TOKEN}`, "X-Organization-Id": ORG },
+      env: foreign,
+    });
+    expect(stranger.status).toBe(404);
+  });
+
+  it("denies revoked members at the gate before any gateway code runs", async () => {
+    await enrollHello();
+    await seedMembership(ORG, USER_B, "lab", "active", "member");
+    const foreign = asUser(USER_B);
+    const headers = { Authorization: `Bearer ${TOKEN}` };
+    const before = await mcpCall({ method: "tools/list", params: {}, headers, env: foreign });
+    expect(before.status).toBe(200);
+    await bindings.DB.prepare("UPDATE org_memberships SET status='revoked' WHERE org_id=? AND user_id=?")
+      .bind(ORG, USER_B)
+      .run();
+    const after = await mcpCall({ method: "tools/list", params: {}, headers, env: foreign });
+    expect(after.status).toBe(403);
+    expect(after.body).toMatchObject({ error: { code: "MEMBERSHIP_REVOKED" } });
   });
 });
