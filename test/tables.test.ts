@@ -549,6 +549,11 @@ describe("TABLE-02 physical document_ids batch filter (issue #154)", () => {
     const rejectedCount = await call(`/api/tables/docs/count?${tooMany}`, "GET");
     expect(rejectedCount.status).toBe(400);
     expect(await rejectedCount.json()).toMatchObject({ error: { code: "TOO_MANY_DOCUMENT_IDS" } });
+    // 26 identical IDs evade nothing: the raw key count is bounded pre-dedup.
+    const dupesTooMany = Array.from({ length: 26 }, () => "document_ids=ord-1").join("&");
+    const dupRejected = await call(`/api/tables/docs/rows?${dupesTooMany}`, "GET");
+    expect(dupRejected.status).toBe(400);
+    expect(await dupRejected.json()).toMatchObject({ error: { code: "TOO_MANY_DOCUMENT_IDS" } });
     // The 25-ID boundary still lands.
     const boundary = Array.from({ length: 25 }, (_, i) => `document_ids=d${i}`).join("&");
     expect((await call(`/api/tables/docs/rows?${boundary}`, "GET")).status).toBe(200);

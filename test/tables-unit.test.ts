@@ -145,10 +145,14 @@ describe("tables defensive branches", () => {
     params.append("document_ids", "a");
     params.append("document_ids", "b");
     expect(parseTableQuery(params).documentIds).toEqual(["b", "a"]);
-    expect(parseTableQuery(new URLSearchParams()).documentIds).toEqual([]);
+    expect(parseTableQuery(new URLSearchParams()).documentIds).toBeUndefined();
     const tooMany = new URLSearchParams();
     for (let i = 0; i < TABLE_DOCUMENT_IDS_MAX + 1; i += 1) tooMany.append("document_ids", `d${i}`);
     expect(faultCode(() => parseTableQuery(tooMany))).toBe("TOO_MANY_DOCUMENT_IDS");
+    // Repeats cannot evade the max: the raw key count is bounded pre-dedup.
+    const tooManyDupes = new URLSearchParams();
+    for (let i = 0; i < TABLE_DOCUMENT_IDS_MAX + 1; i += 1) tooManyDupes.append("document_ids", "same");
+    expect(faultCode(() => parseTableQuery(tooManyDupes))).toBe("TOO_MANY_DOCUMENT_IDS");
     for (const bad of ["", "   ", "x".repeat(TABLE_DOCUMENT_ID_QUERY_MAX + 1)]) {
       const single = new URLSearchParams();
       single.append("document_ids", bad);

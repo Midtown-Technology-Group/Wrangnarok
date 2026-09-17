@@ -88,8 +88,9 @@ export interface TableFilter {
 export interface TableQuery {
   readonly filters: readonly TableFilter[];
   /** Physical document-ID allowlist with set semantics (first-seen order).
-   * Missing or empty means no ID constraint. Results keep normal
-   * document-ID order, never input order. */
+   * Omitted when no document_ids keys are present; an explicitly present
+   * empty/blank entry is invalid. Results keep normal document-ID order,
+   * never input order. */
   readonly documentIds?: readonly string[];
   readonly prefix?: string;
   readonly order: "asc" | "desc";
@@ -212,13 +213,20 @@ export function parseTableQuery(params: URLSearchParams): TableQuery {
     filters.push({ path, value });
   }
   // Physical document-ID allowlist (upstream 8af322ac/PR #730): repeated
-  // document_ids keys with set semantics (first-seen dedup). Unknown IDs
-  // silently match nothing. Transport adaptation: upstream spoke JSON, here
-  // the list rides repeated query keys, so an explicitly present empty/blank
-  // ID fails closed — query encoding cannot faithfully distinguish upstream
-  // JSON [] from a missing filter. Each ID is bound, never interpolated.
+  // document_ids keys with set semantics (first-seen dedup for SQL).
+  // Unknown IDs silently match nothing. The length bound applies to the raw
+  // repeated-key count before validation/dedup, matching upstream: padding
+  // the list with repeats cannot evade the max. Transport adaptation:
+  // upstream spoke JSON, here the list rides repeated query keys, so an
+  // explicitly present empty/blank ID fails closed — query encoding cannot
+  // faithfully distinguish upstream JSON [] from a missing filter. Each ID
+  // is bound, never interpolated.
+  const rawDocumentIds = params.getAll("document_ids");
+  if (rawDocumentIds.length > TABLE_DOCUMENT_IDS_MAX) {
+    throw invalid("TOO_MANY_DOCUMENT_IDS", `At most ${TABLE_DOCUMENT_IDS_MAX} document_ids are accepted.`);
+  }
   const documentIds: string[] = [];
-  for (const raw of params.getAll("document_ids")) {
+  for (const raw of rawDocumentIds) {
     if (raw.length === 0 || raw.trim().length === 0 || raw.length > TABLE_DOCUMENT_ID_QUERY_MAX) {
       throw invalid(
         "INVALID_DOCUMENT_IDS",
@@ -226,9 +234,6 @@ export function parseTableQuery(params: URLSearchParams): TableQuery {
       );
     }
     if (!documentIds.includes(raw)) documentIds.push(raw);
-  }
-  if (documentIds.length > TABLE_DOCUMENT_IDS_MAX) {
-    throw invalid("TOO_MANY_DOCUMENT_IDS", `At most ${TABLE_DOCUMENT_IDS_MAX} document_ids are accepted.`);
   }
   let prefix: string | undefined;
   const rawPrefix = params.get("prefix");
@@ -269,7 +274,7 @@ export function parseTableQuery(params: URLSearchParams): TableQuery {
   if (rawCursor !== null) parseDocId(rawCursor);
   return {
     filters,
-    documentIds,
+    ...(rawDocumentIds.length === 0 ? {} : { documentIds }),
     ...(prefix === undefined ? {} : { prefix }),
     order,
     skipCount,
