@@ -917,6 +917,9 @@ export interface SdkFormField {
   readonly default?: unknown;
   readonly options?: readonly string[];
   readonly provider?: unknown;
+  /** Declared auto-fill targets (FORM-02, issue #155): sibling target
+   * field name to provider row output key, on table-provider selects. */
+  readonly autoFill?: Record<string, string>;
   readonly visibleWhen?: { readonly field: string; readonly equals: string | number | boolean };
   readonly file?: { readonly location: string; readonly maxMb?: number; readonly contentTypes?: readonly string[] };
   readonly min?: number;

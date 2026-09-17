@@ -1,0 +1,15 @@
+# lane/form-155-autofill scope (issue #155, FORM-02 clause 2 slice A):
+# declared provider auto-fill targets under the existing form provider
+# and Table authorization path. Snapshot precedence defaults < auto-fill
+# < prefill < submission; 50-mapping / 64 KiB upstream bounds; fail-closed
+# targets, projections, and provider errors. No migration, no new route,
+# no new primitive, no auth/execution path change.
+src/forms.ts
+src/index.ts
+src/sdk.ts
+client/src/lib/client-types.ts
+test/form-lifecycle.test.ts
+docs/upstream-parity.md
+docs/sdk.md
+docs/sdk-capability-map.md
+scopes/form-155-autofill.scope

@@ -139,6 +139,9 @@ await client.setConfig({ key: "apiKey", type: "secret", value: { ref: "clientSec
 // Dynamic forms (FORM-02, issue #155): designer CRUD, startup handles,
 // providers, submit or schedule. The handle is peeked for validation and
 // consumed only after validation passes; unknown/stale handles answer STALE_FORM_HANDLE.
+// Declared auto-fill targets (`autoFill` on table-provider selects) merge
+// into the startup snapshot under explicit prefill: defaults lose to
+// auto-fill, auto-fill loses to prefill, every submission value wins.
 await client.listForms();
 await client.getForm("contact");
 await client.startForm("contact", { name: "Ada" }); // opt-in prefill only

@@ -27,6 +27,22 @@
 //   or denied tables fail closed, never leak); the submit route
 //   re-checks option membership against freshly resolved options, so a
 //   stale client list cannot smuggle an unlisted value.
+// - Declared auto-fill targets: a table-provider select/multiselect field
+//   may declare `autoFill: { <sibling field>: <row output key> }` naming
+//   which provider output keys may fill which bindable form fields
+//   (upstream `auto_fill`, contracts/forms.py). At startup the server
+//   projects the declared keys from the first row of the same bounded
+//   Table scan that feeds option lists (mapping count bounded by the
+//   50-field declaration cap, fetched output capped at 64 KiB) through
+//   the caller Table gate and merges valid projections into the snapshot
+//   UNDER explicit prefill:
+//   declared defaults lose to auto-fill, auto-fill loses to URL prefill,
+//   and every submission value wins at submit (the snapshot never
+//   satisfies requiredness). Unknown, display-only, self, or
+//   twice-targeted names fail the designer declaration; missing keys,
+//   invalid projected values, oversized output, and provider errors yield
+//   no value plus a safe per-field error (never a leak, never a
+//   fabrication).
 // - Bounded startup handles: POST /api/forms/:name/startup mints a
 //   random 30-minute session-bound handle (token hash persisted in
 //   `form_startups`, single row per handle). Submit peeks the handle for
@@ -61,6 +77,7 @@ import { executionId, Fault, parseSubmission, UUID } from "./domain";
 import type { FieldFailure, Principal, SagaDef } from "./domain";
 import type { CallerCtx } from "./orgs";
 import { can } from "./roles";
+import { lookupPath } from "./tables";
 
 /** Closed v2 field type set. Display-only kinds (heading, paragraph,
 // divider) render layout and never bind to Saga inputs. */
@@ -114,12 +131,21 @@ export interface FormFilePolicy {
   readonly contentTypes?: readonly string[];
 }
 
+/** Declared auto-fill targets on one provider-backed field: sibling target
+ * field name to provider row output key (dotted column path). The server
+ * projects the named keys from the first bounded-scan row into the startup
+ * snapshot; explicit prefill and every submission value win over them. */
+export type FormAutoFill = Record<string, string>;
+
 export interface FormField {
   readonly name: string;
   readonly type: FormFieldType;
   readonly label?: string;
   readonly required: boolean;
   readonly maxLength: number;
+  /** Declared auto-fill targets (select/multiselect with a table provider
+   * only): which provider output keys may fill which sibling fields. */
+  readonly autoFill?: FormAutoFill;
   /** Declared default: merged under validated submission values. File
    * fields take a { location, path } reference (kind-checked at
    * declaration time). */
@@ -187,6 +213,17 @@ export const FORM_STARTUP_TTL_MS = 30 * 60 * 1000;
 export const FORM_STARTUP_HANDLE_RE = /^[a-f0-9]{64}$/;
 /** Provider fetch caps: 50 option keys from the bounded reader. */
 export const FORM_PROVIDER_MAX_OPTIONS = 50;
+/** Provider auto-fill fetch bound: at most 64 KiB of output JSON per source
+ * field (upstream 64 KiB provider bound, applied here to the fetched output
+ * the declaration projects instead of the request inputs). The upstream
+ * 50-key mapping bound needs no separate cap here: declarations hold at
+ * most 50 fields (FORM_MAX_FIELDS, the same upstream 50), so a form carries
+ * at most 49 auto-fill targets — the field bound is the tighter fence. */
+export const FORM_AUTOFILL_MAX_BYTES = 64 * 1024;
+/** Provider row output keys: column names with optional dotted nesting
+ * (the Table lookupPath shape), 1 to 128 chars total. */
+const OUTPUT_KEY = /^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)*$/;
+const OUTPUT_KEY_MAX = 128;
 /** Scheduled-submit lookahead: at most 30 days out, never in the past. */
 export const FORM_SCHEDULE_MAX_MS = 30 * 24 * 60 * 60 * 1000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -299,6 +336,39 @@ function parseProvider(fieldName: string, value: unknown): FormFieldProvider | u
   throw new Error(`Form field "${fieldName}" provider kind must be static or table.`);
 }
 
+/** Parse one field's declared auto-fill targets: sibling target field name
+ * to provider row output key. Static providers carry no row metadata, so
+ * auto-fill needs a table provider on the same field; target existence,
+ * display-only, self, and duplicate checks run in the post-pass below
+ * (forward references read naturally, like visibleWhen). */
+function parseAutoFill(
+  fieldName: string,
+  type: FormFieldType,
+  value: unknown,
+  provider: FormFieldProvider | undefined,
+): FormAutoFill | undefined {
+  if (value === undefined) return undefined;
+  // Static providers carry no row metadata: only table-provider selects
+  // declare targets. No count cap: 50 fields bound targets to 49 siblings.
+  if ((type !== "select" && type !== "multiselect") || provider?.kind !== "table") {
+    throw new Error(`Form field "${fieldName}" auto-fill needs a table-provider select.`);
+  }
+  if (!isRecord(value)) {
+    throw new Error(`Form field "${fieldName}" auto-fill maps target fields to output keys.`);
+  }
+  const entries = Object.entries(value);
+  if (entries.length === 0) throw new Error(`Form field "${fieldName}" auto-fill declares at least one target.`);
+  const parsed: Record<string, string> = {};
+  for (const [target, outputKey] of entries) {
+    if (!FIELD_NAME.test(target)) throw new Error(`Form field "${fieldName}" auto-fill targets must be field names.`);
+    if (typeof outputKey !== "string" || outputKey.length > OUTPUT_KEY_MAX || !OUTPUT_KEY.test(outputKey)) {
+      throw new Error(`Form field "${fieldName}" auto-fill output keys must be 1-128 char column paths.`);
+    }
+    parsed[target] = outputKey;
+  }
+  return parsed;
+}
+
 function parseFilePolicy(fieldName: string, value: unknown): FormFilePolicy | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value) || typeof value.location !== "string" || !LOCATION_NAME.test(value.location)) {
@@ -348,6 +418,7 @@ export function parseFormFields(value: unknown): FormField[] {
       "default",
       "options",
       "provider",
+      "autoFill",
       "visibleWhen",
       "file",
       "min",
@@ -357,7 +428,7 @@ export function parseFormFields(value: unknown): FormField[] {
     ];
     if (Object.keys(entry).some((key) => !allowed.includes(key))) {
       throw new Error(
-        "Form fields declare only name, type, label, required, maxLength, default, options, provider, visibleWhen, file, min, max, pattern, content.",
+        "Form fields declare only name, type, label, required, maxLength, default, options, provider, autoFill, visibleWhen, file, min, max, pattern, content.",
       );
     }
     if (typeof entry.name !== "string" || !FIELD_NAME.test(entry.name)) {
@@ -425,6 +496,7 @@ export function parseFormFields(value: unknown): FormField[] {
     if ((type === "select" || type === "multiselect") && options === undefined && provider === undefined) {
       throw new Error(`Select field "${entry.name}" needs options or a provider.`);
     }
+    const autoFill = parseAutoFill(entry.name, type, entry.autoFill, provider);
     const file = parseFilePolicy(entry.name, entry.file);
     if (file !== undefined && type !== "file") {
       throw new Error(`Only file fields carry a file policy (field "${entry.name}").`);
@@ -557,6 +629,7 @@ export function parseFormFields(value: unknown): FormField[] {
       ...(entry.default === undefined ? {} : { default: entry.default as FormField["default"] }),
       ...(options === undefined ? {} : { options }),
       ...(provider === undefined ? {} : { provider }),
+      ...(autoFill === undefined ? {} : { autoFill }),
       ...(visibleWhen === undefined ? {} : { visibleWhen }),
       ...(file === undefined ? {} : { file }),
       ...(entry.min === undefined ? {} : { min: entry.min as number }),
@@ -571,6 +644,24 @@ export function parseFormFields(value: unknown): FormField[] {
   for (const field of parsed) {
     if (field.visibleWhen !== undefined && !names.has(field.visibleWhen.field)) {
       throw new Error(`Form field "${field.name}" conditions on unknown field "${field.visibleWhen.field}".`);
+    }
+  }
+  // Auto-fill targets name a declared bindable field exactly once: unknown,
+  // display-only, self, or twice-claimed targets are ambiguous, never
+  // silent last-wins.
+  const byName = new Map(parsed.map((field) => [field.name, field]));
+  const claimed = new Set<string>();
+  for (const field of parsed) {
+    if (field.autoFill === undefined) continue;
+    for (const target of Object.keys(field.autoFill)) {
+      const targetField = byName.get(target);
+      if (!targetField) throw new Error(`Form field "${field.name}" auto-fill targets unknown field "${target}".`);
+      if (target === field.name) throw new Error(`Form field "${field.name}" auto-fill cannot target itself.`);
+      if ((FORM_DISPLAY_TYPES as readonly string[]).includes(targetField.type)) {
+        throw new Error(`Form field "${field.name}" auto-fill cannot target display-only field "${target}".`);
+      }
+      if (claimed.has(target)) throw new Error(`Form field "${target}" is auto-filled twice.`);
+      claimed.add(target);
     }
   }
   return parsed;
@@ -1472,18 +1563,90 @@ export async function resolveProviderOptions(
   return { options, errors };
 }
 
-/** Mint a startup handle: resolve providers, merge prefill over defaults
- * (declaration opt-in only), persist the snapshot hash row, and return the
- * one-time handle plus the inspectable snapshot. Unknown prefill names,
- * prefill for display-only fields, and prefill values that would fail the
- * submission gate (wrong type, over bound, unlisted option, file shape)
- * fail closed with 422. */
+/** Resolve declared auto-fill targets through the caller's Table policy
+ * gate. For each table-provider source field, the bounded row scan (the
+ * same scan feeding option lists, at most 50 rows) is fetched; output over
+ * 64 KiB, denied or foreign tables, and missing keys yield no value plus a
+ * safe per-field error entry, never a leak. Declared keys project from the
+ * first row; each projected value runs the target field's submission gate
+ * (minus required/hidden, which belong to submit time, reusing the prefill
+ * checks), so a value the submit gate would refuse never enters the
+ * snapshot. Resolution is one pass over provider rows only: targets that
+ * are also sources are not chained. */
+export async function resolveAutoFillValues(
+  db: D1Database,
+  caller: Principal,
+  fields: readonly FormField[],
+  readRows: (db: D1Database, caller: Principal, table: string) => Promise<readonly Record<string, unknown>[]>,
+  allowedOptions?: Record<string, readonly string[]>,
+): Promise<{ values: Record<string, unknown>; errors: Record<string, string> }> {
+  const values: Record<string, unknown> = {};
+  const errors: Record<string, string> = {};
+  const byName = new Map(fields.map((field) => [field.name, field]));
+  for (const field of fields) {
+    if (field.autoFill === undefined || field.provider?.kind !== "table") continue;
+    let rows: readonly Record<string, unknown>[];
+    try {
+      rows = await readRows(db, caller, field.provider.table);
+    } catch {
+      errors[field.name] = "Provider table is not available to this caller.";
+      continue;
+    }
+    if (byteLength(JSON.stringify(rows)) > FORM_AUTOFILL_MAX_BYTES) {
+      errors[field.name] = "Provider auto-fill output is too large.";
+      continue;
+    }
+    const first = rows[0];
+    if (first === undefined) continue;
+    for (const [target, outputKey] of Object.entries(field.autoFill)) {
+      const targetField = byName.get(target);
+      if (
+        !targetField ||
+        target === field.name ||
+        (FORM_DISPLAY_TYPES as readonly string[]).includes(targetField.type)
+      ) {
+        continue;
+      }
+      const projected = lookupPath(first, outputKey);
+      // A declared key missing from the provider output is Table/declaration
+      // drift: no value is fabricated, and the providers route names the
+      // safe per-field error.
+      if (projected === undefined) {
+        errors[field.name] = "Provider auto-fill output is missing a declared key.";
+        continue;
+      }
+      const allowed =
+        targetField.type === "select" || targetField.type === "multiselect"
+          ? (allowedOptions?.[target] ?? targetField.options ?? [])
+          : [];
+      const failures: FieldFailure[] = [];
+      checkPrefillValue(targetField, projected, allowed, failures);
+      if (failures.length > 0) {
+        errors[field.name] = "Provider auto-fill did not pass validation for this field.";
+        continue;
+      }
+      values[target] = projected;
+    }
+  }
+  return { values, errors };
+}
+
+/** Mint a startup handle: resolve providers and declared auto-fill targets,
+ * merge prefill over auto-fill over defaults (declaration opt-in only for
+ * prefill), persist the snapshot hash row, and return the one-time handle
+ * plus the inspectable snapshot. Unknown prefill names, prefill for
+ * display-only fields, and prefill values that would fail the submission
+ * gate (wrong type, over bound, unlisted option, file shape) fail closed
+ * with 422. Auto-fill fetch failures and invalid projections yield no
+ * snapshot value (surfaced on the providers route); explicit prefill and
+ * every submission value always win over auto-fill. */
 export async function startFormSession(
   db: D1Database,
   caller: Principal,
   def: FormDefinition,
   body: unknown,
   readTable: (db: D1Database, caller: Principal, table: string, valueField: string) => Promise<readonly string[]>,
+  readRows: (db: D1Database, caller: Principal, table: string) => Promise<readonly Record<string, unknown>[]>,
 ): Promise<FormStartup> {
   await ensureStartupTable(db);
   let prefill: Record<string, unknown> = {};
@@ -1512,6 +1675,10 @@ export async function startFormSession(
     throw new Fault(403, "PREFILL_NOT_ALLOWED", "This form does not accept URL prefill.");
   }
   const { options } = await resolveProviderOptions(db, caller, def.fields, readTable);
+  // Declared auto-fill projections resolve through the same caller Table
+  // gate; fetch failures and invalid values yield no snapshot entry (the
+  // providers route surfaces them), so they can never poison the snapshot.
+  const { values: autoFilled } = await resolveAutoFillValues(db, caller, def.fields, readRows, options);
   // Prefill runs the same per-field gate as submissions (minus required
   // and hidden-field checks, which belong to submit time): unknown names,
   // display-only names, wrong types, over-bound text, bad patterns, broken
@@ -1540,10 +1707,16 @@ export async function startFormSession(
   const snapshot: Record<string, unknown> = {};
   for (const field of def.fields) {
     if ((FORM_DISPLAY_TYPES as readonly string[]).includes(field.type)) continue;
-    // Null prefill means "no value" (falls back to defaults): never persist
-    // null into the snapshot, so visibility and submit treat it as a gap.
+    // Null prefill means "no value" (falls back below): never persist null
+    // into the snapshot, so visibility and submit treat it as a gap.
+    // Precedence is explicit prefill, then declared auto-fill, then the
+    // author-declared default — auto-fill never overrides prefill.
     if (prefill[field.name] !== undefined && prefill[field.name] !== null) {
       snapshot[field.name] = prefill[field.name];
+      continue;
+    }
+    if (autoFilled[field.name] !== undefined) {
+      snapshot[field.name] = autoFilled[field.name];
       continue;
     }
     if (field.default !== undefined) snapshot[field.name] = field.default;

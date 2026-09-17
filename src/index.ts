@@ -176,6 +176,7 @@ import {
   parseScheduleAt,
   parseStartupHandle,
   peekStartupHandle,
+  resolveAutoFillValues,
   resolveProviderOptions,
   saveForm,
   startFormSession,
@@ -614,6 +615,7 @@ function serializeForm(def: FormDefinition): unknown {
       ...(field.default === undefined ? {} : { default: field.default }),
       ...(field.options === undefined ? {} : { options: field.options }),
       ...(field.provider === undefined ? {} : { provider: field.provider }),
+      ...(field.autoFill === undefined ? {} : { autoFill: field.autoFill }),
       ...(field.visibleWhen === undefined ? {} : { visibleWhen: field.visibleWhen }),
       ...(field.file === undefined ? {} : { file: field.file }),
       ...(field.min === undefined ? {} : { min: field.min }),
@@ -656,6 +658,28 @@ async function readProviderTable(
   }
   values.sort();
   return values;
+}
+
+/** Provider row reader for FORM-02 declared auto-fill targets: the same
+ * bounded Table scan that feeds option lists (caller-scoped read policy,
+ * at most 50 rows, insertion order), but with full row documents so the
+ * declaration can project named output keys. Denied or missing tables
+ * throw (the resolver converts to safe per-field errors, never a leak).
+ * The 64 KiB output bound is enforced by the resolver, not the scan. */
+async function readProviderRows(
+  db: D1Database,
+  caller: Principal,
+  table: string,
+): Promise<readonly Record<string, unknown>[]> {
+  const def = await loadTable(db, caller.orgId, table);
+  if (!def) throw new Fault(404, "TABLE_NOT_FOUND", "Table not found.");
+  const page = await queryRows(db, caller, def, {
+    filters: [],
+    order: "asc",
+    skipCount: true,
+    limit: 50,
+  });
+  return page.rows.map((row) => row.data);
 }
 
 /** Re-validate file-field references against the live FILE-01 rows: the
@@ -1311,9 +1335,9 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const formStartup = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/startup$/.exec(url.pathname);
     if (formStartup?.[1] && request.method === "POST") {
       // FORM-02 startup: mint a session-bound 30-minute handle plus the
-      // resolved snapshot (defaults, opt-in prefill merge, provider
-      // options through the caller-scoped Table gate). Query strings and
-      // display-only/unknown prefill fail closed.
+      // resolved snapshot (defaults under declared auto-fill under opt-in
+      // prefill merge, provider options through the caller-scoped Table
+      // gate). Query strings and display-only/unknown prefill fail closed.
       const name = formStartup[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
@@ -1326,7 +1350,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (!(await mayStartForm(env.DB, ctx, caller.orgId, name))) {
         throw new Fault(403, "GRANT_REQUIRED", "Starting this Form requires a read or submit grant.");
       }
-      const started = await startFormSession(env.DB, caller, def, await boundedJson(request.body), readProviderTable);
+      const started = await startFormSession(
+        env.DB,
+        caller,
+        def,
+        await boundedJson(request.body),
+        readProviderTable,
+        readProviderRows,
+      );
       return json(
         {
           form: name,
@@ -1343,7 +1374,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // FORM-02 provider fetch: resolved select/multiselect options for
       // this Organization through the caller-scoped Table gate. Denied or
       // foreign tables yield empty lists with per-field errors, never a
-      // leak. Query strings are unsupported (options ride the declaration).
+      // leak. Declared auto-fill targets resolve through the same gate and
+      // surface fetch/validation failures here too (startup carries no
+      // error channel). Query strings are unsupported (options ride the
+      // declaration).
       const name = formProviders[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
@@ -1357,7 +1391,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         throw new Fault(403, "GRANT_REQUIRED", "Reading this Form's providers requires a read or submit grant.");
       }
       const resolved = await resolveProviderOptions(env.DB, caller, def.fields, readProviderTable);
-      return json({ form: name, options: resolved.options, errors: resolved.errors });
+      const filled = await resolveAutoFillValues(env.DB, caller, def.fields, readProviderRows, resolved.options);
+      // Option errors keep their established message on collision: both
+      // entries name the same unreadable table, never its contents.
+      return json({ form: name, options: resolved.options, errors: { ...filled.errors, ...resolved.errors } });
     }
     const formSubmit = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/submit$/.exec(url.pathname);
     if (formSubmit?.[1] && request.method === "POST") {
