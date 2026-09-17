@@ -244,6 +244,169 @@ Ordering and correlation (issue-ledger drift): at `08a8f58b` upstream commits ev
 
 **Wrangnarök implication (TRG-02, ADR 018):** Adopt the product shape — scoped endpoints bound to a stable Saga, per-endpoint revocable credentials, HMAC verification with the evidenced encodings/whitespace rules, echo-param challenges answered in plaintext with no Execution, per-endpoint rate limiting before any Execution write, vendor event IDs with deterministic `wep-` delivery keys (same event replays, mismatched duplicates conflict), Organization/run-as identity from the endpoint row only, and synchronous HTTP responses kept distinct from asynchronous Execution receipts (async-first; bounded sync stays with RUN-03). Adapt the mechanism: Worker fetch plus D1 plus the standard submit protocol (Execution row written before Workflow dispatch; no Queue or Durable Object), deployment-scoped webhook secrets per ADR 005 v0, and fail-closed admission (rate-window read faults and endpoint-lookup faults propagate as sanitized 5xx, never as 404 or an invented zero count). No automatic retry of business mutations: submit failures propagate and the vendor redelivers the same event ID.
 
+### 23. External MCP servers: templates, connections, catalog, consent, refresh (TOOL-02, issue #171, Sep 2026)
+
+All pins at `3543c7e` (the parity-audit baseline). Surveyed:
+`api/src/routers/mcp_servers.py` (425 lines),
+`api/src/routers/mcp_connections.py` (899 lines),
+`api/src/routers/mcp_oauth_callback.py` (437 lines),
+`api/src/services/execution/agent_helpers.py` (341 lines),
+`api/tests/e2e/api/test_mcp_servers.py` (234 lines),
+`api/tests/e2e/api/test_mcp_connections.py` (404 lines),
+`api/tests/e2e/api/test_mcp_oauth_callback.py` (50 lines).
+Supporting behavior confirmed at the same commit in
+`api/src/services/mcp_client/{auth_resolution,catalog_sync,client,dispatch,discovery,errors,oauth_state}.py`
+(note: these modules moved from `api/src/mcp_client/` since the `0598020e`
+pins in §18; behavior matches), `api/src/models/orm/external_mcp.py`, and
+`api/src/models/contracts/external_mcp.py`.
+
+**Templates are secretless and admin-managed** (`mcp_servers.py`). A template
+carries name (globally unique), `server_url`, an optional OAuth-provider
+link, `redirect_url`, `discovery_metadata`, an optional org scope, and
+`is_active` — no secrets, manifest-friendly. Platform admins see all
+templates (filterable: all / platform-level / one org); org users see
+platform-level (`organization_id` NULL) plus their own org's; cross-org
+detail answers 404, not 403. Create/update/delete and discovery are
+platform-admin-only (403 otherwise). Delete defaults to soft
+(`is_active=False`, excludable via `active_only`) so existing agent tool
+bindings don't silently break; `?hard=true` cascade-deletes connections,
+catalog rows, and per-user credentials. Provider linking is exclusive-or:
+`oauth_provider_id` (link) or inline `oauth_provider` (create) — both is
+422; `authorization_code` without `authorization_url` is 422. The
+provider's `client_id`/secret are `"__mcp_per_connection__"` placeholders
+that MUST NOT be used for token requests — the authoritative per-org pair
+lives on the Connection. Discovery (`POST /discover`) fetches
+`/.well-known/oauth-authorization-server` and
+`/.well-known/oauth-protected-resource` from the server's host (5s timeout,
+no retries) and returns merged metadata or `{metadata: null}` when neither
+is usable; the form falls back to manual entry.
+
+**Connections are per-org OAuth instances** (`mcp_connections.py`). One
+Connection per (server, org); each carries the org's own `client_id` plus
+encrypted `client_secret` (registered as that org's OAuth app with the
+vendor), an optional `server_url_override` (wins over the template URL),
+`available_in_chat` / `available_to_autonomous` flags (default false), and
+`service_oauth_token_id` once connected. CRUD requires platform admin or
+membership in the Connection's org (v1 permissive; tighter roles deferred);
+cross-org reads 404; the encrypted secret never appears in responses
+(asserted in tests). Create accepts a plaintext secret and encrypts at
+rest; unknown server is 404; org users may only target platform-level or
+own-org templates. Update re-encrypts a rotated secret and flips flags.
+Delete is a hard cascade (catalog rows + per-user credentials).
+Per-tool overrides (`PATCH .../tools/{tool_id}`) toggle `enabled`: disabling
+records `"Manually disabled by admin"` so catalog sync won't auto-re-enable;
+re-enabling clears auto-disable markers. Refresh (`POST .../refresh-tools`)
+runs `tools/list` over the service token and returns
+`{total, enabled, disabled}`; no service token (or provider, or failed
+refresh) is a loud 400, not an empty catalog. Admin connect
+(`POST .../connect`) branches on the provider flow: `authorization_code`
+returns `{authorization_url, state}` for a PKCE-S256 popup (signed state
+JWT: connection_id, `flow_type=service`, verifier, redirect URI, nonce);
+`client_credentials` exchanges synchronously server-to-server and persists
+or in-place-updates the service token row (preserving the FK). No provider
+is 400. Per-user connect (`GET /api/me/mcp-connections/{id}/connect`)
+needs only same-org visibility and is `authorization_code`-only
+(`client_credentials` is 400 — no per-user mode exists); its state carries
+`flow_type=user` plus user_id. Per-user listing returns credentials with
+token expiry but never the Bearer; disconnect (`DELETE`) is idempotent 204
+and deletes both the credential row and its token row. The callback URL is
+deterministic per deployment (`{public_url}/api/mcp/oauth/callback`) so
+exactly one redirect URI is registered with each vendor.
+
+**The callback completes consent, never JSON** (`mcp_oauth_callback.py`).
+`GET /api/mcp/oauth/callback?code&state` short-circuits vendor errors to an
+error popup with no state work, then decodes the signed state, consumes the
+single-use nonce (replay → "state already used or expired"), resolves
+Connection + provider, runs the PKCE code exchange with the Connection's
+per-org secret, and always inserts a NEW token row ("rotate on consent";
+the old row is orphaned). Service flow sets `service_oauth_token_id`; user
+flow upserts the (user, Connection) credential with `consent_granted_at`
+and granted scopes (vendor-returned scope, else provider scopes). Missing
+vendor expiry defaults to one hour. Every outcome renders an HTML popup
+page (`window.opener.postMessage` + `window.close`), 200 on success and 400
+on error — asserted in e2e.
+
+**The catalog is per-Connection and drift-tolerant** (`catalog_sync.py`,
+`external_mcp.py`). Sync always uses the service token, never a per-user
+token (catalog is per-Connection, not per-user; sync is operator-initiated).
+Schemas persist verbatim (`inputSchema`) for planner re-emit. New tools
+arrive enabled; vanished tools are flagged `enabled=False` with a
+timestamped `"Removed from server catalog at ..."` reason — never deleted,
+so schemas and agent bindings survive. Vendor-restored tools auto-re-enable
+only when the previous reason was auto-removal; admin manual disables
+survive sync. Consent rows are unique per (user, Connection), pointing at a
+user-owned token with granted scopes and an optional consent expiry.
+
+**Refresh and resolution are centralized in one five-path table**
+(`auth_resolution.py`, `errors.py`, `dispatch.py`). Freshness uses a 5-minute
+expiry margin matching the scheduler's refresh buffer; `expires_at NULL`
+counts as fresh (unknown expiry — let the vendor reject first use). At most
+one refresh attempt through the shared scheduler primitives, persisted on
+success; failure falls through to the next path. Health checks are
+deliberately uncached so revocation fails closed on the next call, and the
+firing path is returned for per-call audit (user vs service identity). The
+paths: (1) chat caller + healthy per-user credential → user token;
+(2) chat caller without one + `available_in_chat` + healthy service token
+→ service fallback; (3) chat caller with no fallback → `NeedsReauthError`
+carrying a server-built reauth URL (`authorization_code`), or
+`MisconfigError` (`client_credentials` — only an admin enabling the flag
+can fix it); (4) autonomous caller (`None`) + `available_to_autonomous` +
+healthy service token → service; (5) autonomous otherwise → `MisconfigError`
+(a planner bug made visible, never a silent fallback). `client_credentials`
+has no per-user mode at all. Dispatch pre-checks catalog presence and
+`enabled` (disabled reason included in the denial), then on post-resolution
+401/403 (conservative marker match) resolves once more and retries exactly
+once; a user token that still 401s becomes `NeedsReauthError` — never a
+quiet upgrade to service. Result envelopes are normalized and capped at
+~250 KB serialized JSON with a structured truncation nudge.
+
+**Agent binding is opt-in, caller-scoped, and namespaced**
+(`agent_helpers.py`). Only Connections explicitly granted via
+`agent_mcp_connections` surface tools to an agent — no grant means zero MCP
+tools regardless of flags; platform-level agents get none. Planner gates:
+autonomous runs need `available_to_autonomous` plus a service token not
+hard-expired (more than 5 minutes past expiry; in-window expiry is left for
+dispatch to refresh); chat runs on `client_credentials` Connections need
+`available_in_chat` plus a usable service token, while
+`authorization_code` Connections are includable because per-user OAuth can
+happen at dispatch. Precedence is system tools (always win) > workflow tools
+(sorted by ID, loser hidden with a warning) > delegation > MCP. LLM-visible
+names are `mcp__<connectionUUID>__<tool>` with UUID-validated parsing
+(malformed names route elsewhere, never error); collisions are defensively
+skipped with a warning. Descriptions prefer the schema text, else a
+generated fallback; parameters accept `inputSchema` or `input_schema`, else
+an empty object.
+
+**Transport is Streamable HTTP only** (`client.py`). Exactly one transport —
+`mcp.client.streamable_http.streamablehttp_client`; no SSE, no stdio, by
+deliberate omission (future transports arrive as separate modules). The
+layer is auth-agnostic bytes-over-wire: Bearer header from the resolved
+token, per-call sessions, torn down after use.
+
+**Test-shape note.** The e2e files pin the HTTP surface and negative paths
+listed above; in-process happy paths (discovery parse, refresh-tools
+success, state encoding, callback exchange, client-credentials exchange)
+live in unit tests because the cross-process runner cannot mock into the
+API container (`tests/unit/services/test_mcp_client_discovery.py`,
+`tests/unit/services/test_mcp_oauth_state.py`,
+`tests/unit/routers/test_mcp_oauth_callback.py`,
+`tests/unit/routers/test_mcp_connections*.py`).
+
+**Wrangnarök implication (TOOL-02, P0 decisions in
+`docs/tool-02-p0-decisions.md`):** Adopt the four-way secret split
+(secretless templates, per-org pairs, verbatim catalog, per-user consent),
+the five-path resolution table with the no-privilege-fallback rule
+(user-auth failure → needs-reauth, never service), the drift-tolerant
+catalog rules, the `mcp__<connection>__<tool>` namespace policy, and the
+Streamable-HTTP-only transport as parity. Adapt the substrate: no agent
+entity exists yet, so P2/P3 resolve Connection-first with an explicit
+service principal for autonomous callers (consistent with ADR 018 machine
+principals) and AI-02 grants attach later; secrets land in the settled
+OAUTH-01 token envelopes + SEC-02 envelope path with inline/on-demand
+refresh only (scheduled refresh stays deferred with OAUTH-01). Private
+endpoints, non-HTTP transports, and SSE/stdio are explicit v0 non-support
+with P4 compatibility statements.
+
 ## Candidate product invariants
 
 These are stronger than implementation preferences and should guide design reviews:
