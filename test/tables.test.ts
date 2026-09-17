@@ -727,6 +727,31 @@ describe("TABLE-02 all-or-denied batch mutations", () => {
     });
   });
 
+  it("counts duplicate delete ids once: repeats report DOCUMENT_NOT_FOUND", async () => {
+    // One physical row deleted twice must not count twice. The first
+    // occurrence deletes; later ones report DOCUMENT_NOT_FOUND like ghosts
+    // (mirroring the insert path, where a repeat of an id the same request
+    // wrote reports DOCUMENT_CONFLICT). The scoped count proves only one
+    // row left the table.
+    const inserted = await call("/api/tables/ledger/rows/batch", "POST", {
+      items: [{ id: "a", data: { n: 1 } }],
+    });
+    expect(inserted.status).toBe(201);
+    const removed = await call("/api/tables/ledger/rows/batch-delete", "POST", {
+      ids: ["a", "a", "ghost", "a"],
+    });
+    expect(await removed.json()).toEqual({
+      results: [
+        { docId: "a", ok: true, error: null },
+        { docId: "a", ok: false, error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." } },
+        { docId: "ghost", ok: false, error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." } },
+        { docId: "a", ok: false, error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." } },
+      ],
+      count: 1,
+    });
+    expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 0 });
+  });
+
   it("bounds batches and validates batch bodies", async () => {
     const tooMany = await call("/api/tables/ledger/rows/batch", "POST", {
       items: Array.from({ length: TABLE_BATCH_MAX + 1 }, (_, i) => ({ id: `d${i}`, data: { n: i } })),

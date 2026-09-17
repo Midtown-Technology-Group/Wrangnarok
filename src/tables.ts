@@ -1007,8 +1007,12 @@ export async function executeBatchWrite(
 
 /** Batch delete behind the batch-delete compatibility route: denied callers
  * fail the whole batch first (TABLE_BATCH_DENIED); missing rows ride
- * per-item DOCUMENT_NOT_FOUND results. Deletes land through the same single
- * batch() transaction discipline as writes. */
+ * per-item DOCUMENT_NOT_FOUND results, as do repeats of an id this same
+ * request already deleted — only the first occurrence deletes, so count
+ * reflects unique physical deletions (mirroring the insert path, where a
+ * repeat of an id the same request wrote reports DOCUMENT_CONFLICT).
+ * Deletes land through the same single batch() transaction discipline as
+ * writes. */
 export async function executeBatchDelete(
   db: D1Database,
   caller: Principal,
@@ -1023,7 +1027,15 @@ export async function executeBatchDelete(
   }
   if (docIds.length === 0) return { results: [], count: 0 };
   const present = await preflightExisting(db, table, docIds);
-  const targets = docIds.filter((id) => present.has(id));
+  // Deduplicate to unique physical deletions: repeats of an id this request
+  // already targets send no second statement (it would delete nothing yet
+  // still cost a query) and report DOCUMENT_NOT_FOUND per item below.
+  const seen = new Set<string>();
+  const targets = docIds.filter((id) => {
+    if (!present.has(id) || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
   // Missing rows ride per-item DOCUMENT_NOT_FOUND from the preflight; the
   // surviving deletes land through the single transaction, and a lost race
   // fails the whole request for retry instead of deleting row by row.
@@ -1031,10 +1043,17 @@ export async function executeBatchDelete(
     db,
     targets.map((id) => db.prepare("DELETE FROM table_rows WHERE table_id=? AND doc_id=?").bind(table.id, id)),
   );
-  const results = docIds.map((id) =>
-    present.has(id)
-      ? { docId: id, ok: true as const, error: null }
-      : { docId: id, ok: false as const, error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." } },
-  );
+  const reported = new Set<string>();
+  const results = docIds.map((id) => {
+    if (seen.has(id) && !reported.has(id)) {
+      reported.add(id);
+      return { docId: id, ok: true as const, error: null };
+    }
+    return {
+      docId: id,
+      ok: false as const,
+      error: { code: "DOCUMENT_NOT_FOUND", message: "Document not found." },
+    };
+  });
   return { results, count: results.filter((result) => result.ok).length };
 }
