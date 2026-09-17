@@ -227,6 +227,10 @@ wrangler secret put LAB_TOKEN --env dev
 wrangler secret put LAB_ORG_ID --env dev
 wrangler secret put LAB_USER_ID --env dev
 # Optional, only for the ninjaone-orgs path: NINJA_CLIENT_ID / NINJA_CLIENT_SECRET.
+# Optional, only for the cloudflare-zone-inventory path (issue #411):
+# `wrangler secret put CLOUDFLARE_API_TOKEN --env dev` reads the value from
+# stdin, so pipe it in (e.g. from a Keeper-sidecar pipeline) and never pass
+# it as an argument or commit it.
 
 # 4. Deploy dev.
 wrangler deploy --env dev
