@@ -539,6 +539,91 @@ describe("grant evaluation branches", () => {
   });
 });
 
+describe("policy rule uniqueness hardening (issue #430)", () => {
+  it("bootstrapped tables carry the migration-0013 uniqueness invariant", async () => {
+    await bindings.DB.exec(
+      "DROP TABLE policy_rules; DROP TABLE role_assignments; DROP TABLE role_grants; DROP TABLE resource_roles;",
+    );
+    await ensureRoleTables(bindings.DB);
+    const index = await bindings.DB.prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='policy_rules' AND name='policy_rules_unique'",
+    ).first<{ name: string; sql: string }>();
+    expect(index?.name).toBe("policy_rules_unique");
+    expect(index?.sql ?? "").toContain("COALESCE");
+    // The invariant holds at the D1 level, not just behind the application
+    // pre-check: a raw duplicate tuple with a distinct id fails.
+    const stamp = new Date().toISOString();
+    const insert =
+      "INSERT INTO policy_rules(id,org_id,resource_kind,resource_id,action,subject_type,subject_ref,created_at) VALUES (?,?,?,?,?,?,?,?)";
+    await bindings.DB.prepare(insert)
+      .bind("11111111-1111-4111-8111-111111111111", ORG_A, "saga", echoSaga.id, "execute", "user", USER_ORDINARY, stamp)
+      .run();
+    await expect(
+      bindings.DB.prepare(insert)
+        .bind(
+          "22222222-2222-4222-8222-222222222222",
+          ORG_A,
+          "saga",
+          echoSaga.id,
+          "execute",
+          "user",
+          USER_ORDINARY,
+          stamp,
+        )
+        .run(),
+    ).rejects.toThrow(/UNIQUE constraint failed/i);
+  });
+
+  it("maps concurrent identical org-rule creates to one success plus 409", async () => {
+    const attempts = await Promise.allSettled([
+      createPolicyRule(bindings.DB, ORG_A, "saga", echoSaga.id, "execute", "user", USER_ORDINARY),
+      createPolicyRule(bindings.DB, ORG_A, "saga", echoSaga.id, "execute", "user", USER_ORDINARY),
+    ]);
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    const loser = attempts.find((attempt) => attempt.status === "rejected");
+    expect(loser?.status).toBe("rejected");
+    expect(loser !== undefined && loser.status === "rejected" ? loser.reason : null).toMatchObject({
+      status: 409,
+      code: "RULE_EXISTS",
+    });
+    expect(await listPolicyRules(bindings.DB, ORG_A)).toHaveLength(1);
+    // Revocation still removes the authority completely: deleting the
+    // surviving row denies the next request (no twin keeps authorizing).
+    const winner = attempts.find((attempt) => attempt.status === "fulfilled");
+    const survivorId = winner !== undefined && winner.status === "fulfilled" ? winner.value.id : "";
+    await deletePolicyRule(bindings.DB, ORG_A, survivorId);
+    expect(
+      await can(bindings.DB, MEMBER_CTX, {
+        orgId: ORG_A,
+        resourceKind: "saga",
+        resourceId: echoSaga.id,
+        action: "execute",
+      }),
+    ).toBe(false);
+  });
+
+  it("races global rules the same way while keeping scopes distinct", async () => {
+    const attempts = await Promise.allSettled([
+      createPolicyRule(bindings.DB, null, "saga", echoSaga.id, "execute", "all", "all"),
+      createPolicyRule(bindings.DB, null, "saga", echoSaga.id, "execute", "all", "all"),
+    ]);
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    const loser = attempts.find((attempt) => attempt.status === "rejected");
+    expect(loser?.status).toBe("rejected");
+    expect(loser !== undefined && loser.status === "rejected" ? loser.reason : null).toMatchObject({
+      status: 409,
+      code: "RULE_EXISTS",
+    });
+    // The same tuple as an org rule is a distinct row, not a conflict.
+    const orgRule = await createPolicyRule(bindings.DB, ORG_A, "saga", echoSaga.id, "execute", "all", "all");
+    expect(orgRule.orgId).toBe(ORG_A);
+    expect(await listPolicyRules(bindings.DB, null)).toHaveLength(1);
+    expect(await listPolicyRules(bindings.DB, ORG_A)).toHaveLength(2);
+  });
+});
+
 describe("role route validation branches", () => {
   it("rejects malformed role, grant, assignment, and revoke bodies", async () => {
     expect(await call(`/api/orgs/${ORG_A}/roles`, "POST", USER_ADMIN, {})).toMatchObject({

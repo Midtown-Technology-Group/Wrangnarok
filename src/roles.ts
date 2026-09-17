@@ -123,6 +123,18 @@ function isMissingTable(error: unknown): boolean {
   return error instanceof Error && /no such table/i.test(error.message);
 }
 
+/** True for D1/SQLite unique-index violations (the race loser for a tuple the
+ * pre-check missed). Foreign-key and other store failures are not duplicates
+ * and keep their own path. */
+function isUniqueViolation(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 3 && current instanceof Error; depth++) {
+    if (/unique constraint failed/i.test(current.message)) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
 function fail503(): Fault {
   return new Fault(503, "ROLE_STORE_NOT_MIGRATED", "Resource-role storage is not migrated: apply migration 0013.");
 }
@@ -131,8 +143,8 @@ function fail503(): Fault {
  * Shared D1 failure mapping for the role store (one site, not one per
  * function): domain Faults thrown inside a try pass through, missing
  * migration-0013 tables answer 503, and anything else rethrows. Callers with
- * duplicate-key semantics (createRole, addGrant) keep their own catch that
- * maps the residual to 409.
+ * duplicate-key semantics (createRole, addGrant, createPolicyRule) keep their
+ * own catch that maps the residual to 409.
  */
 function storeError(error: unknown): never {
   if (error instanceof Fault) throw error;
@@ -642,9 +654,12 @@ export async function createPolicyRule(
   const id = crypto.randomUUID().toLowerCase();
   const stamp = now();
   try {
-    // SQLite UNIQUE ignores NULL org_id, so duplicates are refused here (409)
-    // instead of in DDL. Scoped to the exact scope: a global rule and an org
-    // rule for the same tuple are distinct rows, not conflicts.
+    // Fast-path duplicate: the SELECT below misses only when a concurrent
+    // identical create is in flight. The UNIQUE expression index
+    // (policy_rules_unique, same DDL as migration 0013) is the real arbiter
+    // for both NULL (global) and set org_id via COALESCE. Scoped to the exact
+    // scope: a global rule and an org rule for the same tuple are distinct
+    // rows, not conflicts.
     const existing =
       scopeOrgId === null
         ? await db
@@ -667,21 +682,30 @@ export async function createPolicyRule(
             )
             .first<{ id: string }>();
     if (existing) throw new Fault(409, "RULE_EXISTS", "This policy rule already exists.");
-    await db
-      .prepare(
-        "INSERT INTO policy_rules(id,org_id,resource_kind,resource_id,action,subject_type,subject_ref,created_at) VALUES (?,?,?,?,?,?,?,?)",
-      )
-      .bind(
-        id,
-        scopeOrgId,
-        triple.resourceKind,
-        triple.resourceId,
-        triple.action,
-        subject.subjectType,
-        subject.subjectRef,
-        stamp,
-      )
-      .run();
+    try {
+      await db
+        .prepare(
+          "INSERT INTO policy_rules(id,org_id,resource_kind,resource_id,action,subject_type,subject_ref,created_at) VALUES (?,?,?,?,?,?,?,?)",
+        )
+        .bind(
+          id,
+          scopeOrgId,
+          triple.resourceKind,
+          triple.resourceId,
+          triple.action,
+          subject.subjectType,
+          subject.subjectRef,
+          stamp,
+        )
+        .run();
+    } catch (error) {
+      // Race loser: the tuple landed between our SELECT and INSERT. The
+      // database picked the single winner; report the deterministic 409
+      // instead of leaking a driver error. Anything else (missing table,
+      // foreign key, ...) keeps its existing path via the outer catch.
+      if (isUniqueViolation(error)) throw new Fault(409, "RULE_EXISTS", "This policy rule already exists.");
+      throw error;
+    }
   } catch (error) {
     storeError(error);
   }
@@ -808,6 +832,11 @@ export async function ensureRoleTables(db: D1Database): Promise<void> {
     "CREATE INDEX IF NOT EXISTS role_assignments_role ON role_assignments(role_id,status)",
     "CREATE TABLE IF NOT EXISTS policy_rules(id TEXT PRIMARY KEY,org_id TEXT,resource_kind TEXT NOT NULL,resource_id TEXT NOT NULL,action TEXT NOT NULL,subject_type TEXT NOT NULL,subject_ref TEXT NOT NULL,created_at TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS policy_rules_lookup ON policy_rules(resource_kind,resource_id,action,subject_type,subject_ref)",
+    // Same uniqueness invariant as migration 0013: the COALESCE expression
+    // index covers NULL (global) and set org_id alike. Bootstrapped databases
+    // must refuse duplicate authority at the D1 level, not just behind the
+    // application pre-check, or concurrent creates leave undeletable twins.
+    "CREATE UNIQUE INDEX IF NOT EXISTS policy_rules_unique ON policy_rules(COALESCE(org_id, ''),resource_kind,resource_id,action,subject_type,subject_ref)",
   ];
   for (const ddl of stmts) {
     try {
