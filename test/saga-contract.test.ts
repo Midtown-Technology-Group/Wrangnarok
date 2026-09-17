@@ -15,13 +15,18 @@ import type { SagaEventContext, SagaStep } from "../src/saga";
 import { SAGA_CATALOG, SAGA_DEFINITIONS } from "../src/sagas";
 import {
   BODY_LIMIT,
+  CLOUDFLARE_INTEGRATION_ID,
   ECHO_INTEGRATION_ID,
+  cloudflareInventorySaga,
+  cloudflareVerifySaga,
   digestSaga,
   helloParentSaga,
   helloSaga,
   echoSaga,
   NINJA_INTEGRATION_ID,
   ninjaSaga,
+  parseCloudflareInventoryInput,
+  parseCloudflareVerifyInput,
   parseDigestInput,
   parseHelloInput,
   parseHelloParentInput,
@@ -40,7 +45,7 @@ const CHURN_MESSAGE =
 
 describe("Saga authoring contract (issue #57)", () => {
   it("keeps all I/O and nondeterminism inside step.do() for every registered Saga", () => {
-    expect(SAGA_DEFINITIONS).toHaveLength(6);
+    expect(SAGA_DEFINITIONS).toHaveLength(8);
     for (const def of SAGA_DEFINITIONS) {
       expect(() => assertDeterministicRun(def.name, def.run)).not.toThrow();
     }
@@ -140,6 +145,32 @@ describe("Saga authoring contract (issue #57)", () => {
         input: { name: "Ada" },
         output: { greeting: "Hello, Ada!", name: "Ada", childExecutionId: "ab".repeat(32) },
       },
+      "cloudflare-verify-connection": {
+        input: { account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" } },
+        output: {
+          status: "healthy",
+          readOnly: true,
+          integration: "Cloudflare",
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          credential: { status: "active", expiresOn: null, notBefore: null },
+          apiCalls: 1,
+        },
+      },
+      "cloudflare-inventory-zones": {
+        input: { max_zones: 75, account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" } },
+        output: {
+          status: "completed",
+          readOnly: true,
+          integration: "Cloudflare",
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          zoneCount: 1,
+          totalAvailable: 1,
+          truncated: false,
+          apiCalls: 1,
+          summary: { statusCounts: { active: 1 }, typeCounts: { full: 1 }, paused: 0, developmentModeActive: 0 },
+          zones: [],
+        },
+      },
     };
     for (const def of SAGA_DEFINITIONS) {
       const sample = samples[def.name];
@@ -214,6 +245,8 @@ describe("Saga authoring contract (issue #57)", () => {
     expect(byName.get("system.smoke")?.requiredIntegrations).toEqual([]);
     expect(byName.get("hello")?.requiredIntegrations).toEqual([]);
     expect(byName.get("hello-parent")?.requiredIntegrations).toEqual([]);
+    expect(byName.get("cloudflare-verify-connection")?.requiredIntegrations).toEqual([CLOUDFLARE_INTEGRATION_ID]);
+    expect(byName.get("cloudflare-inventory-zones")?.requiredIntegrations).toEqual([CLOUDFLARE_INTEGRATION_ID]);
     for (const def of SAGA_DEFINITIONS) {
       expect(Array.isArray(def.requiredIntegrations)).toBe(true);
     }
@@ -246,6 +279,8 @@ describe("Saga authoring contract (issue #57)", () => {
   it("keeps definitions, domain constants, catalog, and manifest in agreement", () => {
     const byName = new Map(SAGA_DEFINITIONS.map((def) => [def.name, def]));
     expect([...byName.keys()].sort()).toEqual([
+      "cloudflare-inventory-zones",
+      "cloudflare-verify-connection",
       "echo",
       "hello",
       "hello-parent",
@@ -260,6 +295,8 @@ describe("Saga authoring contract (issue #57)", () => {
       { stable: smokeSaga, parse: parseSmokeInput },
       { stable: helloSaga, parse: parseHelloInput },
       { stable: helloParentSaga, parse: parseHelloParentInput },
+      { stable: cloudflareVerifySaga, parse: parseCloudflareVerifyInput },
+      { stable: cloudflareInventorySaga, parse: parseCloudflareInventoryInput },
     ];
     for (const { stable, parse } of expected) {
       const def = byName.get(stable.name);

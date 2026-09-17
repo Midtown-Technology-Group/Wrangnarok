@@ -31,6 +31,16 @@
       "id": "c0ff4b1e-7a2d-4a1e-9c3d-5e6f7a8b9c0d",
       "name": "hello-parent",
       "revision": "hello-parent-v1"
+    },
+    {
+      "id": "9d2f4a6c-3b1e-4f5a-9c2d-6e8f0a1b2c3d",
+      "name": "cloudflare-verify-connection",
+      "revision": "cloudflare-verify-connection-v1"
+    },
+    {
+      "id": "7c1e3b5a-2d4f-4e6b-8a1c-5d7f9e0a1b2c",
+      "name": "cloudflare-inventory-zones",
+      "revision": "cloudflare-inventory-zones-v1"
     }
   ]
 }

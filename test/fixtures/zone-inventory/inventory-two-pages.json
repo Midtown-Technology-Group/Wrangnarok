@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "name": "inventory-two-pages",
+  "workflow": {
+    "id": "a5160896-d1de-55cc-b1af-71e57b670f44",
+    "input": { "max_zones": 75 }
+  },
+  "binding": {
+    "integration": "Cloudflare",
+    "entity_id": "0123456789abcdef0123456789abcdef",
+    "entity_name": "Example MSP",
+    "config": { "api_token": { "secret_ref": "cloudflare_api_token" } }
+  },
+  "http": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://api.cloudflare.com/client/v4/zones",
+        "headers": { "Authorization": "Bearer {{ secret.cloudflare_api_token }}" },
+        "query": {
+          "account.id": "0123456789abcdef0123456789abcdef",
+          "direction": "asc",
+          "order": "name",
+          "page": 1,
+          "per_page": 50
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "success": true,
+          "errors": [],
+          "result": [
+            {
+              "id": "zone-1",
+              "name": "alpha.example",
+              "status": "active",
+              "type": "full",
+              "paused": false,
+              "development_mode": 0,
+              "account": { "id": "0123456789abcdef0123456789abcdef", "name": "Example MSP" },
+              "plan": { "name": "Pro" },
+              "name_servers": ["b.ns.example", "a.ns.example"],
+              "activated_on": "2026-01-02T03:04:05Z",
+              "modified_on": "2026-02-03T04:05:06Z"
+            },
+            {
+              "id": "zone-2",
+              "name": "bravo.example",
+              "status": "active",
+              "type": "full",
+              "paused": false,
+              "development_mode": 0,
+              "account": { "id": "0123456789abcdef0123456789abcdef", "name": "Example MSP" },
+              "plan": { "legacy_id": "free" },
+              "name_servers": ["d.ns.example", "c.ns.example"]
+            }
+          ],
+          "result_info": { "page": 1, "total_pages": 2, "total_count": 3 }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://api.cloudflare.com/client/v4/zones",
+        "headers": { "Authorization": "Bearer {{ secret.cloudflare_api_token }}" },
+        "query": {
+          "account.id": "0123456789abcdef0123456789abcdef",
+          "direction": "asc",
+          "order": "name",
+          "page": 2,
+          "per_page": 50
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "success": true,
+          "errors": [],
+          "result": [
+            {
+              "id": "zone-3",
+              "name": "charlie.example",
+              "status": "pending",
+              "type": "partial",
+              "paused": true,
+              "development_mode": 600,
+              "account": { "id": "0123456789abcdef0123456789abcdef", "name": "Example MSP" },
+              "plan": {},
+              "name_servers": []
+            }
+          ],
+          "result_info": { "page": 2, "total_pages": 2, "total_count": 3 }
+        }
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "succeeded",
+    "result": {
+      "status": "completed",
+      "read_only": true,
+      "integration": "Cloudflare",
+      "account": { "id": "0123456789abcdef0123456789abcdef", "name": "Example MSP" },
+      "zone_count": 3,
+      "total_available": 3,
+      "truncated": false,
+      "api_calls": 2,
+      "summary": {
+        "status_counts": { "active": 2, "pending": 1 },
+        "type_counts": { "full": 2, "partial": 1 },
+        "paused": 1,
+        "development_mode_active": 1
+      },
+      "zones": [
+        {
+          "id": "zone-1",
+          "name": "alpha.example",
+          "status": "active",
+          "type": "full",
+          "paused": false,
+          "development_mode_active": false,
+          "account_id": "0123456789abcdef0123456789abcdef",
+          "account_name": "Example MSP",
+          "plan": "Pro",
+          "name_servers": ["a.ns.example", "b.ns.example"],
+          "activated_on": "2026-01-02T03:04:05Z",
+          "modified_on": "2026-02-03T04:05:06Z"
+        },
+        {
+          "id": "zone-2",
+          "name": "bravo.example",
+          "status": "active",
+          "type": "full",
+          "paused": false,
+          "development_mode_active": false,
+          "account_id": "0123456789abcdef0123456789abcdef",
+          "account_name": "Example MSP",
+          "plan": "free",
+          "name_servers": ["c.ns.example", "d.ns.example"],
+          "activated_on": null,
+          "modified_on": null
+        },
+        {
+          "id": "zone-3",
+          "name": "charlie.example",
+          "status": "pending",
+          "type": "partial",
+          "paused": true,
+          "development_mode_active": true,
+          "account_id": "0123456789abcdef0123456789abcdef",
+          "account_name": "Example MSP",
+          "plan": "unknown",
+          "name_servers": [],
+          "activated_on": null,
+          "modified_on": null
+        }
+      ]
+    }
+  },
+  "invariants": [
+    "preserve vendor page order",
+    "sort each zone's name servers",
+    "stop after the final advertised page",
+    "report the exact number of external calls"
+  ]
+}

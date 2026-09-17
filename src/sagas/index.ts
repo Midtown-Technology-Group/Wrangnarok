@@ -19,6 +19,12 @@
 import { buildCatalog } from "../saga";
 import type { CatalogEntry } from "../saga";
 import { SAGA_DEFINITIONS } from "./definitions";
+import {
+  cloudflareInventorySagaDef,
+  CloudflareInventoryWorkflow,
+  cloudflareVerifySagaDef,
+  CloudflareVerifyWorkflow,
+} from "./cloudflare";
 import { digestSagaDef, NinjaEchoDigestWorkflow } from "./digest";
 import { helloParentSagaDef, HelloParentWorkflow } from "./hello-parent";
 import { helloSagaDef, HelloWorkflow } from "./hello";
@@ -27,6 +33,7 @@ import { ninjaOrgsSagaDef, NinjaOrgsWorkflow } from "./ninjaorgs";
 import { smokeSagaDef, SmokeWorkflow } from "./smoke";
 
 export { SAGA_DEFINITIONS };
+export { cloudflareInventorySagaDef, CloudflareInventoryWorkflow, cloudflareVerifySagaDef, CloudflareVerifyWorkflow };
 export { digestSagaDef, NinjaEchoDigestWorkflow };
 export { helloParentSagaDef, HelloParentWorkflow };
 export { helloSagaDef, HelloWorkflow };

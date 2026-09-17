@@ -13,6 +13,7 @@ export default defineConfig({
           LAB_USER_ID: "00000000-0000-4000-8000-000000000002",
           NINJA_CLIENT_ID: "test-client-id",
           NINJA_CLIENT_SECRET: "test-client-secret-sentinel",
+          CLOUDFLARE_API_TOKEN: "test-cloudflare-token-sentinel",
         },
       },
     }),

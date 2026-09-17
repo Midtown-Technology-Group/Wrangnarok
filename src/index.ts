@@ -96,6 +96,8 @@ import {
   boundedJson,
   canTransition,
   classifyTerminateError,
+  cloudflareInventorySaga,
+  cloudflareVerifySaga,
   digestSaga,
   echoSaga,
   executionId,
@@ -105,6 +107,8 @@ import {
   ninjaSaga,
   object,
   parseCallerKey,
+  parseCloudflareInventoryInput,
+  parseCloudflareVerifyInput,
   parseDigestInput,
   parseHelloInput,
   parseHelloParentInput,
@@ -316,6 +320,8 @@ import { listExecutionLogs, parseLogSearchQuery, parseLogTailQuery, searchExecut
 import { deploymentSecretsFromEnv, scrubValueWithDeploymentSecrets } from "./secrets";
 import { logRequest } from "./usage";
 export {
+  CloudflareInventoryWorkflow,
+  CloudflareVerifyWorkflow,
   EchoWorkflow,
   HelloParentWorkflow,
   HelloWorkflow,
@@ -1375,6 +1381,8 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         [smokeSaga.id, parseSmokeInput],
         [helloSaga.id, parseHelloInput],
         [helloParentSaga.id, parseHelloParentInput],
+        [cloudflareVerifySaga.id, parseCloudflareVerifyInput],
+        [cloudflareInventorySaga.id, parseCloudflareInventoryInput],
       ]);
       const { meta, parsed, requiredIntegrations } = previewLocal(SAGA_CATALOG, parsers, record.sagaId, record.input);
       const withEnv = record.checkEnvironment === true;
