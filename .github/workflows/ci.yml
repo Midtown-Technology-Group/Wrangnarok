@@ -110,7 +110,9 @@ jobs:
           git fetch origin main --unshallow --update-head-ok 2>/dev/null \
             || git fetch origin main --depth=50 --update-head-ok \
             || git fetch origin main --update-head-ok
-          node scripts/lane-scope.mjs --self-check
+          # PRs require one scope to own their whole diff. A merge-group is an
+          # aggregate of already-validated PRs, so its scopes cover by union.
+          node scripts/lane-scope.mjs --self-check --event-name "${{ github.event_name }}"
           dupes="$(ls migrations/*.sql | sed 's|.*/||' | cut -c1-4 | sort | uniq -d)"
           if [[ -n "$dupes" ]]; then
             echo "Duplicate migration numbers (see docs/migration-ledger.md):"
