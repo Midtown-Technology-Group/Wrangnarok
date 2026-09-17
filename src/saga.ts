@@ -23,15 +23,8 @@ import { checkpointRetryLimit, stepRetryLimit, UUID, vendorRetryLimit } from "./
 import type { EchoInput, NinjaOrgsResult, SagaRuntimePolicy } from "./domain";
 import type { EchoConnection } from "./integrations/echo";
 import type { NinjaConnection, NinjaSecrets } from "./integrations/ninjaone";
-import type {
-  CloudflareConnection,
-  CloudflareSecrets,
-} from "./integrations/cloudflare";
-import type {
-  CloudflareInventoryInput,
-  CloudflareInventoryResult,
-  CloudflareVerifyResult,
-} from "./domain";
+import type { CloudflareConnection, CloudflareSecrets } from "./integrations/cloudflare";
+import type { CloudflareInventoryInput, CloudflareInventoryResult, CloudflareVerifyResult } from "./domain";
 import type { SagaChildren } from "./children";
 
 /** Durable Operation API surfaced to Saga authors. Deliberately smaller than

@@ -33,12 +33,7 @@ import { ninjaOrgsSagaDef, NinjaOrgsWorkflow } from "./ninjaorgs";
 import { smokeSagaDef, SmokeWorkflow } from "./smoke";
 
 export { SAGA_DEFINITIONS };
-export {
-  cloudflareInventorySagaDef,
-  CloudflareInventoryWorkflow,
-  cloudflareVerifySagaDef,
-  CloudflareVerifyWorkflow,
-};
+export { cloudflareInventorySagaDef, CloudflareInventoryWorkflow, cloudflareVerifySagaDef, CloudflareVerifyWorkflow };
 export { digestSagaDef, NinjaEchoDigestWorkflow };
 export { helloParentSagaDef, HelloParentWorkflow };
 export { helloSagaDef, HelloWorkflow };

@@ -21,7 +21,8 @@ export interface HaloCredentials {
 export interface CloudflareCredentials {
   CLOUDFLARE_API_TOKEN?: string;
 }
-export interface Bindings extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials, HaloCredentials, CloudflareCredentials {
+export interface Bindings
+  extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials, HaloCredentials, CloudflareCredentials {
   DB: D1Database;
   FILES: R2Bucket;
   ARTIFACTS?: R2Bucket;

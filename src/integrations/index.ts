@@ -156,7 +156,12 @@ function endpointPolicyFor(integrationName: string): EndpointPolicy {
     return { allowLoopback: true, requireHttps: false, allowedSuffixes: [], loopbackOnly: true };
   }
   if (integrationName === "cloudflare") {
-    return { allowLoopback: false, requireHttps: true, allowedSuffixes: CLOUDFLARE_ALLOWED_SUFFIXES, loopbackOnly: false };
+    return {
+      allowLoopback: false,
+      requireHttps: true,
+      allowedSuffixes: CLOUDFLARE_ALLOWED_SUFFIXES,
+      loopbackOnly: false,
+    };
   }
   return { allowLoopback: false, requireHttps: true, allowedSuffixes: NINJA_ALLOWED_SUFFIXES, loopbackOnly: false };
 }
