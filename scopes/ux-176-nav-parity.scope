@@ -1,0 +1,11 @@
+# UX-01c navigation-correction lane scope (issue #176): retarget disabled
+# nav entries from closed scaffolding issues (#15/#16/#18) to their open
+# parity owners (Integrations -> #160 APP-02, Triggers -> #139 TRG-03,
+# Tables -> #154 TABLE-02) on the canonical org repo URL, plus accessible
+# regression coverage pinning label, disabled state, live issue URL, and
+# keyboard semantics. No unfinished routes enabled, no branding/profile/Home
+# behavior, no shell redesign, no backend/primitive/migration, no AUTH-02
+# change. App.tsx listed only if a strictly-needed nav wiring fix arises.
+client/src/components/Nav.tsx
+test/ui-shell.test.tsx
+scopes/ux-176-nav-parity.scope

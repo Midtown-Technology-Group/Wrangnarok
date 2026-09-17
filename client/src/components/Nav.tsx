@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0
 import { Link, NavLink } from "react-router-dom";
 
-const REPO = "https://github.com/MTG-Thomas/Wrangnarok";
+const REPO = "https://github.com/Midtown-Technology-Group/Wrangnarok";
 
 export interface NavEntry {
   label: string;
