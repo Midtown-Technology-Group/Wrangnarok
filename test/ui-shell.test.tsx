@@ -89,7 +89,7 @@ it("points each disabled nav entry at its open parity owner", () => {
   for (const [label, issue] of Object.entries(owners)) {
     const entry = NAV_ENTRIES.find((e) => e.label === label);
     expect(entry?.enabled).toBe(false);
-    expect(entry?.issue).toBe(`https://github.com/MTG-Thomas/Wrangnarok/issues/${issue}`);
+    expect(entry?.issue).toBe(`https://github.com/Midtown-Technology-Group/Wrangnarok/issues/${issue}`);
   }
   const html = renderToStaticMarkup(
     <MemoryRouter>
@@ -102,6 +102,30 @@ it("points each disabled nav entry at its open parity owner", () => {
   // Quote-boundaried: /issues/154 must not satisfy a /issues/15 check.
   for (const closed of [15, 16, 18]) {
     expect(html).not.toContain(`/issues/${closed}"`);
+  }
+});
+
+// UX-01c (issue #176): disabled entries stay honestly grayed out AND
+// keyboard-honest — the label itself is not a tab stop, the tracking issue
+// is a real focusable anchor with a stable accessible name.
+it("renders disabled nav entries with label, disabled state, and keyboard-reachable issue link", () => {
+  const html = renderToStaticMarkup(
+    <MemoryRouter>
+      <Nav />
+    </MemoryRouter>,
+  );
+  for (const entry of NAV_ENTRIES.filter((e) => !e.enabled)) {
+    // Visible label plus the honest "soon" marker.
+    expect(html).toContain(entry.label);
+    expect(html).toContain("(soon)");
+    // Disabled state is exposed to assistive tech on the list item.
+    expect(html).toContain('aria-disabled="true"');
+    // The tracking link is a real anchor to the live issue URL with a
+    // stable accessible name, and is not removed from tab order.
+    const liveUrl = entry.issue as string;
+    expect(html).toContain(`href="${liveUrl}"`);
+    expect(html).toContain(`aria-label="${entry.label} tracking issue"`);
+    expect(html).not.toContain(`href="${liveUrl}" tabindex="-1"`);
   }
 });
 
