@@ -8,7 +8,7 @@ Status vocabulary: **Implemented** (shipped locally), **Partial** (materially na
 
 Upstream tests are evidence of intended assertions, not passing-test claims. Upstream sources were inspected, not executed; no upstream production instance was used.
 
-Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 29 Partial, 12 Missing, 1 Gated.
+Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 30 Partial, 11 Missing, 1 Gated.
 
 | ID | Title | Phase | Status | Depends | Existing issue |
 | --- | --- | --- | --- | --- | --- |
@@ -45,7 +45,7 @@ Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 29 Par
 | SOL-03 | Export, capture and import portable Solution source without tenant state | 5 | Partial | SOL-01, MIG-01, SEC-01 | #163 |
 | MIG-01 | Deliver the existing workspace-to-bundle bridge without false compatibility claims | 5 | Partial | — | #116 |
 | MIG-02 | Verify and close out the existing TypeScript migration pilot | 1 | Partial | — | #119 |
-| AI-01 | Configure AI provider Connections, model profiles and capability assignments | 6 | Missing | SEC-01, CON-01, AUTH-02 | new |
+| AI-01 | Configure AI provider Connections, model profiles and capability assignments | 6 | Partial | SEC-01, CON-01, AUTH-02 | #164 |
 | AI-02 | Run user-managed agents with scoped tools, delegation and bounded autonomy | 6 | Missing | AI-01, TOOL-01, RUN-02, AUTH-02 | new |
 | AI-03 | Provide durable chat, safe agent routing and attachment-aware conversations | 6 | Missing | AI-02, FILE-02, OBS-02 | new |
 | AI-04 | Review, evaluate and tune agents without replaying real side effects | 6 | Missing | AI-02, AI-03, OPS-01 | new |
@@ -1077,15 +1077,17 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## AI-01: Configure AI provider Connections, model profiles and capability assignments
 
-Phase 6; **Missing**; existing issue: new
+Phase 6; **Partial**; existing issue: #164
 
-Local status: No model/provider/embedding configuration or verification surface exists.
+Local status: Config substrate shipped (design + build slices 1–2 + secret scrub, below). Live inference and per-tenant AI keys are explicitly deferred: credentials stay deployment-global (SEC-02 tripwire shut for AI), and Cloudflare Free never includes external model inference.
 
 AI-01 design slice (issue #164, ADR 032, landed incrementally on main): provider kinds (`openai | anthropic | google | openrouter | openai-compatible`) and the six default-assignment keys pinned as stable vocabulary; credentials stay deployment-global in v0 (SEC-02 tripwire shut, no per-tenant keys); profiles/assignments/embedding/behavior scoped as separate entities with lifecycle guards; capability state resets on transport change. Build slices (registry definitions, migration 0028 DDL, routes, probes) follow.
 
 AI-01 build slice 1 (issue #164, landed incrementally on main): five provider Integration definitions (openai, anthropic, google, openrouter, openai-compatible) with deployment-global apiKey secrets, per-provider default endpoints (explicit origin required for openai-compatible), and public-https endpoint policy; migration 0028 DDL (profiles with NOCASE CI-unique names, six-key assignments, embedding singletons, behavior rows); Connection reachability probes that never send the key.
 
 AI-01 secret-scrub slice (issue #164): the five deployment-global AI API keys are registered in `deploymentSecretsFromEnv` (`src/secrets.ts`), so the shared write-time and Worker HTTP-layer scrubbing covers them like every other deployment secret (sentinel regressions in `test/secret-scrub.test.ts`). ADR 032 v0 unchanged: no per-tenant keys, no D1 persistence.
+
+AI-01 build slice 2 (issue #164): `src/ai-profiles.ts` entity plus admin-gated `/api/ai/*` routes reusing the CON-01 management boundary (reads ride the membership gate, mutations are admin-only); centralized fail-closed assignment resolver with a read-only resolve route; all four lifecycle guards (first-profile auto-assign of all six keys, `chat_default` disable rejection, referenced-delete block, merge reassign + OR chat flags); `primary`/`chat_default` un-clearable; 404-on-foreign plus Connection ownership/disabled checks; bounded key-authenticated verify-with-key and model discovery (5s, manual redirects, 64 KiB cap, mocked vendor HTTP only) answering availability booleans; identities-only browser surface (no provider model ids, no key material); ADR 013 egress rows per AI vendor; per-Connection vendor-paid cost copy on the AI defs. Reuses migration 0028, no new migration.
 
 Depends: SEC-01, CON-01, AUTH-02
 

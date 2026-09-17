@@ -325,6 +325,18 @@ import { fileURLToPath } from "node:url";
 // slice net to 739082 bytes locally against the 730 KiB line (CI number
 // governs): 8438 bytes of headroom, 246 bytes above the 8 KiB minimum.
 // LIMITS-META measuredBytes only; BUDGET_BYTES/MIN_HEADROOM_BYTES untouched.
+// 2026-09-17 (AI-01 build slice 2, issue #164): no budget change. The
+// profile/assignment/embedding/behavior surface (src/ai-profiles.ts plus
+// 15 /api/ai/* routes, SDK codes/descriptor/capability, vendor-paid
+// Integration copy) measures 800067 bytes locally against the 730 KiB
+// advisory reference (CI number governs): 52547 bytes over the reference,
+// +42654 over the 1c611c3 base (757413 B). Split: ai-profiles +31676 B,
+// routes +7318 B, SDK +3136 B (metafile attribution). The read-only probe
+// estimated +21632 B; the as-built slice is larger (full verify/discovery
+// vendor table, merge, singletons, 15 routes) — recorded here deliberately
+// per the supervision decision accepting the warn-only advisory overrun
+// (issue #177 policy), not silently absorbed.
+// LIMITS-META measuredBytes only; BUDGET_BYTES/MIN_HEADROOM_BYTES untouched.
 const BUDGET_BYTES = 730 * 1024;
 // LIMITS-01 advisory reserve (issue #177, advisory per owner decision): the
 // reference level should exceed the measured bundle by at least this margin.

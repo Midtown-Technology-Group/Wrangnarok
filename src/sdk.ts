@@ -325,6 +325,21 @@ export const SDK_ERROR_CODES = [
   "RULE_NOT_FOUND",
   "INVALID_SUBJECT",
   "USER_NOT_FOUND",
+  "AI_FORBIDDEN",
+  "AI_INVALID_PROFILE",
+  "AI_PROFILE_NOT_FOUND",
+  "AI_PROFILE_EXISTS",
+  "AI_PROFILE_REFERENCED",
+  "AI_PROFILE_NOT_CHAT",
+  "AI_CHAT_DEFAULT_HELD",
+  "AI_INVALID_ASSIGNMENT",
+  "AI_ASSIGNMENT_REQUIRED",
+  "AI_ASSIGNMENT_UNRESOLVED",
+  "AI_INVALID_MERGE",
+  "AI_INVALID_EMBEDDING",
+  "AI_INVALID_BEHAVIOR",
+  "AI_VERIFY_FAILED",
+  "AI_DISCOVERY_FAILED",
 ] as const;
 
 export type SdkErrorCode = (typeof SDK_ERROR_CODES)[number];
@@ -3197,6 +3212,53 @@ export function describeContract(): SdkContractDescriptor {
         path: "/api/connections/:integrationId/test",
         description: "Read-only connectivity test: no writes, no dispatch (CON-01).",
       },
+      {
+        method: "GET",
+        path: "/api/ai/profiles",
+        description: "This Organization's model profiles, identities only (AI-01).",
+      },
+      {
+        method: "POST",
+        path: "/api/ai/profiles",
+        description: "Create a reusable model profile, admin-gated (AI-01).",
+      },
+      { method: "GET", path: "/api/ai/profiles/:id", description: "Read one model profile, identities only (AI-01)." },
+      { method: "PUT", path: "/api/ai/profiles/:id", description: "Update a model profile, admin-gated (AI-01)." },
+      {
+        method: "DELETE",
+        path: "/api/ai/profiles/:id",
+        description: "Delete a model profile; referenced rows reject AI_PROFILE_REFERENCED (AI-01).",
+      },
+      {
+        method: "POST",
+        path: "/api/ai/profiles/merge",
+        description: "Merge profiles into one target, reassigning assignments, admin-gated (AI-01).",
+      },
+      {
+        method: "POST",
+        path: "/api/ai/profiles/:id/verify",
+        description: "Bounded key-authenticated model verification, admin-gated (AI-01).",
+      },
+      {
+        method: "GET",
+        path: "/api/ai/discover/:integrationId",
+        description: "Bounded vendor model discovery as counts plus per-profile availability (AI-01).",
+      },
+      { method: "GET", path: "/api/ai/assignments", description: "The six capability assignment keys (AI-01)." },
+      {
+        method: "PUT",
+        path: "/api/ai/assignments/:key",
+        description: "Set or clear one assignment; primary/chat_default cannot clear, admin-gated (AI-01).",
+      },
+      {
+        method: "GET",
+        path: "/api/ai/resolve/:key",
+        description: "Fail-closed read-only assignment resolution (AI-01).",
+      },
+      { method: "GET", path: "/api/ai/embedding", description: "Embedding singleton, identities only (AI-01)." },
+      { method: "PUT", path: "/api/ai/embedding", description: "Upsert the embedding singleton, admin-gated (AI-01)." },
+      { method: "GET", path: "/api/ai/behavior", description: "Behavior row: default system prompt (AI-01)." },
+      { method: "PUT", path: "/api/ai/behavior", description: "Upsert the behavior row, admin-gated (AI-01)." },
       { method: "GET", path: "/api/tables", description: "Tables visible to this caller in this Organization." },
       { method: "POST", path: "/api/tables", description: "Create a Table declaration (owner: the creator)." },
       { method: "GET", path: "/api/tables/:name", description: "Table declaration." },
@@ -3458,6 +3520,12 @@ export function describeContract(): SdkContractDescriptor {
         status: "supported",
         detail:
           "Opt-in Saga tools (TOOL-01, issue #170): explicit enrollment with stable identity, collision-safe names, distinctive descriptions; discovery and execution share one gate (disabled/stale rows vanish from both). Host-mediated OpenAPI Code Mode plus the authorized inbound MCP gateway (tools/list, tools/call, tools/search, tools/describe) over the same membership gate as every /api/* route.",
+      },
+      {
+        name: "ai-model-profiles",
+        status: "supported",
+        detail:
+          "Reusable AI model profiles over provider Connections (AI-01, issue #164): admin-gated CRUD with lifecycle guards, six fixed capability assignments with fail-closed read-only resolution, independent embedding/behavior singletons, and bounded verify/discovery probes. Browser views carry profile identities only — provider model ids and deployment keys never leave the server. Live inference and per-tenant keys stay deferred (deployment-global credentials only).",
       },
       {
         name: "resource-management",
