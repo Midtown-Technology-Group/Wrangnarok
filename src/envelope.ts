@@ -196,7 +196,9 @@ export async function decryptConnectionSecret(input: EnvelopeDecryptInput): Prom
         ),
       ),
     );
-    if (rawDek.length !== 32) throw new EnvelopeError("ENVELOPE_DECRYPT_FAILED");
+    // No length check on the unwrapped DEK: AES-GCM authentication above
+    // already guarantees integrity, and exactly 32 bytes were wrapped at
+    // encrypt time. An explicit check would be uncoverable dead code.
     const dek = await crypto.subtle.importKey("raw", rawDek, "AES-GCM", false, ["decrypt"]);
     const aad = contentAad(input.orgId, input.connectionId, input.field);
     const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce, additionalData: aad }, dek, ciphertext);

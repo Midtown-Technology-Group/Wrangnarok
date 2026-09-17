@@ -23,6 +23,8 @@ import {
   putConnectionSecrets,
   resolveConnectionSecrets,
 } from "../src/connections";
+import { resolveExecutionOrgSecrets } from "../src/sagas/shared";
+import { clearExecutionSecrets, getExecutionSecrets } from "../src/secrets";
 import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
 
 const bindings = env as unknown as Bindings;
@@ -168,6 +170,10 @@ describe("per-Organization secrets write path (SEC-02)", () => {
     expect(await resolveConnectionSecrets(bindings.DB, ORG, created.id, { 1: KEK })).toEqual({ apiToken: VALUE });
     // Wrong org resolves to no secrets — never someone else's.
     expect(await resolveConnectionSecrets(bindings.DB, OTHER_ORG, created.id, { 1: KEK })).toEqual({});
+    // An empty KEK map fails version-gated, never silent.
+    await expect(resolveConnectionSecrets(bindings.DB, ORG, created.id, {})).rejects.toMatchObject({
+      code: "CONNECTION_SECRET_UNREADABLE",
+    });
     await expect(resolveConnectionSecrets(bindings.DB, ORG, created.id, { 1: OTHER_KEK })).rejects.toMatchObject({
       code: "CONNECTION_SECRET_UNREADABLE",
     });
@@ -248,6 +254,48 @@ describe("per-Organization secrets route (SEC-02)", () => {
         )
       ).status,
     ).toBe(404);
+  });
+});
+
+describe("execution org-secret resolution (SEC-02)", () => {
+  async function seedExecution(id: string, orgId: string, userId: string) {
+    await bindings.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        id,
+        cloudflareVerifySaga.id,
+        "cloudflare",
+        cloudflareVerifySaga.revision,
+        orgId,
+        userId,
+        JSON.stringify({}),
+        1,
+        "Pending",
+        new Date().toISOString(),
+      )
+      .run();
+  }
+
+  it("returns empty without a KEK, for unknown executions, and without a mapping", async () => {
+    const saga = { id: cloudflareVerifySaga.id, revision: cloudflareVerifySaga.revision };
+    expect(await resolveExecutionOrgSecrets(bindings.DB, "e".repeat(64), saga, undefined)).toEqual({});
+    expect(await resolveExecutionOrgSecrets(bindings.DB, "e".repeat(64), saga, "")).toEqual({});
+    expect(await resolveExecutionOrgSecrets(bindings.DB, "e".repeat(64), saga, KEK)).toEqual({});
+    await seedExecution("f".repeat(64), OTHER_ORG, OTHER_USER);
+    expect(await resolveExecutionOrgSecrets(bindings.DB, "f".repeat(64), saga, KEK)).toEqual({});
+  });
+
+  it("resolves the provisioned value and registers it for scrubbing", async () => {
+    await seedCloudflareMapping();
+    await putConnectionSecrets(bindings.DB, caller, CLOUDFLARE_INTEGRATION_ID, { apiToken: VALUE }, KEK);
+    const execId = "d".repeat(64);
+    await seedExecution(execId, ORG, USER);
+    const saga = { id: cloudflareVerifySaga.id, revision: cloudflareVerifySaga.revision };
+    expect(await resolveExecutionOrgSecrets(bindings.DB, execId, saga, KEK)).toEqual({ apiToken: VALUE });
+    expect(getExecutionSecrets(execId)).toContain(VALUE);
+    clearExecutionSecrets(execId);
+    expect(getExecutionSecrets(execId)).toEqual([]);
   });
 });
 

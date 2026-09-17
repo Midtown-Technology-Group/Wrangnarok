@@ -71,6 +71,12 @@ describe("connection secret envelope (SEC-02)", () => {
     await expect(opened(row, { orgId: OTHER_ORG })).rejects.toThrow("ENVELOPE_DECRYPT_FAILED");
   });
 
+  it("rejects unversioned rows and short nonces without touching subtle", async () => {
+    const row = await sealed();
+    await expect(opened({ ...row, keyVersion: 0 })).rejects.toThrow("ENVELOPE_UNKNOWN_KEY_VERSION");
+    await expect(opened({ ...row, nonce: btoa("short") })).rejects.toThrow("ENVELOPE_DECRYPT_FAILED");
+  });
+
   it("rejects unknown algorithm and unknown key versions without touching subtle", async () => {
     const row = await sealed();
     await expect(opened({ ...row, algorithm: "AES-CBC-128" })).rejects.toThrow("ENVELOPE_UNKNOWN_ALGORITHM");

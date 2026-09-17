@@ -40,6 +40,55 @@ async function executionOrgId(db: D1Database, id: string): Promise<string> {
   return row.org_id;
 }
 
+/** Resolve per-Organization secret values for one Execution (SEC-02, issue
+ * #411). Without a KEK this returns empty without touching D1: the v0 path
+ * runs untouched, and removing the KEK parks the per-org path (rows stay
+ * inert ciphertext) rather than migrating anything. With a KEK, stored
+ * envelopes for the Execution's org resolve here and win over the
+ * deployment credential; corrupt rows fail loud via
+ * resolveConnectionSecrets (never a silent deployment fallback). Unknown
+ * executions resolve to no org row and return empty — the prepare step
+ * still owns that failure exactly as before. Resolved values register with
+ * the execution-scoped registry for write-time scrubbing. */
+export async function resolveExecutionOrgSecrets(
+  db: D1Database,
+  id: string,
+  saga: { readonly id: string; readonly revision: string },
+  kekMaterial: string | undefined,
+): Promise<{ clientSecret?: string; apiToken?: string }> {
+  if (typeof kekMaterial !== "string" || kekMaterial.length === 0) return {};
+  const keks: Readonly<Record<number, string>> = { [ENVELOPE_KEY_VERSION]: kekMaterial };
+  const orgRow = await db
+    .prepare("SELECT org_id,user_id FROM executions WHERE id=?")
+    .bind(id)
+    .first<{ org_id: string; user_id: string }>();
+  if (!orgRow) return {};
+  const orgSecrets: { clientSecret?: string; apiToken?: string } = {};
+  const orgCtx = {
+    orgId: orgRow.org_id,
+    userId: orgRow.user_id,
+    executionId: id,
+    sagaId: saga.id,
+    sagaRevision: saga.revision,
+    attemptToken: `${id}:0`,
+  };
+  const bindings = [
+    { integrationId: NINJA_INTEGRATION_ID, field: "clientSecret", ctxKey: "clientSecret" },
+    { integrationId: CLOUDFLARE_INTEGRATION_ID, field: "apiToken", ctxKey: "apiToken" },
+  ] as const;
+  for (const binding of bindings) {
+    const resolved = await resolveConnection(db, orgCtx, binding.integrationId, []);
+    if (!resolved.found) continue;
+    const decrypted = await resolveConnectionSecrets(db, orgRow.org_id, resolved.connection.id, keks);
+    const value = decrypted[binding.field];
+    if (typeof value === "string" && value.length > 0) {
+      orgSecrets[binding.ctxKey] = value;
+      registerExecutionSecrets(id, [value]);
+    }
+  }
+  return orgSecrets;
+}
+
 export async function executeSaga<TOutput>(
   env: Bindings,
   event: WorkflowEvent<ExecutionParams>,
@@ -61,49 +110,9 @@ export async function executeSaga<TOutput>(
     env.HALO_CLIENT_SECRET,
     env.CLOUDFLARE_API_TOKEN,
   ]);
-  // Per-Organization secrets (SEC-02, issue #411). Skipped entirely without
-  // a KEK: the v0 path runs untouched with zero extra reads, and removing
-  // the KEK parks the per-org path (rows stay inert ciphertext) rather than
-  // migrating anything. With a KEK, stored envelopes for the Execution's
-  // org resolve here and win over the deployment credential; corrupt rows
-  // fail loud via resolveConnectionSecrets (never a silent deployment
-  // fallback). Unknown executions resolve to no org row and skip — the
-  // prepare step below still owns that failure exactly as before.
-  const keks: Readonly<Record<number, string>> =
-    typeof env.SECRETS_KEK === "string" && env.SECRETS_KEK.length > 0
-      ? { [ENVELOPE_KEY_VERSION]: env.SECRETS_KEK }
-      : {};
-  const orgSecrets: { clientSecret?: string; apiToken?: string } = {};
-  if (Object.keys(keks).length > 0) {
-    const orgRow = await env.DB.prepare("SELECT org_id,user_id FROM executions WHERE id=?")
-      .bind(id)
-      .first<{ org_id: string; user_id: string }>()
-      .catch(() => null);
-    if (orgRow) {
-      const orgCtx = {
-        orgId: orgRow.org_id,
-        userId: orgRow.user_id,
-        executionId: id,
-        sagaId: def.id,
-        sagaRevision: def.revision,
-        attemptToken: `${id}:0`,
-      };
-      const bindings = [
-        { integrationId: NINJA_INTEGRATION_ID, field: "clientSecret", ctxKey: "clientSecret" },
-        { integrationId: CLOUDFLARE_INTEGRATION_ID, field: "apiToken", ctxKey: "apiToken" },
-      ] as const;
-      for (const binding of bindings) {
-        const resolved = await resolveConnection(env.DB, orgCtx, binding.integrationId, []);
-        if (!resolved.found) continue;
-        const decrypted = await resolveConnectionSecrets(env.DB, orgRow.org_id, resolved.connection.id, keks);
-        const value = decrypted[binding.field];
-        if (typeof value === "string" && value.length > 0) {
-          orgSecrets[binding.ctxKey] = value;
-          registerExecutionSecrets(id, [value]);
-        }
-      }
-    }
-  }
+  // Per-Organization secrets (SEC-02, issue #411); see
+  // resolveExecutionOrgSecrets below for the contract.
+  const orgSecrets = await resolveExecutionOrgSecrets(env.DB, id, def, env.SECRETS_KEK);
   try {
     const sagaStep = bindSagaStep(step);
     const catalog: ChildCatalog = { sagas: SAGA_DEFINITIONS };

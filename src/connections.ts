@@ -23,7 +23,7 @@ import { assertSafeEndpoint, integrationById, validateConnectionConfig } from ".
 import type { ConnectionView } from "./integrations";
 import { scrubValueWithDeploymentSecrets } from "./secrets";
 import type { CloudflareCredentials, HaloCredentials, NinjaCredentials } from "./bindings";
-import { decryptConnectionSecret, encryptConnectionSecret, ENVELOPE_MAX_PLAINTEXT, EnvelopeError } from "./envelope";
+import { decryptConnectionSecret, encryptConnectionSecret, ENVELOPE_MAX_PLAINTEXT } from "./envelope";
 
 /** Deployment credential surface read by the management test path (CON-01).
  * Required-secret values are presence-checked only — never persisted,
@@ -66,28 +66,34 @@ function parseDisplayName(value: unknown): string | null {
   return value;
 }
 
+/** True when the per-Organization secrets table exists. Suites on partial
+ * migration chains (pre-0028) skip secrets reads; every other D1 failure
+ * still throws — a missing table is tolerated, never a real error. An
+ * explicit existence check (not error-message matching) keeps both sides
+ * honest and coverable. */
+async function hasSecretsTable(db: D1Database): Promise<boolean> {
+  const found = await db
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='connection_secrets'")
+    .first<{ ok: number }>();
+  return found !== null;
+}
+
 /** Provisioned per-Organization secret-field names for one Connection
- * (names only, ordered; empty when none). Suites on partial migration
- * chains (pre-0028) read as none; every other D1 failure still throws —
- * only the missing-table case is tolerated, never a real error. */
+ * (names only, ordered; empty when none). */
 async function provisionedFields(db: D1Database, connectionId: string): Promise<string[]> {
-  try {
-    const found = await db
-      .prepare("SELECT field FROM connection_secrets WHERE connection_id=? ORDER BY field")
-      .bind(connectionId)
-      .all<{ field: string }>();
-    return found.results.map((entry) => entry.field);
-  } catch (error) {
-    if (error instanceof Error && error.message.includes("no such table")) return [];
-    throw error;
-  }
+  if (!(await hasSecretsTable(db))) return [];
+  const found = await db
+    .prepare("SELECT field FROM connection_secrets WHERE connection_id=? ORDER BY field")
+    .bind(connectionId)
+    .all<{ field: string }>();
+  return found.results.map((entry) => entry.field);
 }
 
 /** Shape one D1 row into the secret-free management view. Redaction is by
  * construction: the view carries non-secret config plus required-secret
  * names only — no secret values exist on this path to leak. Provisioned
  * per-Organization fields arrive as names via `provisioned`. */
-function toView(row: ConnectionRow, provisioned: readonly string[] = []): ConnectionView {
+function toView(row: ConnectionRow, provisioned: readonly string[]): ConnectionView {
   const def = integrationById(row.integration_id);
   const config: Record<string, string> = { endpoint: row.endpoint };
   if (def) {
@@ -311,19 +317,18 @@ export async function putConnectionSecrets(
     if (typeof value !== "string" || value.length > ENVELOPE_MAX_PLAINTEXT) {
       throw invalid("INVALID_CONNECTION", `Secret field "${field}" must be a non-empty string.`);
     }
-    let envelope;
-    try {
-      envelope = await encryptConnectionSecret({
-        orgId: caller.orgId,
-        connectionId: row.id,
-        field,
-        plaintext: value,
-        kekMaterial,
-      });
-    } catch (error) {
-      if (error instanceof EnvelopeError) throw invalid("SECRET_STORE_FAILED", "The secret could not be stored.", 500);
-      throw error;
-    }
+    // No try/catch: inputs are validated above to the envelope's own
+    // contract (non-empty, bounded, KEK present), so encrypt cannot fail on
+    // bad input here. An unexpected subtle failure propagates to the global
+    // 500 path with a fixed message — envelope errors carry codes, never
+    // values, so nothing secret can leak through that path either.
+    const envelope = await encryptConnectionSecret({
+      orgId: caller.orgId,
+      connectionId: row.id,
+      field,
+      plaintext: value,
+      kekMaterial,
+    });
     await db
       .prepare(
         "INSERT INTO connection_secrets(connection_id,org_id,field,ciphertext,nonce,wrapped_dek,key_version,algorithm,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(connection_id,field) DO UPDATE SET ciphertext=excluded.ciphertext,nonce=excluded.nonce,wrapped_dek=excluded.wrapped_dek,key_version=excluded.key_version,algorithm=excluded.algorithm,updated_at=excluded.updated_at",
@@ -373,21 +378,15 @@ export async function resolveConnectionSecrets(
   connectionId: string,
   keks: Readonly<Record<number, string>>,
 ): Promise<Readonly<Record<string, string>>> {
-  let rows: ConnectionSecretRow[];
-  try {
-    const found = await db
-      .prepare(
-        "SELECT field,ciphertext,nonce,wrapped_dek,key_version,algorithm FROM connection_secrets WHERE org_id=? AND connection_id=?",
-      )
-      .bind(orgId, connectionId)
-      .all<ConnectionSecretRow>();
-    rows = [...found.results];
-  } catch (error) {
-    if (error instanceof Error && error.message.includes("no such table")) return Object.freeze({});
-    throw error;
-  }
+  if (!(await hasSecretsTable(db))) return Object.freeze({});
+  const found = await db
+    .prepare(
+      "SELECT field,ciphertext,nonce,wrapped_dek,key_version,algorithm FROM connection_secrets WHERE org_id=? AND connection_id=?",
+    )
+    .bind(orgId, connectionId)
+    .all<ConnectionSecretRow>();
   const out: Record<string, string> = {};
-  for (const entry of rows) {
+  for (const entry of found.results) {
     try {
       out[entry.field] = await decryptConnectionSecret({
         orgId,
@@ -402,11 +401,12 @@ export async function resolveConnectionSecrets(
         },
         keks,
       });
-    } catch (error) {
-      if (error instanceof EnvelopeError) {
-        throw invalid("CONNECTION_SECRET_UNREADABLE", "A stored Connection credential could not be decrypted.", 500);
-      }
-      throw error;
+    } catch {
+      // decryptConnectionSecret throws only EnvelopeError (every subtle
+      // failure is wrapped at the throw site), so any failure here means
+      // the stored credential is unreadable — never a partial map, never
+      // a plaintext fallback. Envelope codes carry no values.
+      throw invalid("CONNECTION_SECRET_UNREADABLE", "A stored Connection credential could not be decrypted.", 500);
     }
   }
   return Object.freeze(out);
@@ -417,7 +417,8 @@ export async function resolveConnectionSecrets(
  * required Integration is allowed here — the Execution path fails loud
  * (424) on next use, which is the observable contract. Provisioned
  * per-Organization secrets are deleted explicitly with the mapping (belt
- * beside the FK cascade, which D1 may not enforce). */
+ * beside the FK cascade, which D1 may not enforce). Pre-0028 chains skip
+ * the secrets delete via the table check. */
 export async function deleteConnection(db: D1Database, caller: Principal, integrationId: string): Promise<void> {
   if (!UUID.test(integrationId)) throw invalid("UNKNOWN_INTEGRATION", "Unknown Integration id.", 404);
   const def = integrationById(integrationId);
@@ -431,10 +432,8 @@ export async function deleteConnection(db: D1Database, caller: Principal, integr
       409,
     );
   }
-  try {
+  if (await hasSecretsTable(db)) {
     await db.prepare("DELETE FROM connection_secrets WHERE connection_id=?").bind(row.id).run();
-  } catch (error) {
-    if (!(error instanceof Error && error.message.includes("no such table"))) throw error;
   }
   await db
     .prepare("DELETE FROM connections WHERE org_id=? AND integration_id=?")
