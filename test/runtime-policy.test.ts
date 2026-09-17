@@ -714,7 +714,7 @@ describe("RUN-01 Slice C lost-runtime-history convergence (issue #135)", () => {
       dispatchConfirmed: true,
       runtimeStatus: null,
       result: null,
-      error: { code: "ECHO_INTEGRATION_FAILED" },
+      error: { code: "ECHO_INTEGRATION_FAILED", message: "The echo Integration could not complete." },
       policy: { sagaId: echoSaga.id, version: 1, policy: { timeout: { vendorTimeoutMs: 250 } } },
       operations: [
         { name: "prepare-input-v1", status: "Succeeded" },
@@ -726,7 +726,10 @@ describe("RUN-01 Slice C lost-runtime-history convergence (issue #135)", () => {
       .first<{ status: string; dispatched: number; error_json: string }>();
     expect(stored?.status).toBe("Failed");
     expect(stored?.dispatched).toBe(1);
-    expect(JSON.parse(stored?.error_json ?? "")).toMatchObject({ code: "ECHO_INTEGRATION_FAILED" });
+    expect(JSON.parse(stored?.error_json ?? "")).toEqual({
+      code: "ECHO_INTEGRATION_FAILED",
+      message: "The echo Integration could not complete.",
+    });
     const replay = await worker.fetch(submitRequest(key), bindings);
     expect(replay.status).toBe(200);
     expect(await replay.json()).toMatchObject({ executionId: id, replayed: true });
