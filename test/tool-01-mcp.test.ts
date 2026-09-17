@@ -175,7 +175,7 @@ describe("MCP gateway over the local Worker (real client)", () => {
     expect(typeof (body.result as { executionId: string }).executionId).toBe("string");
   });
 
-  it("denies unknown, disabled, and stale tools as call-level errors", async () => {
+  it("denies unknown and disabled tools as call-level errors", async () => {
     const name = await enrollHello();
     const unknown = await mcp("tools/call", { tool: "ghost_tool", input: {} });
     expect(unknown.status).toBe(200);
@@ -193,6 +193,34 @@ describe("MCP gateway over the local Worker (real client)", () => {
     expect((revoked.body.result as { error: { code: string } }).error.code).toBe("TOOL_DISABLED");
     // Disabled tools also vanish from discovery (identical scoping).
     const listed = await mcp("tools/list", {});
+    const names = ((listed.body.result?.tools as { name: string }[]) ?? []).map((entry) => entry.name);
+    expect(names).not.toContain(name);
+  });
+
+  it("rejects a previously valid gateway revision as TOOL_STALE after the enrollment goes stale", async () => {
+    const name = await enrollHello();
+    // Previously valid: the enrolled revision resolves through the
+    // authoritative gateway request path (real JSON-RPC tools/call).
+    const before = await mcp("tools/call", {
+      tool: name,
+      input: { input: { name: "Ada" }, idempotencyKey: "mcp-stale-before-0001" },
+    });
+    expect(before.status).toBe(200);
+    expect((before.body.result as { tool: string }).tool).toBe(name);
+    // The underlying gateway configuration/revision changes: the enrollment
+    // now names a Saga revision that is no longer current.
+    await bindings.DB.prepare("UPDATE tool_enrollments SET saga_revision=? WHERE org_id=? AND tool_name=?")
+      .bind("hello-v0", ORG, name)
+      .run();
+    const stale = await mcp("tools/call", {
+      tool: name,
+      input: { input: { name: "Ada" }, idempotencyKey: "mcp-stale-after-0001" },
+    });
+    expect(stale.status).toBe(200);
+    expect((stale.body.result as { error: { code: string } }).error.code).toBe("TOOL_STALE");
+    // Stale rows vanish from discovery identically.
+    const listed = await mcp("tools/list", {});
+    expect(listed.status).toBe(200);
     const names = ((listed.body.result?.tools as { name: string }[]) ?? []).map((entry) => entry.name);
     expect(names).not.toContain(name);
   });
