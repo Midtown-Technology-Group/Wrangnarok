@@ -9,13 +9,18 @@
 // non-secret endpoint; decrypted material only ever exists transiently
 // inside server-side execution (see ADR 005, Proposed).
 import {
+  ANTHROPIC_INTEGRATION_ID,
   CLOUDFLARE_API_BASE,
   CLOUDFLARE_INTEGRATION_ID,
   ECHO_INTEGRATION_ID,
   Fault,
+  GOOGLE_INTEGRATION_ID,
   HALO_INTEGRATION_ID,
   NINJA_INTEGRATION_ID,
   object,
+  OPENAI_COMPATIBLE_INTEGRATION_ID,
+  OPENAI_INTEGRATION_ID,
+  OPENROUTER_INTEGRATION_ID,
   UUID,
 } from "../domain";
 import type { FieldFailure } from "../domain";
@@ -113,8 +118,30 @@ function isPrivateIPv4(host: string): boolean {
 function isInternalIPv6(host: string): boolean {
   const value = stripBrackets(host).toLowerCase();
   if (value === "::1" || value === "::") return true;
+  // IPv4-mapped IPv6 literals (::ffff:0:0/96) embed a dotted or hex IPv4
+  // tail the URL parser normalizes to hex (e.g. [::ffff:7f00:1]). Decode
+  // the tail and apply the IPv4 checks so mapped loopback/private cannot
+  // bypass this gate before a vendor probe issues.
+  const mapped = decodeMappedIPv4(value);
+  if (mapped !== null) return isPrivateIPv4(mapped);
   // Link-local and unique-local literals never serve a Connection endpoint.
   return value.startsWith("fe80") || value.startsWith("fc") || value.startsWith("fd");
+}
+
+/** Decode the embedded IPv4 quad of an IPv4-mapped IPv6 literal
+ * (`::ffff:0:0/96`, any case, dotted or hex tail). Returns null for
+ * non-mapped addresses. Pure. */
+function decodeMappedIPv4(value: string): string | null {
+  const prefix = "::ffff:";
+  if (!value.startsWith(prefix)) return null;
+  const tail = value.slice(prefix.length);
+  if (isIPv4Literal(tail)) return tail;
+  const hexTail = tail.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (!hexTail?.[1] || !hexTail?.[2]) return null;
+  const hi = Number.parseInt(hexTail[1], 16);
+  const lo = Number.parseInt(hexTail[2], 16);
+  if (!Number.isSafeInteger(hi) || !Number.isSafeInteger(lo)) return null;
+  return `${(hi >>> 8) & 255}.${hi & 255}.${(lo >>> 8) & 255}.${lo & 255}`;
 }
 
 /** True for loopback names/addresses reserved to the local echo fixture. */
@@ -162,6 +189,19 @@ const HALO_ALLOWED_SUFFIXES: readonly string[] = Object.freeze(["halo-lab.exampl
 function endpointPolicyFor(integrationName: string): EndpointPolicy | null {
   if (integrationName === "echo") {
     return { allowLoopback: true, requireHttps: false, allowedSuffixes: [], loopbackOnly: true };
+  }
+  // AI-01 providers (issue #164, ADR 032): public https origins only, no
+  // suffix allowlist (vendor hosts vary, openai-compatible is operator-set).
+  // Default-endpoint validation keeps honest hosts honest; the use-time
+  // assertSafeEndpoint re-parse covers rows that predate this policy.
+  if (
+    integrationName === "openai" ||
+    integrationName === "anthropic" ||
+    integrationName === "google" ||
+    integrationName === "openrouter" ||
+    integrationName === "openai-compatible"
+  ) {
+    return { allowLoopback: false, requireHttps: true, allowedSuffixes: [], loopbackOnly: false };
   }
   if (integrationName === "cloudflare") {
     return {
@@ -477,6 +517,87 @@ export const haloIntegrationDef = defineIntegration({
   },
 });
 
+/** AI-01 provider Integration definitions (issue #164, ADR 032): the five
+ * upstream provider kinds as CON-01 registry entries. Credentials stay
+ * deployment-global in v0 (SEC-02 tripwire shut): provider-global
+ * requiredSecrets resolved from deployment env vars, presence-checked at
+ * test/execution time, never persisted, never returned through discovery.
+ * Per-provider default endpoints apply except openai-compatible, which
+ * requires an explicit endpoint (its vendor model has no default). */
+function aiProviderDef(
+  id: string,
+  name: string,
+  description: string,
+  envPrefix: string,
+  defaultOrigin: string | null,
+): IntegrationDefinition {
+  return defineIntegration({
+    id,
+    name,
+    description,
+    secretFields: ["apiKey"],
+    configSchema: [
+      {
+        name: "endpoint",
+        type: "string",
+        required: true,
+        ...(defaultOrigin === null ? {} : { default: defaultOrigin }),
+        maxLength: CONNECTION_CONFIG_MAX_LENGTH,
+        description:
+          defaultOrigin === null
+            ? "Provider API origin (required: openai-compatible has no default endpoint)."
+            : `Provider API origin (defaults to ${defaultOrigin}).`,
+      },
+    ],
+    requiredSecrets: ["apiKey"],
+    secretEnvVars: { apiKey: `${envPrefix}_API_KEY` },
+    health: {
+      testHint: "Run the connectivity test, then verify a model profile against this provider.",
+      remediation: "Confirm the provider origin and the deployment API key, then re-test before verifying profiles.",
+    },
+  });
+}
+
+export const openaiIntegrationDef = aiProviderDef(
+  OPENAI_INTEGRATION_ID,
+  "openai",
+  "OpenAI API provider for model profiles and capability assignments.",
+  "OPENAI",
+  "https://api.openai.com",
+);
+
+export const anthropicIntegrationDef = aiProviderDef(
+  ANTHROPIC_INTEGRATION_ID,
+  "anthropic",
+  "Anthropic API provider for model profiles and capability assignments.",
+  "ANTHROPIC",
+  "https://api.anthropic.com",
+);
+
+export const googleIntegrationDef = aiProviderDef(
+  GOOGLE_INTEGRATION_ID,
+  "google",
+  "Google AI API provider for model profiles and capability assignments.",
+  "GOOGLE",
+  "https://generativelanguage.googleapis.com",
+);
+
+export const openrouterIntegrationDef = aiProviderDef(
+  OPENROUTER_INTEGRATION_ID,
+  "openrouter",
+  "OpenRouter gateway provider for model profiles and capability assignments.",
+  "OPENROUTER",
+  "https://openrouter.ai",
+);
+
+export const openaiCompatibleIntegrationDef = aiProviderDef(
+  OPENAI_COMPATIBLE_INTEGRATION_ID,
+  "openai-compatible",
+  "OpenAI-compatible endpoint provider (explicit origin required).",
+  "OPENAI_COMPATIBLE",
+  null,
+);
+
 /** All Integration definitions, in canonical order. Add new Integrations here. */
 export const cloudflareIntegrationDef = defineIntegration({
   id: CLOUDFLARE_INTEGRATION_ID,
@@ -513,6 +634,11 @@ export const INTEGRATION_DEFINITIONS: readonly IntegrationDefinition[] = Object.
   echoIntegrationDef,
   ninjaIntegrationDef,
   haloIntegrationDef,
+  openaiIntegrationDef,
+  anthropicIntegrationDef,
+  googleIntegrationDef,
+  openrouterIntegrationDef,
+  openaiCompatibleIntegrationDef,
   cloudflareIntegrationDef,
 ]);
 

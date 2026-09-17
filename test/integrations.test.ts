@@ -15,6 +15,7 @@ import {
   isInternalLiteralHost,
   isLoopbackHost,
   ninjaIntegrationDef,
+  openaiIntegrationDef,
   validateConnectionConfig,
 } from "../src/integrations";
 import { CLOUDFLARE_API_BASE, ECHO_INTEGRATION_ID, NINJA_INTEGRATION_ID } from "../src/domain";
@@ -33,7 +34,8 @@ const BASE = {
 
 describe("Integration registry (ADR 003)", () => {
   it("registers the built-in Integrations with stable identity", () => {
-    expect(INTEGRATION_DEFINITIONS).toHaveLength(4);
+    // 3 base Integrations plus the 5 AI-01 provider kinds (issue #164) plus Cloudflare.
+    expect(INTEGRATION_DEFINITIONS).toHaveLength(9);
     expect(echoIntegrationDef).toMatchObject({ id: ECHO_INTEGRATION_ID, name: "echo", secretFields: [] });
     expect(ninjaIntegrationDef).toMatchObject({
       id: NINJA_INTEGRATION_ID,
@@ -451,5 +453,21 @@ describe("Connection config validation (CON-01)", () => {
     expect(isInternalLiteralHost("fd00::1")).toBe(true);
     expect(isInternalLiteralHost("2001:db8::1")).toBe(false);
     expect(isInternalLiteralHost("example.com")).toBe(false);
+    // CodeRabbit Major (PR #403, CWE-918): IPv4-mapped IPv6 literals decode
+    // to their embedded quad before the internal check, so mapped loopback
+    // and private addresses cannot bypass the gate ahead of a vendor probe.
+    expect(isInternalLiteralHost("[::ffff:127.0.0.1]")).toBe(true);
+    expect(isInternalLiteralHost("[::ffff:7f00:1]")).toBe(true);
+    expect(isInternalLiteralHost("[::FFFF:7F00:1]")).toBe(true);
+    expect(isInternalLiteralHost("[::ffff:10.0.0.9]")).toBe(true);
+    expect(isInternalLiteralHost("[::ffff:a00:9]")).toBe(true);
+    expect(isInternalLiteralHost("[::ffff:192.168.0.1]")).toBe(true);
+    expect(isInternalLiteralHost("[::ffff:8.8.8.8]")).toBe(false);
+    expect(isInternalLiteralHost("[::ffff:808:808]")).toBe(false);
+  });
+
+  it("rejects IPv4-mapped IPv6 endpoints before any vendor contact (PR #403)", () => {
+    expect(() => validateConnectionConfig(openaiIntegrationDef, { endpoint: "https://[::ffff:127.0.0.1]/" })).toThrow();
+    expect(() => validateConnectionConfig(openaiIntegrationDef, { endpoint: "https://[::ffff:7f00:1]/v1" })).toThrow();
   });
 });

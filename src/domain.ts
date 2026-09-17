@@ -16,6 +16,13 @@ export const NINJA_INTEGRATION_ID = "0606e237-137b-4629-8346-85468e1c2df6";
 // TOOL-01 HaloPSA Code Mode provider (issue #170, ADR 022): stable identity
 // for the OpenAPI proof Integration. Never changes across source edits.
 export const HALO_INTEGRATION_ID = "a1b2c3d4-0000-4111-8111-000000000001";
+// AI-01 provider Integration identities (issue #164, ADR 032): stable UUIDs
+// for the five upstream provider kinds. Never change across source edits.
+export const OPENAI_INTEGRATION_ID = "b2c3d4e5-0000-4111-8111-000000000001";
+export const ANTHROPIC_INTEGRATION_ID = "c3d4e5f6-0000-4111-8111-000000000001";
+export const GOOGLE_INTEGRATION_ID = "d4e5f6a7-0000-4111-8111-000000000001";
+export const OPENROUTER_INTEGRATION_ID = "e5f6a7b8-0000-4111-8111-000000000001";
+export const OPENAI_COMPATIBLE_INTEGRATION_ID = "f6a7b8c9-0000-4111-8111-000000000001";
 // AI-01 provider kinds (issue #164, ADR 032): the five upstream provider
 // kinds as Integration-definition names. Stable slugs; the definitions land
 // in src/integrations/index.ts in the build slice.
