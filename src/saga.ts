@@ -172,6 +172,22 @@ export interface IoSchema {
   readonly additionalProperties?: boolean;
 }
 
+/** One-line frozen IoSchema builder (ADR-033-1). Declaration sugar only: it
+ * compresses the nested Object.freeze literals without solving schema/parser
+ * drift, and must never be framed as more. String-typed leaf map covers the
+ * common case; nested/object schemas stay hand-written. */
+export function schemaOf(properties: Readonly<Record<string, string>>, required: readonly string[] = []): IoSchema {
+  const frozenProps = Object.freeze(
+    Object.fromEntries(Object.entries(properties).map(([key, type]) => [key, Object.freeze({ type })])),
+  );
+  return Object.freeze({
+    type: "object" as const,
+    properties: frozenProps,
+    required: Object.freeze([...required]),
+    additionalProperties: false,
+  });
+}
+
 export type SagaRun<TOutput> = (ctx: SagaEventContext, step: SagaStep) => Promise<TOutput>;
 
 /** Static Saga definition. Identity/discovery metadata only: id, name,
