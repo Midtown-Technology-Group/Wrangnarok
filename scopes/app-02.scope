@@ -1,8 +1,11 @@
-# APP-02 lane scope (issue #160): browser App SDK runtime slice.
-# Minimal slice only. Adjust at PR time to cover the branch diff exactly.
-src/app-runtime.ts
-src/index.ts
-src/sdk.ts
-migrations/0007_app_runtime.sql
+# APP-02 verification slice (issue #160): polling-freshness proof only.
+# Proves the revision-polling adaptation gives observable freshness after
+# every currently supported batch-adjacent Table mutation (sequential
+# single-row writes; no batch endpoint exists) through subscribeTable
+# authoritative refetch with no stale rows, and documents the upstream v2
+# table_invalidated divergence. No routes, WebSockets, primitives,
+# migrations, runtime auth changes, or TABLE-02 implementation.
+test/app-runtime.test.ts
+test/app-sdk-client.test.tsx
+docs/app-sdk.md
 scopes/app-02.scope
-package.json
