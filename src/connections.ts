@@ -19,12 +19,13 @@
 //   plaintext secret storage anywhere.
 import { Fault, UUID } from "./domain";
 import type { Principal } from "./domain";
-import { assertSafeEndpoint, integrationById, validateConnectionConfig } from "./integrations";
+import { assertSafeEndpoint, INTEGRATION_DEFINITIONS, integrationById, validateConnectionConfig } from "./integrations";
 import type { ConnectionView } from "./integrations";
+import type { TokenHealthStatus } from "./oauth";
 import { scrubValueWithDeploymentSecrets } from "./secrets";
 import type { AiProviderCredentials, CloudflareCredentials, HaloCredentials, NinjaCredentials } from "./bindings";
 import { decryptConnectionSecret, encryptConnectionSecret, ENVELOPE_MAX_PLAINTEXT } from "./envelope";
-import { deleteOAuthTokens } from "./oauth-tokens";
+import { deleteOAuthTokens, readAllOAuthTokenHealth } from "./oauth-tokens";
 
 /** Deployment credential surface read by the management test path (CON-01).
  * Required-secret values are presence-checked only — never persisted,
@@ -640,4 +641,117 @@ export async function testConnection(
  * construction, but caller echoes and remediation copy pass through here. */
 export function scrubConnectionPayload<T>(value: T, env: SecretEnv): T {
   return scrubValueWithDeploymentSecrets(value, env);
+}
+
+/** Integration-list credential health (OAUTH-01 aggregate, issue #149): the
+ * upstream PR #762 labels over Wrangnarok's effective OAuth Connection set.
+ * Upstream counts its default connection plus distinct per-mapping override
+ * tokens; Wrangnarok has no global/default token (ADR 003: exact-org
+ * resolution, no global fallback), so the effective set is the persisted
+ * per-Organization token health rows only — an explicit, documented
+ * narrowing, not a second fallback path. */
+export type IntegrationCredentialStatus = "Connected" | "Degraded" | "Failed" | "None";
+
+export interface IntegrationCredentialHealth {
+  readonly integrationId: string;
+  readonly integrationName: string;
+  /** Mappings carrying a Connection row. A separate concept from health
+   * cardinality: mappings without a persisted token count here and nowhere
+   * in the effective-connection counters below. */
+  readonly mappingCount: number;
+  /** Effective OAuth connections currently healthy. */
+  readonly connectedCount: number;
+  /** Effective OAuth connections needing a fresh authorization: failed plus
+   * revoked (revoked is terminal until re-consent, never silently usable). */
+  readonly needsReconnectionCount: number;
+  /** Effective OAuth connections by persisted status (sparse: only present
+   * statuses appear, matching the upstream group-by shape). */
+  readonly connectionStatusCounts: Readonly<Partial<Record<TokenHealthStatus, number>>>;
+  readonly status: IntegrationCredentialStatus;
+}
+
+export interface OAuthHealthSummary {
+  readonly connectedCount: number;
+  readonly needsReconnectionCount: number;
+  readonly connectionStatusCounts: Readonly<Partial<Record<TokenHealthStatus, number>>>;
+  readonly status: IntegrationCredentialStatus;
+}
+
+/** Roll one Integration's effective OAuth Connection health into the
+ * PR #762 summary: Connected when every effective connection is healthy,
+ * Degraded on any healthy-plus-needs-reconnection mix, Failed when none is
+ * usable, None when no effective connection exists. Pure: no I/O. */
+export function summarizeOAuthHealth(statuses: readonly TokenHealthStatus[]): OAuthHealthSummary {
+  let connected = 0;
+  let failed = 0;
+  let revoked = 0;
+  for (const status of statuses) {
+    if (status === "healthy") connected += 1;
+    else if (status === "failed") failed += 1;
+    else revoked += 1;
+  }
+  const needsReconnection = failed + revoked;
+  const counts: Partial<Record<TokenHealthStatus, number>> = {};
+  if (connected > 0) counts.healthy = connected;
+  if (failed > 0) counts.failed = failed;
+  if (revoked > 0) counts.revoked = revoked;
+  const status: IntegrationCredentialStatus =
+    connected > 0 && needsReconnection > 0
+      ? "Degraded"
+      : connected > 0
+        ? "Connected"
+        : needsReconnection > 0
+          ? "Failed"
+          : "None";
+  return Object.freeze({
+    connectedCount: connected,
+    needsReconnectionCount: needsReconnection,
+    connectionStatusCounts: Object.freeze(counts),
+    status,
+  });
+}
+
+/** List per-Integration credential health across every Organization's
+ * mappings (OAUTH-01 aggregate, issue #149). Instance-admin-only at the
+ * route: the counts span Organizations but carry no org attribution, so no
+ * caller learns which Organization holds which health. Reads committed
+ * persisted health only (non-secret columns, never decrypted); mappings
+ * without a token row shape mappingCount alone; rows for unknown
+ * Integrations and orphan token rows are skipped with the registry
+ * authoritative, mirroring the Connection list behavior. */
+export async function listIntegrationOAuthHealth(db: D1Database): Promise<readonly IntegrationCredentialHealth[]> {
+  const mappings = await db
+    .prepare("SELECT id,integration_id FROM connections")
+    .all<{ id: string; integration_id: string }>();
+  const known = new Map<string, string>();
+  const mappingCounts = new Map<string, number>();
+  for (const row of mappings.results) {
+    if (!integrationById(row.integration_id)) continue;
+    known.set(row.id, row.integration_id);
+    mappingCounts.set(row.integration_id, (mappingCounts.get(row.integration_id) ?? 0) + 1);
+  }
+  const byIntegration = new Map<string, TokenHealthStatus[]>();
+  for (const health of await readAllOAuthTokenHealth(db)) {
+    const integrationId = known.get(health.connectionId);
+    if (integrationId === undefined) continue;
+    const list = byIntegration.get(integrationId) ?? [];
+    list.push(health.status);
+    byIntegration.set(integrationId, list);
+  }
+  const entries: IntegrationCredentialHealth[] = [];
+  for (const def of INTEGRATION_DEFINITIONS) {
+    const summary = summarizeOAuthHealth(byIntegration.get(def.id) ?? []);
+    entries.push(
+      Object.freeze({
+        integrationId: def.id,
+        integrationName: def.name,
+        mappingCount: mappingCounts.get(def.id) ?? 0,
+        connectedCount: summary.connectedCount,
+        needsReconnectionCount: summary.needsReconnectionCount,
+        connectionStatusCounts: summary.connectionStatusCounts,
+        status: summary.status,
+      }),
+    );
+  }
+  return Object.freeze(entries);
 }
