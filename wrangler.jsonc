@@ -120,6 +120,16 @@
       "name": "wrangnarok-hello-parent-v1",
       "class_name": "HelloParentWorkflow",
     },
+    {
+      "binding": "CLOUDFLARE_VERIFY_WORKFLOW",
+      "name": "wrangnarok-cloudflare-verify-v1",
+      "class_name": "CloudflareVerifyWorkflow",
+    },
+    {
+      "binding": "CLOUDFLARE_INVENTORY_WORKFLOW",
+      "name": "wrangnarok-cloudflare-inventory-v1",
+      "class_name": "CloudflareInventoryWorkflow",
+    },
   ],
   // ADR 004 environments: dev is the first deployment target and smoke-test
   // environment with its own mutable resources. Production is intentionally
@@ -214,6 +224,16 @@
           "binding": "HELLO_PARENT_WORKFLOW",
           "name": "wrangnarok-hello-parent-v1-dev",
           "class_name": "HelloParentWorkflow",
+        },
+        {
+          "binding": "CLOUDFLARE_VERIFY_WORKFLOW",
+          "name": "wrangnarok-cloudflare-verify-v1-dev",
+          "class_name": "CloudflareVerifyWorkflow",
+        },
+        {
+          "binding": "CLOUDFLARE_INVENTORY_WORKFLOW",
+          "name": "wrangnarok-cloudflare-inventory-v1-dev",
+          "class_name": "CloudflareInventoryWorkflow",
         },
       ],
     },

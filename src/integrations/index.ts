@@ -10,6 +10,8 @@
 // inside server-side execution (see ADR 005, Proposed).
 import {
   ANTHROPIC_INTEGRATION_ID,
+  CLOUDFLARE_API_BASE,
+  CLOUDFLARE_INTEGRATION_ID,
   ECHO_INTEGRATION_ID,
   Fault,
   GOOGLE_INTEGRATION_ID,
@@ -170,6 +172,12 @@ export interface EndpointPolicy {
   readonly loopbackOnly: boolean;
 }
 
+/** Suffixes a Cloudflare Connection endpoint may live under: the public
+ * vendor host, plus RFC 2606 `.invalid` (never routable; the test seam —
+ * vendor HTTP is intercepted in tests, so these rows can never reach a real
+ * host). Same posture as the NinjaOne allowlist. */
+const CLOUDFLARE_ALLOWED_SUFFIXES: readonly string[] = Object.freeze(["api.cloudflare.com", ".invalid"]);
+
 function endpointPolicyFor(integrationName: string): EndpointPolicy {
   if (integrationName === "echo") {
     return { allowLoopback: true, requireHttps: false, allowedSuffixes: [], loopbackOnly: true };
@@ -186,6 +194,14 @@ function endpointPolicyFor(integrationName: string): EndpointPolicy {
     integrationName === "openai-compatible"
   ) {
     return { allowLoopback: false, requireHttps: true, allowedSuffixes: [], loopbackOnly: false };
+  }
+  if (integrationName === "cloudflare") {
+    return {
+      allowLoopback: false,
+      requireHttps: true,
+      allowedSuffixes: CLOUDFLARE_ALLOWED_SUFFIXES,
+      loopbackOnly: false,
+    };
   }
   return { allowLoopback: false, requireHttps: true, allowedSuffixes: NINJA_ALLOWED_SUFFIXES, loopbackOnly: false };
 }
@@ -550,6 +566,37 @@ export const openaiCompatibleIntegrationDef = aiProviderDef(
 );
 
 /** All Integration definitions, in canonical order. Add new Integrations here. */
+export const cloudflareIntegrationDef = defineIntegration({
+  id: CLOUDFLARE_INTEGRATION_ID,
+  name: "cloudflare",
+  description: "Read-only Cloudflare zone inventory over bearer API credentials.",
+  secretFields: ["apiToken"],
+  configSchema: [
+    {
+      name: "endpoint",
+      type: "string",
+      required: true,
+      default: CLOUDFLARE_API_BASE,
+      maxLength: CONNECTION_CONFIG_MAX_LENGTH,
+      description: "Cloudflare API base URL (https://api.cloudflare.com/client/v4).",
+    },
+    {
+      name: "accountLabel",
+      type: "string",
+      required: false,
+      maxLength: 128,
+      description: "Optional non-secret label naming which Cloudflare account this mapping inventories.",
+    },
+  ],
+  requiredSecrets: ["apiToken"],
+  secretEnvVars: { apiToken: "CLOUDFLARE_API_TOKEN" },
+  health: {
+    testHint: "Verify the credential, then submit a bounded read-only zone inventory.",
+    remediation: "Confirm the API base URL and the deployment credential, then re-test before submitting work.",
+  },
+});
+
+/** All Integration definitions, in canonical order. Add new Integrations here. */
 export const INTEGRATION_DEFINITIONS: readonly IntegrationDefinition[] = Object.freeze([
   echoIntegrationDef,
   ninjaIntegrationDef,
@@ -559,6 +606,7 @@ export const INTEGRATION_DEFINITIONS: readonly IntegrationDefinition[] = Object.
   googleIntegrationDef,
   openrouterIntegrationDef,
   openaiCompatibleIntegrationDef,
+  cloudflareIntegrationDef,
 ]);
 
 export function integrationById(id: string): IntegrationDefinition | undefined {

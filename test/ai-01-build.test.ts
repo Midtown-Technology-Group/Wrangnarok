@@ -65,7 +65,7 @@ async function createAiConnection(integrationId: string, endpoint: string): Prom
 
 describe("AI-01 provider registry (issue #164)", () => {
   it("registers five provider definitions with stable identities", () => {
-    expect(INTEGRATION_DEFINITIONS).toHaveLength(8);
+    expect(INTEGRATION_DEFINITIONS).toHaveLength(9);
     expect(integrationById(OPENAI_INTEGRATION_ID)).toBe(openaiIntegrationDef);
     expect(integrationById(ANTHROPIC_INTEGRATION_ID)).toBe(anthropicIntegrationDef);
     expect(integrationById(GOOGLE_INTEGRATION_ID)).toBe(googleIntegrationDef);
