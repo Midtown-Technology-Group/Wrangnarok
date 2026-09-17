@@ -110,7 +110,8 @@ export const BODY_LIMIT = 4096;
 export const RECOVERY_WINDOW_MS = 15 * 60 * 1000;
 // Canonical per ADR 001 (reconciled #15): deterministic 64-hex Execution ID
 // scoped to (org, user, key); required Idempotency-Key 16-128; Pending never
-// auto-swept; Scheduled distinct (deferred); operator step-retry ceiling 2.
+// auto-swept; operator step-retry ceiling 2. Schedule promotion submits
+// directly to Pending (TRG-01, issue #436): no Scheduled execution state.
 export const STEP_RETRY_CEILING = 2;
 // Explicit vendor deadline (issue #16): the echo vendor step enforces its own
 // deadline and surfaces ECHO_VENDOR_TIMEOUT. TimedOut is only ever written by
@@ -255,8 +256,7 @@ export function checkpointRetryLimit(policy: SagaRuntimePolicy): number {
 }
 export const EXECUTION_ID = /^[a-f0-9]{64}$/;
 export const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-export type ExecutionStatus =
-  "Pending" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelling" | "Cancelled" | "Scheduled";
+export type ExecutionStatus = "Pending" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelling" | "Cancelled";
 // Retry policy table (upstream finding 14, issue #16): vendor/Integration
 // steps never auto-retry (0) unless destination-side idempotency is proven and
 // an explicit policy exists; only idempotent D1 checkpoint steps may retry, up
@@ -284,11 +284,9 @@ export function stepRetryLimit(stepName: string): number {
 // cancellation is never flipped to Failed afterward. Terminal states have
 // no outgoing transitions. Unit-tested as pure TypeScript.
 const EXECUTION_TRANSITIONS: Record<ExecutionStatus, readonly ExecutionStatus[]> = {
-  // TRG-01 (issue #137): Scheduled is the durable pre-publish row the tick
-  // promotes. It advances only to Pending (tick claim) or Cancelling (owner
-  // schedule-cancel); the tick claim then flows through submit() into the
-  // normal Pending lifecycle. No other entry into Scheduled exists.
-  Scheduled: ["Pending", "Cancelling"],
+  // TRG-01 (issue #436): no Scheduled execution state exists. Schedule
+  // promotion submits directly to Pending through submit(); schedule
+  // disable/delete plus Pending/Running cancellation cover the lifecycle.
   Pending: ["Running", "Failed", "Cancelling"],
   Running: ["Succeeded", "Failed", "TimedOut", "Cancelling"],
   Cancelling: ["Cancelled"],
@@ -791,7 +789,6 @@ const HISTORY_STATUSES: readonly string[] = [
   "TimedOut",
   "Cancelling",
   "Cancelled",
-  "Scheduled",
 ];
 export interface HistoryCursor {
   readonly createdAt: string;
