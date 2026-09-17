@@ -5,21 +5,17 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
-import { Fault, NINJA_INTEGRATION_ID, NINJA_TIMEOUT_MS, ninjaSaga, parseNinjaOrgsInput } from "../domain";
-import { loadExecutionPolicy } from "../executions";
-import { vendorDeadlineMs } from "../domain";
+import { NINJA_INTEGRATION_ID, NINJA_TIMEOUT_MS, ninjaSaga, parseNinjaOrgsInput } from "../domain";
 import type { ExecutionParams, NinjaOrgsResult, SafeError } from "../domain";
-import { defineSaga, withOperation } from "../saga";
+import { defineSaga } from "../saga";
+import { integrationOperation } from "../saga-helpers";
 import { scrubExecutionError } from "../secrets";
 import {
   assertRunExecutionId,
-  beginOperation,
   failExecution,
-  finishOperation,
   persistRunFailure,
   persistRunSuccess,
   prepareExecution,
-  resolveConnection,
 } from "../executions";
 import { executeSaga } from "./shared";
 
@@ -55,51 +51,23 @@ export const ninjaOrgsSagaDef = defineSaga<NinjaOrgsResult>({
       const prepared = await step.do("prepare-input-v1", () =>
         prepareExecution(ctx.db, id, ninjaSaga.id, ninjaSaga.revision, parseNinjaOrgsInput),
       );
-      const outcome = await step.do("ninja-list-orgs-v1", async () => {
-        await beginOperation(ctx.db, id, "ninja-list-orgs-v1", 1);
-        // RUN-01 (ADR 018, Slice A issue #135): vendor deadline from the
-        // Execution snapshot. A snapshot read failure throws before any
-        // vendor work.
-        const deadline = vendorDeadlineMs(await loadExecutionPolicy(ctx.db, id), NINJA_TIMEOUT_MS);
-        // Phase 1b (ADR 010): exact-org Connection resolution through the
-        // step's own OrgCtx. NinjaOne is declared required, so a miss fails
-        // loud with 424 as a structured step result (no retry via
-        // NonRetryableError).
-        const stepOrg = withOperation(prepared.orgCtx, "ninja-list-orgs-v1");
-        const resolved = await resolveConnection(
-          ctx.db,
-          stepOrg,
-          NINJA_INTEGRATION_ID,
-          ninjaOrgsSagaDef.requiredIntegrations,
-        );
-        if (!resolved.found && !resolved.declared) {
-          // Unreachable while NinjaOne stays declared required: optional
-          // access would resolve to None here instead of failing.
-          throw new NonRetryableError("Unexpected optional Integration access.");
-        }
-        if (!resolved.found) return { ok: false as const, error: resolved.error };
-        const connection = resolved.connection;
-        // Local-only credential posture (documented Rung 1 deviation): the
-        // client secret lives in env, never in D1. ADR 005 envelope before
-        // any second Organization. The secret handle passes straight through
-        // the Action boundary — presence is enforced inside listOrganizations,
-        // so this step never branches on credentials.
-        let result: NinjaOrgsResult;
-        try {
-          result = await ctx.integrations.ninjaone.listOrganizations(connection, ctx.secrets, id, deadline);
-        } catch (error) {
-          // Raw transport errors must not leak vendor-shaped text into step
-          // results: Faults already carry fixed safe text (scrubbed at the
-          // boundary); anything else maps to the generic integration failure.
-          const safe =
-            error instanceof Fault
-              ? scrubExecutionError({ code: error.code, message: error.message }, id)
-              : { code: "NINJA_INTEGRATION_FAILED", message: "The NinjaOne Integration could not complete." };
-          return { ok: false as const, error: safe };
-        }
-        await finishOperation(ctx.db, id, "ninja-list-orgs-v1", result);
-        return { ok: true as const, result };
-      });
+      // ADR-033-4: one Action convention — the helper supplies
+      // (connection, secrets, deadline, operationId) and each leg takes what
+      // its Action needs. The secret handle passes straight through the
+      // Action boundary; presence is enforced inside listOrganizations, so
+      // this step never branches on credentials.
+      const outcome = await step.do("ninja-list-orgs-v1", () =>
+        integrationOperation(ctx, ninjaOrgsSagaDef, prepared, {
+          op: "ninja-list-orgs-v1",
+          position: 1,
+          integrationId: NINJA_INTEGRATION_ID,
+          vendorDefaultMs: NINJA_TIMEOUT_MS,
+          failureCode: "NINJA_INTEGRATION_FAILED",
+          failureMessage: "The NinjaOne Integration could not complete.",
+          call: (connection, secrets, deadline) =>
+            ctx.integrations.ninjaone.listOrganizations(connection, secrets, id, deadline),
+        }),
+      );
       if (!outcome.ok) {
         expectedFailure = outcome.error;
         timedOut = outcome.error.code === "NINJA_VENDOR_TIMEOUT";

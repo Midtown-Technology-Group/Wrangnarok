@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0
-// Issue #415 Slice A (ADR-033-4): Action-vocabulary guardrails + provider-leg
-// convention lock. Tests only — no Saga leg migrates here (rides #416).
-// Runs in real workerd via @cloudflare/vitest-plugin like the contract gates;
-// assertions read live module exports and Function source, never the
-// filesystem.
+// Issue #415 (ADR-033-4): Action-vocabulary guardrails + provider-leg
+// convention lock. Slice A landed the guardrails; Slice B migrates every
+// Integration leg to integrationOperation, so run sources carry no required
+// list and no required/optional branch. Runs in real workerd via
+// @cloudflare/vitest-plugin like the contract gates; assertions read live
+// module exports and Function source, never the filesystem.
 import { describe, expect, it } from "vitest";
 import * as sagaHelpers from "../src/saga-helpers";
 import { SAGA_DEFINITIONS } from "../src/sagas";
@@ -261,6 +262,14 @@ describe("Saga helper conventions (issue #415 Slice A)", () => {
       return timeoutMs ?? 0;
     }
     expect(findPolicyKnobs(helperParameterNames(scratchTimeout))).toEqual(["timeoutMs"]);
+    async function scratchSchedule(_ctx: unknown, scheduleCron?: string): Promise<string> {
+      return scheduleCron ?? "";
+    }
+    expect(findPolicyKnobs(helperParameterNames(scratchSchedule))).toEqual(["scheduleCron"]);
+    async function scratchConcurrency(_ctx: unknown, maxConcurrency?: number): Promise<number> {
+      return maxConcurrency ?? 0;
+    }
+    expect(findPolicyKnobs(helperParameterNames(scratchConcurrency))).toEqual(["maxConcurrency"]);
     const scratchDestructure = "const { op, retryLimit } = options;";
     expect(findPolicyKnobs(optionsSurfaceNames(scratchDestructure))).toEqual(["retryLimit"]);
     expect(findPolicyKnobs(optionsSurfaceNames("await sleep(options.backoffMs);"))).toEqual(["backoffMs"]);
@@ -298,10 +307,12 @@ describe("Saga helper conventions (issue #415 Slice A)", () => {
 
   it("pins canonical-def-only required threading at every resolveConnection-family call site", () => {
     // resolveConnection(db, orgCtx, integrationId, requiredList) takes the
-    // list fourth; the cloudflare legs thread it through the private
-    // resolveCloudflareVendor(db, orgCtx, required, account) third. Every
-    // site must pass a canonical-def member (X.requiredIntegrations) — never
-    // an inline list. Scans every registered run plus the helper interior.
+    // list fourth. Every site must pass a canonical-def member
+    // (X.requiredIntegrations) — never an inline list. Scans every
+    // registered run plus the helper interior. The retired cloudflare
+    // resolveCloudflareVendor(db, orgCtx, required, account) shape stays in
+    // the callee list so a reintroduction fails loudly instead of slipping
+    // past the gate.
     const SITES: Array<{ callee: string; requiredIndex: number }> = [
       { callee: "resolveConnection", requiredIndex: 3 },
       { callee: "resolveCloudflareVendor", requiredIndex: 2 },
@@ -324,14 +335,14 @@ describe("Saga helper conventions (issue #415 Slice A)", () => {
         }
       }
     }
-    // Anchor: echo 1, ninjaone-orgs 1, digest 2, cloudflare legs 2, helper
-    // interior 1. #416 migration updates this count as legs move (run-source
-    // sites drop to 0; the helper interior stays 1).
-    expect(siteCount).toBe(7);
-    // Negative controls, including the private-helper passthrough shape at
-    // src/sagas/cloudflare.ts resolveCloudflareVendor (bare `required`
-    // identifier): both must fail the member-access rule, which is why that
-    // helper migrates in #416 instead of surviving it.
+    // Anchor: every Integration leg migrated to integrationOperation in
+    // Slice B (#415), so no run source calls resolveConnection directly —
+    // the helper interior is the one remaining site.
+    expect(siteCount).toBe(1);
+    // Negative controls, including the retired private-helper passthrough
+    // shape from src/sagas/cloudflare.ts resolveCloudflareVendor (bare
+    // `required` identifier): both must fail the member-access rule, which
+    // is why that helper retired in #415 instead of surviving the migration.
     expect(callArgumentLists("await resolveConnection(db, orgCtx, id, []);", "resolveConnection")[0]?.[3]).not.toMatch(
       /\.requiredIntegrations$/,
     );
@@ -349,9 +360,14 @@ describe("Saga helper conventions (issue #415 Slice A)", () => {
   });
 
   it("pins no per-call required list at integrationOperation call sites", () => {
+    // Anchor: echo 1, ninjaone-orgs 1, digest 2, cloudflare-verify 1,
+    // cloudflare-inventory 1 — every Integration leg goes through
+    // integrationOperation with one Action convention (Slice B, #415).
+    let legCount = 0;
     for (const def of SAGA_DEFINITIONS) {
       const source = Function.prototype.toString.call(def.run);
       for (const args of callArgumentLists(source, "integrationOperation")) {
+        legCount += 1;
         for (const arg of args) {
           expect(arg, `${def.name} integrationOperation() must pass no per-call required list`).not.toMatch(
             /(^|[,{]\s*)required\s*:/,
@@ -359,6 +375,7 @@ describe("Saga helper conventions (issue #415 Slice A)", () => {
         }
       }
     }
+    expect(legCount).toBe(6);
     // Positive control: the canonical-def exemplar passes the checker.
     const exemplar = "integrationOperation(ctx, echoSagaDef, prepared, { op, position: 1 })";
     for (const args of callArgumentLists(exemplar, "integrationOperation")) {

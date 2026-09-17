@@ -1,5 +1,19 @@
-# ADR-033-4 Slice A guardrails (issue #415): lock the provider-leg convention
-# with TESTS ONLY. No Saga leg migrates here (rides #416); src/sagas/*.ts,
-# src/index.ts, src/sdk.ts, and every other src/ file are read-only.
+# ADR-033-4 Action vocabulary (issue #415): unify every Integration leg on
+# integrationOperation with one Action convention (helper supplies
+# connection/secrets/deadline/operationId; each leg takes what its Action
+# needs); required-vs-optional derives from the Saga definition plus the
+# integration ID, so call sites pass no required list and branch on no
+# required/optional shape; helper signatures reject runtime-policy knobs;
+# vendor-neutral helper names (lexicon). Slice A landed the guardrails;
+# Slice B migrates the six legs (echo, ninjaone-orgs, digest x2,
+# cloudflare-verify, cloudflare-inventory) and retires the private
+# resolveCloudflareVendor passthrough. Terminals, prepare, and adapters ride
+# #416 (one Saga per PR); no new primitive, no policy knobs, no DSL.
 scopes/adr033-4-action-vocabulary.scope
+src/saga-helpers.ts
+src/sagas/echo.ts
+src/sagas/ninjaorgs.ts
+src/sagas/digest.ts
+src/sagas/cloudflare.ts
+test/saga-helpers.test.ts
 test/saga-helper-conventions.test.ts

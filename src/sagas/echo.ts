@@ -5,21 +5,17 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
-import { echoSaga, ECHO_INTEGRATION_ID, Fault, parseInput, VENDOR_TIMEOUT_MS } from "../domain";
-import { loadExecutionPolicy } from "../executions";
-import { vendorDeadlineMs } from "../domain";
+import { echoSaga, ECHO_INTEGRATION_ID, parseInput, VENDOR_TIMEOUT_MS } from "../domain";
 import type { EchoInput, ExecutionParams, SafeError } from "../domain";
-import { defineSaga, withOperation } from "../saga";
+import { defineSaga } from "../saga";
+import { integrationOperation } from "../saga-helpers";
 import { scrubExecutionError } from "../secrets";
 import {
   assertRunExecutionId,
-  beginOperation,
   failExecution,
-  finishOperation,
   persistRunFailure,
   persistRunSuccess,
   prepareExecution,
-  resolveConnection,
 } from "../executions";
 import { executeSaga } from "./shared";
 
@@ -49,52 +45,22 @@ export const echoSagaDef = defineSaga<EchoInput>({
       const prepared = await step.do("prepare-input-v1", () =>
         prepareExecution(ctx.db, id, echoSaga.id, echoSaga.revision, parseInput),
       );
-      const outcome = await step.do("echo-http-v1", async () => {
-        await beginOperation(ctx.db, id, "echo-http-v1", 1);
-        // RUN-01 (ADR 018, Slice A issue #135): the vendor deadline resolves
-        // through the Execution's snapshotted policy (timeout 0 keeps the
-        // Integration default, custom overrides it). 0 disables only the
-        // override. A snapshot read failure throws before any vendor work.
-        const deadline = vendorDeadlineMs(await loadExecutionPolicy(ctx.db, id), VENDOR_TIMEOUT_MS);
-        // Phase 1b (ADR 010): exact-org Connection resolution through the
-        // step's own OrgCtx. Echo is declared required, so a miss fails loud
-        // with 424 as a structured step result (no retry via NonRetryableError
-        // downstream). The outbound key derives from the step ctx, so the
-        // stable operation ID and the downstream Idempotency-Key agree.
-        const stepOrg = withOperation(prepared.orgCtx, "echo-http-v1");
-        const resolved = await resolveConnection(
-          ctx.db,
-          stepOrg,
-          ECHO_INTEGRATION_ID,
-          echoSagaDef.requiredIntegrations,
-        );
-        if (!resolved.found && !resolved.declared) {
-          // Unreachable while echo stays declared required: optional access
-          // would resolve to None here instead of failing.
-          throw new NonRetryableError("Unexpected optional Integration access.");
-        }
-        if (!resolved.found) return { ok: false as const, error: resolved.error };
-        const connection = resolved.connection;
-        let result: EchoInput;
-        try {
-          result = await ctx.integrations.echo.echo(
-            connection,
-            prepared.input,
-            `${id}-${stepOrg.operationId}`,
-            deadline,
-          );
-        } catch (error) {
-          // Raw echo transport errors map to the generic failure; Fault text is
-          // fixed-shape and scrubbed against this Execution's registry.
-          const safe =
-            error instanceof Fault
-              ? scrubExecutionError({ code: error.code, message: error.message }, id)
-              : { code: "ECHO_INTEGRATION_FAILED", message: "The echo Integration could not complete." };
-          return { ok: false as const, error: safe };
-        }
-        await finishOperation(ctx.db, id, "echo-http-v1", result);
-        return { ok: true as const, result };
-      });
+      // ADR-033-4: the Integration-step interior lives in
+      // integrationOperation, which derives required-vs-optional from the
+      // Saga definition plus the integration ID — the call site passes no
+      // required list and branches on no required/optional shape.
+      const outcome = await step.do("echo-http-v1", () =>
+        integrationOperation(ctx, echoSagaDef, prepared, {
+          op: "echo-http-v1",
+          position: 1,
+          integrationId: ECHO_INTEGRATION_ID,
+          vendorDefaultMs: VENDOR_TIMEOUT_MS,
+          failureCode: "ECHO_INTEGRATION_FAILED",
+          failureMessage: "The echo Integration could not complete.",
+          call: (connection, _secrets, deadline, operationId) =>
+            ctx.integrations.echo.echo(connection, prepared.input, operationId, deadline),
+        }),
+      );
       if (!outcome.ok) {
         expectedFailure = outcome.error;
         timedOut = outcome.error.code === "ECHO_VENDOR_TIMEOUT";
