@@ -18,7 +18,7 @@ import { clearExecutionSecrets, registerExecutionSecrets, scrubExecutionText, sc
 import { echo } from "../integrations/echo";
 import { listOrganizations } from "../integrations/ninjaone";
 import { inventoryZones, verifyConnection } from "../integrations/cloudflare";
-import { parseStoredPolicy, resolveConnection } from "../executions";
+import { loadExecutionPolicy, resolveConnection } from "../executions";
 import { resolveConnectionSecrets } from "../connections";
 import { ENVELOPE_KEY_VERSION } from "../envelope";
 
@@ -175,16 +175,13 @@ export async function executeSaga<TOutput>(
         return bindSagaConfig({ db: env.DB, orgId, executionId: id, secrets: deploymentSecrets }).require(key);
       },
     };
-    // RUN-01 (ADR 018): the Workflow resolves step retry limits through the
-    // Execution's snapshotted policy, never the live operator row. In-flight
-    // runs keep the behavior they started with when an operator edits policy
-    // mid-flight; missing snapshots (old rows) collapse to the code table.
-    const snapshot = await env.DB.prepare("SELECT policy_json FROM executions WHERE id=?")
-      .bind(id)
-      .first<{ policy_json: string | null }>()
-      .catch(() => null);
-    const policy: SagaRuntimePolicy | undefined =
-      snapshot?.policy_json == null ? undefined : parseStoredPolicy(snapshot.policy_json);
+    // RUN-01 (ADR 018, Slice A issue #135): the Workflow resolves step retry
+    // limits through the Execution's snapshotted policy, never the live
+    // operator row. In-flight runs keep the behavior they started with when
+    // an operator edits policy mid-flight; legacy snapshots (old rows)
+    // resolve to the code default through the shared loader. A snapshot read
+    // failure throws before any step runs, never falling back to defaults.
+    const policy: SagaRuntimePolicy = await loadExecutionPolicy(env.DB, id);
     const ctx: SagaEventContext = {
       executionId: id,
       integrations: {

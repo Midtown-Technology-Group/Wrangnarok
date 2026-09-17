@@ -17,7 +17,7 @@ import {
   shapeDigest,
   VENDOR_TIMEOUT_MS,
 } from "../domain";
-import { parseStoredPolicy } from "../executions";
+import { loadExecutionPolicy } from "../executions";
 import { vendorDeadlineMs } from "../domain";
 import type { DigestResult, EchoInput, ExecutionParams, NinjaOrgsResult, SafeError } from "../domain";
 import { defineSaga, withOperation } from "../saga";
@@ -65,16 +65,10 @@ export const digestSagaDef = defineSaga<DigestResult>({
       );
       const orgs = await step.do("ninja-list-orgs-v1", async () => {
         await beginOperation(ctx.db, id, "ninja-list-orgs-v1", 1);
-        // RUN-01 (ADR 018): vendor deadline from the Execution snapshot.
-        const appliedNinja = await ctx.db
-          .prepare("SELECT policy_json FROM executions WHERE id=?")
-          .bind(id)
-          .first<{ policy_json: string | null }>()
-          .catch(() => null);
-        const ninjaDeadline = vendorDeadlineMs(
-          appliedNinja?.policy_json == null ? parseStoredPolicy(null) : parseStoredPolicy(appliedNinja.policy_json),
-          NINJA_TIMEOUT_MS,
-        );
+        // RUN-01 (ADR 018, Slice A issue #135): vendor deadline from the
+        // Execution snapshot. A snapshot read failure throws before any
+        // vendor work.
+        const ninjaDeadline = vendorDeadlineMs(await loadExecutionPolicy(ctx.db, id), NINJA_TIMEOUT_MS);
         // Phase 1b (ADR 010): exact-org resolution through the step's own
         // OrgCtx. NinjaOne is declared required, so a miss fails loud with 424.
         const stepOrg = withOperation(prepared.orgCtx, "ninja-list-orgs-v1");
@@ -120,16 +114,10 @@ export const digestSagaDef = defineSaga<DigestResult>({
       }
       const echoed = await step.do("echo-digest-v1", async () => {
         await beginOperation(ctx.db, id, "echo-digest-v1", 2);
-        // RUN-01 (ADR 018): vendor deadline from the Execution snapshot.
-        const appliedEcho = await ctx.db
-          .prepare("SELECT policy_json FROM executions WHERE id=?")
-          .bind(id)
-          .first<{ policy_json: string | null }>()
-          .catch(() => null);
-        const echoDeadline = vendorDeadlineMs(
-          appliedEcho?.policy_json == null ? parseStoredPolicy(null) : parseStoredPolicy(appliedEcho.policy_json),
-          VENDOR_TIMEOUT_MS,
-        );
+        // RUN-01 (ADR 018, Slice A issue #135): vendor deadline from the
+        // Execution snapshot. A snapshot read failure throws before any
+        // vendor work.
+        const echoDeadline = vendorDeadlineMs(await loadExecutionPolicy(ctx.db, id), VENDOR_TIMEOUT_MS);
         // Phase 1b (ADR 010): exact-org resolution through the step's own
         // OrgCtx. Echo is declared required, so a miss fails loud with 424.
         // The outbound key derives from the step ctx, so the stable operation

@@ -12,7 +12,13 @@ import type { Connection } from "./integrations";
 import { scrubExecutionError } from "./secrets";
 import { withOperation } from "./saga";
 import type { SagaDefinition, SagaEventContext } from "./saga";
-import { beginOperation, finishOperation, prepareExecution, parseStoredPolicy, resolveConnection } from "./executions";
+import {
+  beginOperation,
+  finishOperation,
+  loadExecutionPolicy,
+  prepareExecution,
+  resolveConnection,
+} from "./executions";
 import type { PreparedExecution } from "./executions";
 
 /** The prepare-input-v1 interior (ADR-033-1), always invoked as
@@ -69,18 +75,11 @@ export async function integrationOperation<T>(
   const { op, position, integrationId, vendorDefaultMs, failureCode, failureMessage, call } = options;
   const id = ctx.executionId;
   await beginOperation(ctx.db, id, op, position);
-  // RUN-01 (ADR 018): the vendor deadline resolves through the Execution's
-  // snapshotted policy (timeout 0 keeps the Integration default). 0 disables
-  // only the override. Unreadable rows fail closed to the default policy.
-  const applied = await ctx.db
-    .prepare("SELECT policy_json FROM executions WHERE id=?")
-    .bind(id)
-    .first<{ policy_json: string | null }>()
-    .catch(() => null);
-  const deadline = vendorDeadlineMs(
-    applied?.policy_json == null ? parseStoredPolicy(null) : parseStoredPolicy(applied.policy_json),
-    vendorDefaultMs,
-  );
+  // RUN-01 (ADR 018, Slice A issue #135): the vendor deadline resolves
+  // through the Execution's snapshotted policy (timeout 0 keeps the
+  // Integration default). 0 disables only the override. A snapshot read
+  // failure throws before any vendor work, never falling back to defaults.
+  const deadline = vendorDeadlineMs(await loadExecutionPolicy(ctx.db, id), vendorDefaultMs);
   // Phase 1b (ADR 010): exact-org Connection resolution through the step's
   // own OrgCtx, so the stable operation ID and downstream idempotency agree.
   const stepOrg = withOperation(prepared.orgCtx, op);
