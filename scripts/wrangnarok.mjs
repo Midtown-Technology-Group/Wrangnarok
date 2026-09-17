@@ -45,7 +45,10 @@ export function parseContext(argv = process.argv) {
   return coreParseContext(argv);
 }
 
-function validateAndGenerate(ctx) {
+// Offline generator entry (INT-01): exported so CLI dispatch can call it
+// directly instead of routing through the shared network-result object
+// (CodeQL js/http-to-file-access).
+export function validateAndGenerate(ctx) {
   const id = ctx.genId;
   if (!id || !/^[a-z][a-z0-9-]{1,63}$/.test(id)) {
     fail("USAGE", "generate-integration needs --id ID (1-64 chars [a-z0-9-], starting with a letter).");
@@ -243,7 +246,9 @@ async function main() {
     process.exitCode = child.status ?? 1;
     return;
   }
-  const result = await runCommand({
+  // Direct dispatch (not via runCommand): the offline generator result must
+  // never share an object with network results (CodeQL js/http-to-file-access).
+  const result = await validateAndGenerate({
     command: "generate-integration",
     genId: arg("id"),
     genSpec: arg("spec"),

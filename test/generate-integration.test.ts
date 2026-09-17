@@ -3,7 +3,8 @@
 // no Workflows, no vendor HTTP. A Halo-shaped fixture proves the exit:
 // converts to a compiling-shaped module or fails loudly with the gap.
 import { describe, expect, it } from "vitest";
-import { runCommand } from "../scripts/wrangnarok.mjs";
+import { runCommand, validateAndGenerate } from "../scripts/wrangnarok.mjs";
+import { runGenerateIntegration } from "../scripts/wrangnarok-core.mjs";
 import { Fault } from "../src/domain";
 import { generateIntegrationModule } from "../src/generate-integration";
 
@@ -106,6 +107,30 @@ describe("INT-01 generator (issue #229)", () => {
     expect(cli.generated.content).toContain("await fetchImpl(url");
     expect(cli.generated.content).toContain("resolveRequestUrl({ ...pinned");
     expect(cli.generated.content).not.toContain("return { result: null, provenance: {} as CodeModeProvenance }");
+  });
+
+  // Alerts 57/58/60/61 (js/http-to-file-access) were a static-analysis
+  // artifact of routing the offline generator through the shared
+  // network-result object. CLI dispatch now calls these direct offline
+  // entries; this pins them to the dispatch payload.
+  it("exposes direct offline generator entries matching dispatch", async () => {
+    const spec = haloShaped();
+    const ctx = {
+      command: "generate-integration",
+      genId: "halo",
+      genName: "halo",
+      genSpec: spec,
+      genOrigins: ["https://halo-lab.example.com"],
+      genClassifications: { Ticket_Delete: "destructive" },
+    };
+    const viaDispatch = (await runCommand(ctx)) as GeneratedCliResult;
+    const direct = validateAndGenerate(ctx) as GeneratedCliResult;
+    expect(direct.generated).toEqual(viaDispatch.generated);
+    const coreFirst = (await runGenerateIntegration(ctx)) as GeneratedCliResult;
+    const coreSecond = (await runGenerateIntegration(ctx)) as GeneratedCliResult;
+    expect(coreSecond.generated).toEqual(coreFirst.generated);
+    expect(coreFirst.generated.path).toBe("src/integrations/halo.ts");
+    expect(coreFirst.generated.operations).toBe(3);
   });
 
   it("keeps the CLI auth flags on the canonical typed output", async () => {
