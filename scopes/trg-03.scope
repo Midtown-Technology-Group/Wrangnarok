@@ -1,5 +1,5 @@
 # TRG-03 S1 lane scope (issue #139): event-source registry + durable event log.
-migrations/0028_events.sql
+migrations/0030_events.sql
 docs/migration-ledger.md
 src/events.ts
 src/index.ts

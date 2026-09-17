@@ -75,7 +75,7 @@ other way around.
 ### TRG-03 S1 implementation (2026-09-17, issue #139)
 
 The first slice registers sources without building subscriptions: an
-`event_sources` table plus CRUD (`src/events.ts`, migration 0028), a typed
+`event_sources` table plus CRUD (`src/events.ts`, migration 0030), a typed
 append-only `events` log (dot-namespaced topics, deterministic
 (source, event) identity with same-content replay and 409 on mismatched
 content), operator-owned emit/list routes, and best-effort delivery appends

@@ -37,7 +37,7 @@ must update every importing test in the same commit.
 | 0026   | 0026_cancelling_repair.sql      | codex-migration-replay | cancelling FK repair: child-preserving executions rebuild (issue #381) |
 | 0027   | 0027_rename_replay_repair.sql   | codex-migration-replay | rename-replay convergence, IF NOT EXISTS (issues #367-371) |
 | 0029   | 0029_connection_secrets.sql       | SEC-02 #411 | per-Organization envelope ciphertext (ciphertext/nonce/wrapped_dek/key_version/algorithm), FK-cascaded off connections |
-| 0028   | 0028_events.sql                 | TRG-03  | event-source registry + org-scoped event log (issue #139, S1) |
+| 0030   | 0030_events.sql                 | TRG-03  | event-source registry + org-scoped event log (issue #139, S1) |
 
 ## Stuck-database recovery (codex findings #381, #367-371)
 

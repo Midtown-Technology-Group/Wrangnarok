@@ -44,8 +44,8 @@ import migration0024 from "../../migrations/0024_tool_enrollments.sql?raw";
 // parent_execution_id from 0015) and breaks harness suites, so the harness
 // chain skips them. Stuck-database recovery stays owned by
 // docs/migration-ledger.md.
-import migration0028 from "../../migrations/0028_events.sql?raw";
 import migration0029 from "../../migrations/0029_connection_secrets.sql?raw";
+import migration0030 from "../../migrations/0030_events.sql?raw";
 import seed from "../../scripts/seed-local.sql?raw";
 
 /** Every migration in filename order. 0017 is reserved (see
@@ -76,8 +76,8 @@ const FULL_MIGRATIONS = [
   migration0022,
   migration0023,
   migration0024,
-  migration0028,
   migration0029,
+  migration0030,
 ] as const;
 
 export type WorkflowHarnessDb = Pick<D1Database, "exec" | "prepare" | "batch">;
