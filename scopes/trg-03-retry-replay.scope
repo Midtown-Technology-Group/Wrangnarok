@@ -1,0 +1,18 @@
+# TRG-03 S3a lane scope (issue #139): operator retry/replay of failed deliveries.
+src/events.ts
+src/index.ts
+src/sdk.ts
+test/event-subscriptions.test.ts
+test/event-subscription-branches.test.ts
+docs/upstream-parity.md
+docs/architecture/012-phase2-triggers.md
+docs/architecture/000-steward-checklist.md
+scopes/trg-03-retry-replay.scope
+# No new migration: the failed set derives from the S2 receipt rows
+# (migration 0033), so docs/migration-ledger.md stays untouched.
+# No domain.ts change: no new mechanism and no new registry entry were
+# needed (the evt- reservation and Fault codes already exist; the one new
+# served code joins SDK_ERROR_CODES in src/sdk.ts).
+# Bundle measurement stays advisory per the owner-approved #468 policy:
+# exact bytes/headroom/warnings are measured and reported, never a gate.
+# No threshold change and no semantics shrink in this slice.

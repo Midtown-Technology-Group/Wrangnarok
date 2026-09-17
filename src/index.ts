@@ -153,12 +153,16 @@ import {
   emitEvent,
   listEventSources,
   listEvents,
+  listFailedDeliveries,
   listSubscriptionDeliveries,
   listSubscriptions,
   loadEventSource,
   loadSubscription,
+  parseDeliveryEventId,
+  parseDeliveryOutcome,
   parseEventSourceName,
   parseSubscriptionName,
+  retrySubscriptionDelivery,
   setEventSourceEnabled,
   setSubscriptionEnabled,
   subscriptionSummary,
@@ -868,6 +872,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // own allowlisted parser below.
     const scheduleDeliveriesRead =
       request.method === "GET" && /^\/api\/schedules\/[a-z0-9][a-z0-9-]{0,63}\/deliveries$/.test(url.pathname);
+    // TRG-03 S3a delivery history (issue #139): ?outcome= through the
+    // route's own allowlisted parser below.
+    const subscriptionDeliveriesRead =
+      request.method === "GET" &&
+      /^\/api\/event-sources\/[a-z0-9][a-z0-9-]{0,63}\/subscriptions\/[a-z0-9][a-z0-9-]{0,63}\/deliveries$/.test(
+        url.pathname,
+      );
     if (
       url.search &&
       !(historyList && request.method === "GET") &&
@@ -882,7 +893,8 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       !fileBytes &&
       !isPolicyConsumers &&
       !openapiSearch &&
-      !scheduleDeliveriesRead
+      !scheduleDeliveriesRead &&
+      !subscriptionDeliveriesRead
     )
       throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
     if (isOrgPath) {
@@ -1213,7 +1225,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         url.pathname,
       );
     if (subscriptionDeliveries?.[1] && subscriptionDeliveries?.[2] && request.method === "GET") {
-      // Delivery receipts for replay visibility: newest first, bounded 50.
+      // Delivery history for replay visibility: newest first, bounded 50.
+      // ?outcome= narrows to receipts (delivered) or derived failures
+      // (failed: logged events matching this filter with no receipt, the
+      // S3a retry set); an absent filter returns both newest-first.
       const source = await loadEventSource(env.DB, caller.orgId, parseEventSourceName(subscriptionDeliveries[1]));
       if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");
       const found = await loadSubscription(
@@ -1223,8 +1238,55 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         parseSubscriptionName(subscriptionDeliveries[2]),
       );
       if (!found) throw new Fault(404, "NOT_FOUND", "Not found.");
+      const outcome = parseDeliveryOutcome(url.searchParams);
+      if (outcome === "delivered") {
+        return json({ deliveries: await listSubscriptionDeliveries(env.DB, found.id, 50) });
+      }
+      if (outcome === "failed") {
+        return json({ deliveries: await listFailedDeliveries(env.DB, found, 50) });
+      }
+      const [delivered, failed] = await Promise.all([
+        listSubscriptionDeliveries(env.DB, found.id, 50),
+        listFailedDeliveries(env.DB, found, 50),
+      ]);
+      const merged = [...delivered, ...failed]
+        .sort(
+          (left, right) => right.createdAt.localeCompare(left.createdAt) || right.eventId.localeCompare(left.eventId),
+        )
+        .slice(0, 50);
+      return json({ deliveries: merged });
+    }
+    const subscriptionRetry =
+      /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/subscriptions\/([a-z0-9][a-z0-9-]{0,63})\/deliveries\/([a-zA-Z0-9._:-]{1,128})\/retry$/.exec(
+        url.pathname,
+      );
+    if (subscriptionRetry?.[1] && subscriptionRetry?.[2] && subscriptionRetry?.[3] && request.method === "POST") {
+      // TRG-03 S3a operator retry (issue #139): re-dispatch one failed
+      // delivery through the standard submit protocol with the identical
+      // evt- key. The first retry creates the Execution; duplicate retries
+      // converge on it. Authority revalidates at dispatch time, so a
+      // disabled or deleted subscription, or a revoked run-as grant,
+      // fails closed with no Execution. Operator-managed like every
+      // dispatching write; foreign rows answer 404.
+      await requireManageOrg(env.DB, ctx, caller.orgId);
       rejectQuery(url);
-      return json({ deliveries: await listSubscriptionDeliveries(env.DB, found.id, 50) });
+      const source = await loadEventSource(env.DB, caller.orgId, parseEventSourceName(subscriptionRetry[1]));
+      if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");
+      const found = await loadSubscription(
+        env.DB,
+        caller.orgId,
+        source.id,
+        parseSubscriptionName(subscriptionRetry[2]),
+      );
+      if (!found) throw new Fault(404, "NOT_FOUND", "Not found.");
+      const eventId = parseDeliveryEventId(subscriptionRetry[3]);
+      const retried = await retrySubscriptionDelivery(env.DB, env, submit, {
+        orgId: caller.orgId,
+        source,
+        subscription: found,
+        eventId,
+      });
+      return json({ delivery: retried }, retried.replayed ? 200 : 201);
     }
     // Unknown shapes under the event-source namespace answer 404, never
     // UNIMPLEMENTED theater — including paths deeper than the S1 guard.
@@ -1237,6 +1299,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         subscriptionDetail?.[1] !== undefined ||
         subscriptionEnable?.[1] !== undefined ||
         subscriptionDeliveries?.[1] !== undefined ||
+        subscriptionRetry?.[1] !== undefined ||
         eventSourceDetail?.[1] !== undefined ||
         eventSourceEnable?.[1] !== undefined;
       if (knownCollection || !knownItem) {
