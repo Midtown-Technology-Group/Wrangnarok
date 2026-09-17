@@ -102,6 +102,12 @@ export const NAV_ENTRIES: NavEntry[] = [
     issue: `${REPO}/issues/154`,
     phase: "Phase 4",
   },
+  {
+    label: "AI profiles",
+    to: "/ai-profiles",
+    enabled: true,
+    phase: "Phase 6 (#164)",
+  },
 ];
 
 /**

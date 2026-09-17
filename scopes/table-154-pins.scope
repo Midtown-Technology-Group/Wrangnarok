@@ -1,0 +1,8 @@
+# TABLE-02 retention-posture pins (issue #154, Brief 1): verify-first
+# retention/byte-cap pins plus TABLE-02 blocker pointer touch-up. No
+# migration, no new primitive, no src behavior change, no event wiring,
+# no realtime.
+test/tables.test.ts
+test/tables-unit.test.ts
+docs/upstream-parity.md
+scopes/table-154-pins.scope

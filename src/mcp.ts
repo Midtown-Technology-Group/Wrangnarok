@@ -127,6 +127,54 @@ export function mcpResult(
   return { jsonrpc: "2.0", id, result };
 }
 
+/** RFC 9728 protected-resource metadata paths for the inbound MCP
+ * gateway (TOOL-01 S1, ADR 022). Both serve the same public document: the
+ * bare well-known path plus the path-inserted form for the /api/mcp
+ * resource. Public by design — resource identity only, never
+ * Organization data — so standards-shaped MCP clients can discover how
+ * to authenticate. The gateway itself stays behind authenticate plus
+ * the membership gate. */
+export const MCP_PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";
+export const MCP_PROTECTED_RESOURCE_MCP_PATH = `${MCP_PROTECTED_RESOURCE_PATH}/api/mcp`;
+
+/** Protected-resource metadata document (RFC 9728 section 2). No scopes
+ * vocabulary: authorization is Organization membership plus execute
+ * grants, not OAuth scopes. `authorization_servers` names the Access
+ * team only when Access is configured; local dev/CI uses the LAB
+ * fixture bearer and advertises no authorization server. */
+export interface McpProtectedResourceMetadata {
+  readonly resource: string;
+  readonly resource_name: string;
+  readonly bearer_methods_supported: readonly ["header"];
+  readonly authorization_servers?: readonly [string];
+}
+
+/** Build the metadata document for one request origin. Pure: the caller
+ * passes the request origin and env, this assembles constants. */
+export function mcpProtectedResourceMetadata(
+  origin: string,
+  env: { ACCESS_TEAM_DOMAIN?: string },
+): McpProtectedResourceMetadata {
+  // Trailing-slash strip mirrors readAccessConfig (regex-free: CodeQL
+  // polynomial-regexp on env input). An unconfigured team advertises no
+  // authorization server rather than an empty string.
+  let team = (env.ACCESS_TEAM_DOMAIN ?? "").trim();
+  while (team.endsWith("/")) team = team.slice(0, -1);
+  return {
+    resource: `${origin}/api/mcp`,
+    resource_name: "Wrangnarok MCP gateway",
+    bearer_methods_supported: ["header"],
+    ...(team ? { authorization_servers: [team] as const } : {}),
+  };
+}
+
+/** 401 challenge for POST /api/mcp: the bearer scheme plus the
+ * resource_metadata pointer (RFC 9728 section 3) so a rejected MCP
+ * client learns the discovery document URL from the rejection itself. */
+export function mcpUnauthorizedChallenge(origin: string): string {
+  return `Bearer resource_metadata="${origin}${MCP_PROTECTED_RESOURCE_MCP_PATH}"`;
+}
+
 /** The gateway never invents authority: this marker interface documents that
  * every gateway execution receives an already-authorized Principal from the
  * membership gate in src/index.ts. MCP-client auth and vendor Connection

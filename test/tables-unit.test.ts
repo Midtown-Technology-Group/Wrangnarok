@@ -7,15 +7,19 @@
 // every behavior above the stub (policy, parsing, batching) is the real
 // src/tables.ts code.
 import { describe, expect, it } from "vitest";
+import migration9 from "../migrations/0009_tables.sql?raw";
 import {
   countRows,
   executeBatchDelete,
   executeBatchWrite,
   loadTable,
   parseBatchRequest,
+  parseDocument,
   parseTableQuery,
   requireVisibleTable,
+  TABLE_BATCH_BODY_LIMIT,
   TABLE_BATCH_MAX,
+  TABLE_DOC_MAX_BYTES,
   TABLE_DOCUMENT_IDS_MAX,
   TABLE_DOCUMENT_ID_QUERY_MAX,
   TABLE_QUERY_ROW_CAP,
@@ -228,5 +232,91 @@ describe("tables defensive branches", () => {
     await expect(requireVisibleTable(stubDb(), stranger, table)).rejects.toMatchObject({
       code: "TABLE_NOT_FOUND",
     });
+  });
+});
+
+describe("tables retention-posture DDL pins (issue #154)", () => {
+  /** Column names of one CREATE TABLE statement in definition order:
+   * top-level comma-separated definitions, table constraints skipped.
+   * (Mirrors the workerd applied-schema pin; both must agree.) */
+  function topLevelColumns(createTableSql: string): string[] {
+    const inner = createTableSql.slice(createTableSql.indexOf("(") + 1, createTableSql.lastIndexOf(")"));
+    const defs: string[] = [];
+    let depth = 0;
+    let current = "";
+    for (const char of inner) {
+      if (char === "(") depth += 1;
+      if (char === ")") depth -= 1;
+      if (char === "," && depth === 0) {
+        defs.push(current);
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    defs.push(current);
+    const columns: string[] = [];
+    for (const def of defs) {
+      // Leading identifier, not the whitespace token: constraints read
+      // UNIQUE(...) / PRIMARY KEY(...) with no space after the keyword.
+      const first = def.trim().match(/^([A-Za-z_]+)/)?.[1] ?? "";
+      if (["PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"].includes(first.toUpperCase())) continue;
+      columns.push(first);
+    }
+    return columns;
+  }
+
+  function statementFor(ddl: string, table: string): string {
+    const found = ddl
+      .split(";")
+      .map((part) => part.trim())
+      .find((part) => part.toUpperCase().startsWith(`CREATE TABLE ${table.toUpperCase()}(`));
+    if (!found) throw new Error(`DDL is missing CREATE TABLE ${table}.`);
+    return found;
+  }
+
+  it("tables DDL carries no TTL/partition columns and keeps the per-document CHECK", () => {
+    // No background-expiry surface anywhere in the tables DDL: retention is
+    // explicit deletion (deleteTable / row deletes) or nothing.
+    expect(migration9).not.toMatch(/\b(ttl|expir(e[sd]?|y|ation)?|partition|retention)\b/i);
+    expect(statementFor(migration9, "tables")).toContain("UNIQUE(org_id, name)");
+    expect(topLevelColumns(statementFor(migration9, "tables"))).toEqual([
+      "id",
+      "org_id",
+      "name",
+      "owner_user_id",
+      "created_at",
+    ]);
+    const rowsDdl = statementFor(migration9, "table_rows");
+    expect(rowsDdl).toContain("CHECK(length(data_json) <= 4096)");
+    expect(topLevelColumns(rowsDdl)).toEqual([
+      "table_id",
+      "org_id",
+      "doc_id",
+      "owner_user_id",
+      "data_json",
+      "created_at",
+      "updated_at",
+    ]);
+    expect(topLevelColumns(statementFor(migration9, "table_grants"))).toEqual([
+      "id",
+      "table_id",
+      "action",
+      "grantee_user_id",
+      "created_at",
+    ]);
+  });
+
+  it("byte bounds stay pinned: 4 KB documents, 256 KB batch bodies", () => {
+    expect(TABLE_DOC_MAX_BYTES).toBe(4096);
+    expect(TABLE_BATCH_BODY_LIMIT).toBe(256_000);
+    // Domain byte boundary: exactly 4096 UTF-8 bytes parses, 4097 fails.
+    // {"blob":"..."} costs 11 envelope bytes around the payload.
+    const boundary = { blob: "x".repeat(TABLE_DOC_MAX_BYTES - 11) };
+    expect(new TextEncoder().encode(JSON.stringify(boundary)).byteLength).toBe(TABLE_DOC_MAX_BYTES);
+    expect(parseDocument(boundary)).toEqual(boundary);
+    expect(faultCode(() => parseDocument({ blob: "x".repeat(TABLE_DOC_MAX_BYTES - 10) }))).toBe("DOCUMENT_TOO_LARGE");
+    // Bytes, not characters: 2044 multibyte chars exceed 4096 bytes and fail.
+    expect(faultCode(() => parseDocument({ blob: "é".repeat(2044) }))).toBe("DOCUMENT_TOO_LARGE");
   });
 });

@@ -2,6 +2,7 @@
 import { Navigate, Route, Routes, useParams } from "react-router-dom";
 import { Nav } from "./components/Nav";
 import { AdminOrgs } from "./pages/AdminOrgs";
+import { AiProfilesList } from "./pages/AiProfiles";
 import { ApplicationDetailView, ApplicationsList } from "./pages/Applications";
 import { AuditList } from "./pages/Audit";
 import { ArtifactDetailView, ArtifactsList } from "./pages/Artifacts";
@@ -44,6 +45,7 @@ export function App(): React.JSX.Element {
           <Route path="/forms" element={<FormsList />} />
           <Route path="/forms/:name" element={<FormRoute />} />
           <Route path="/connections" element={<ConnectionsList />} />
+          <Route path="/ai-profiles" element={<AiProfilesList />} />
           <Route path="*" element={<p>Not found. Try History.</p>} />
         </Routes>
       </main>

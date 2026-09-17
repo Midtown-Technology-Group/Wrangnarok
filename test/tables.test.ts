@@ -31,6 +31,7 @@ import {
   parseDocument,
   parseTableQuery,
   readRow,
+  TABLE_BATCH_BODY_LIMIT,
   TABLE_BATCH_MAX,
   TABLE_DOCUMENT_IDS_MAX,
   TABLE_DOCUMENT_ID_QUERY_MAX,
@@ -73,6 +74,35 @@ function faultCode(fn: () => unknown): string {
     throw error;
   }
   throw new Error("expected a Fault");
+}
+
+/** Column names of one CREATE TABLE statement in definition order:
+ * top-level comma-separated definitions, table constraints skipped. */
+function topLevelColumns(createTableSql: string): string[] {
+  const inner = createTableSql.slice(createTableSql.indexOf("(") + 1, createTableSql.lastIndexOf(")"));
+  const defs: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const char of inner) {
+    if (char === "(") depth += 1;
+    if (char === ")") depth -= 1;
+    if (char === "," && depth === 0) {
+      defs.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  defs.push(current);
+  const columns: string[] = [];
+  for (const def of defs) {
+    // Leading identifier, not the whitespace token: constraints read
+    // UNIQUE(...) / PRIMARY KEY(...) with no space after the keyword.
+    const first = def.trim().match(/^([A-Za-z_]+)/)?.[1] ?? "";
+    if (["PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"].includes(first.toUpperCase())) continue;
+    columns.push(first);
+  }
+  return columns;
 }
 
 async function putDoc(table: string, id: string, data: Record<string, unknown>) {
@@ -1033,6 +1063,145 @@ describe("TABLE-02 large-table bounded-memory regression", () => {
     expect(even.length).toBe(30);
     expect(new Set(even).size).toBe(30);
     expect(even.every((id, i) => i === 0 || even[i - 1]! < id)).toBe(true);
+  });
+});
+
+describe("TABLE-02 retention-posture pins (explicit deletion only, issue #154)", () => {
+  it("deleteTable drops rows from every batch path plus grants, leaving no orphans", async () => {
+    await createTable("ledger");
+    // Grants that must die with the table.
+    for (const action of ["read", "insert", "update", "delete"]) {
+      const granted = await call("/api/tables/ledger/grants", "POST", { action, granteeUserId: OTHER_USER });
+      expect(granted.status).toBe(200);
+    }
+    // Rows enter through the canonical batch endpoint ...
+    const inserted = await call("/api/tables/ledger/rows/batch", "POST", {
+      write_mode: "insert",
+      items: [
+        { id: "a", data: { n: 1 } },
+        { id: "b", data: { n: 2 } },
+        { id: "c", data: { n: 3 } },
+      ],
+    });
+    expect(inserted.status).toBe(201);
+    // ... are rewritten through the batch-update alias ...
+    const updated = await call("/api/tables/ledger/rows/batch-update", "PUT", {
+      items: [{ id: "b", data: { n: 20 } }],
+    });
+    expect(await updated.json()).toMatchObject({ count: 1 });
+    expect(await call("/api/tables/ledger/rows/b").then((r) => r.json())).toMatchObject({
+      row: { data: { n: 20 } },
+    });
+    // ... and leave through the batch-delete alias before the table itself goes.
+    const removed = await call("/api/tables/ledger/rows/batch-delete", "POST", { ids: ["c"] });
+    expect(await removed.json()).toMatchObject({ count: 1 });
+    expect((await call("/api/tables/ledger/rows/c")).status).toBe(404);
+    expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 2 });
+
+    const table = (await loadTable(bindings.DB, ORG, "ledger"))!;
+    const deleted = await call("/api/tables/ledger", "DELETE");
+    expect(deleted.status).toBe(200);
+    // The declaration is gone on every route surface ...
+    expect((await call("/api/tables/ledger")).status).toBe(404);
+    expect((await call("/api/tables/ledger/rows/a")).status).toBe(404);
+    expect((await call("/api/tables/ledger/count")).status).toBe(404);
+    // ... and no rows, grants, or declaration survive under the old id.
+    const rows = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM table_rows WHERE table_id=?")
+      .bind(table.id)
+      .first<{ n: number }>();
+    const grants = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM table_grants WHERE table_id=?")
+      .bind(table.id)
+      .first<{ n: number }>();
+    const tables = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM tables WHERE id=?")
+      .bind(table.id)
+      .first<{ n: number }>();
+    expect(rows?.n).toBe(0);
+    expect(grants?.n).toBe(0);
+    expect(tables?.n).toBe(0);
+    // A reused name starts empty: nothing resurrects from orphan rows.
+    await createTable("ledger");
+    expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 0 });
+  });
+
+  it("applied tables schema carries no TTL/partition columns, only explicit-deletion state", async () => {
+    const schema = await bindings.DB.prepare(
+      "SELECT name, sql FROM sqlite_schema WHERE type='table' AND name IN ('tables','table_rows','table_grants')",
+    ).all<{ name: string; sql: string }>();
+    expect(schema.results.map((row) => row.name).sort()).toEqual(["table_grants", "table_rows", "tables"]);
+    const ddl = schema.results.map((row) => row.sql).join("\n");
+    // No background-expiry surface anywhere in the applied DDL: retention is
+    // explicit deletion (deleteTable / row deletes) or nothing.
+    expect(ddl).not.toMatch(/\b(ttl|expir(e[sd]?|y|ation)?|partition|retention)\b/i);
+    // The per-document bound answers to D1 itself, not only to TypeScript.
+    expect(ddl).toContain("CHECK(length(data_json) <= 4096)");
+    // Exact applied columns: rows carry identity, attribution, payload, and
+    // timestamps — no expiry/partition columns to drift in silently.
+    const rowsSql = schema.results.find((row) => row.name === "table_rows")!.sql;
+    expect(topLevelColumns(rowsSql)).toEqual([
+      "table_id",
+      "org_id",
+      "doc_id",
+      "owner_user_id",
+      "data_json",
+      "created_at",
+      "updated_at",
+    ]);
+  });
+
+  it("D1 CHECK rejects oversized data_json below the transport bound", async () => {
+    await createTable("ledger");
+    const table = (await loadTable(bindings.DB, ORG, "ledger"))!;
+    const stamp = new Date().toISOString();
+    const insertDirect = (docId: string, dataJson: string) =>
+      bindings.DB.prepare(
+        "INSERT INTO table_rows(table_id, org_id, doc_id, owner_user_id, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+        .bind(table.id, ORG, docId, OWNER, dataJson, stamp, stamp)
+        .run();
+    // Straight past boundedJson and parseDocument: only the DDL CHECK stands
+    // between this insert and the page. 5000 chars trips length() <= 4096.
+    await expect(insertDirect("oversized", "x".repeat(5000))).rejects.toThrow(/CHECK constraint failed/i);
+    expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 0 });
+    // The bound is exactly 4096 characters: a boundary document lands and
+    // reads back like any other row.
+    const boundary = JSON.stringify({ blob: "x".repeat(4085) });
+    expect(boundary.length).toBe(4096);
+    await insertDirect("boundary", boundary);
+    expect(await call("/api/tables/ledger/rows/boundary").then((r) => r.json())).toMatchObject({
+      row: { id: "boundary", data: { blob: "x".repeat(4085) } },
+    });
+  });
+
+  it("batch body byte cap trips over TABLE_BATCH_BODY_LIMIT and passes under it", async () => {
+    await createTable("ledger");
+    // Under the cap (~200 KB): transport passes the body through, so the
+    // oversized documents fail at domain validation (400), never at the
+    // gate. Against the 4 KB default this same body would 413.
+    const underItems = Array.from({ length: TABLE_BATCH_MAX }, (_, i) => ({
+      id: `u${i}`,
+      data: { blob: "x".repeat(8000) },
+    }));
+    const underBody = JSON.stringify({ write_mode: "insert", items: underItems });
+    expect(underBody.length).toBeGreaterThan(100_000);
+    expect(underBody.length).toBeLessThan(TABLE_BATCH_BODY_LIMIT);
+    const under = await call("/api/tables/ledger/rows/batch", "POST", JSON.parse(underBody));
+    expect(under.status).toBe(400);
+    expect(await under.json()).toMatchObject({ error: { code: "DOCUMENT_TOO_LARGE" } });
+    expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 0 });
+    // Over the cap (~263 KB): the gate fails closed with 413 before any
+    // parse or write, naming the exact bound.
+    const overItems = Array.from({ length: TABLE_BATCH_MAX }, (_, i) => ({
+      id: `o${i}`,
+      data: { blob: "x".repeat(10_500) },
+    }));
+    const overBody = JSON.stringify({ write_mode: "insert", items: overItems });
+    expect(overBody.length).toBeGreaterThan(TABLE_BATCH_BODY_LIMIT);
+    const over = await call("/api/tables/ledger/rows/batch", "POST", JSON.parse(overBody));
+    expect(over.status).toBe(413);
+    expect(await over.json()).toMatchObject({
+      error: { code: "BODY_TOO_LARGE", message: `The body exceeds ${TABLE_BATCH_BODY_LIMIT} bytes.` },
+    });
+    expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 0 });
   });
 });
 

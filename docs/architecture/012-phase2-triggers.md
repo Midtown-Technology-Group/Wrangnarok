@@ -107,6 +107,22 @@ the restart-recovery story. Operator replay/retry APIs, built-in platform
 events, and retention policy stay deferred to S3. Still Worker + Workflows
 + D1 only: no Queue, no Durable Object, no second auth or execution path.
 
+### TRG-03 S3a implementation (2026-09-17, issue #139)
+
+The retry slice reuses the S2 rows with no new migration: a failed
+delivery is derived (a logged event matching the subscription filter with
+no receipt), listed per subscription newest-first through
+`?outcome=delivered|failed|all`, and retried through the same
+single-subscriber dispatch fan-out uses (shared helper, identical `evt-`
+keys, submit-first-then-receipt). The first retry creates the Execution;
+duplicate retries converge on it via same-key submit replay. Authority
+revalidates at dispatch time (disabled/deleted/revoked fail closed with
+no Execution), foreign rows answer 404, and the per-event 10-dispatch
+bound holds on replay (an event that already dispatched 10 times refuses
+further retries). Built-in platform events and retention policy stay
+deferred. Still Worker + Workflows + D1 only: no Queue, no Durable
+Object, no second auth or execution path.
+
 ### Same-window deduplication is not cross-window overlap policy
 
 **Audit correction (2026-09-11, [#132](https://github.com/MTG-Thomas/Wrangnarok/issues/132)):** the rules below suppress duplicate delivery of the same window only. Current upstream `api/src/jobs/schedulers/cron_scheduler.py:166-203` skips a new window while an earlier delivery for the same source remains active. A deterministic key for W does not prevent W+1 from overlapping W. The schedule implementation must test both cases and decide cross-window policy explicitly; this investigation still implements neither. Upstream enum alternatives do not establish working queue/parallel overlap modes.

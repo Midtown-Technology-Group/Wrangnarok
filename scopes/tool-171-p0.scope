@@ -1,0 +1,8 @@
+# TOOL-02 P0 decisions + upstream archaeology (issue #171): docs-only survey
+# of upstream mcp_servers.py / mcp_connections.py / mcp_oauth_callback.py /
+# agent_helpers.py + the three MCP e2e tests at 3543c7e, recorded in
+# docs/upstream-spec.md, plus the P0 decision record. No src/, migrations/,
+# or test/ changes; no build lanes dispatched.
+scopes/tool-171-p0.scope
+docs/upstream-spec.md
+docs/tool-02-p0-decisions.md

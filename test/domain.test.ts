@@ -77,7 +77,12 @@ describe("MVP slice contracts", () => {
     expect(stepRetryLimit("prepare-input-v1")).toBe(STEP_RETRY_CEILING);
     expect(stepRetryLimit("persist-success-v1")).toBe(STEP_RETRY_CEILING);
     expect(stepRetryLimit("persist-failure-v1")).toBe(STEP_RETRY_CEILING);
-    expect(stepRetryLimit("timeout-mark-v1")).toBe(STEP_RETRY_CEILING);
+    // ADR-033-3 (issue #414): timeout-mark-v1 retired from the checkpoint
+    // set — failSagaExecution classifies inside persist-failure-v1, so no
+    // distinct timeout checkpoint exists. The six legacy Saga steps still
+    // emit the name until #416 migrates them; unknown names fail closed to
+    // 0, pinned here so the post-retirement behavior cannot drift silently.
+    expect(stepRetryLimit("timeout-mark-v1")).toBe(0);
     // RUN-02 (ADR 018): child-dispatch Operations converge on one
     // deterministic child row, so they retry like checkpoints. Poll/await
     // reads stay at 0.
