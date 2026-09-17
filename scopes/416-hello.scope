@@ -1,0 +1,6 @@
+# ADR-033-5 hello migration (issue #416, 2/6): hello onto the ADR 033
+# interior helpers (schemaOf, prepareInput, completeExecution /
+# failSagaExecution, makeSagaWorkflow) with byte-identical behavior. No
+# other Saga, no contract change, no new primitive. Worker+D1 only.
+scopes/416-hello.scope
+src/sagas/hello.ts
