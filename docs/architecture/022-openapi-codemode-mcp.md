@@ -85,6 +85,54 @@ Every vendor call must preserve the same Organization, Connection, role/policy, 
 
 Vendor OAuth and MCP-client authentication remain separate concerns. MCP authenticates the caller to Wrangnarok; the Connection authenticates Wrangnarok to the vendor.
 
+### Inbound MCP authorization is the Access-compatible platform flow (decided, TOOL-01 S1)
+
+This records option (b) of issue #170's MCP-auth acceptance item
+("MCP OAuth discovery/authorization/dynamic registration or an
+explicitly justified Access-compatible authorization flow") and closes
+that item. Inbound MCP clients authenticate to Wrangnarok exactly like
+every other `/api/*` caller: `authenticate` (a Cloudflare Access JWT
+assertion for human operators and service tokens, or the local-only LAB
+fixture bearer in dev/CI) plus the AUTH-01 membership gate and AUTH-02
+execute grants. `POST /api/mcp` adds no credential type, no token mint,
+and no registration endpoint. Unauthorized callers fail with 401/403/404
+before any gateway code runs, and discovery (`tools/list`,
+`tools/search`) and invocation (`tools/call`, `tools/describe`) stay
+identically scoped to enrolled, enabled, revision-current tools.
+
+This restates and preserves the separation above: MCP-client auth
+(caller-to-Wrangnarok) is distinct from vendor Connection auth
+(Wrangnarok-to-vendor, OAUTH-01). An MCP credential never becomes a
+vendor credential and never selects a Connection outside the caller's
+Organization; Connection resolution, egress policy, redaction, and audit
+run unchanged inside the execution host.
+
+Discovery stays standards-shaped without a local authorization server.
+`POST /api/mcp` answers 401 with a `WWW-Authenticate` challenge naming
+the protected-resource metadata document, and both
+`/.well-known/oauth-protected-resource` and
+`/.well-known/oauth-protected-resource/api/mcp` serve that public
+RFC 9728 document: the MCP resource URL plus — when Access is configured
+— the Access team as the authorization server. The metadata is public by
+design (it carries no Organization data); the gateway itself never is.
+
+Explicitly rejected: a Wrangnarok-minted OAuth flow with dynamic client
+registration (RFC 7591) for MCP clients. Registration would mint
+per-client credentials — a second authoritative authentication path
+alongside the Access/membership spine, plus code/token storage needing a
+new primitive or migration — for no new authority: registered clients
+would still be authorized by the same membership and grants. Per-tenant
+API keys stay out of scope. If a future MCP profile mandates
+registration, that lane must prove the registry composes with (not
+forks) the membership gate and record the steward one-diagram verdict.
+
+Steward one-diagram note (TOOL-01 S1): the authentication/authorization
+path stays single — one `authenticate` plus one membership gate for
+browser, SDK, CLI, and MCP callers alike (evidence: `src/auth.ts`,
+`src/access.ts`, the membership gate in `src/index.ts`,
+`test/tool-01-mcp.test.ts` Access/cross-org/revocation cases). No second
+MCP auth path appears; no new primitive; no new migration.
+
 ### Read and write operations are policy-distinct
 
 OpenAPI describes request validity, not whether a request is wise.
@@ -270,7 +318,7 @@ Issue #170 and focused follow-ups own:
 - search/index strategy for specs and whether any preprocessing is persisted;
 - OpenAPI overlay format and ownership;
 - operation risk-classification schema and approval UX;
-- inbound MCP transport/auth details;
+- inbound MCP transport details (streaming/SSE posture still open; authorization decided above — Access-compatible flow, TOOL-01 S1);
 - how Code Mode operations appear in agent tool discovery metadata;
 - rate-limit and pagination helpers;
 - response shaping/truncation for model consumption;

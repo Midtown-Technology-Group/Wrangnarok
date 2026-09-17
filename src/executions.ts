@@ -509,14 +509,16 @@ export async function failExecution(
 ): Promise<void> {
   // Terminal checkpoints only: conditional on still being Pending/Running
   // so a late checkpoint can never overwrite Cancelled, Cancelling, or
-  // another terminal. Failed is written by persist-failure-v1, TimedOut
-  // exclusively by the explicit timeout-mark-v1 step. Operation rows stay
-  // within ('Running','Succeeded','Failed'); the timeout code lives in
-  // error_json. Owner-cancel wins (ADR 001): once the Cancelling marker is
-  // written, a racing terminal checkpoint is stale and no-ops; the cancel
-  // marker below no-ops on non-Cancelling rows, so an acknowledged
-  // cancellation is never rewritten. Write-time scrub: a secret substring
-  // embedded in an error message is replaced before the terminal row lands.
+  // another terminal. Both failure terminals flow through persist-failure-v1
+  // via failSagaExecution's classification (ADR-033-3, issue #414: the
+  // timeout-mark-v1 step retired; failSagaExecution is the sole writer of
+  // TimedOut). Operation rows stay within ('Running','Succeeded','Failed');
+  // the timeout code lives in error_json. Owner-cancel wins (ADR 001): once
+  // the Cancelling marker is written, a racing terminal checkpoint is stale
+  // and no-ops; the cancel marker below no-ops on non-Cancelling rows, so
+  // an acknowledged cancellation is never rewritten. Write-time scrub: a
+  // secret substring embedded in an error message is replaced before the
+  // terminal row lands.
   const now = new Date().toISOString();
   const json = JSON.stringify(scrubExecutionError(error, id));
   await db.batch([
@@ -574,6 +576,38 @@ export async function persistRunFailure(
     await step.do("persist-failure-v1", () => failExecution(ctx.db, id, safe));
   }
   throw new NonRetryableError(safe.code);
+}
+/** Timeout classification (ADR-033-3, issue #414): every Integration vendor
+ * deadline surfaces a `*_VENDOR_TIMEOUT` code (echo, ninjaone, cloudflare,
+ * halo today; generated Integrations follow the same `${prefix}_VENDOR_TIMEOUT`
+ * shape), and only those codes classify as TimedOut. Anything else —
+ * integration failures, missing Connections, `CHILD_AWAIT_TIMEOUT`,
+ * `PROVIDER_TIMEOUT` — is a Failed with its safe code preserved. Pure, so
+ * generated Sagas carry no per-Saga timeout-code checks. */
+export function isTimeoutError(error: SafeError): boolean {
+  return error.code.endsWith("_VENDOR_TIMEOUT");
+}
+/** Canonical success terminal (ADR-033-3, issue #414): the persist-success-v1
+ * interior for generated Sagas, always invoked as
+ * `step.do("persist-success-v1", () => completeExecution(ctx.db, id, output))`.
+ * Owns the success terminal contract — write-time scrub plus the
+ * Running-fenced checkpoint — through the one shared success writer, so a
+ * late success can never overwrite Cancelled, Cancelling, or another
+ * terminal. Takes no `step`: the Saga owns the durable boundary. */
+export async function completeExecution(db: D1Database, id: string, output: unknown): Promise<void> {
+  return persistRunSuccess(db, id, output);
+}
+/** Canonical failure terminal writer (ADR-033-3, issue #414): the
+ * persist-failure-v1 interior for generated Sagas, always invoked as
+ * `step.do("persist-failure-v1", () => failSagaExecution(ctx.db, id, error))`.
+ * Owns scrub plus terminal-state rules plus Failed-vs-TimedOut
+ * classification, and is the sole writer of TimedOut (the timeout-mark-v1
+ * step retired with it). The fenced conditional writes below preserve ADR
+ * 001's owner-cancel-wins invariant by mechanism: a late failure checkpoint
+ * racing a Cancelling marker no-ops. Takes no `step`: the Saga owns the
+ * durable boundary. */
+export async function failSagaExecution(db: D1Database, id: string, error: SafeError): Promise<void> {
+  return failExecution(db, id, error, isTimeoutError(error) ? "TimedOut" : "Failed");
 }
 /** RUN-04 confirm decision (issue #151, ADR 001): known native terminal
  * outcomes confirm the logical cancel — a delivered stop, an engine that

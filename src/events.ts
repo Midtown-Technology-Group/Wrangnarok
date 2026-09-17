@@ -17,9 +17,9 @@
 // event IDs: same (source, event) replays, mismatched duplicates answer 409,
 // and schedule promotion / endpoint delivery append best-effort delivery
 // rows (topics `schedule.delivered` / `webhook.delivered`) that never fail
-// the delivery itself. Operator replay and built-in platform events stay
-// deferred to the S3 slice. No Queue, no Durable Object, no second auth or
-// execution path.
+// the delivery itself. Operator retry/replay ships in the S3a slice below;
+// built-in platform events and retention policy stay deferred. No Queue,
+// no Durable Object, no second auth or execution path.
 //
 // TRG-03 S2 (issue #139) adds scoped subscriptions plus bounded fan-out in
 // this same file: one accepted event fans out through the existing submit
@@ -435,8 +435,8 @@ export async function recordSourceDelivery(
 // ON CONFLICT DO NOTHING, which is also the restart-recovery story —
 // there is no cursor to resume and no Queue to drain.
 //
-// Worker + Workflows + D1 only. Operator replay/retry APIs and built-in
-// platform events stay deferred to S3.
+// Worker + Workflows + D1 only. Operator retry/replay APIs ship in the S3a
+// slice below; built-in platform events and retention policy stay deferred.
 
 /** Deterministic per-event fan-out admission bound. Every dispatch is a
  * full submit-protocol call; the bound keeps one emit inside the D1
@@ -470,7 +470,10 @@ export interface SubscriptionSummary {
 export interface SubscriptionDeliverySummary {
   eventId: string;
   topic: string;
-  executionId: string;
+  /** Null while the delivery still failed: failed entries are derived
+   * (log minus receipts), never rows, so there is no Execution to name. */
+  executionId: string | null;
+  outcome: "delivered" | "failed";
   createdAt: string;
 }
 
@@ -696,6 +699,7 @@ export async function listSubscriptionDeliveries(
     eventId: entry.event_id,
     topic: entry.topic,
     executionId: entry.execution_id,
+    outcome: "delivered",
     createdAt: entry.created_at,
   }));
 }
@@ -736,6 +740,79 @@ function fanoutSkip(subscription: string, code: string): FanoutDelivery {
   return { subscription, status: "skipped", code };
 }
 
+export interface SubscriberDispatch {
+  readonly executionId: string;
+  readonly replayed: boolean;
+}
+
+/** Dispatch one event to one subscriber through the standard submit
+ * protocol. Shared by fan-out (S2) and operator retry (S3a) so the two
+ * admission paths cannot drift: the same disable/delete fence, the same
+ * run-as authority revalidation, the same catalog and parse gates, the
+ * same stable `evt-` delivery key, and the same submit-first-then-receipt
+ * discipline. Every fence fails closed by throwing its Fault — fan-out
+ * catches it into a per-subscriber skip, retry lets it answer the route —
+ * and anything else fails loud so a backend fault never reads as a skip.
+ * Callers own admission policy (fan-out's attempt bound, retry's receipt
+ * bound) and eligibility (fan-out's scan filter, retry's log lookup). */
+async function dispatchToSubscriber(
+  db: D1Database,
+  env: Bindings,
+  submitFn: typeof submit,
+  subscriptionId: string,
+  event: FanoutEvent,
+): Promise<SubscriberDispatch> {
+  // Fence 1: never trust the scan. Re-read by id so a disable/delete
+  // that landed after the scan wins the race here.
+  let fresh: SubscriptionRow | null;
+  try {
+    fresh = await db
+      .prepare("SELECT * FROM event_subscriptions WHERE id=?")
+      .bind(subscriptionId)
+      .first<SubscriptionRow>();
+  } catch (error) {
+    if (error instanceof Error && /no such table/i.test(error.message)) fresh = null;
+    else throw error;
+  }
+  if (!fresh) throw new Fault(404, "SUBSCRIPTION_GONE", "This subscription no longer exists.");
+  if (fresh.enabled !== 1) throw new Fault(409, "SUBSCRIPTION_DISABLED", "This subscription is disabled.");
+  // Fence 2: the persisted run-as IDs are an identity reference, not
+  // continuing authorization. Re-resolve organization, user, and
+  // membership lifecycle plus the saga execute grant at action time.
+  const { principal } = await resolveCurrentAuthority(
+    db,
+    env,
+    { orgId: fresh.org_id, userId: fresh.run_as_user_id },
+    {
+      orgId: fresh.org_id,
+      resourceKind: "saga",
+      resourceId: fresh.saga_id.toLowerCase(),
+      action: "execute",
+    },
+  );
+  // Fence 3: the catalog is the authority on dispatchable Sagas.
+  const saga = resolveSubmissionSaga(fresh.saga_id);
+  if (!saga) {
+    throw new Fault(409, "SUBSCRIPTION_MISCONFIGURED", "This subscription targets a Saga that is no longer deployed.");
+  }
+  // Fence 4: the event payload must be valid Saga input.
+  const input = saga.parse(event.payload);
+  const key = await subscriptionDeliveryKey(fresh.id, event.eventId);
+  const accepted = await submitFn(env, principal, key, saga, input);
+  try {
+    await db
+      .prepare(
+        "INSERT INTO event_deliveries(subscription_id,event_id,org_id,topic,execution_id,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(subscription_id,event_id) DO NOTHING",
+      )
+      .bind(fresh.id, event.eventId, event.orgId, event.topic, accepted.executionId, new Date().toISOString())
+      .run();
+  } catch {
+    // Delivery receipts are replay visibility only: a missing table on an
+    // old database must not fail the Execution itself.
+  }
+  return { executionId: accepted.executionId, replayed: accepted.replayed };
+}
+
 /** Fan out one accepted event through the standard submit protocol.
  * Deterministic: eligible subscribers resolve exact-org in name order and
  * at most EVENT_FANOUT_LIMIT dispatch; the remainder report as
@@ -760,7 +837,9 @@ function fanoutSkip(subscription: string, code: string): FanoutDelivery {
  * Only a successful submit records a delivery receipt (submit first, then
  * the row — the endpoint_events discipline), so a failed dispatch leaves
  * no receipt and a redelivered event converges on the exact created
- * Execution with no latest-for-subscription lookup. */
+ * Execution with no latest-for-subscription lookup. The per-subscriber
+ * dispatch below is shared with operator retry (dispatchToSubscriber):
+ * one fence sequence, one key derivation, one submit path. */
 export async function dispatchEventFanout(
   db: D1Database,
   env: Bindings,
@@ -798,94 +877,198 @@ export async function dispatchEventFanout(
       continue;
     }
     attempted += 1;
-    // Fence 1: never trust the scan. Re-read by id so a disable/delete
-    // that landed after the scan wins the race here.
-    let fresh: SubscriptionRow | null;
     try {
-      fresh = await db
-        .prepare("SELECT * FROM event_subscriptions WHERE id=?")
-        .bind(candidate.id)
-        .first<SubscriptionRow>();
+      const accepted = await dispatchToSubscriber(db, env, submitFn, candidate.id, event);
+      deliveries.push({
+        subscription: candidate.name,
+        status: "dispatched",
+        executionId: accepted.executionId,
+        replayed: accepted.replayed,
+      });
     } catch (error) {
-      if (error instanceof Error && /no such table/i.test(error.message)) fresh = null;
-      else throw error;
-    }
-    if (!fresh) {
-      deliveries.push(fanoutSkip(candidate.name, "SUBSCRIPTION_GONE"));
-      continue;
-    }
-    if (fresh.enabled !== 1) {
-      deliveries.push(fanoutSkip(candidate.name, "SUBSCRIPTION_DISABLED"));
-      continue;
-    }
-    // Fence 2: the persisted run-as IDs are an identity reference, not
-    // continuing authorization. Re-resolve organization, user, and
-    // membership lifecycle plus the saga execute grant at action time.
-    let principal: { orgId: string; userId: string };
-    try {
-      ({ principal } = await resolveCurrentAuthority(
-        db,
-        env,
-        { orgId: fresh.org_id, userId: fresh.run_as_user_id },
-        {
-          orgId: fresh.org_id,
-          resourceKind: "saga",
-          resourceId: fresh.saga_id.toLowerCase(),
-          action: "execute",
-        },
-      ));
-    } catch (error) {
+      // Every fence fails closed with its code while eligible siblings
+      // still dispatch; anything else fails loud so a backend fault never
+      // reads as a skip.
       if (error instanceof Fault) {
         deliveries.push(fanoutSkip(candidate.name, error.code));
         continue;
       }
       throw error;
     }
-    // Fence 3: the catalog is the authority on dispatchable Sagas.
-    const saga = resolveSubmissionSaga(fresh.saga_id);
-    if (!saga) {
-      deliveries.push(fanoutSkip(candidate.name, "SUBSCRIPTION_MISCONFIGURED"));
-      continue;
-    }
-    // Fence 4: the event payload must be valid Saga input.
-    let input: unknown;
-    try {
-      input = saga.parse(event.payload);
-    } catch (error) {
-      if (error instanceof Fault) {
-        deliveries.push(fanoutSkip(candidate.name, error.code));
-        continue;
-      }
-      throw error;
-    }
-    const key = await subscriptionDeliveryKey(fresh.id, event.eventId);
-    let accepted: { executionId: string; replayed: boolean };
-    try {
-      accepted = await submitFn(env, principal, key, saga, input);
-    } catch (error) {
-      if (error instanceof Fault) {
-        deliveries.push(fanoutSkip(candidate.name, error.code));
-        continue;
-      }
-      throw error;
-    }
-    try {
-      await db
-        .prepare(
-          "INSERT INTO event_deliveries(subscription_id,event_id,org_id,topic,execution_id,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(subscription_id,event_id) DO NOTHING",
-        )
-        .bind(fresh.id, event.eventId, event.orgId, event.topic, accepted.executionId, new Date().toISOString())
-        .run();
-    } catch {
-      // Delivery receipts are replay visibility only: a missing table on an
-      // old database must not fail the Execution itself.
-    }
-    deliveries.push({
-      subscription: candidate.name,
-      status: "dispatched",
-      executionId: accepted.executionId,
-      replayed: accepted.replayed,
-    });
   }
   return { deliveries, overflowSkipped };
+}
+
+// ---------------------------------------------------------------------------
+// TRG-03 S3a (issue #139): operator retry/replay of failed deliveries.
+//
+// A failed delivery is derived, never stored: S2 records a receipt row only
+// for a successful submit, so a logged event that matches a subscription's
+// filter but carries no receipt for it is exactly the retry set — no new
+// table, no new migration, no second dispatch path. The operator lists
+// failures per subscription (newest first, bounded, alongside the S2
+// receipts) and retries one event, which re-dispatches through the shared
+// dispatchToSubscriber helper with the identical stable `evt-` key: the
+// first retry creates the Execution, duplicate retries converge on it via
+// same-key submit replay, and the receipt converges via ON CONFLICT DO
+// NOTHING. Authority revalidates at dispatch time through the same
+// fences as fan-out, so a disabled or deleted subscription, or a revoked
+// run-as grant, fails closed with no Execution and no re-enable side
+// effect. The per-event admission bound survives replay: an event that
+// already dispatched EVENT_FANOUT_LIMIT times refuses further retries.
+//
+// Worker + Workflows + D1 only. Built-in platform emissions and the
+// retention/admission policy stay deferred to later slices.
+
+/** An event ID from the retry route. Unknown shapes answer 404 like the
+ * sibling path-segment parsers, never a leak. */
+export function parseDeliveryEventId(segment: string): string {
+  if (segment.length === 0 || segment.length > EVENT_ID_MAX || !SAFE_EVENT_CHAR.test(segment)) {
+    throw new Fault(404, "NOT_FOUND", "Not found.");
+  }
+  return segment;
+}
+
+export type DeliveryOutcomeFilter = "delivered" | "failed" | "all";
+
+/** Parse the deliveries `?outcome=` filter. The key allowlist mirrors the
+ * schedule-deliveries `?window=` posture: only `outcome` travels here, an
+ * absent filter returns both outcomes newest-first, and anything else
+ * fails closed. */
+export function parseDeliveryOutcome(params: URLSearchParams): DeliveryOutcomeFilter {
+  for (const key of params.keys()) {
+    if (key !== "outcome") {
+      throw new Fault(400, "UNSUPPORTED_QUERY", "Only outcome is supported here.");
+    }
+  }
+  const raw = params.get("outcome");
+  if (raw === null) return "all";
+  if (raw !== "delivered" && raw !== "failed" && raw !== "all") {
+    throw new Fault(400, "INVALID_OUTCOME", "Outcome must be delivered, failed, or all.");
+  }
+  return raw;
+}
+
+/** Failed deliveries for replay visibility: logged events matching this
+ * subscription's filter with no receipt row, newest first, bounded. The
+ * bound windows the unreceived log scan, so a filter matching only older
+ * events reports what the window holds — the same bounded newest-first
+ * posture as every other history read. Exact-org visibility is enforced
+ * by the caller via loadSubscription, like listSubscriptionDeliveries.
+ * Pre-migration absence reads as empty; a real backend fault rethrows. */
+export async function listFailedDeliveries(
+  db: D1Database,
+  subscription: SubscriptionRow,
+  limit: number,
+): Promise<SubscriptionDeliverySummary[]> {
+  const capped = Math.min(Math.max(limit, 1), SUBSCRIPTION_DELIVERY_LIMIT);
+  let rows: { event_id: string; topic: string; created_at: string }[];
+  try {
+    const result = await db
+      .prepare(
+        "SELECT event_id,topic,created_at FROM events WHERE source_id=? AND NOT EXISTS (SELECT 1 FROM event_deliveries WHERE subscription_id=? AND event_deliveries.event_id=events.event_id) ORDER BY created_at DESC,event_id DESC LIMIT ?",
+      )
+      .bind(subscription.source_id, subscription.id, capped)
+      .all<{ event_id: string; topic: string; created_at: string }>();
+    rows = result.results;
+  } catch (error) {
+    // Old DB without the tables: no log means no failed deliveries.
+    if (error instanceof Error && /no such table/i.test(error.message)) return [];
+    throw error;
+  }
+  return rows
+    .filter((entry) => matchesTopicFilter(entry.topic, subscription.topic_filter))
+    .map((entry) => ({
+      eventId: entry.event_id,
+      topic: entry.topic,
+      executionId: null,
+      outcome: "failed",
+      createdAt: entry.created_at,
+    }));
+}
+
+export interface RetryDeliveryRequest {
+  readonly orgId: string;
+  readonly source: EventSourceRow;
+  readonly subscription: SubscriptionRow;
+  readonly eventId: string;
+}
+
+export interface RetryDeliveryResult {
+  readonly subscription: string;
+  readonly eventId: string;
+  readonly executionId: string;
+  readonly replayed: boolean;
+}
+
+/** Retry one failed delivery through the shared single-subscriber dispatch
+ * (identical `evt-` key, same fences, same submit protocol). In order:
+ *
+ * 1. The event must be logged in this source and must match the
+ *    subscription's filter — anything else is not a failed delivery of
+ *    this subscription and answers 404, never a dispatch.
+ * 2. The per-event bound holds: receipts for this event from the source's
+ *    other subscriptions already at EVENT_FANOUT_LIMIT refuse the retry
+ *    (DELIVERY_BOUND_EXCEEDED), so one event never dispatches more than
+ *    the bound however it was admitted. The retry's own receipt never
+ *    counts, so duplicate retries still converge below.
+ * 3. The shared dispatch re-reads the subscription, revalidates the
+ *    run-as authority and grant, and submits with the identical key —
+ *    disabled/deleted/revoked fail closed, the first retry creates the
+ *    Execution, and duplicate retries converge on it with no receipt
+ *    pre-check (the submit protocol's same-key replay is the dedup).
+ */
+export async function retrySubscriptionDelivery(
+  db: D1Database,
+  env: Bindings,
+  submitFn: typeof submit,
+  request: RetryDeliveryRequest,
+): Promise<RetryDeliveryResult> {
+  let logged: { topic: string; payload_json: string } | null;
+  try {
+    logged = await db
+      .prepare("SELECT topic,payload_json FROM events WHERE source_id=? AND event_id=?")
+      .bind(request.source.id, request.eventId)
+      .first<{ topic: string; payload_json: string }>();
+  } catch (error) {
+    // Old DB without the log: nothing logged means nothing to retry.
+    if (error instanceof Error && /no such table/i.test(error.message)) logged = null;
+    else throw error;
+  }
+  if (!logged || !matchesTopicFilter(logged.topic, request.subscription.topic_filter)) {
+    throw new Fault(404, "NOT_FOUND", "This subscription has no failed delivery for this event.");
+  }
+  let dispatched: { n: number } | null;
+  try {
+    dispatched = await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM event_deliveries WHERE event_id=? AND subscription_id IN (SELECT id FROM event_subscriptions WHERE source_id=?) AND subscription_id != ?",
+      )
+      .bind(request.eventId, request.source.id, request.subscription.id)
+      .first<{ n: number }>();
+  } catch (error) {
+    // Old DB without the receipts: no receipts means nothing dispatched.
+    if (error instanceof Error && /no such table/i.test(error.message)) dispatched = { n: 0 };
+    else throw error;
+  }
+  if ((dispatched?.n ?? 0) >= EVENT_FANOUT_LIMIT) {
+    throw new Fault(
+      409,
+      "DELIVERY_BOUND_EXCEEDED",
+      `This event already reached the per-event dispatch bound (${EVENT_FANOUT_LIMIT}).`,
+    );
+  }
+  const accepted = await dispatchToSubscriber(db, env, submitFn, request.subscription.id, {
+    orgId: request.orgId,
+    sourceId: request.source.id,
+    eventId: request.eventId,
+    topic: logged.topic,
+    payload: JSON.parse(logged.payload_json) as unknown,
+  });
+  return {
+    subscription: request.subscription.name,
+    eventId: request.eventId,
+    executionId: accepted.executionId,
+    replayed: accepted.replayed,
+  };
 }

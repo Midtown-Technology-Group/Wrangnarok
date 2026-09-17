@@ -26,7 +26,7 @@ type SagaRuntimePolicy = {
 };
 ```
 
-- `timeout.vendorTimeoutMs`: per-Operation vendor deadline override in ms. `0` keeps the Integration default (echo 1000ms, ninjaone 5000ms); custom values cap at 30000ms. The explicit `timeout-mark-v1` checkpoint stays the sole writer of `TimedOut`; nothing is ever inferred from Workflow introspection.
+- `timeout.vendorTimeoutMs`: per-Operation vendor deadline override in ms. `0` keeps the Integration default (echo 1000ms, ninjaone 5000ms); custom values cap at 30000ms. `failSagaExecution` is the sole writer of `TimedOut` (ADR-033-3, issue #414, retired the `timeout-mark-v1` step); nothing is ever inferred from Workflow introspection.
 - `timeout.stepTimeout`: fixed platform text (`"10 seconds"`). Recorded for inspectability, not operator-tunable: changing native step bounds is a platform decision with its own ADR, not a per-Saga knob.
 - `retry.checkpointRetries` / `retry.vendorRetries`: engine-loss-only ceilings through the existing `STEP_RETRY_CEILING` (2). Vendor defaults stay 0; checkpoints default to 2. Business and expected failures still throw `NonRetryableError`, so the engine never retries a non-idempotent mutation.
 - `admission.enabled`: pause is admission-only. `false` fences new dispatches with `409 SAGA_PAUSED`; in-flight Executions keep their snapshot and run to their own terminal. `admission.maxConcurrent` (`0` is unbounded, cap 100) fences overload with `429 ADMISSION_LIMITED`.
@@ -40,7 +40,7 @@ Authorization follows the authoritative Organization membership boundary: any au
 
 | Case | Expectation |
 | --- | --- |
-| Timeout 0 (default) | Integration default applies (echo 1000ms, ninjaone 5000ms). Slow vendor surfaces `*_VENDOR_TIMEOUT` through `timeout-mark-v1` as `TimedOut`. |
+| Timeout 0 (default) | Integration default applies (echo 1000ms, ninjaone 5000ms). Slow vendor surfaces `*_VENDOR_TIMEOUT` through `failSagaExecution` as `TimedOut`. |
 | Timeout custom | A short custom override (e.g. 50ms) turns a normally-fast vendor into `TimedOut`; a long override lets a slow vendor succeed. The snapshot records the override; later edits do not rewrite history. |
 | Engine-loss-only retry ceilings | Vendor steps default 0 (one outbound call on failure, proven by existing resilience tests). Operator `vendorRetries` raises only the native retry budget for lost checkpoints; checkpoint retries cap at 2. |
 | Business-error non-retry | `NonRetryableError` on every expected failure (`INVALID_INPUT`, `424 INTEGRATION_REQUIREMENT_UNSATISFIED`, vendor `*_FAILED`); no automatic retry of mutations. |

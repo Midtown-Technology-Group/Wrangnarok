@@ -9,8 +9,8 @@ export interface EchoConnection {
 /** Fixture-only Action: POST echoes data without mutating any external resource.
  * Enforces its own explicit deadline: a vendor that is slow (abort fires) or
  * merely late (resolves after the deadline because the transport ignored the
- * abort) surfaces ECHO_VENDOR_TIMEOUT. The Saga maps that code onto the
- * explicit timeout-mark-v1 checkpoint; TimedOut is never inferred. */
+ * abort) surfaces ECHO_VENDOR_TIMEOUT. failSagaExecution maps that code onto
+ * TimedOut (ADR-033-3, issue #414); it is never inferred. */
 export async function echo(
   connection: EchoConnection,
   input: EchoInput,

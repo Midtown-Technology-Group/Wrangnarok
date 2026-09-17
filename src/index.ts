@@ -82,7 +82,11 @@ import {
   HALO_SPEC_VERSION,
 } from "./integrations/halo";
 import {
+  MCP_PROTECTED_RESOURCE_MCP_PATH,
+  MCP_PROTECTED_RESOURCE_PATH,
+  mcpProtectedResourceMetadata,
   mcpResult,
+  mcpUnauthorizedChallenge,
   parseMcpCallParams,
   parseMcpDescribeParams,
   parseMcpRequest,
@@ -153,12 +157,16 @@ import {
   emitEvent,
   listEventSources,
   listEvents,
+  listFailedDeliveries,
   listSubscriptionDeliveries,
   listSubscriptions,
   loadEventSource,
   loadSubscription,
+  parseDeliveryEventId,
+  parseDeliveryOutcome,
   parseEventSourceName,
   parseSubscriptionName,
+  retrySubscriptionDelivery,
   setEventSourceEnabled,
   setSubscriptionEnabled,
   subscriptionSummary,
@@ -773,6 +781,27 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
   // Single-Worker full-stack app (ADR 008): the browser UI ships as Static
   // Assets and needs no auth; only /api/* is authenticated JSON.
   if (!url.pathname.startsWith("/api/")) {
+    // TOOL-01 S1 (issue #170, ADR 022): public OAuth protected-resource
+    // metadata (RFC 9728) for the inbound MCP gateway. Unauthenticated by
+    // design — resource identity only, never Organization data — so a
+    // standards-shaped MCP client can discover how to authenticate. Only
+    // GET serves; anything else falls through to the static/404 path
+    // below. Faults serialize like the /hooks/* path: the gateway itself
+    // stays behind authenticate plus the membership gate, and this route
+    // grants nothing.
+    if (
+      request.method === "GET" &&
+      (url.pathname === MCP_PROTECTED_RESOURCE_PATH || url.pathname === MCP_PROTECTED_RESOURCE_MCP_PATH)
+    ) {
+      try {
+        rejectQuery(url);
+        return json(mcpProtectedResourceMetadata(url.origin, env));
+      } catch (error) {
+        const fault =
+          error instanceof Fault ? error : new Fault(500, "INTERNAL_ERROR", "The request could not be completed.");
+        return json({ error: { code: fault.code, message: fault.message } }, fault.status);
+      }
+    }
     // Public vendor receivers live outside /api/* precisely so they do not
     // require the operator session (ADR 019): /hooks/:name for webhooks.
     if (url.pathname.startsWith("/hooks/")) {
@@ -886,6 +915,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // own allowlisted parser below.
     const scheduleDeliveriesRead =
       request.method === "GET" && /^\/api\/schedules\/[a-z0-9][a-z0-9-]{0,63}\/deliveries$/.test(url.pathname);
+    // TRG-03 S3a delivery history (issue #139): ?outcome= through the
+    // route's own allowlisted parser below.
+    const subscriptionDeliveriesRead =
+      request.method === "GET" &&
+      /^\/api\/event-sources\/[a-z0-9][a-z0-9-]{0,63}\/subscriptions\/[a-z0-9][a-z0-9-]{0,63}\/deliveries$/.test(
+        url.pathname,
+      );
     if (
       url.search &&
       !(historyList && request.method === "GET") &&
@@ -900,7 +936,8 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       !fileBytes &&
       !isPolicyConsumers &&
       !openapiSearch &&
-      !scheduleDeliveriesRead
+      !scheduleDeliveriesRead &&
+      !subscriptionDeliveriesRead
     )
       throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
     if (isOrgPath) {
@@ -1231,7 +1268,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         url.pathname,
       );
     if (subscriptionDeliveries?.[1] && subscriptionDeliveries?.[2] && request.method === "GET") {
-      // Delivery receipts for replay visibility: newest first, bounded 50.
+      // Delivery history for replay visibility: newest first, bounded 50.
+      // ?outcome= narrows to receipts (delivered) or derived failures
+      // (failed: logged events matching this filter with no receipt, the
+      // S3a retry set); an absent filter returns both newest-first.
       const source = await loadEventSource(env.DB, caller.orgId, parseEventSourceName(subscriptionDeliveries[1]));
       if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");
       const found = await loadSubscription(
@@ -1241,8 +1281,55 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         parseSubscriptionName(subscriptionDeliveries[2]),
       );
       if (!found) throw new Fault(404, "NOT_FOUND", "Not found.");
+      const outcome = parseDeliveryOutcome(url.searchParams);
+      if (outcome === "delivered") {
+        return json({ deliveries: await listSubscriptionDeliveries(env.DB, found.id, 50) });
+      }
+      if (outcome === "failed") {
+        return json({ deliveries: await listFailedDeliveries(env.DB, found, 50) });
+      }
+      const [delivered, failed] = await Promise.all([
+        listSubscriptionDeliveries(env.DB, found.id, 50),
+        listFailedDeliveries(env.DB, found, 50),
+      ]);
+      const merged = [...delivered, ...failed]
+        .sort(
+          (left, right) => right.createdAt.localeCompare(left.createdAt) || right.eventId.localeCompare(left.eventId),
+        )
+        .slice(0, 50);
+      return json({ deliveries: merged });
+    }
+    const subscriptionRetry =
+      /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/subscriptions\/([a-z0-9][a-z0-9-]{0,63})\/deliveries\/([a-zA-Z0-9._:-]{1,128})\/retry$/.exec(
+        url.pathname,
+      );
+    if (subscriptionRetry?.[1] && subscriptionRetry?.[2] && subscriptionRetry?.[3] && request.method === "POST") {
+      // TRG-03 S3a operator retry (issue #139): re-dispatch one failed
+      // delivery through the standard submit protocol with the identical
+      // evt- key. The first retry creates the Execution; duplicate retries
+      // converge on it. Authority revalidates at dispatch time, so a
+      // disabled or deleted subscription, or a revoked run-as grant,
+      // fails closed with no Execution. Operator-managed like every
+      // dispatching write; foreign rows answer 404.
+      await requireManageOrg(env.DB, ctx, caller.orgId);
       rejectQuery(url);
-      return json({ deliveries: await listSubscriptionDeliveries(env.DB, found.id, 50) });
+      const source = await loadEventSource(env.DB, caller.orgId, parseEventSourceName(subscriptionRetry[1]));
+      if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");
+      const found = await loadSubscription(
+        env.DB,
+        caller.orgId,
+        source.id,
+        parseSubscriptionName(subscriptionRetry[2]),
+      );
+      if (!found) throw new Fault(404, "NOT_FOUND", "Not found.");
+      const eventId = parseDeliveryEventId(subscriptionRetry[3]);
+      const retried = await retrySubscriptionDelivery(env.DB, env, submit, {
+        orgId: caller.orgId,
+        source,
+        subscription: found,
+        eventId,
+      });
+      return json({ delivery: retried }, retried.replayed ? 200 : 201);
     }
     // Unknown shapes under the event-source namespace answer 404, never
     // UNIMPLEMENTED theater — including paths deeper than the S1 guard.
@@ -1255,6 +1342,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         subscriptionDetail?.[1] !== undefined ||
         subscriptionEnable?.[1] !== undefined ||
         subscriptionDeliveries?.[1] !== undefined ||
+        subscriptionRetry?.[1] !== undefined ||
         eventSourceDetail?.[1] !== undefined ||
         eventSourceEnable?.[1] !== undefined;
       if (knownCollection || !knownItem) {
@@ -3736,7 +3824,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const fault =
       error instanceof Fault ? error : new Fault(500, "INTERNAL_ERROR", "The request could not be completed.");
     const headers: Record<string, string> = {};
-    if (fault.status === 401) headers["WWW-Authenticate"] = "Bearer";
+    // TOOL-01 S1: MCP clients learn the discovery document URL from the
+    // rejection itself (RFC 9728 resource_metadata pointer). Every other
+    // route keeps the bare bearer challenge.
+    if (fault.status === 401)
+      headers["WWW-Authenticate"] = url.pathname === "/api/mcp" ? mcpUnauthorizedChallenge(url.origin) : "Bearer";
     if (fault.status === 503) headers["Retry-After"] = "5";
     // Outward error path: a secret substring embedded in a Fault message
     // (caller input echoed back, miswired env text) is replaced before send.

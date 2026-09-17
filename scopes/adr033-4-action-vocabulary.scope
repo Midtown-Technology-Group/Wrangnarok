@@ -1,0 +1,5 @@
+# ADR-033-4 Slice A guardrails (issue #415): lock the provider-leg convention
+# with TESTS ONLY. No Saga leg migrates here (rides #416); src/sagas/*.ts,
+# src/index.ts, src/sdk.ts, and every other src/ file are read-only.
+scopes/adr033-4-action-vocabulary.scope
+test/saga-helper-conventions.test.ts

@@ -9,9 +9,13 @@
 // idempotency keys, deterministic filter match/miss/order, same-content
 // replay convergence vs mismatched-content conflict, disable/revoke/delete
 // fencing with zero dispatch, the per-event fan-out bound with explicit
-// overflow, cross-org isolation, and no-side-effect failures. Operator
-// replay/retry APIs and built-in platform events stay deferred to S3 and
-// are untested here by design.
+// overflow, cross-org isolation, and no-side-effect failures. The S3a cases
+// (issue #139) cover operator retry/replay over the same receipt rows with
+// identical evt- keys: failed derivation plus ?outcome= filtering, first
+// retry dispatch vs duplicate convergence, dispatch-time authority
+// revalidation, cross-org 404 posture, and the per-event bound on replay.
+// Built-in platform events and retention policy stay deferred and are
+// untested here by design.
 import { env } from "cloudflare:workers";
 import { expect, it, vi } from "vitest";
 import worker from "../src/index";
@@ -61,8 +65,8 @@ async function ensureUser(userId: string, role: "admin" | "member"): Promise<voi
     .run();
 }
 
-async function createSource(name: string): Promise<void> {
-  const res = await worker.fetch(authed("/api/event-sources", "POST", { name, kind: "topic" }), bindings);
+async function createSource(name: string, caller: Bindings = bindings): Promise<void> {
+  const res = await worker.fetch(authed("/api/event-sources", "POST", { name, kind: "topic" }), caller);
   expect(res.status).toBe(201);
 }
 
@@ -85,14 +89,49 @@ interface EmitBody {
 interface SubBody {
   readonly subscription?: { id: string; name: string };
   readonly subscriptions?: { name: string }[];
-  readonly deliveries?: { eventId: string; executionId: string }[];
+  readonly deliveries?: { eventId: string; executionId: string | null; outcome: string }[];
   readonly deleted?: boolean;
   readonly error?: { code?: string };
 }
 
-async function createSub(source: string, body: Record<string, unknown>): Promise<{ status: number; body: SubBody }> {
-  const res = await worker.fetch(authed(`/api/event-sources/${source}/subscriptions`, "POST", body), bindings);
+interface RetryBody {
+  readonly delivery?: { subscription: string; eventId: string; executionId: string; replayed: boolean };
+  readonly error?: { code?: string };
+}
+
+async function createSub(
+  source: string,
+  body: Record<string, unknown>,
+  caller: Bindings = bindings,
+): Promise<{ status: number; body: SubBody }> {
+  const res = await worker.fetch(authed(`/api/event-sources/${source}/subscriptions`, "POST", body), caller);
   return { status: res.status, body: (await res.json()) as SubBody };
+}
+
+async function deliveries(
+  source: string,
+  sub: string,
+  query = "",
+  caller: Bindings = bindings,
+): Promise<{ status: number; body: SubBody }> {
+  const res = await worker.fetch(
+    authed(`/api/event-sources/${source}/subscriptions/${sub}/deliveries${query}`, "GET"),
+    caller,
+  );
+  return { status: res.status, body: (await res.json()) as SubBody };
+}
+
+async function retry(
+  source: string,
+  sub: string,
+  eventId: string,
+  caller: Bindings = bindings,
+): Promise<{ status: number; body: RetryBody }> {
+  const res = await worker.fetch(
+    authed(`/api/event-sources/${source}/subscriptions/${sub}/deliveries/${eventId}/retry`, "POST", {}),
+    caller,
+  );
+  return { status: res.status, body: (await res.json()) as RetryBody };
 }
 
 async function emit(
@@ -520,3 +559,308 @@ it("fails with no side effects and deletes cascade to subscriptions", async () =
   expect(scopedReceipts?.n).toBe(0);
   expect(await executionCount()).toBe(before + 1);
 }, 25000);
+
+it("retries a failed delivery with the identical key and converges duplicates", async () => {
+  await createSource("s3a-retry");
+  const made = await createSub("s3a-retry", {
+    name: "retry-sub",
+    topicFilter: "vendor.order.created",
+    sagaId: helloSaga.id,
+  });
+  expect(made.status).toBe(201);
+  const subId = made.body.subscription?.id ?? "";
+  await ensureUser(MEMBER_USER, "member");
+  const before = await executionCount();
+
+  // Disabled at emit time: the log accepts, the subscriber skips, and the
+  // failure is derived (no receipt row exists for it).
+  await worker.fetch(authed("/api/event-sources/s3a-retry/subscriptions/retry-sub/disable", "POST", {}), bindings);
+  const skipped = await emit("s3a-retry", {
+    eventId: "evt-r1",
+    topic: "vendor.order.created",
+    payload: { name: "Ada" },
+  });
+  expect(skipped.status).toBe(201);
+  expect(skipped.body.deliveries).toMatchObject([
+    { subscription: "retry-sub", status: "skipped", code: "SUBSCRIPTION_DISABLED" },
+  ]);
+  expect(await executionCount()).toBe(before);
+
+  const failed = await deliveries("s3a-retry", "retry-sub", "?outcome=failed");
+  expect(failed.status).toBe(200);
+  expect(failed.body.deliveries).toMatchObject([{ eventId: "evt-r1", outcome: "failed", executionId: null }]);
+
+  // Members cannot retry; operators can.
+  expect((await retry("s3a-retry", "retry-sub", "evt-r1", asUser(MEMBER_USER))).status).toBe(403);
+  await worker.fetch(authed("/api/event-sources/s3a-retry/subscriptions/retry-sub/enable", "POST", {}), bindings);
+  const first = await retry("s3a-retry", "retry-sub", "evt-r1");
+  expect(first.status).toBe(201);
+  const execId = first.body.delivery?.executionId ?? "";
+  expect(first.body.delivery).toMatchObject({ subscription: "retry-sub", eventId: "evt-r1", replayed: false });
+  await trackAll([execId]);
+  // Identical evt- key: the Execution ID is the deterministic hash of the
+  // same (run-as org, run-as user, delivery key) triple fan-out uses.
+  const key = await subscriptionDeliveryKey(subId, "evt-r1");
+  expect(execId).toBe(await executionId({ orgId: ORG, userId: LAB_USER }, key));
+  expect(await executionCount()).toBe(before + 1);
+
+  // The retry lands a receipt: delivered lists it, failed no longer does.
+  const delivered = await deliveries("s3a-retry", "retry-sub", "?outcome=delivered");
+  expect(delivered.body.deliveries).toMatchObject([{ eventId: "evt-r1", outcome: "delivered", executionId: execId }]);
+  expect((await deliveries("s3a-retry", "retry-sub", "?outcome=failed")).body.deliveries).toEqual([]);
+
+  // Duplicate retries converge on the same Execution with no new dispatch.
+  const again = await retry("s3a-retry", "retry-sub", "evt-r1");
+  expect(again.status).toBe(200);
+  expect(again.body.delivery).toMatchObject({ executionId: execId, replayed: true });
+  expect(await executionCount()).toBe(before + 1);
+  const receipts = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM event_deliveries WHERE subscription_id=?")
+    .bind(subId)
+    .first<{ n: number }>();
+  expect(receipts?.n).toBe(1);
+
+  // Query strings ride the list, never the retry.
+  expect(
+    await worker
+      .fetch(
+        authed("/api/event-sources/s3a-retry/subscriptions/retry-sub/deliveries/evt-r1/retry?x=1", "POST", {}),
+        bindings,
+      )
+      .then((res) => res.status),
+  ).toBe(400);
+}, 25000);
+
+it("filters deliveries by outcome and fails closed on bad filters", async () => {
+  await createSource("s3a-outcome");
+  expect(
+    (await createSub("s3a-outcome", { name: "o-deliver", topicFilter: "vendor.order.*", sagaId: helloSaga.id })).status,
+  ).toBe(201);
+  expect(
+    (await createSub("s3a-outcome", { name: "o-other", topicFilter: "customer.created", sagaId: helloSaga.id })).status,
+  ).toBe(201);
+
+  const first = await emit("s3a-outcome", {
+    eventId: "evt-o1",
+    topic: "vendor.order.created",
+    payload: { name: "Ada" },
+  });
+  expect(first.body.deliveries).toMatchObject([{ subscription: "o-deliver", status: "dispatched" }]);
+  await trackAll((first.body.deliveries ?? []).map((entry) => entry.executionId));
+  const second = await emit("s3a-outcome", {
+    eventId: "evt-o2",
+    topic: "customer.created",
+    payload: { name: "Bo" },
+  });
+  await trackAll((second.body.deliveries ?? []).map((entry) => entry.executionId));
+  await worker.fetch(authed("/api/event-sources/s3a-outcome/subscriptions/o-deliver/disable", "POST", {}), bindings);
+  await emit("s3a-outcome", { eventId: "evt-o3", topic: "vendor.order.created", payload: { name: "Cy" } });
+  await worker.fetch(authed("/api/event-sources/s3a-outcome/subscriptions/o-deliver/enable", "POST", {}), bindings);
+
+  // o-deliver: one receipt, one derived failure; sibling-topic events and
+  // filter misses never appear.
+  const delivered = await deliveries("s3a-outcome", "o-deliver", "?outcome=delivered");
+  expect(delivered.body.deliveries?.map((entry) => entry.eventId)).toEqual(["evt-o1"]);
+  const failed = await deliveries("s3a-outcome", "o-deliver", "?outcome=failed");
+  expect(failed.body.deliveries?.map((entry) => entry.eventId)).toEqual(["evt-o3"]);
+  for (const query of ["", "?outcome=all"]) {
+    const both = await deliveries("s3a-outcome", "o-deliver", query);
+    expect(both.body.deliveries?.map((entry) => [entry.eventId, entry.outcome])).toEqual([
+      ["evt-o3", "failed"],
+      ["evt-o1", "delivered"],
+    ]);
+  }
+  // o-other: its own receipt only; vendor events match nothing there.
+  expect(
+    (await deliveries("s3a-outcome", "o-other", "?outcome=delivered")).body.deliveries?.map((entry) => entry.eventId),
+  ).toEqual(["evt-o2"]);
+  expect((await deliveries("s3a-outcome", "o-other", "?outcome=failed")).body.deliveries).toEqual([]);
+
+  // Bad filters fail closed with named codes.
+  const bogus = await deliveries("s3a-outcome", "o-deliver", "?outcome=bogus");
+  expect(bogus.status).toBe(400);
+  expect(bogus.body).toMatchObject({ error: { code: "INVALID_OUTCOME" } });
+  const extra = await deliveries("s3a-outcome", "o-deliver", "?other=1");
+  expect(extra.status).toBe(400);
+  expect(extra.body).toMatchObject({ error: { code: "UNSUPPORTED_QUERY" } });
+
+  // Retry eligibility: filter-mismatched and unknown events 404. A GET on
+  // the POST-only retry path reports UNIMPLEMENTED like every other
+  // method-mismatched known shape (gray-out posture); unshaped event IDs
+  // never match the route and answer 404.
+  expect((await retry("s3a-outcome", "o-other", "evt-o1")).status).toBe(404);
+  expect((await retry("s3a-outcome", "o-deliver", "evt-ghost")).status).toBe(404);
+  const wrongMethod = await worker.fetch(
+    authed("/api/event-sources/s3a-outcome/subscriptions/o-deliver/deliveries/evt-o1/retry", "GET"),
+    bindings,
+  );
+  expect(wrongMethod.status).toBe(501);
+  expect(await wrongMethod.json()).toMatchObject({ error: { code: "UNIMPLEMENTED" } });
+  expect(
+    await worker
+      .fetch(
+        authed("/api/event-sources/s3a-outcome/subscriptions/o-deliver/deliveries/BAD!!/retry", "POST", {}),
+        bindings,
+      )
+      .then((res) => res.status),
+  ).toBe(404);
+}, 25000);
+
+it("fails closed on disabled, revoked, and deleted subscriptions with no dispatch", async () => {
+  await createSource("s3a-fence");
+  expect(
+    (await createSub("s3a-fence", { name: "fenced-r", topicFilter: "vendor.order.created", sagaId: helloSaga.id }))
+      .status,
+  ).toBe(201);
+  await ensureUser(ADMIN2_USER, "admin");
+  const live = await emit("s3a-fence", {
+    eventId: "evt-sf0",
+    topic: "vendor.order.created",
+    payload: { name: "Ada" },
+  });
+  await trackAll((live.body.deliveries ?? []).map((entry) => entry.executionId));
+  const before = await executionCount();
+
+  await worker.fetch(authed("/api/event-sources/s3a-fence/subscriptions/fenced-r/disable", "POST", {}), bindings);
+  await emit("s3a-fence", { eventId: "evt-sf1", topic: "vendor.order.created", payload: { name: "Ada" } });
+
+  // Disabled fails closed and stays disabled: no Execution, no re-enable.
+  const disabled = await retry("s3a-fence", "fenced-r", "evt-sf1");
+  expect(disabled.status).toBe(409);
+  expect(disabled.body).toMatchObject({ error: { code: "SUBSCRIPTION_DISABLED" } });
+  expect(await executionCount()).toBe(before);
+  const still = await worker.fetch(authed("/api/event-sources/s3a-fence/subscriptions/fenced-r", "GET"), bindings);
+  expect(await still.json()).toMatchObject({ subscription: { enabled: false } });
+
+  // Revoked run-as authority never resurrects: a second admin retries while
+  // the persisted run-as owner stays revoked.
+  await worker.fetch(authed("/api/event-sources/s3a-fence/subscriptions/fenced-r/enable", "POST", {}), bindings);
+  await bindings.DB.prepare("UPDATE org_memberships SET status='revoked' WHERE org_id=? AND user_id=?")
+    .bind(ORG, LAB_USER)
+    .run();
+  try {
+    const revoked = await retry("s3a-fence", "fenced-r", "evt-sf1", asUser(ADMIN2_USER));
+    expect(revoked.status).toBe(403);
+    expect(revoked.body).toMatchObject({ error: { code: "MEMBERSHIP_REVOKED" } });
+    expect(await executionCount()).toBe(before);
+  } finally {
+    await bindings.DB.prepare("UPDATE org_memberships SET status='active' WHERE org_id=? AND user_id=?")
+      .bind(ORG, LAB_USER)
+      .run();
+  }
+
+  // Deleted subscriptions answer 404 with nothing dispatched.
+  await worker.fetch(authed("/api/event-sources/s3a-fence/subscriptions/fenced-r", "DELETE"), bindings);
+  expect((await retry("s3a-fence", "fenced-r", "evt-sf1")).status).toBe(404);
+  expect(await executionCount()).toBe(before);
+}, 25000);
+
+it("denies cross-org replay without disclosing foreign rows", async () => {
+  await createSource("s3a-xorg");
+  expect(
+    (await createSub("s3a-xorg", { name: "x-sub", topicFilter: "vendor.order.created", sagaId: helloSaga.id })).status,
+  ).toBe(201);
+  const live = await emit("s3a-xorg", {
+    eventId: "evt-x1",
+    topic: "vendor.order.created",
+    payload: { name: "Ada" },
+  });
+  await trackAll((live.body.deliveries ?? []).map((entry) => entry.executionId));
+
+  // A caller with no membership reaches nothing: 404 on retry and reads.
+  await ensureUser(STRANGER_USER, "member");
+  await bindings.DB.prepare("DELETE FROM org_memberships WHERE org_id=? AND user_id=?").bind(ORG, STRANGER_USER).run();
+  const stranger = asUser(STRANGER_USER);
+  expect((await retry("s3a-xorg", "x-sub", "evt-x1", stranger)).status).toBe(404);
+  expect((await deliveries("s3a-xorg", "x-sub", "?outcome=failed", stranger)).status).toBe(404);
+  expect((await deliveries("s3a-xorg", "x-sub", "", stranger)).status).toBe(404);
+
+  // A genuine second-org admin operates only on their own rows: the same
+  // names resolve in their org, and the first org's event is not theirs.
+  const OTHER_ORG = "00000000-0000-4000-8000-000000000009";
+  const OTHER_ADMIN = "00000000-0000-4000-8000-00000000000a";
+  const stamp = new Date().toISOString();
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?) ON CONFLICT(id) DO NOTHING")
+    .bind(OTHER_ORG, "Other")
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?) ON CONFLICT(user_id) DO NOTHING",
+  )
+    .bind(OTHER_ADMIN, stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,?,'active','ordinary',?,?) ON CONFLICT(org_id,user_id) DO NOTHING",
+  )
+    .bind(OTHER_ORG, OTHER_ADMIN, "admin", stamp, stamp)
+    .run();
+  await bindings.DB.prepare("UPDATE org_memberships SET role='admin',status='active' WHERE org_id=? AND user_id=?")
+    .bind(OTHER_ORG, OTHER_ADMIN)
+    .run();
+  const foreign: Bindings = {
+    ...bindings,
+    LAB_ORG_ID: OTHER_ORG,
+    LAB_USER_ID: OTHER_ADMIN,
+    LAB_FIXTURE_USER_ID: LAB_USER,
+  };
+  await createSource("s3a-xorg", foreign);
+  expect(
+    (await createSub("s3a-xorg", { name: "x-sub", topicFilter: "vendor.order.created", sagaId: helloSaga.id }, foreign))
+      .status,
+  ).toBe(201);
+  const foreignEmit = await emit(
+    "s3a-xorg",
+    { eventId: "evt-x9", topic: "vendor.order.created", payload: { name: "Zed" } },
+    foreign,
+  );
+  expect(foreignEmit.status).toBe(201);
+  await trackAll((foreignEmit.body.deliveries ?? []).map((entry) => entry.executionId));
+  expect((await deliveries("s3a-xorg", "x-sub", "", foreign)).body.deliveries?.map((entry) => entry.eventId)).toEqual([
+    "evt-x9",
+  ]);
+  expect((await retry("s3a-xorg", "x-sub", "evt-x1", foreign)).status).toBe(404);
+
+  // The first org's rows are untouched by the foreign caller.
+  expect((await deliveries("s3a-xorg", "x-sub", "")).body.deliveries?.map((entry) => entry.eventId)).toEqual([
+    "evt-x1",
+  ]);
+}, 25000);
+
+it("honors the per-event 10-dispatch bound on replay", async () => {
+  await createSource("s3a-bound");
+  for (let index = 0; index < 12; index += 1) {
+    const name = `s3a-c${String(index).padStart(2, "0")}`;
+    expect((await createSub("s3a-bound", { name, topicFilter: "vendor.order.*", sagaId: helloSaga.id })).status).toBe(
+      201,
+    );
+  }
+  const before = await executionCount();
+
+  const burst = await emit("s3a-bound", {
+    eventId: "evt-s3a-burst",
+    topic: "vendor.order.created",
+    payload: { name: "Ada" },
+  });
+  expect(burst.status).toBe(201);
+  expect(burst.body).toMatchObject({ overflowSkipped: 2 });
+  const ids = (burst.body.deliveries ?? []).map((entry) => entry.executionId);
+  expect(ids).toHaveLength(10);
+  await trackAll(ids);
+  expect(await executionCount()).toBe(before + 10);
+
+  // Overflowed subscribers stay listed as failed but refuse at the bound:
+  // the event already dispatched 10 times.
+  const failed = await deliveries("s3a-bound", "s3a-c10", "?outcome=failed");
+  expect(failed.body.deliveries?.map((entry) => entry.eventId)).toEqual(["evt-s3a-burst"]);
+  for (const sub of ["s3a-c10", "s3a-c11"]) {
+    const refused = await retry("s3a-bound", sub, "evt-s3a-burst");
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ error: { code: "DELIVERY_BOUND_EXCEEDED" } });
+  }
+  expect(await executionCount()).toBe(before + 10);
+
+  // The bound never breaks idempotency: a duplicate retry of a delivered
+  // subscriber still converges, since its own receipt does not count.
+  const dup = await retry("s3a-bound", "s3a-c00", "evt-s3a-burst");
+  expect(dup.status).toBe(200);
+  expect(dup.body.delivery).toMatchObject({ executionId: ids[0], replayed: true });
+  expect(await executionCount()).toBe(before + 10);
+}, 60000);

@@ -8,7 +8,7 @@ Status vocabulary: **Implemented** (shipped locally), **Partial** (materially na
 
 Upstream tests are evidence of intended assertions, not passing-test claims. Upstream sources were inspected, not executed; no upstream production instance was used.
 
-Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 30 Partial, 11 Missing, 1 Gated.
+Total: 47 capability rows — 5 Implemented, 1 Complete (pending review), 29 Partial, 11 Missing, 1 Gated.
 
 | ID | Title | Phase | Status | Depends | Existing issue |
 | --- | --- | --- | --- | --- | --- |
@@ -40,7 +40,7 @@ Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 30 Par
 | FILE-02 | Manage generated artifacts and attachment lifecycles with retention | 4+6 | Partial | FILE-01, AUTH-02 | #158 |
 | APP-01 | Deploy authored applications with explicit lifecycle, ownership and recovery | 4+5 | Partial | AUTH-02, DEV-02, SOL-01 | #159 |
 | APP-02 | Provide the browser App SDK with scoped workflows, Tables, files and live updates | 4 | Partial | APP-01, TABLE-02, FILE-01, OBS-02 | #160 |
-| SOL-01 | Close the existing bundle reconciliation and activation contract gaps | 5 | Partial | — | new |
+| SOL-01 | Close the existing bundle reconciliation and activation contract gaps | 5 | Implemented | — | #479 |
 | SOL-02 | Install and manage complete reusable Solutions across Organizations | 5 | Partial | SOL-01, AUTH-02, CON-02, TABLE-02, FORM-02, APP-01, AI-02, TRG-03 | new |
 | SOL-03 | Export, capture and import portable Solution source without tenant state | 5 | Partial | SOL-01, MIG-01, SEC-01 | #163 |
 | MIG-01 | Deliver the existing workspace-to-bundle bridge without false compatibility claims | 5 | Partial | — | #116 |
@@ -167,7 +167,7 @@ Related Wrangnarok issues: #76
 
 Phase 4; **Partial**; existing issue: new
 
-Local status: S1 ships the org-scoped event-source registry plus the typed append-only event log (migration 0030, `src/events.ts`): deterministic (source, event) identity with same-content replay and 409 on mismatched content, operator emit/list, disable fencing, and best-effort delivery appends from schedule promotion and endpoint delivery. S2 (issue #139, migration 0033) adds scoped subscriptions binding topic filters (exact or trailing-`.*` namespace) to a target Saga with bounded fan-out through the standard submit protocol: exact-org rows in name order, stable `evt-` delivery keys, per-subscriber disable/delete fencing plus pre-dispatch authority revalidation through the canonical resolver/grant path, an explicit per-event admission bound (10 dispatches, overflow reported, never silently dropped), and per-subscription delivery receipts. Still missing (S3): operator retry/replay APIs, built-in platform emissions, and retention/admission policy. Worker + Workflows + D1 only; no Queue/DO.
+Local status: S1 ships the org-scoped event-source registry plus the typed append-only event log (migration 0030, `src/events.ts`): deterministic (source, event) identity with same-content replay and 409 on mismatched content, operator emit/list, disable fencing, and best-effort delivery appends from schedule promotion and endpoint delivery. S2 (issue #139, migration 0033) adds scoped subscriptions binding topic filters (exact or trailing-`.*` namespace) to a target Saga with bounded fan-out through the standard submit protocol: exact-org rows in name order, stable `evt-` delivery keys, per-subscriber disable/delete fencing plus pre-dispatch authority revalidation through the canonical resolver/grant path, an explicit per-event admission bound (10 dispatches, overflow reported, never silently dropped), and per-subscription delivery receipts. S3a (issue #139) ships operator retry/replay over the same receipt rows with no new DDL: a derived failed set (log minus receipts) with `?outcome=delivered|failed|all` listing, single-event retry through the shared submit-protocol dispatch with identical `evt-` keys (first retry creates the Execution, duplicates converge), dispatch-time authority revalidation (disabled/deleted/revoked fail closed), cross-org 404 posture, and the per-event 10-dispatch bound honored on replay. Still missing: built-in platform emissions and retention/admission policy. Worker + Workflows + D1 only; no Queue/DO.
 
 Depends: TRG-01, TRG-02, AUTH-02
 
@@ -641,7 +641,9 @@ boundary, so spreading one request over several batch() calls is several
 transactions, never one atomic batch. Each INSERT carries at most ~4.6 KB
 against the 100 KB statement cap. The batch route body caps at 256 KB (25
 capped documents plus ids and envelope fit; what persists still answers to
-the per-document CHECK). Upstream's 1000-document batch has no truthful
+the per-document CHECK; over/under-limit pins plus the below-transport CHECK
+proof live in `test/tables.test.ts` "TABLE-02 retention-posture pins").
+Upstream's 1000-document batch has no truthful
 single-invocation Cloudflare mapping: 1000 statements plus preflight and
 policy overhead exceed the 50-query Free cap and even the 1000-query Paid
 cap (1000 statements + ~15 overhead > 1000), so a 1000-wide batch would need
@@ -651,13 +653,21 @@ several sequential batch requests; each request stays atomic on its own.
 Unsupported
 query operators fail closed (UNSUPPORTED_QUERY / INVALID_ORDER / INVALID_CURSOR
 for offset or custom sorts: no offset pagination, no custom sorts, no
-projection, no managed indexes, no version tokens). D1 limits recorded as
+projection, no managed indexes, no version tokens; fail-closed pins in
+`test/tables.test.ts` "tables query parser units"). D1 limits recorded as
 blockers: 500 MB Free per-database cap (10 GB Paid) needs a
 retention/partitioning policy before
-large Tables are production-shaped (explicit deletion only in this slice);
+large Tables are production-shaped (explicit deletion only in this slice,
+pinned by `test/tables.test.ts` "TABLE-02 retention-posture pins" and the
+`test/tables-unit.test.ts` DDL pins: deleteTable cascade, no TTL/partition
+columns, per-document CHECK);
 single-database transactions only (batch() is one-database atomic, no
-cross-database semantics); JSON filtering is application-side over the bounded
-keyset window (no PostgreSQL JSONB assumptions, no managed indexes yet).
+cross-database semantics; single-`batch()` discipline in `runSingleBatch`,
+`src/tables.ts`, with raced-abort pins in `test/tables-unit.test.ts`); JSON
+filtering is application-side over the bounded
+keyset window (no PostgreSQL JSONB assumptions, no managed indexes yet;
+bounded walk in `queryRows`, `src/tables.ts`, with the bounded-memory
+regression in `test/tables.test.ts`).
 
 Canonical batch adaptations (labeled, Cloudflare-driven): upsert modes
 compose insert plus update grants fail-closed — upstream row-policies have no
@@ -973,9 +983,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## SOL-01: Close the existing bundle reconciliation and activation contract gaps
 
-Phase 5; **Partial**; existing issue: new
+Phase 5; **Implemented**; existing issue: #479
 
-Local status: Current installBundle reconciles declared endpoints and appends a ledger. There is no absent-managed-row deletion, active-install execution gate or atomic activation pointer; #35 being closed does not prove these guarantees.
+Local status: Shipped. installBundle (`src/solutions.ts`, ADR 011) reconciles the full desired state per org — Connection endpoints plus sibling config (`connections.config_json`), the manifest config list (`bundle_config`), and saga pins (`bundle_sagas`) — with scoped managed-absentee deletion, same-version fencing (`INSTALL_CONFLICT`), an immutable ledger (`bundle_installs` triggers), and a fenced per-org activation pointer (`bundle_active`) moved only on full reconcile success; `requireActiveInstall` fails execution closed (`NO_ACTIVE_INSTALL`/`STALE_INSTALL_REVISION`/`INCONSISTENT_INSTALL`) with the explicit local/loose exception for orgs with no install rows. #479 verify-first: the silent-config omission, stale-marker skip, and saga-only derivation gaps carried from #161 were re-checked against main — full-config reconcile and saga-only org derivation (plus explicit `ORG_NOT_DECLARED`/`INVALID_MANIFEST` rejection) already ship with tests since #161; the one genuinely missing case, the version-only upgrade marker bump, is now pinned by test. Proven in `test/solutions-activation.test.ts` (26 tests), `test/solutions-install.test.ts`, and `test/solutions-validation.test.ts` against real local D1.
 
 Depends: none
 
@@ -993,7 +1003,7 @@ Upstream evidence (paths relative to upstream repo root):
 - `api/src/routers/solutions.py`
 - `api/src/jobs/platform/application_deploy.py`
 
-Related Wrangnarok issues: #35
+Related Wrangnarok issues: #35, #161, #479
 
 ## SOL-02: Install and manage complete reusable Solutions across Organizations
 
