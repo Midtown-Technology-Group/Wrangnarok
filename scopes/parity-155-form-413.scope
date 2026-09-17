@@ -3,6 +3,8 @@
 # request with the canonical 413 behavior and dispatches/creates nothing,
 # plus the explicit 4 KiB-vs-256 KiB divergence note. No production limit,
 # form-semantics, auth, migration, or unrelated-test changes.
+# This lane changes only the divergence-rationale note; the 413 regression
+# it cites already landed with the scope's owned test path.
 test/form-lifecycle.test.ts
 docs/upstream-parity.md
 scopes/parity-155-form-413.scope
