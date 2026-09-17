@@ -33,6 +33,12 @@ keywords = ["wrangnarok_canary_"]
 [[allowlists]]
 description = "Controlled #247 canary fixtures (scanned in isolation by the canary step)."
 paths = ['''test/fixtures/secret-scan/.*''']
+# Historic false positive, remediated in-tree: superseded lane commit c708c28
+# quoted a const-key docs example that matches generic-api-key. Reworded in
+# 5942d5d; the old commit stays in history (repo policy forbids force-push),
+# so history scans skip it by SHA. Never add a real leaked credential here —
+# real leaks must be revoked/rotated first (see SECURITY.md).
+commits = ['''c708c2802b4d482eac076488b9f4c9310a85a56b''']
 
 # generic-api-key is the noisy heuristic: test scaffolding assigns key-shaped
 # idempotency strings (e.g. run02-parent-happy-001 style values) that are not

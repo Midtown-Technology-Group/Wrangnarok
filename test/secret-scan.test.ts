@@ -26,8 +26,11 @@ describe("secret scanning (#247)", () => {
     expect(gitleaksConfig).toContain("wrangnarok_canary_");
     expect(gitleaksConfig).toContain("test/fixtures/secret-scan/");
     // The noisy generic-api-key heuristic is scoped down to test/ paths only
-    // (idempotency-key scaffolding); vendor rules still apply everywhere.
+    // (idempotency scaffolding); vendor rules still apply everywhere.
     expect(gitleaksConfig).toContain('id = "generic-api-key"');
+    // Historic remediated FP is skipped by commit SHA with a comment (the
+    // branch keeps history; force-push is forbidden).
+    expect(gitleaksConfig).toContain("c708c2802b4d482eac076488b9f4c9310a85a56b");
     // No blanket exclusions: no paths allowlist entry targets source dirs.
     expect(gitleaksConfig).not.toMatch(/paths\s*=\s*\[[^\]]*src\//s);
   });
