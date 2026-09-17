@@ -8,8 +8,11 @@
 - **Extends:** ADR 002 (stable Saga identity), ADR 010 (source boundary), ADR 018 RUN-01/RUN-02 (runtime policy, child invocation), `docs/upstream-spec.md` findings 1, 3, 15, 18
 - **Implements:** ADR-033 Saga authoring ergonomics (issues #412–#416).
   #412 landed interior helpers, #413 scanner/manifest gates, #414 terminal
-  outcome helpers, #415 Action vocabulary; #416 records this acceptance plus
-  the entrypoint/synthesis proofs and migrates the six in-scope Sagas.
+  outcome helpers, #415 Action vocabulary (six Integration legs onto
+  `integrationOperation` — legs, not Saga rewrites); #416 records this
+  acceptance plus the entrypoint/synthesis proofs, with the six in-scope
+  Saga migrations following one-per-PR after acceptance (no Saga rewrites
+  ride the acceptance PR itself).
 - **Renamed:** `TBD-saga-authoring-ergonomics.md` → `033-saga-authoring-ergonomics.md`
   on acceptance; no content change rides the rename beyond the acceptance
   record in this section and the proof outcomes below.
