@@ -1,0 +1,9 @@
+# Issue #302 Slice C-D-F: D1 migration-chain fidelity, plan registry, and optimize hook.
+docs/d1-conventions.md
+docs/migration-ledger.md
+migrations/0028_executions_column_restore.sql
+migrations/0032_executions_column_restore.sql
+package.json
+scripts/d1-plan.mjs
+test/migrations-chain.test.ts
+scopes/d1-302-cdf.scope
