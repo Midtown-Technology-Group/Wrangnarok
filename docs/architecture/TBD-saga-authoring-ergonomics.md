@@ -132,6 +132,20 @@ stated as decisions, not options:
     invariant is preserved by mechanism — `failSagaExecution` becomes that
     sole writer — and the accepted ADR records the retirement explicitly
     rather than leaving two terminal shapes in the codebase.
+
+    Retirement record (issue #414, landed pre-acceptance): `completeExecution`
+    / `failSagaExecution` live in `src/executions.ts` beside `failExecution`,
+    taking `(db, id, ...)` like their sibling terminal writers (the sketch's
+    `ctx`-first call was illustrative; the lane chose the sibling shape).
+    `failSagaExecution` classifies `*_VENDOR_TIMEOUT` codes as `TimedOut` and
+    everything else as `Failed`, then writes through the one shared fenced
+    mechanism. The `timeout-mark-v1` entry is retired from the retry table,
+    code comments, and docs; the six legacy Saga `timeout-mark-v1` steps stay
+    byte-identical until #416 migrates them, resolving 0 retries (fail-closed,
+    pinned by `test/domain.test.ts` and `test/terminal-outcomes.test.ts`).
+    The single-attempt checkpoint is the same conditional `UPDATE`, so the
+    legacy paths still land `TimedOut` — proven by the existing timeout
+    suites staying green, not by a second writer.
 3. **Saga helpers accept no runtime-policy knobs.** Effective deadlines and
    retry ceilings derive internally from the Integration default plus the
    Execution policy snapshot plus the platform ceiling. Saga authors never

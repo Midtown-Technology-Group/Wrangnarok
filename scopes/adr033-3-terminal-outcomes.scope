@@ -1,0 +1,23 @@
+# Lane scope: lane/adr033-3-terminal (issue #414).
+# Terminal outcome helpers: completeExecution/failSagaExecution as the one
+# canonical terminal writer (scrub + Failed-vs-TimedOut + cancel-race fencing)
+# beside failExecution; timeout-mark-v1 retired from the retry table, code
+# comments, and docs. Scout catch resolved as fail-closed-0 proof: the six
+# legacy Saga timeout-mark-v1 steps (src/sagas/*, byte-identical until #416)
+# now resolve 0 retries, pinned by test; existing TimedOut suites staying
+# green is the post-retirement behavior proof. Zero Saga rewrites: no
+# src/sagas/*.ts content change. No cancel-route, submit, dispatch, or
+# policy-table behavior change.
+scopes/adr033-3-terminal-outcomes.scope
+src/executions.ts
+src/domain.ts
+src/integrations/echo.ts
+src/integrations/cloudflare.ts
+test/domain.test.ts
+test/terminal-outcomes.test.ts
+docs/architecture/TBD-saga-authoring-ergonomics.md
+docs/architecture/018-runtime-policy.md
+docs/architecture/018-child-invocation.md
+docs/architecture/001-execution-model.md
+docs/architecture/007-mvp-slice.md
+docs/upstream-spec.md
