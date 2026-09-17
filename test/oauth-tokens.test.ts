@@ -976,6 +976,162 @@ describe("stale-generation health/revocation fencing (issue #149)", () => {
     });
   });
 
+  it("a revoke landing before a concurrent same-generation failure keeps revoked", async () => {
+    const connectionId = await seedMapping();
+    await storeInitialOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      accessToken: ACCESS,
+      refreshToken: REFRESH,
+      kekMaterial: KEK,
+      checkedAt: AT,
+    });
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let refreshEntered!: () => void;
+    const refreshEnteredGate = new Promise<void>((resolve) => {
+      refreshEntered = resolve;
+    });
+    let releaseRevoke!: () => void;
+    const revokeGate = new Promise<void>((resolve) => {
+      releaseRevoke = resolve;
+    });
+    let revokeEntered!: () => void;
+    const revokeEnteredGate = new Promise<void>((resolve) => {
+      revokeEntered = resolve;
+    });
+    const { fetchImpl: refreshFetch } = stubVendor([
+      async () => {
+        refreshEntered();
+        await refreshGate;
+        return tokenJson({ error: "invalid_grant" }, 400);
+      },
+    ]);
+    const { fetchImpl: revokeFetch } = stubVendor([
+      async () => {
+        revokeEntered();
+        await revokeGate;
+        return new Response(null, { status: 200 });
+      },
+    ]);
+    // Both operations read generation 1 healthy before either vendor call
+    // lands: the Durable Object fence serializes refresh flights, not a
+    // refresh overlapping a revocation.
+    const pendingRefresh = refreshPersistedOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      endpoint: ENDPOINT,
+      tokenPath: TOKEN_PATH,
+      credentials: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET },
+      faults: FAULTS,
+      keks: { 1: KEK },
+      kekMaterial: KEK,
+      fetchImpl: refreshFetch,
+      checkedAt: LATER,
+    });
+    const pendingRevoke = revokePersistedOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      endpoint: ENDPOINT,
+      revocationPath: REVOKE_PATH,
+      keks: { 1: KEK },
+      fetchImpl: revokeFetch,
+      checkedAt: LATER,
+    });
+    await refreshEnteredGate;
+    await revokeEnteredGate;
+    releaseRevoke();
+    await expect(pendingRevoke).resolves.toMatchObject({ revoked: true });
+    releaseRefresh();
+    // Same generation, so this is a health conflict, not a stale generation:
+    // the vendor failure still reports, but the committed revoked state wins
+    // over the failure computed from the pre-vendor read.
+    await expect(pendingRefresh).rejects.toMatchObject({ code: "TEST_AUTH_FAILED" });
+    const health = (await readOAuthTokenState(bindings.DB, ORG, connectionId))?.health;
+    expect(health).toMatchObject({ status: "revoked", consecutiveFailures: 0 });
+    expect(health && isTokenUsable(health)).toBe(false);
+  });
+
+  it("a revoke landing after a concurrent same-generation failure preserves its metadata", async () => {
+    const connectionId = await seedMapping();
+    await storeInitialOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      accessToken: ACCESS,
+      refreshToken: REFRESH,
+      kekMaterial: KEK,
+      checkedAt: AT,
+    });
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let refreshEntered!: () => void;
+    const refreshEnteredGate = new Promise<void>((resolve) => {
+      refreshEntered = resolve;
+    });
+    let releaseRevoke!: () => void;
+    const revokeGate = new Promise<void>((resolve) => {
+      releaseRevoke = resolve;
+    });
+    let revokeEntered!: () => void;
+    const revokeEnteredGate = new Promise<void>((resolve) => {
+      revokeEntered = resolve;
+    });
+    const { fetchImpl: refreshFetch } = stubVendor([
+      async () => {
+        refreshEntered();
+        await refreshGate;
+        return tokenJson({ error: "invalid_grant" }, 400);
+      },
+    ]);
+    const { fetchImpl: revokeFetch } = stubVendor([
+      async () => {
+        revokeEntered();
+        await revokeGate;
+        return new Response(null, { status: 200 });
+      },
+    ]);
+    const pendingRefresh = refreshPersistedOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      endpoint: ENDPOINT,
+      tokenPath: TOKEN_PATH,
+      credentials: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET },
+      faults: FAULTS,
+      keks: { 1: KEK },
+      kekMaterial: KEK,
+      fetchImpl: refreshFetch,
+      checkedAt: LATER,
+    });
+    const pendingRevoke = revokePersistedOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      endpoint: ENDPOINT,
+      revocationPath: REVOKE_PATH,
+      keks: { 1: KEK },
+      fetchImpl: revokeFetch,
+      checkedAt: LATER,
+    });
+    await refreshEnteredGate;
+    await revokeEnteredGate;
+    releaseRefresh();
+    await expect(pendingRefresh).rejects.toMatchObject({ code: "TEST_AUTH_FAILED" });
+    releaseRevoke();
+    await expect(pendingRevoke).resolves.toMatchObject({ revoked: true });
+    // The vendor confirmed revocation of this generation, so revoked stands —
+    // but with the committed failure diagnostics, not the pre-vendor read's.
+    const health = (await readOAuthTokenState(bindings.DB, ORG, connectionId))?.health;
+    expect(health).toMatchObject({
+      status: "revoked",
+      consecutiveFailures: 1,
+      lastFailureCode: "TEST_AUTH_FAILED",
+    });
+    expect(health && isTokenUsable(health)).toBe(false);
+  });
+
   it("conditional health writes reject stale generations without touching the row", async () => {
     const connectionId = await seedMapping();
     await storeInitialOAuthToken(bindings.DB, {
