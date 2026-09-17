@@ -3,9 +3,12 @@
 // no Workflows, no vendor HTTP. A Halo-shaped fixture proves the exit:
 // converts to a compiling-shaped module or fails loudly with the gap.
 import { describe, expect, it } from "vitest";
-import { runCommand } from "../scripts/wrangnarok.mjs";
+import { runCommand, validateAndGenerate } from "../scripts/wrangnarok.mjs";
+import { runGenerateIntegration } from "../scripts/wrangnarok-core.mjs";
 import { Fault } from "../src/domain";
-import { generateIntegrationModule } from "../src/generate-integration";
+import { GENERATOR_EMBED_BYTES_MAX, generateIntegrationModule } from "../src/generate-integration";
+import { defineIntegration } from "../src/integrations/index";
+import { detectGeneratorAuthKind, indexOperations, integrationUuidV5 } from "../src/openapi";
 
 const DIGEST = "ab".repeat(32);
 
@@ -24,6 +27,15 @@ function haloShaped() {
     openapi: "3.0.3",
     info: { version: "halo-lab-1", title: "HaloPSA lab proof" },
     servers: [{ url: "https://halo-lab.example.com" }],
+    components: {
+      securitySchemes: {
+        HaloOAuth: {
+          type: "oauth2",
+          flows: { clientCredentials: { tokenUrl: "https://halo-lab.example.com/auth/token", scopes: {} } },
+        },
+      },
+    },
+    security: [{ HaloOAuth: [] }],
     paths: {
       "/api/Tickets/{id}": {
         get: { operationId: "Ticket_Get", summary: "Get one ticket by id." },
@@ -56,7 +68,7 @@ describe("INT-01 generator (issue #229)", () => {
     expect(out.fileName).toBe("halo.ts");
     expect(out.operationCount).toBe(3);
     expect(out.specDigest).toBe(DIGEST);
-    expect(out.source).toContain(`export const HALO_INTEGRATION_ID = "halo";`);
+    expect(out.source).toContain(`export const HALO_INTEGRATION_ID = "${integrationUuidV5(DIGEST)}";`);
     expect(out.source).toContain(`// Spec digest: ${DIGEST}`);
     expect(out.source).toContain("// Spec version: halo-lab-1");
     expect(out.source).toContain(`"Ticket_Get": "read"`);
@@ -66,6 +78,10 @@ describe("INT-01 generator (issue #229)", () => {
     expect(out.source).toContain("executeHaloOperation");
     expect(out.source).toContain("scrubValueWithSecrets");
     expect(out.source).toContain("buildProvenance");
+    // OAuth fixture keeps the client-credentials shape (Halo proof stays green).
+    expect(out.source).toContain("// Auth kind: clientCredentials");
+    expect(out.source).toContain("clientSecret");
+    expect(out.source).toContain("requestClientCredentialsToken");
     // TOOL-01 (issue #170) host boundaries: bounded vendor bodies and
     // genuine-absence-only Connection mapping must survive regeneration.
     expect(out.source).toContain("readBoundedVendorBody");
@@ -106,6 +122,30 @@ describe("INT-01 generator (issue #229)", () => {
     expect(cli.generated.content).toContain("await fetchImpl(url");
     expect(cli.generated.content).toContain("resolveRequestUrl({ ...pinned");
     expect(cli.generated.content).not.toContain("return { result: null, provenance: {} as CodeModeProvenance }");
+  });
+
+  // Alerts 57/58/60/61 (js/http-to-file-access) were a static-analysis
+  // artifact of routing the offline generator through the shared
+  // network-result object. CLI dispatch now calls these direct offline
+  // entries; this pins them to the dispatch payload.
+  it("exposes direct offline generator entries matching dispatch", async () => {
+    const spec = haloShaped();
+    const ctx = {
+      command: "generate-integration",
+      genId: "halo",
+      genName: "halo",
+      genSpec: spec,
+      genOrigins: ["https://halo-lab.example.com"],
+      genClassifications: { Ticket_Delete: "destructive" },
+    };
+    const viaDispatch = (await runCommand(ctx)) as GeneratedCliResult;
+    const direct = validateAndGenerate(ctx) as GeneratedCliResult;
+    expect(direct.generated).toEqual(viaDispatch.generated);
+    const coreFirst = (await runGenerateIntegration(ctx)) as GeneratedCliResult;
+    const coreSecond = (await runGenerateIntegration(ctx)) as GeneratedCliResult;
+    expect(coreSecond.generated).toEqual(coreFirst.generated);
+    expect(coreFirst.generated.path).toBe("src/integrations/halo.ts");
+    expect(coreFirst.generated.operations).toBe(3);
   });
 
   it("keeps the CLI auth flags on the canonical typed output", async () => {
@@ -327,6 +367,10 @@ describe("INT-01 generator (issue #229)", () => {
     expect(out.source).toContain(`"Ticket_Get": "read"`);
     expect(out.source).toContain(`"Ticket_AddNote": "mutation"`);
     expect(out.source).toContain("// Spec version: postman-v2.1");
+    // Collections declare a bearer scheme: bearer shape, never OAuth fields.
+    expect(out.source).toContain("// Auth kind: apiToken");
+    expect(out.source).toContain("apiToken");
+    expect(out.source).not.toContain("clientSecret");
   });
 
   it("keeps the CLI on the canonical Postman output", async () => {
@@ -354,5 +398,348 @@ describe("INT-01 generator (issue #229)", () => {
     expect(() => generateIntegrationModule(JSON.stringify({ info: { name: "e" }, item: [] }), opts(), DIGEST)).toThrow(
       expect.objectContaining({ code: "GENERATOR_INVALID_SPEC" }),
     );
+  });
+
+  it("detects bearer schemes and emits the bearer shape (fix 1)", () => {
+    const bearer = {
+      openapi: "3.0.3",
+      info: { version: "1.0.0", title: "Bearer API" },
+      components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer", bearerFormat: "dnkey" } } },
+      security: [{ BearerAuth: [] }],
+      paths: { "/v1/things": { get: { operationId: "Things_List", summary: "List things." } } },
+    };
+    expect(detectGeneratorAuthKind(bearer)).toBe("apiToken");
+    const out = generateIntegrationModule(JSON.stringify(bearer), { ...opts(), id: "bearer" }, DIGEST);
+    expect(out.source).toContain("// Auth kind: apiToken");
+    expect(out.source).toContain("Authorization: `Bearer ${apiToken}`");
+    expect(out.source).not.toContain("clientSecret");
+    expect(out.source).not.toContain("requestClientCredentialsToken");
+    // Bearer timeouts map to the vendor-timeout Fault like the OAuth host.
+    expect(out.source).toContain('throw new Fault(504, "BEARER_VENDOR_TIMEOUT", "The vendor exceeded its deadline.");');
+    // apiKey and basic schemes share the bearer shape (single token, never OAuth).
+    const apiKey = {
+      openapi: "3.0.3",
+      info: { version: "1.0.0" },
+      components: { securitySchemes: { Key: { type: "apiKey", in: "header", name: "X-Key" } } },
+      security: [{ Key: [] }],
+      paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+    };
+    expect(detectGeneratorAuthKind(apiKey)).toBe("apiToken");
+    const basic = {
+      openapi: "3.0.3",
+      info: { version: "1.0.0" },
+      components: { securitySchemes: { Basic: { type: "http", scheme: "basic" } } },
+      security: [{ Basic: [] }],
+      paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+    };
+    expect(detectGeneratorAuthKind(basic)).toBe("apiToken");
+    // Declared-but-unreferenced schemes never select the kind (fail closed).
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
+        paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+      }),
+    ).toBe("unknown");
+    // Heterogeneous requirements (one host, two credential shapes) fail closed.
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        components: {
+          securitySchemes: {
+            BearerAuth: { type: "http", scheme: "bearer" },
+            O: { type: "oauth2", flows: { clientCredentials: { tokenUrl: "https://x.example/token", scopes: {} } } },
+          },
+        },
+        security: [{ BearerAuth: [] }, { O: [] }],
+        paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+      }),
+    ).toBe("unknown");
+    // Unresolved references fail closed (never stamp a shape for a scheme
+    // the spec does not declare).
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
+        security: [{ Missing: [] }],
+        paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+      }),
+    ).toBe("unknown");
+  });
+
+  it("detects OAuth client-credentials and keeps existing OAuth specs working (fix 1)", () => {
+    expect(detectGeneratorAuthKind(JSON.parse(haloShaped()))).toBe("clientCredentials");
+    const implicit = {
+      openapi: "3.0.3",
+      info: { version: "1.0.0" },
+      components: {
+        securitySchemes: {
+          Implicit: {
+            type: "oauth2",
+            flows: { implicit: { authorizationUrl: "https://x.example/auth", scopes: {} } },
+          },
+        },
+      },
+      security: [{ Implicit: [] }],
+      paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+    };
+    expect(detectGeneratorAuthKind(implicit)).toBe("unknown");
+    expect(() => generateIntegrationModule(JSON.stringify(implicit), { ...opts(), id: "implicit" }, DIGEST)).toThrow(
+      expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }),
+    );
+    // Branch cover: unresolved references fail closed, never skipped.
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
+        security: [{ Missing: [] }],
+        paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+      }),
+    ).toBe("unknown");
+    // Missing, malformed, and empty flows fail closed: only an explicit
+    // clientCredentials-capable grant selects the OAuth shape.
+    for (const flows of [{}, undefined, null, ["x"]]) {
+      expect(
+        detectGeneratorAuthKind({
+          openapi: "3.0.3",
+          info: { version: "1.0.0" },
+          components: { securitySchemes: { O: { type: "oauth2", ...(flows === undefined ? {} : { flows }) } } },
+          security: [{ O: [] }],
+          paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+        }),
+      ).toBe("unknown");
+    }
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        components: { securitySchemes: { O: { type: "oauth2", flows: { authorizationCode: {} } } } },
+        security: [{ O: [] }],
+        paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+      }),
+    ).toBe("unknown");
+    // No security blocks at all: never guess bearer from silence.
+    // Undeclared references stay unknown even when bearer-shaped.
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        security: [{ ServiceToken: [] }],
+        paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+      }),
+    ).toBe("unknown");
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        security: [{ SessionCookie: [] }],
+        paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+      }),
+    ).toBe("unknown");
+    // Per-operation references select the kind when top-level is absent.
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
+        paths: {
+          "/v1/things": {
+            get: { operationId: "Things_List", security: [{ BearerAuth: [] }] },
+          },
+        },
+      }),
+    ).toBe("apiToken");
+    // Malformed security blocks (non-arrays, non-objects) stay unknown.
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        security: "bearer",
+        paths: {
+          "/v1/things": {
+            get: { operationId: "Things_List", security: [{ Bad: [] }, null, "x"] },
+          },
+        },
+      }),
+    ).toBe("unknown");
+  });
+
+  it("fails closed on unknown schemes and mismatched overrides (fix 1)", () => {
+    const bare = JSON.stringify({
+      openapi: "3.0.3",
+      info: { version: "v1" },
+      paths: { "/a": { get: { operationId: "A_Get" } } },
+    });
+    expect(() => generateIntegrationModule(bare, { ...opts(), id: "bare" }, DIGEST)).toThrow(
+      expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }),
+    );
+    const bearer = JSON.stringify({
+      openapi: "3.0.3",
+      info: { version: "v1" },
+      components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
+      security: [{ BearerAuth: [] }],
+      paths: { "/a": { get: { operationId: "A_Get" } } },
+    });
+    // Mismatched override fails closed; agreeing override passes.
+    expect(() =>
+      generateIntegrationModule(bearer, { ...opts(), id: "bare", authKind: "clientCredentials" }, DIGEST),
+    ).toThrow(expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }));
+    expect(() => generateIntegrationModule(bearer, { ...opts(), id: "bare", authKind: "unknown" }, DIGEST)).toThrow(
+      expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }),
+    );
+    expect(() =>
+      generateIntegrationModule(bearer, { ...opts(), id: "bare", authKind: "apiToken" }, DIGEST),
+    ).not.toThrow();
+    // OAuth-only options on a bearer spec are a caller error, not ignored.
+    expect(() =>
+      generateIntegrationModule(bearer, { ...opts(), id: "bare", tokenPath: "/oauth/token" }, DIGEST),
+    ).toThrow(expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }));
+  });
+
+  it("derives a deterministic UUIDv5 Integration ID from the spec digest (fix 2)", () => {
+    const first = integrationUuidV5(DIGEST);
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(integrationUuidV5(DIGEST)).toBe(first);
+    expect(integrationUuidV5("cd".repeat(32))).not.toBe(first);
+    expect(() => integrationUuidV5("not-hex")).toThrow(expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }));
+    const out = generateIntegrationModule(haloShaped(), opts(), DIGEST);
+    expect(out.source).toContain(`export const HALO_INTEGRATION_ID = "${first}";`);
+    // The emitted UUID registers: defineIntegration requires a stable UUID.
+    expect(() =>
+      defineIntegration({
+        id: first,
+        name: "halo-generated",
+        description: "Generator regression proof.",
+        secretFields: ["clientSecret"],
+        configSchema: [
+          {
+            name: "endpoint",
+            type: "string",
+            required: true,
+            maxLength: 512,
+            description: "Provider origin.",
+          },
+        ],
+        requiredSecrets: ["clientSecret"],
+        secretEnvVars: { clientSecret: "HALO_GENERATED_CLIENT_SECRET" },
+        health: { testHint: "Probe the generated provider.", remediation: "Check the endpoint and retry." },
+      }),
+    ).not.toThrow();
+  });
+
+  it("excludes deprecated operations by default with an opt-in flag (fix 3)", () => {
+    const spec = {
+      openapi: "3.0.3",
+      info: { version: "v1", title: "Deprecations" },
+      components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
+      security: [{ BearerAuth: [] }],
+      paths: {
+        "/v1/old": { get: { operationId: "Old_Get", summary: "Old.", deprecated: true } },
+        "/v1/new": { get: { operationId: "New_Get", summary: "New." } },
+      },
+    };
+    const text = JSON.stringify(spec);
+    expect(indexOperations(spec).map((op) => op.operationId)).toEqual(["New_Get"]);
+    expect(
+      indexOperations(spec, {}, { includeDeprecated: true })
+        .map((op) => op.operationId)
+        .sort(),
+    ).toEqual(["New_Get", "Old_Get"]);
+    const excluded = generateIntegrationModule(text, { ...opts(), id: "dep" }, DIGEST);
+    expect(excluded.operationCount).toBe(1);
+    expect(excluded.source).not.toContain(`"Old_Get":`);
+    // The embedded literal keeps the deprecated op (pinned contract evidence)
+    // but it is never callable: no classification entry, no search hit.
+    const embedded = JSON.parse(
+      excluded.source.match(/__GENERATED_SPEC__: OpenApiDocument = (\{.*?\});\n\nasync function pinnedSpec/s)?.[1] ??
+        "{}",
+    ) as { paths: Record<string, Record<string, { operationId?: string }>> };
+    expect(embedded.paths["/v1/old"]?.get?.operationId).toBe("Old_Get");
+    expect(indexOperations(embedded, {})).toHaveLength(1);
+    const included = generateIntegrationModule(text, { ...opts(), id: "dep", includeDeprecated: true }, DIGEST);
+    expect(included.operationCount).toBe(2);
+    expect(included.source).toContain(`"Old_Get": "read"`);
+    // The opt-in flag threads into every generated runtime indexing call so
+    // the advertised classifications stay executable and searchable.
+    expect(included.source).toContain("DEP_CLASSIFICATIONS, { includeDeprecated: true }");
+    expect(included.source).not.toContain("DEP_CLASSIFICATIONS, {}");
+    expect(excluded.source).toContain("DEP_CLASSIFICATIONS, {}");
+    expect(excluded.source).not.toContain("DEP_CLASSIFICATIONS, { includeDeprecated: true }");
+  });
+
+  it("keeps the embedded spec under the documented budget via the strip policy (fix 4)", () => {
+    expect(GENERATOR_EMBED_BYTES_MAX).toBe(96 * 1024);
+    const fat = {
+      openapi: "3.0.3",
+      info: { version: "v1" },
+      components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
+      security: [{ BearerAuth: [] }],
+      paths: {
+        "/v1/things": {
+          get: {
+            operationId: "Things_List",
+            summary: "List.",
+            description: "d".repeat(2000),
+            responses: { 200: { description: "ok", content: { "application/json": { example: { big: true } } } } },
+          },
+        },
+      },
+      "x-vendor": { huge: true },
+    };
+    const out = generateIntegrationModule(JSON.stringify(fat), { ...opts(), id: "fat" }, DIGEST);
+    const embedded =
+      out.source.match(/__GENERATED_SPEC__: OpenApiDocument = (\{.*?\});\n\nasync function pinnedSpec/s)?.[1] ?? "";
+    expect(new TextEncoder().encode(embedded).length).toBeLessThanOrEqual(GENERATOR_EMBED_BYTES_MAX);
+    expect(embedded).not.toContain("example");
+    expect(embedded).not.toContain("x-vendor");
+    expect(embedded).toContain("[truncated]");
+    // A stripped spec still over budget fails closed instead of emitting.
+    const enormous = {
+      openapi: "3.0.3",
+      info: { version: "v1" },
+      components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
+      security: [{ BearerAuth: [] }],
+      paths: Object.fromEntries(
+        Array.from({ length: 1200 }, (_, i) => [
+          `/v1/thing${i}`,
+          {
+            get: {
+              operationId: `Thing${i}_Get`,
+              summary: `Thing ${i}.`,
+              description: `Description for thing ${i} with enough text to pad the literal.`,
+            },
+          },
+        ]),
+      ),
+    };
+    expect(() => generateIntegrationModule(JSON.stringify(enormous), { ...opts(), id: "fat" }, DIGEST)).toThrow(
+      expect.objectContaining({ code: "GENERATOR_INVALID_SPEC" }),
+    );
+  });
+
+  it("keeps the CLI on the canonical bearer output (fix 1 parity)", async () => {
+    const bearer = JSON.stringify({
+      openapi: "3.0.3",
+      info: { version: "1.0.0", title: "Bearer API" },
+      components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
+      security: [{ BearerAuth: [] }],
+      paths: { "/v1/things": { get: { operationId: "Things_List", summary: "List things." } } },
+    });
+    const digest = await sha256Hex(bearer);
+    const canonical = generateIntegrationModule(bearer, { ...opts(), id: "bearer", name: "bearer" }, digest);
+    const cli = (await runCommand({
+      command: "generate-integration",
+      genId: "bearer",
+      genName: "bearer",
+      genSpec: bearer,
+      genOrigins: ["https://halo-lab.example.com"],
+    })) as GeneratedCliResult;
+    expect(cli.generated.content).toBe(canonical.source);
+    expect(cli.generated.content).toContain("// Auth kind: apiToken");
+    expect(cli.generated.content).not.toContain("clientSecret");
   });
 });

@@ -30,6 +30,7 @@ import migration6 from "../migrations/0006_apps.sql?raw";
 import migration7 from "../migrations/0007_org_membership.sql?raw";
 import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
 import migration9 from "../migrations/0011_connection_admin.sql?raw";
+import migration10 from "../migrations/0029_connection_secrets.sql?raw";
 import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
@@ -65,6 +66,7 @@ beforeEach(async () => {
   await bindings.DB.exec(migration7);
   await bindings.DB.exec(migration8);
   await bindings.DB.exec(migration9);
+  await bindings.DB.exec(migration10);
   // The LAB fixture identity self-bootstraps membership on first request
   // (src/auth.ts); the second org is created directly since cross-org
   // membership for the fixture caller would widen its scope. The foreign
@@ -99,7 +101,17 @@ describe("Integration discovery (CON-01)", () => {
     expect(response.status).toBe(200);
     const body = await jsonOf(response);
     const integrations = body.integrations as { id: string; name: string; requiredSecrets: string[] }[];
-    expect(integrations.map((entry) => entry.name).sort()).toEqual(["cloudflare", "echo", "halo", "ninjaone"]);
+    expect(integrations.map((entry) => entry.name).sort()).toEqual([
+      "anthropic",
+      "cloudflare",
+      "echo",
+      "google",
+      "halo",
+      "ninjaone",
+      "openai",
+      "openai-compatible",
+      "openrouter",
+    ]);
     const echo = integrations.find((entry) => entry.name === "echo");
     const text = JSON.stringify(body);
     // The echo default endpoint is a portable declaration (schema default),

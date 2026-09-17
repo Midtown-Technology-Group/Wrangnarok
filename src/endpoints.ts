@@ -39,6 +39,7 @@
 // fields, which are rejected loudly.
 import { BODY_LIMIT, Fault, hash, parseKey, parseSubmission, UUID } from "./domain";
 import type { Principal, SagaDef } from "./domain";
+import { WEBHOOK_DELIVERED_TOPIC, recordSourceDelivery } from "./events";
 import { submit } from "./executions";
 
 export const ENDPOINT_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -154,12 +155,48 @@ export function parseWebhookSecrets(value: string | undefined): ReadonlyMap<stri
   }
 }
 
+const B64ABC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/** Decode the canonical base64 form of a 32-byte HMAC-SHA256 digest:
+ * exactly 44 standard-alphabet chars with single `=` padding. Returns null
+ * for every ambiguous alternate encoding (base64url, unpadded base64,
+ * wrong length such as base64-of-hex, inner whitespace, non-canonical pad
+ * bits) so those fail closed to 401 at the caller. */
+function decodeDigestBase64(input: string): Uint8Array | null {
+  if (input.length !== 44 || !input.endsWith("=")) return null;
+  const values: number[] = [];
+  for (let i = 0; i < 43; i++) {
+    const at = B64ABC.indexOf(input[i] ?? "");
+    if (at < 0) return null;
+    values.push(at);
+  }
+  const at = (index: number): number => values[index] as number;
+  const out = new Uint8Array(32);
+  for (let group = 0; group < 10; group++) {
+    out[group * 3] = (at(group * 4) << 2) | (at(group * 4 + 1) >> 4);
+    out[group * 3 + 1] = ((at(group * 4 + 1) & 15) << 4) | (at(group * 4 + 2) >> 2);
+    out[group * 3 + 2] = ((at(group * 4 + 2) & 3) << 6) | at(group * 4 + 3);
+  }
+  // 32 digest bytes carry 256 bits; 43 data chars carry 258, so the two
+  // excess pad bits must be zero for the encoding to be canonical.
+  if ((at(42) & 3) !== 0) return null;
+  out[30] = (at(40) << 2) | (at(41) >> 4);
+  out[31] = ((at(41) & 15) << 4) | (at(42) >> 2);
+  return out;
+}
+
 /** Verify a `webhook` endpoint HMAC-SHA256 body signature. The raw request
  * bytes are signed with the endpoint secret; D1 holds only the SHA-256
  * confirmation digest of the secret (never the secret itself), and the raw
  * secret arrives via the deployment secret binding (ADR 005 v0:
- * deployment-level secrets). Throws 401 on missing/invalid signatures, 410
- * on disabled endpoints. */
+ * deployment-level secrets). Accepted encodings mirror the upstream generic
+ * adapter (issue #138 drift, `gobifrost/bifrost@070235e0`): canonical hex
+ * or standard padded base64 of the raw digest, tolerating surrounding
+ * whitespace plus whitespace after the `sha256=` prefix (notably HaloPSA's
+ * `sha256= <base64>` form). base64url, unpadded base64, base64-of-hex, and
+ * whitespace inside the digest stay rejected. The hex digest compares in
+ * constant time and the base64 digest verifies through `crypto.subtle.verify`.
+ * Throws 401 on missing/invalid signatures, 410 on disabled endpoints. */
 export async function verifyWebhookSignature(
   endpoint: EndpointRow,
   rawBody: Uint8Array,
@@ -176,10 +213,8 @@ export async function verifyWebhookSignature(
   if (secret === undefined || (await hash(secret)) !== endpoint.signature_secret_hash) {
     throw new Fault(401, "ENDPOINT_UNAUTHORIZED", "A valid webhook signature is required.");
   }
-  const prefixed = signature.startsWith("sha256=") ? signature.slice("sha256=".length) : signature;
-  if (!/^[a-f0-9]{64}$/i.test(prefixed)) {
-    throw new Fault(401, "ENDPOINT_UNAUTHORIZED", "A valid webhook signature is required.");
-  }
+  let candidate = signature.trim();
+  if (candidate.startsWith("sha256=")) candidate = candidate.slice("sha256=".length).trimStart();
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -187,11 +222,18 @@ export async function verifyWebhookSignature(
     false,
     ["sign", "verify"],
   );
-  const hex = (bytes: Uint8Array): string => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  const computed = hex(new Uint8Array(await crypto.subtle.sign("HMAC", key, rawBody as BufferSource)));
-  if (!(await timingEqualHex(computed, prefixed.toLowerCase()))) {
-    throw new Fault(401, "ENDPOINT_UNAUTHORIZED", "A valid webhook signature is required.");
+  const computed = new Uint8Array(await crypto.subtle.sign("HMAC", key, rawBody as BufferSource));
+  let verified = false;
+  if (/^[a-f0-9]{64}$/i.test(candidate)) {
+    const hex = Array.from(computed, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    verified = await timingEqualHex(hex, candidate.toLowerCase());
+  } else {
+    const decoded = decodeDigestBase64(candidate);
+    if (decoded !== null && decoded.byteLength === computed.byteLength) {
+      verified = await crypto.subtle.verify("HMAC", key, decoded as BufferSource, rawBody as BufferSource);
+    }
   }
+  if (!verified) throw new Fault(401, "ENDPOINT_UNAUTHORIZED", "A valid webhook signature is required.");
   return {
     orgId: endpoint.org_id,
     userId: `endpoint:${endpoint.id}`,
@@ -301,8 +343,11 @@ export function mapEndpointPayload(saga: SagaDef, payload: unknown): { saga: Sag
 
 /** Inbound per-endpoint rate limiting (abuse protection, ADR 018): minute
  * buckets in D1, checked before any Execution write. Over-limit answers 429
- * with Retry-After; the check is advisory under concurrency (two racers may
- * both pass) — Execution idempotency, not this counter, owns correctness. */
+ * with Retry-After. The check fails closed: a store error is not evidence
+ * that the bucket is empty, so the read fault propagates instead of
+ * admitting under an invented zero count. The counter stays advisory under
+ * concurrency (two racers may both pass) — Execution idempotency, not this
+ * counter, owns correctness. */
 export async function checkEndpointRateLimit(db: D1Database, endpoint: EndpointRow): Promise<void> {
   const perMinute = endpoint.rate_limit_per_minute;
   if (perMinute === null) return;
@@ -312,8 +357,7 @@ export async function checkEndpointRateLimit(db: D1Database, endpoint: EndpointR
   const existing = await db
     .prepare('SELECT hits FROM "endpoint_rate_windows" WHERE endpoint_id=? AND window_start=?')
     .bind(endpoint.id, windowStart)
-    .first<{ hits: number }>()
-    .catch(() => null);
+    .first<{ hits: number }>();
   const hits = existing?.hits ?? 0;
   if (hits >= perMinute) {
     throw new Fault(429, "ENDPOINT_RATE_LIMITED", "This endpoint is receiving too many requests.");
@@ -704,5 +748,16 @@ export async function executeEndpointDelivery(
     // endpoint_events is replay visibility only: a missing table (old DB
     // before migration 0021) must not fail the Execution itself.
   }
+  // TRG-03 S1 (issue #139): best-effort delivery append. When the operator
+  // registered an enabled `webhook` source observing this endpoint, the
+  // vendor event lands in the event log with its Execution attribution;
+  // otherwise (or on any fault) this resolves to silence and delivery is
+  // unaffected.
+  await recordSourceDelivery(db, endpoint.org_id, "webhook", endpoint.id, {
+    eventId: opts.eventId,
+    topic: WEBHOOK_DELIVERED_TOPIC,
+    payloadJson: JSON.stringify(input),
+    executionId: accepted.executionId,
+  });
   return { ...accepted, eventReplayed };
 }

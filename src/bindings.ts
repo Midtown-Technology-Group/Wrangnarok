@@ -14,6 +14,16 @@ export interface HaloCredentials {
   HALO_CLIENT_ID?: string;
   HALO_CLIENT_SECRET?: string;
 }
+/** AI-01 provider credentials (issue #164, ADR 032): deployment-global API
+ * keys, one per provider kind. Presence-checked at test/execution time,
+ * never persisted, never returned through discovery. */
+export interface AiProviderCredentials {
+  OPENAI_API_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
+  GOOGLE_API_KEY?: string;
+  OPENROUTER_API_KEY?: string;
+  OPENAI_COMPATIBLE_API_KEY?: string;
+}
 /** Zone Inventory migration (issues #116 MIG-01, #119 MIG-02): deployment
  * credential surface for the Cloudflare bearer Connection. The account-owned
  * API token lives in env, never in D1; the account mapping resolves
@@ -21,8 +31,23 @@ export interface HaloCredentials {
 export interface CloudflareCredentials {
   CLOUDFLARE_API_TOKEN?: string;
 }
+/** Per-Organization envelope encryption (SEC-02, issue #411): KEK material
+ * for wrapping per-Connection DEKs. One secret per environment
+ * (stdin-provisioned via Secrets Store); dev and prod values are distinct
+ * and never shared. Never persisted, never returned, never logged. */
+export interface SecretsKek {
+  SECRETS_KEK?: string;
+}
 export interface Bindings
-  extends LabAuth, AccessEnv, AdminEnv, NinjaCredentials, HaloCredentials, CloudflareCredentials {
+  extends
+    LabAuth,
+    AccessEnv,
+    AdminEnv,
+    NinjaCredentials,
+    HaloCredentials,
+    AiProviderCredentials,
+    CloudflareCredentials,
+    SecretsKek {
   DB: D1Database;
   FILES: R2Bucket;
   ARTIFACTS?: R2Bucket;

@@ -4,10 +4,12 @@
 src/saga.ts
 src/domain.ts
 src/executions.ts
+src/saga-helpers.ts
 src/sagas/shared.ts
 src/sagas/echo.ts
 src/sagas/digest.ts
 src/sagas/ninjaorgs.ts
+src/sagas/cloudflare.ts
 src/integrations/echo.ts
 src/integrations/ninjaone.ts
 src/index.ts

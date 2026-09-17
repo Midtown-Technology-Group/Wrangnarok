@@ -2,10 +2,11 @@
 // Shared thin-platform glue for the per-saga modules: translate one Saga
 // definition onto the native Workflow contract. No Saga behavior lives here;
 // each module under src/sagas owns its definition plus its Workflow adapter.
+import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
-import { EXECUTION_ID } from "../domain";
+import { CLOUDFLARE_INTEGRATION_ID, EXECUTION_ID, NINJA_INTEGRATION_ID } from "../domain";
 import type { ExecutionParams, SagaRuntimePolicy } from "../domain";
 import { assertJsonSerializable, bindSagaStep } from "../saga";
 import type { SagaDefinition, SagaEventContext } from "../saga";
@@ -17,7 +18,9 @@ import { clearExecutionSecrets, registerExecutionSecrets, scrubExecutionText, sc
 import { echo } from "../integrations/echo";
 import { listOrganizations } from "../integrations/ninjaone";
 import { inventoryZones, verifyConnection } from "../integrations/cloudflare";
-import { parseStoredPolicy } from "../executions";
+import { loadExecutionPolicy, resolveConnection } from "../executions";
+import { resolveConnectionSecrets } from "../connections";
+import { ENVELOPE_KEY_VERSION } from "../envelope";
 
 /** Read the parent caller identity from its immutable D1 Execution row.
  * Lazy (first child invoke/await only): context construction itself never
@@ -38,6 +41,55 @@ async function executionOrgId(db: D1Database, id: string): Promise<string> {
   return row.org_id;
 }
 
+/** Resolve per-Organization secret values for one Execution (SEC-02, issue
+ * #411). Without a KEK this returns empty without touching D1: the v0 path
+ * runs untouched, and removing the KEK parks the per-org path (rows stay
+ * inert ciphertext) rather than migrating anything. With a KEK, stored
+ * envelopes for the Execution's org resolve here and win over the
+ * deployment credential; corrupt rows fail loud via
+ * resolveConnectionSecrets (never a silent deployment fallback). Unknown
+ * executions resolve to no org row and return empty — the prepare step
+ * still owns that failure exactly as before. Resolved values register with
+ * the execution-scoped registry for write-time scrubbing. */
+export async function resolveExecutionOrgSecrets(
+  db: D1Database,
+  id: string,
+  saga: { readonly id: string; readonly revision: string },
+  kekMaterial: string | undefined,
+): Promise<{ clientSecret?: string; apiToken?: string }> {
+  if (typeof kekMaterial !== "string" || kekMaterial.length === 0) return {};
+  const keks: Readonly<Record<number, string>> = { [ENVELOPE_KEY_VERSION]: kekMaterial };
+  const orgRow = await db
+    .prepare("SELECT org_id,user_id FROM executions WHERE id=?")
+    .bind(id)
+    .first<{ org_id: string; user_id: string }>();
+  if (!orgRow) return {};
+  const orgSecrets: { clientSecret?: string; apiToken?: string } = {};
+  const orgCtx = {
+    orgId: orgRow.org_id,
+    userId: orgRow.user_id,
+    executionId: id,
+    sagaId: saga.id,
+    sagaRevision: saga.revision,
+    attemptToken: `${id}:0`,
+  };
+  const bindings = [
+    { integrationId: NINJA_INTEGRATION_ID, field: "clientSecret", ctxKey: "clientSecret" },
+    { integrationId: CLOUDFLARE_INTEGRATION_ID, field: "apiToken", ctxKey: "apiToken" },
+  ] as const;
+  for (const binding of bindings) {
+    const resolved = await resolveConnection(db, orgCtx, binding.integrationId, []);
+    if (!resolved.found) continue;
+    const decrypted = await resolveConnectionSecrets(db, orgRow.org_id, resolved.connection.id, keks);
+    const value = decrypted[binding.field];
+    if (typeof value === "string" && value.length > 0) {
+      orgSecrets[binding.ctxKey] = value;
+      registerExecutionSecrets(id, [value]);
+    }
+  }
+  return orgSecrets;
+}
+
 export async function executeSaga<TOutput>(
   env: Bindings,
   event: WorkflowEvent<ExecutionParams>,
@@ -52,7 +104,16 @@ export async function executeSaga<TOutput>(
   // checkpoint below scrubs them by substring, including tokens the Action
   // registers mid-run. Cleared on every exit path — a reused isolate never
   // carries one Execution's secrets into the next.
-  registerExecutionSecrets(id, [env.NINJA_CLIENT_ID, env.NINJA_CLIENT_SECRET, env.CLOUDFLARE_API_TOKEN]);
+  registerExecutionSecrets(id, [
+    env.NINJA_CLIENT_ID,
+    env.NINJA_CLIENT_SECRET,
+    env.HALO_CLIENT_ID,
+    env.HALO_CLIENT_SECRET,
+    env.CLOUDFLARE_API_TOKEN,
+  ]);
+  // Per-Organization secrets (SEC-02, issue #411); see
+  // resolveExecutionOrgSecrets below for the contract.
+  const orgSecrets = await resolveExecutionOrgSecrets(env.DB, id, def, env.SECRETS_KEK);
   try {
     const sagaStep = bindSagaStep(step);
     const catalog: ChildCatalog = { sagas: SAGA_DEFINITIONS };
@@ -114,16 +175,13 @@ export async function executeSaga<TOutput>(
         return bindSagaConfig({ db: env.DB, orgId, executionId: id, secrets: deploymentSecrets }).require(key);
       },
     };
-    // RUN-01 (ADR 018): the Workflow resolves step retry limits through the
-    // Execution's snapshotted policy, never the live operator row. In-flight
-    // runs keep the behavior they started with when an operator edits policy
-    // mid-flight; missing snapshots (old rows) collapse to the code table.
-    const snapshot = await env.DB.prepare("SELECT policy_json FROM executions WHERE id=?")
-      .bind(id)
-      .first<{ policy_json: string | null }>()
-      .catch(() => null);
-    const policy: SagaRuntimePolicy | undefined =
-      snapshot?.policy_json == null ? undefined : parseStoredPolicy(snapshot.policy_json);
+    // RUN-01 (ADR 018, Slice A issue #135): the Workflow resolves step retry
+    // limits through the Execution's snapshotted policy, never the live
+    // operator row. In-flight runs keep the behavior they started with when
+    // an operator edits policy mid-flight; legacy snapshots (old rows)
+    // resolve to the code default through the shared loader. A snapshot read
+    // failure throws before any step runs, never falling back to defaults.
+    const policy: SagaRuntimePolicy = await loadExecutionPolicy(env.DB, id);
     const ctx: SagaEventContext = {
       executionId: id,
       integrations: {
@@ -134,8 +192,8 @@ export async function executeSaga<TOutput>(
       db: env.DB,
       secrets: {
         clientId: env.NINJA_CLIENT_ID,
-        clientSecret: env.NINJA_CLIENT_SECRET,
-        apiToken: env.CLOUDFLARE_API_TOKEN,
+        clientSecret: orgSecrets.clientSecret ?? env.NINJA_CLIENT_SECRET,
+        apiToken: orgSecrets.apiToken ?? env.CLOUDFLARE_API_TOKEN,
       },
       children: lazyChildren,
       config: lazyConfig,
@@ -154,4 +212,22 @@ export async function executeSaga<TOutput>(
   } finally {
     clearExecutionSecrets(id);
   }
+}
+
+/** Workflow adapter factory (ADR-033-1): returns the WorkflowEntrypoint
+ * subclass for one Saga definition, replacing the per-file adapter class
+ * body. Each Saga file keeps a one-line named subclass
+ * (`export class EchoWorkflow extends makeSagaWorkflow(echoSagaDef) {}`)
+ * because wrangler.jsonc class_name targets and the src/index.ts re-export
+ * require statically exported classes. The return type preserves the native
+ * (ctx, env) construct signature: a `new () => ...` type fails with TS2322
+ * because the native constructor takes 2 arguments. */
+export function makeSagaWorkflow<TOutput>(
+  def: SagaDefinition<TOutput>,
+): new (ctx: ExecutionContext, env: Bindings) => WorkflowEntrypoint<Bindings, ExecutionParams> {
+  return class extends WorkflowEntrypoint<Bindings, ExecutionParams> {
+    async run(event: WorkflowEvent<ExecutionParams>, step: WorkflowStep): Promise<TOutput> {
+      return executeSaga(this.env, event, step, def);
+    }
+  };
 }

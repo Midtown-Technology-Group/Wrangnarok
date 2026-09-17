@@ -1,0 +1,6 @@
+# Synthetic canary for issue #247 controlled test.
+#
+# This is NOT a real credential: the wrangnarok_canary_ prefix is defined in
+# .gitleaks.toml solely so the scanner path can prove detection end to end.
+# Do not use this prefix for real secrets, and do not copy real credentials here.
+wrangnarok_canary_0123456789ABCDEF0123456789ABCDEF

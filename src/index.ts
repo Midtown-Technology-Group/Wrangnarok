@@ -144,7 +144,15 @@ import {
   updateEndpoint,
   vendorChallenge,
 } from "./endpoints";
-import type { EndpointRow } from "./endpoints";
+import {
+  createEventSource,
+  deleteEventSource,
+  emitEvent,
+  listEventSources,
+  listEvents,
+  parseEventSourceName,
+  setEventSourceEnabled,
+} from "./events";
 import {
   createSchedule,
   deleteSchedule,
@@ -224,6 +232,7 @@ import {
   deleteConnection,
   getConnection,
   listConnections,
+  putConnectionSecrets,
   scrubConnectionPayload,
   testConnection,
   updateConnection,
@@ -493,7 +502,10 @@ async function handlePublicDelivery(request: Request, env: Bindings): Promise<Re
   if (queryKeys.some((entry) => entry !== "challenge")) {
     throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
   }
-  const rows = await loadEndpointsByName(env.DB, name).catch(() => [] as EndpointRow[]);
+  // Fail closed: a D1/query/schema fault propagates to the sanitized 5xx
+  // path (a retryable infrastructure error for vendors), never to a
+  // permanent-looking 404. Only a genuine empty result answers NOT_FOUND.
+  const rows = await loadEndpointsByName(env.DB, name);
   if (rows.length === 0) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
   const challengeRow = findChallengeEndpoint(rows.filter((row) => row.kind === "webhook"));
   const challenge = challengeRow ? vendorChallenge(challengeRow, url) : null;
@@ -1010,6 +1022,100 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const delivery = await deliveryForWindow(env.DB, row.id, window);
       if (!delivery) throw new Fault(404, "NOT_FOUND", "Not found.");
       return json({ delivery: { schedule: name, window, executionId: delivery.execution_id } });
+    }
+    // TRG-03 S1 event sources (issue #139): org-scoped source registry plus
+    // a durable append-only event log. Registration and emission are
+    // operator-managed environment state (requireManageOrg), reads are
+    // member-open, and foreign rows answer 404 — the same posture as the
+    // schedule surface above. Subscriptions, fan-out, and operator replay
+    // are deferred: this block owns the registry plus the log only.
+    if (url.pathname === "/api/event-sources" && request.method === "GET") {
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json({ sources: await listEventSources(env.DB, caller.orgId) });
+    }
+    if (url.pathname === "/api/event-sources" && request.method === "POST") {
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
+      const body = await boundedJson(request.body);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(400, "INVALID_EVENT_SOURCE", "Provide name and kind.");
+      }
+      const record = body as Record<string, unknown>;
+      if (typeof record.name === "string") parseEventSourceName(record.name);
+      return json(
+        {
+          source: await createEventSource(env.DB, caller, {
+            name: record.name,
+            kind: record.kind,
+            ...(record.refId === undefined ? {} : { refId: record.refId }),
+          }),
+        },
+        201,
+      );
+    }
+    const eventSourceDetail = /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname);
+    if (eventSourceDetail?.[1] && (request.method === "GET" || request.method === "DELETE")) {
+      const name = parseEventSourceName(eventSourceDetail[1]);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      if (request.method === "GET") {
+        const [found] = await listEventSources(env.DB, caller.orgId).then((all) =>
+          all.filter((entry) => entry.name === name),
+        );
+        if (!found) throw new Fault(404, "NOT_FOUND", "Not found.");
+        return json({ source: found });
+      }
+      // Deleting removes the source plus its log rows; ExecutionHistory
+      // provenance survives on the executions rows. Gone-or-foreign 404s.
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      await deleteEventSource(env.DB, caller, name);
+      return json({ deleted: true });
+    }
+    const eventSourceEnable = /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/(enable|disable)$/.exec(url.pathname);
+    if (eventSourceEnable?.[1] && eventSourceEnable?.[2] && request.method === "POST") {
+      // Enablement fences future emits and delivery appends while logged
+      // events keep their rows and history.
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      const name = parseEventSourceName(eventSourceEnable[1]);
+      return json({
+        source: await setEventSourceEnabled(env.DB, caller, name, eventSourceEnable[2] === "enable"),
+      });
+    }
+    const sourceEvents = /^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/events$/.exec(url.pathname);
+    // Unknown name shapes answer 404 like parseEventSourceName does — never
+    // UNIMPLEMENTED theater.
+    if (
+      /^\/api\/event-sources\/[^/]+(\/[^/]+)?$/.exec(url.pathname) &&
+      !sourceEvents &&
+      !/^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname) &&
+      !/^\/api\/event-sources\/([a-z0-9][a-z0-9-]{0,63})\/(enable|disable)$/.exec(url.pathname)
+    ) {
+      return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+    }
+    if (sourceEvents?.[1] && request.method === "POST") {
+      // Operator emission into the log: deterministic (source, event) key,
+      // same-content replays, mismatched content 409s. The tick and endpoint
+      // delivery paths append internally without passing through here.
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
+      const name = parseEventSourceName(sourceEvents[1]);
+      const body = await boundedJson(request.body);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(400, "INVALID_EVENT", "Provide eventId, topic, and payload.");
+      }
+      const record = body as Record<string, unknown>;
+      const emitted = await emitEvent(env.DB, caller, name, {
+        eventId: record.eventId,
+        topic: record.topic,
+        payload: record.payload,
+      });
+      return json({ event: emitted.event, replayed: emitted.replayed }, emitted.replayed ? 200 : 201);
+    }
+    if (sourceEvents?.[1] && request.method === "GET") {
+      // Log history for replay visibility: newest first, bounded 50.
+      const name = parseEventSourceName(sourceEvents[1]);
+      if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
+      return json({ events: await listEvents(env.DB, caller.orgId, name, 50) });
     }
     if (url.pathname === "/api/executions" && request.method === "POST") {
       const key = parseCallerKey(request.headers.get("Idempotency-Key"));
@@ -2577,7 +2683,8 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // authorized boundary. Every response is scrubbed with the deployment
     // secrets before send; views carry required-secret names only, never
     // values. Secret values are never accepted on any path here (SEC-02
-    // tripwire stays shut). One explicit matcher per route.
+    // tripwire fired for Connection credentials, issue #411; OAuth token
+    // persistence stays shut). One explicit matcher per route.
     if (url.pathname === "/api/integrations" && request.method === "GET") {
       if (url.search) throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
       return json(scrubConnectionPayload({ integrations: describeIntegrations() }, env));
@@ -2661,6 +2768,20 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       }
       await deleteConnection(env.DB, caller, connOne[1]);
       return json({ deleted: true });
+    }
+    // Per-Organization secrets (SEC-02, issue #411): the exclusive route
+    // that accepts secret values. Values arrive in the POST body only
+    // (stdin-fed by the CLI in P2); the response carries the masked view,
+    // never values. Same admin rule as the mapping writes above.
+    const connSecrets = /^\/api\/connections\/([0-9a-f-]{36})\/secrets$/.exec(url.pathname);
+    if (connSecrets?.[1] && request.method === "PUT") {
+      requireJson(request);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CONNECTION_FORBIDDEN", "Only an admin may manage Connections.");
+      }
+      const body = (await boundedJson(request.body)) as { secrets?: unknown };
+      const stored = await putConnectionSecrets(env.DB, caller, connSecrets[1], body.secrets, env.SECRETS_KEK);
+      return json(scrubConnectionPayload({ connection: stored }, env));
     }
     // TOOL-01 opt-in Saga tools (issue #170, ADR 022): explicit enrollment
     // with stable identity, collision-safe names, and distinctive

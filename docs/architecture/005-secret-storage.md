@@ -1,6 +1,6 @@
 # ADR 005: Per-Organization Secret Storage
 
-- **Status:** Accepted — v0, owner-approved 2026-09-10 per issue #78
+- **Status:** Accepted — v0, owner-approved 2026-09-10 per issue #78; firing amendment Accepted (owner-stamped 2026-09-17 per issue #411 — P1 authorized)
 - **Date:** 2026-09-09 (v0 redraft 2026-09-10)
 - **Extends:** ADR 003 (Integrations and Connections; now Implemented per #75), `docs/upstream-spec.md` Secret management row
 
@@ -55,6 +55,8 @@ v0 declarations:
 | Integration | Credential scope | Rationale |
 | --- | --- | --- |
 | `ninjaone` | provider-global (declared) | MSP-platform M2M app: one credential sees all tenant orgs vendor-side |
+| `halo` | provider-global (declared) | Lab HaloPSA proof credential: one deployment credential for the pinned lab origin (TOOL-01 proof) |
+| `cloudflare` | provider-global (declared) | One account API token as a deployment secret; per-Connection account mapping selects the inventoried account. No per-tenant secret demonstrated (issue #411; PR #406) |
 | `echo` | n/a (fixture, no secrets) | Local loopback fixture; `secretFields: []` |
 
 A future Integration whose vendor model is Organization-scoped must use
@@ -110,6 +112,194 @@ fired it and why no global credential exists; the envelope implemented per
 the retained spec (encrypt-with-latest, decrypt-with-version, staged
 re-wrap rotation, dev-smoke-then-destroy drill); and D1 backups understood
 to carry ciphertext thereafter (unrecoverable without the matching KEK).
+
+### Tripwire evaluation: Cloudflare Zone Inventory (issue #411, decided 2026-09-17)
+
+Question: does provisioning `CLOUDFLARE_API_TOKEN` for the migrated
+Zone Inventory Sagas (PR #406) fire the tripwire and authorize building
+per-Organization envelope encryption plus secret-writing operator paths?
+
+Decision: **no — the tripwire stays shut.** The Cloudflare credential as
+deployed is provider-global: one account API token lives as a deployment
+secret, Connections carry endpoint plus account mapping only, and D1 holds
+no secret values — the same posture as the NinjaOne M2M credential. No
+Integration with genuinely per-tenant secrets was demonstrated, and no
+compliance demand for per-tenant credential isolation was made. A future
+multi-account Cloudflare posture (one token per customer Organization)
+would be the firing condition, and firing it still requires the ADR
+amendment above — this note does not pre-authorize it.
+
+Accepted operator path (unchanged v0 discipline): provision the value
+outside Wrangnarok surfaces via `wrangler secret put CLOUDFLARE_API_TOKEN
+--env <env>` (stdin, so the value never lands in shell history; a
+Keeper-sidecar pipeline feeds the same stdin), reference it by declared
+name only (`secretEnvVars`, `{ ref }`-style references — never values in
+D1, logs, or portable source). No Wrangnarok UI, CLI, or API accepts a
+secret value; both non-goals from the issue hold (no unencrypted values,
+no D1 discipline change). Rotation stays Secrets Store rotation per the v0
+section below.
+
+Follow-through shipped with this decision: `CLOUDFLARE_API_TOKEN` added to
+the Worker-isolate `deploymentSecretsFromEnv` scrub list in
+`src/secrets.ts` (the Workflow isolate already registered it) with
+sentinel tests in `test/secret-scrub.test.ts`, and the provider-global
+declarations table above now covers `cloudflare` (plus the missing `halo`
+row).
+
+Steward checkpoint (one-diagram test): still one authoritative secrets
+path — deployment secrets plus the execution-scoped registry plus
+universal substring scrubbing, tripwire shut. No second path was added.
+
+> Superseded later the same day: the tripwire **FIRED** per owner
+> velocity direction (issue #411 reopened). The shut decision above is
+> kept as history; the firing amendment below is authoritative once
+> owner-stamped.
+
+## Firing amendment (issue #411, Accepted — owner-stamped 2026-09-17)
+
+### What fires it and why no global credential suffices
+
+The firing requirement is general operator velocity, explicitly
+owner-authorized as broader than one vendor: every provider credential
+must be provisionable through Wrangnarok surfaces (CLI, API, UI) instead
+of per-credential `wrangler secret put` sidecars. Deployment-global
+secrets cannot serve this: one store per account capped at 100 secrets,
+statically declared bindings, and a redeploy per new credential make
+per-Organization onboarding require a deploy. Provider-global v0 is
+**retained, not migrated** — existing deployment credentials keep working
+and no forced migration ships with this amendment.
+
+### Crypto contract (boring composition only)
+
+- Algorithm: AES-GCM-256 via Web Crypto, no custom construction, no new
+  primitive (the pre-authorized crypto dependency needs no second
+  justification round; Web Crypto needs none at all).
+- Envelope: random DEK per (Connection, secret field); DEK wrapped by the
+  per-environment KEK. KEK lives in Secrets Store (env secret, stdin-provisioned),
+  never in D1, never in logs, never in portable source.
+- Stored columns beside non-secret config: `ciphertext` / `nonce` /
+  `wrapped_dek` / `key_version` / `algorithm`. Ciphertext only — D1 never
+  holds plaintext values, same discipline as v0.
+- Associated data binds `org_id` + Connection id: ciphertext decrypted
+  under the wrong org or Connection fails closed (no cross-tenant move by
+  row copy).
+- Decrypt transiently at the Integration Action call boundary only;
+  register the plaintext with the execution-scoped registry for
+  write-time scrubbing, then drop it. Encrypt-with-latest,
+  decrypt-with-version.
+
+### Schema (migration 0029; 0017 stays RESERVED and is never used)
+
+New `connection_secrets` table, separate from Connection identity/config
+metadata: `(org_id, connection_id, field)` → envelope columns plus
+timestamps. `UNIQUE(connection_id, field)`; FK to the Connection row so
+deleting a Connection deletes its secrets. Nonce uniqueness is by
+`crypto.getRandomValues` per encryption (never reused, never derived).
+
+### Key lifecycle
+
+- Generation: KEK per environment via stdin-provisioned secret
+  (`wrangler secret put` piped, or Keeper-sidecar pipeline); dev and prod
+  KEKs are distinct and never shared. Local dev KEK lives in `.dev.vars`
+  (0600, never printed, never committed).
+- Rotation: staged re-wrap — mint new `key_version`, re-wrap DEKs,
+  verify decrypt-with-version on both generations, destroy the old KEK
+  only after verification. Rotation is a runbooked drill:
+  dev-smoke-then-destroy before touching prod.
+- Loss/restore: D1 backups carry ciphertext thereafter and are
+  unrecoverable without the matching KEK. Losing a KEK means
+  re-onboarding N Organizations (the v0 single-vendor blast radius no
+  longer applies — stated here, not discovered later).
+
+### Operator contracts (CLI + UI)
+
+- CLI `secret put` accepts values on **stdin only** (plus the existing
+  `@FILE` form, which likewise keeps values out of argv/history); values
+  never appear in args, logs, or errors. Missing/empty stdin fails loud;
+  TTY without piped input refuses rather than blocks.
+- API/UI writes accept values in the request body only; every readback is
+  masked (`[SECRET]`, consistent with `configs` list masking) and never
+  serializes values. Omitting a field on update preserves its ciphertext;
+  undeclared fields are rejected; managed rows reject writes.
+- No Wrangnarok surface echoes a value it accepted — the Bifrost masked
+  config surface invariant, adapted.
+
+### What stays shut under this firing
+
+- OAuth token persistence: cached tokens and scheduled refresh stay
+  fetch-and-discard (this firing covers Connection credentials, not
+  token caching).
+- D1 plaintext discipline and the scrub/redaction contract in full,
+  extended to the new table and routes with sentinel tests.
+- Tripwire-shut code claims that P1 breaks (`src/connections.ts`
+  boundary header, `src/secrets.ts` envelope note, masked-view shaping)
+  are amended in the same lane; untouched claims (OAuth, provider-global
+  resolution) stay as-is.
+
+### Acceptance (P4 test matrix, local workerd, fixture secrets only)
+
+Wrong-org/wrong-key decryption failure, tamper rejection, nonce
+uniqueness, versioned decrypt across rotation, rotation/recovery drill,
+ciphertext-only persistence (sentinel audit of every D1 row), masked
+views and `[SECRET]` lists carrying no values, stdin EOF/TTY behavior,
+UI no-value-leak, and dev/prod KEK separation. No production
+credentials at any stage.
+
+Steward checkpoint (one-diagram test): after stamping, the secrets path
+is deployment secrets (v0 retained) plus per-Organization envelope
+ciphertext (fired) under one registry/scrub discipline — two stores, one
+discipline, one diagram. If a third storage story appears, consolidate
+before new parity lanes.
+
+### OAuth token persistence slice 1 (issue #149, post-#148 amendment)
+
+SEC-02 closed (issue #148; PR #427 merged), so the "OAuth token
+persistence stays fetch-and-discard" line above is now superseded for
+per-Connection OAuth tokens only. This slice persists encrypted
+per-Organization, per-Connection OAuth tokens plus non-secret health in a
+new `oauth_tokens` table (migration 0031, `src/oauth-tokens.ts`) — and
+explicitly adds no second secret store:
+
+- Same envelope, same KEK: AES-GCM-256 rows via `src/envelope.ts`
+  (`ciphertext` / `nonce` / `wrapped_dek` / `key_version` / `algorithm`
+  per token value), per-environment KEK from Secrets Store, associated
+  data binding org_id + Connection id + field (`oauth_access` /
+  `oauth_refresh` bindings so the two values never decrypt under each
+  other). Encrypt-with-latest, decrypt-with-version, staged re-wrap
+  rotation, and dev/prod KEK separation are unchanged from the firing
+  amendment above.
+- Same discipline: D1 holds ciphertext only (sentinel-audited); decrypted
+  tokens exist transiently at the Integration Action call boundary,
+  register with the execution-scoped registry for write-time substring
+  scrubbing, then drop. No token material in D1 rows, ExecutionHistory,
+  Workflow state, logs, errors, or HTTP responses.
+- Same fence: every rotation funnels through the existing centralized
+  `refreshRotatingToken` primitive plus the `OAuthRefreshFence` object
+  with the persisted generation as the fence generation. Replacement
+  writes are conditional on the expected persisted generation
+  (`UPDATE ... WHERE generation=?`): a superseded writer observes
+  OAUTH_TOKEN_GENERATION_STALE instead of overwriting the newer token.
+  No D1 transaction is held across vendor HTTP — D1 read, vendor call,
+  and D1 conditional write are separate phases.
+- Health persists honestly per Connection (`healthy` / `failed` /
+  `revoked` with consecutive-failure counting via the pure lifecycle in
+  `src/oauth.ts`): vendor Faults mark failed, successful rotation
+  recovers to healthy, explicit revocation marks revoked without moving
+  Connection identity. Raw transport errors propagate without a health
+  write (reachability unknown). Deleting a Connection deletes its token
+  row (explicit delete beside the FK cascade; pre-0031 chains skip it).
+- No new operator surface: no callback route, no consent UI, no secret
+  value echoed on any path. No scheduled refresh (still needs its own
+  demonstrated need and ADR). No Integration-list health aggregate (the
+  PR #762 effective-Connection semantics stay deferred until cached
+  tokens plus consent rows exist to aggregate over).
+
+Steward checkpoint (one-diagram test, 2026-09-17): still one secrets
+path — deployment secrets plus per-Organization envelope ciphertext
+(Connection credentials and now OAuth tokens, same mechanism, same KEK
+lifecycle, same registry/scrub discipline). No third storage story;
+Free-tier posture unchanged (one D1 table, no new primitive, no new
+binding).
 
 ## Why Secrets Store alone is insufficient for per-org secrets (tripwire rationale)
 

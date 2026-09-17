@@ -10,7 +10,9 @@ migrations/0021_endpoints.sql
 test/endpoints.test.ts
 test/endpoint-branches.test.ts
 docs/architecture/018-endpoint-triggers.md
+docs/architecture/000-steward-checklist.md
 docs/upstream-parity.md
+docs/upstream-spec.md
 scripts/check-bundle-budget.mjs
 scopes/trg-02.scope
 package.json

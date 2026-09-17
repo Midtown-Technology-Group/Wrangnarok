@@ -15,7 +15,7 @@ Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 28 Par
 | RUN-01 | Persist and enforce per-Saga runtime policy without changing source identity | 2 | Partial | AUTH-02 | new |
 | RUN-02 | Invoke child Sagas with explicit context, completion and failure semantics | 2 | Missing | AUTH-02, RUN-01 | new |
 | TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented (gaps reopened, see #137) | AUTH-02, RUN-01 | #137 |
-| TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01 | #138 |
+| TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01, AUTH-03, CON-01 | #138 |
 | TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Missing | TRG-01, TRG-02, AUTH-02 | new |
 | DEV-01 | Provide a complete typed TypeScript author and automation SDK | 1+4 | Partial | — | new |
 | DEV-02 | Preview, sync and deploy author source with explicit dependency compatibility | 5 | Partial | DEV-01, SOL-01 | new |
@@ -64,7 +64,7 @@ Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 28 Par
 
 Phase 2; **Implemented**; existing issue: #135
 
-Local status: Per-Saga runtime policy persists as org-scoped rows (migration 0012) with applied-policy snapshots on every Execution (ADR 018). Operator inspect/change rides GET/PUT /api/sagas/:id/policy on the AUTH-01 membership gate (admin-only writes); the typed SDK (getSagaPolicy/updateSagaPolicy), the CLI (saga-policy/saga-policy-set), and ExecutionDetail all expose it. The behavioral matrix (timeout 0/default/custom, engine-loss-only retry ceilings, business-error non-retry, pause/admission, CompletedWithErrors-as-Failed, Stuck-as-Running-until-cancel, stale fencing, crash/recovery) is proven by test/runtime-policy.test.ts on local Workflows/D1.
+Local status: Per-Saga runtime policy persists as org-scoped rows (migration 0012) with applied-policy snapshots on every Execution (ADR 018). Operator inspect/change rides GET/PUT /api/sagas/:id/policy on the AUTH-01 membership gate (admin-only writes); the typed SDK (getSagaPolicy/updateSagaPolicy), the CLI (saga-policy/saga-policy-set), and ExecutionDetail all expose it. The behavioral matrix (timeout 0/default/custom, engine-loss-only retry ceilings, business-error non-retry, pause/admission, CompletedWithErrors-as-Failed, Stuck-as-Running-until-cancel, stale fencing, crash/recovery) is proven by test/runtime-policy.test.ts on local Workflows/D1. Slice C (issue #135) proves lost-runtime-history convergence there too: terminal Execution detail converges from authoritative D1 with advisory `runtimeStatus: null` when native Workflow history/status is missing, preserving idempotency, cancel, and stale-completion fences.
 
 Depends: AUTH-02
 
@@ -141,9 +141,9 @@ Related Wrangnarok issues: #76
 
 Phase 2; **Partial**; existing issue: #138
 
-Local status: Scoped api-key endpoints (`POST /api/endpoints/:name`) and HMAC webhook endpoints (`POST /hooks/:name`) bind a name to a deployed Saga (ADR 018, migration 0021). Deliveries verify per-endpoint keys (expiry, disable/rotate revocation) or HMAC signatures against deployment-store secrets, answer echo-param vendor challenges in plaintext, rate-limit per endpoint, and submit through the standard protocol with derived `wep-` keys (202 receipt, 200 replay, 409 mismatch). Operator create/list/read/update/rotate/history ride the AUTH-01 membership gate. Upstream sync-mode inline results stay deferred to RUN-03; per-tenant webhook secrets stay deployment-scoped per ADR 005 v0 (SEC-02 tripwire).
+Local status: Scoped api-key endpoints (`POST /api/endpoints/:name`) and HMAC webhook endpoints (`POST /hooks/:name`) bind a name to a deployed Saga (ADR 018, migration 0021). Deliveries verify per-endpoint keys (expiry, disable/rotate revocation) or HMAC signatures against deployment-store secrets, answer echo-param vendor challenges in plaintext, rate-limit per endpoint, and submit through the standard protocol with derived `wep-` keys (202 receipt, 200 replay, 409 mismatch). Operator create/list/read/update/rotate/history ride the AUTH-01 membership gate. Follow-through (2026-09-17): HMAC accepts canonical hex or standard padded base64 with the evidenced whitespace rules (base64url/unpadded/base64-of-hex/inner-whitespace rejected); rate-window read faults and endpoint-lookup faults fail closed to sanitized 5xx; concurrent redeliveries converge on the exact created event; unconfirmed dispatches record no event row and converge on caller redelivery with no automatic mutation retry; webhook rotate revocation pinned at route level. Upstream sync-mode inline results stay deferred to RUN-03; per-tenant webhook secrets stay deployment-scoped per ADR 005 v0 (SEC-02 tripwire).
 
-Depends: AUTH-01
+Depends: AUTH-01, AUTH-03, CON-01 (both closed)
 
 Acceptance:
 
@@ -276,9 +276,9 @@ Related Wrangnarok issues: #78
 
 ## AUTH-02: Enforce resource roles, claims and explicit delegated authorization end to end
 
-Phase 3; **Missing**; existing issue: new
+Phase 3; **Implemented**; existing issue: #143
 
-Local status: org_id/owner checks are present but there is no Role/Permission/Claim/policy model or resource-sharing control plane.
+Local status: ADR 018 (resource roles, claims-as-subjects, policy rules, deny-by-absence) ships on Worker + D1 (migration 0013, `src/roles.ts`, `test/resource-roles.test.ts`): direct Saga execution (including the provider ingress), form/app delegation, caller matrices, next-request revocation, hidden-reference 404s, and role/policy administration with consumer inspection. Open follow-through lives on #143 (tables/files spine composition, shared non-request authority resolver, policy-rule store hardening per #430, provider-route composition proof, live-subscription enforcement deferred to TRG-03/OBS-02).
 
 Depends: AUTH-01
 
@@ -402,7 +402,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase 3; **Gated**; existing issue: new
 
-Local status: Accepted v0 deliberately uses deployment-global credentials for provider-global vendors. Per-org ciphertext/key lifecycle is not implemented and is not authorized merely by a parity audit.
+Local status: ADR 005 tripwire FIRED per owner stamp 2026-09-17 (issue #411, general operator velocity). Per-Organization envelope backend merged (#419, renumbered #424): migration 0029 `connection_secrets` (ciphertext/nonce/wrapped_dek/key_version/algorithm, FK-cascaded), `src/envelope.ts` AES-GCM-256 envelope (per-Connection DEK, per-environment KEK, AAD-bound org+Connection+field, encrypt-with-latest/decrypt-with-version), admin-only `PUT /api/connections/:id/secrets` with masked views, execution resolution preferring per-org over deployment. P4 matrix green in local workerd (wrong-org/key, per-column tamper, 25x nonce uniqueness, staged re-wrap rotation, ciphertext-only D1 scans, 403/404 isolation, delete cascade, per-org-wins e2e) plus dev/prod KEK separation and ciphertext-only backup/restore recovery drill (issue #148). Provider-global v0 retained, no forced migration. Stays shut: CLI P2 / UI P3 operator slices. (OAuth token persistence has since landed as OAUTH-01 slice 1, migration 0031 — see the OAUTH-01 row.)
 
 Depends: SEC-01, CON-01
 
@@ -420,13 +420,13 @@ Upstream evidence (paths relative to upstream repo root):
 - Upstream tests:
   - `api/tests/e2e/api/test_oauth.py`
 
-Related Wrangnarok issues: #110
+Related Wrangnarok issues: #110, #411
 
 ## OAUTH-01: Complete OAuth authorization, centralized refresh and credential health lifecycle
 
 Phase 3; **Partial**; existing issue: new
 
-Local status: OAuth token mechanics are centralized in `src/oauth.ts` (issue #149): inline client-credentials fetch, auth-code/PKCE/state/callback contract, URL/entity templating, audience/scope replacement semantics (corrected attribution: replacement, never subset), rotating-refresh single-flight fencing with the cross-instance `OAuthRefreshFence` Durable Object (`src/oauth-refresh-fence.ts`, bound as `OAUTH_REFRESH_FENCE`; memory-only, no D1, no persisted token — Cloudflare-native equivalent of the PR #741 row-lock serialization), and a pure non-secret health lifecycle (healthy/failed/revoked with failed/recovered transitions). NinjaOne rides the shared primitive with identical Fault codes/messages, proven by its unchanged regression suites. Tokens stay transient fetch-and-discard (SEC-02 stays shut); health-row/token persistence and any scheduled refresh path stay deferred behind the tripwire. Mock only vendor OAuth HTTP in local acceptance tests (`test/oauth.test.ts`, 41 tests).
+Local status: OAuth token mechanics are centralized in `src/oauth.ts` (issue #149): inline client-credentials fetch, auth-code/PKCE/state/callback contract, URL/entity templating, audience/scope replacement semantics (corrected attribution: replacement, never subset), rotating-refresh single-flight fencing with the cross-instance `OAuthRefreshFence` Durable Object (`src/oauth-refresh-fence.ts`, bound as `OAUTH_REFRESH_FENCE`; memory-only, no D1 — Cloudflare-native equivalent of the PR #741 row-lock serialization), and the non-secret health lifecycle (healthy/failed/revoked with failed/recovered transitions). Persistence slice 1 (post-#148, migration 0031, `src/oauth-tokens.ts`): per-Connection tokens persist as AES-GCM-256 envelopes reusing the ADR 005 KEK path (org+Connection-bound AAD), with a monotonic persisted generation wired to the fence, conditional replacement writes (superseded generations observe OAUTH_TOKEN_GENERATION_STALE), persisted failed/recovered/revoked health, and no D1 transaction across vendor HTTP. The 32-bit scope-hash collision pair is a permanent fence regression with the same-scope exactly-one-POST invariant preserved. NinjaOne rides the shared primitive with identical Fault codes/messages, proven by its unchanged regression suites. Still deferred: operator callback/consent routes, scheduled refresh, and the Integration-list health aggregate. Mock only vendor OAuth HTTP in local acceptance tests (`test/oauth.test.ts`, `test/oauth-tokens.test.ts`).
 
 Depends: CON-01, SEC-02, AUTH-03
 
@@ -949,6 +949,8 @@ Local status: No model/provider/embedding configuration or verification surface 
 
 AI-01 design slice (issue #164, ADR 032, landed incrementally on main): provider kinds (`openai | anthropic | google | openrouter | openai-compatible`) and the six default-assignment keys pinned as stable vocabulary; credentials stay deployment-global in v0 (SEC-02 tripwire shut, no per-tenant keys); profiles/assignments/embedding/behavior scoped as separate entities with lifecycle guards; capability state resets on transport change. Build slices (registry definitions, migration 0028 DDL, routes, probes) follow.
 
+AI-01 build slice 1 (issue #164, landed incrementally on main): five provider Integration definitions (openai, anthropic, google, openrouter, openai-compatible) with deployment-global apiKey secrets, per-provider default endpoints (explicit origin required for openai-compatible), and public-https endpoint policy; migration 0028 DDL (profiles with NOCASE CI-unique names, six-key assignments, embedding singletons, behavior rows); Connection reachability probes that never send the key.
+
 Depends: SEC-01, CON-01, AUTH-02
 
 Acceptance:
@@ -1287,7 +1289,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase Continuous; **Partial**; existing issue: #177
 
-Local status: The dated capability-versus-limit matrix ships as `docs/feasibility-envelope.md` (2026-09-12): Worker CPU/memory/bundle/egress, Workflows instances/steps/history, D1 reads/writes/storage/transaction limits, R2 size/signing, Access users, and model/vector/build costs each carry a free / paid-adaptation / redesign / unresolved classification with the binding limit named. Measured local usage (smoke budgets, usage blocks, bundle size) stays explicitly separated from provider meters; what still requires an authorized dev measurement is listed, not assumed. Remaining: deployed D1-meta/Workers-analytics metering and multi-org load fixtures before any production accuracy claim.
+Local status: The dated capability-versus-limit matrix ships as `docs/feasibility-envelope.md` (2026-09-17): Worker CPU/memory/bundle/egress, Workflows instances/steps/history, Durable Objects, D1 reads/writes/storage/per-database/transaction limits, R2 size/signing, Access users, and model/vector/build costs each carry a free / paid-adaptation / redesign / unresolved classification with the binding limit named. Provider-published allowances were re-checked against current Cloudflare docs on 2026-09-17 (correcting the Free per-database cap to 500 MB); locally measured usage (smoke budgets, usage blocks, 720,796-byte bundle) stays explicitly separated from provider meters; W1–W3 multi-org workload models are labeled estimates; what still requires an authorized dev measurement is listed, not assumed. The soft bundle budget is now mechanical: 715 KiB plus an 8 KiB minimum-headroom gate with a LIMITS-META sync check (`test/limits-envelope.test.ts`), closing the post-merge ratchet flagged on #177. Remaining: deployed D1-meta/Workers-analytics/DO-duration metering and multi-org load fixtures before any production accuracy claim.
 
 Depends: none
 

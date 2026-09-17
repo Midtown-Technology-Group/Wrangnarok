@@ -19,7 +19,7 @@ import {
   parseCloudflareVerifyInput,
   vendorDeadlineMs,
 } from "../domain";
-import { parseStoredPolicy } from "../executions";
+import { loadExecutionPolicy } from "../executions";
 import type {
   CloudflareInventoryInput,
   CloudflareInventoryResult,
@@ -156,15 +156,9 @@ export const cloudflareVerifySagaDef = defineSaga<CloudflareVerifyResult>({
       );
       const outcome = await step.do("cloudflare-verify-v1", async () => {
         await beginOperation(ctx.db, id, "cloudflare-verify-v1", 1);
-        const applied = await ctx.db
-          .prepare("SELECT policy_json FROM executions WHERE id=?")
-          .bind(id)
-          .first<{ policy_json: string | null }>()
-          .catch(() => null);
-        const deadline = vendorDeadlineMs(
-          applied?.policy_json == null ? parseStoredPolicy(null) : parseStoredPolicy(applied.policy_json),
-          CLOUDFLARE_TIMEOUT_MS,
-        );
+        // RUN-01 Slice A (issue #135): deadline from the Execution snapshot;
+        // a snapshot read failure throws before any vendor work.
+        const deadline = vendorDeadlineMs(await loadExecutionPolicy(ctx.db, id), CLOUDFLARE_TIMEOUT_MS);
         const stepOrg = withOperation(prepared.orgCtx, "cloudflare-verify-v1");
         // The account mapping rides the parsed Execution input (scenario
         // `binding.entity_id/entity_name`, validated by the input parser and
@@ -261,15 +255,9 @@ export const cloudflareInventorySagaDef = defineSaga<CloudflareInventoryResult>(
       );
       const outcome = await step.do("cloudflare-inventory-v1", async () => {
         await beginOperation(ctx.db, id, "cloudflare-inventory-v1", 1);
-        const applied = await ctx.db
-          .prepare("SELECT policy_json FROM executions WHERE id=?")
-          .bind(id)
-          .first<{ policy_json: string | null }>()
-          .catch(() => null);
-        const deadline = vendorDeadlineMs(
-          applied?.policy_json == null ? parseStoredPolicy(null) : parseStoredPolicy(applied.policy_json),
-          CLOUDFLARE_TIMEOUT_MS,
-        );
+        // RUN-01 Slice A (issue #135): deadline from the Execution snapshot;
+        // a snapshot read failure throws before any vendor work.
+        const deadline = vendorDeadlineMs(await loadExecutionPolicy(ctx.db, id), CLOUDFLARE_TIMEOUT_MS);
         const stepOrg = withOperation(prepared.orgCtx, "cloudflare-inventory-v1");
         const binding = prepared.input.account ?? { id: null, name: null };
         const vendor = await resolveCloudflareVendor(

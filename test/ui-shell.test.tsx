@@ -72,9 +72,37 @@ it("marks unported nav entries disabled and links each tracking issue", () => {
     expect(html).toContain(entry.label);
     expect(html).toContain(entry.issue as string);
   }
-  expect(html).toContain("/issues/15");
-  expect(html).toContain("/issues/16");
-  expect(html).toContain("/issues/18");
+});
+
+// UX-01c (issue #176): each disabled nav entry must name its actual OPEN
+// parity owner — never a closed scaffolding issue (#15/#16/#18, all CLOSED).
+// Owners per the #176 archaeology slice: Tables -> #154 TABLE-02,
+// Triggers -> #139 TRG-03 (only open trigger issue), Integrations -> #160.
+it("points each disabled nav entry at its open parity owner", () => {
+  const owners: Record<string, number> = {
+    Integrations: 160,
+    Triggers: 139,
+    Tables: 154,
+  };
+  const disabled = NAV_ENTRIES.filter((e) => !e.enabled);
+  expect(disabled.map((e) => e.label).sort()).toEqual(Object.keys(owners).sort());
+  for (const [label, issue] of Object.entries(owners)) {
+    const entry = NAV_ENTRIES.find((e) => e.label === label);
+    expect(entry?.enabled).toBe(false);
+    expect(entry?.issue).toBe(`https://github.com/MTG-Thomas/Wrangnarok/issues/${issue}`);
+  }
+  const html = renderToStaticMarkup(
+    <MemoryRouter>
+      <Nav />
+    </MemoryRouter>,
+  );
+  for (const issue of Object.values(owners)) {
+    expect(html).toContain(`/issues/${issue}`);
+  }
+  // Quote-boundaried: /issues/154 must not satisfy a /issues/15 check.
+  for (const closed of [15, 16, 18]) {
+    expect(html).not.toContain(`/issues/${closed}"`);
+  }
 });
 
 it("enables the Dashboard nav entry at /dashboard", () => {

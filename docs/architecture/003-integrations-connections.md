@@ -151,7 +151,7 @@ Cloudflare Worker secrets and Secrets Store are suitable for deployment/account-
 
 D1 encryption at rest does not make plaintext credential columns acceptable. **ADR 005 v0 is accepted:** explicitly declared provider-global deployment credentials plus Organization-scoped non-secret Connection mappings. NinjaOne currently uses transient client-credentials tokens without persistence; echo has no credentials. Missing required org mappings still fail closed rather than invoking a generic global fallback.
 
-Per-Organization envelope encryption, token persistence, key lifecycle and rotation remain behind ADR 005's first genuinely per-tenant-secret/compliance tripwire. They are not requirements to replace the accepted v0 prematurely. Execution-scoped secret registration and universal substring scrubbing remain production-readiness gates under #110; selected sentinel tests and shaped results do not establish that mechanism. The audit also distinguishes actual Worker secret strings from the ADR's intended Secrets Store binding choice, which needs explicit reconciliation.
+Per-Organization envelope encryption fired under ADR 005 (issue #411) and per-Connection OAuth token persistence landed as OAUTH-01 slice 1 (issue #149, migration 0031); key lifecycle and rotation follow the ADR 005 amendment. Execution-scoped secret registration and universal substring scrubbing remain production-readiness gates under #110; selected sentinel tests and shaped results do not establish that mechanism. The audit also distinguishes actual Worker secret strings from the ADR's intended Secrets Store binding choice, which needs explicit reconciliation.
 
 ### OAuth
 
@@ -171,7 +171,7 @@ OAuth token mechanics are centralized in `src/oauth.ts` (OAUTH-01, issue
   caller supplies the `OAUTH_REFRESH_FENCE` binding, because a module-global
   map alone cannot serialize refreshes across Worker instances (issue #149
   follow-up). The object holds no storage, performs no D1 I/O, and persists
-  no token (SEC-02 stays shut). The vendor sees exactly one refresh POST per
+  no token itself (persisted rows live in `src/oauth-tokens.ts`). The vendor sees exactly one refresh POST per
   rotation no matter how many 401 retries race — the Cloudflare-native
   equivalent of upstream's serialized refresh (bifrost PR #741 row-lock pin,
   recorded in `docs/upstream-spec.md` section 15). Authorization-code
@@ -182,16 +182,22 @@ OAuth token mechanics are centralized in `src/oauth.ts` (OAUTH-01, issue
   enforcement. OAuth resource scopes are never Organization authorization
   scope. `resolveTokenScope` is pure and test-pinned against Graph/Exchange/
   SharePoint-style audiences.
-- Tokens stay transient fetch-and-discard per ADR 005 v0 (SEC-02 stays shut):
-  no token columns, no ciphertext, no cached refresh tokens in D1.
-- Credential health is a pure non-secret lifecycle (`healthy`/`failed`/
-  `revoked`, consecutive-failure counting, visible failed-to-recovered
-  transitions, fail-closed use). Persistence of health rows awaits the SEC-02
-  tripwire and its own steward migration number; Connection identity never
-  moves on a token transition.
-- Token replacement without replacing Connection identity, per-tenant
-  authorization-code consent storage, and any scheduled refresh path remain
-  deferred (see below).
+- Token persistence (OAUTH-01 slice 1, issue #149, post-#148): per-Connection
+  OAuth tokens persist encrypted in `oauth_tokens` (migration 0031) reusing
+  the ADR 005 envelope/KEK path, with a monotonic persisted generation wired
+  to the refresh fence and conditional replacement writes, and no D1
+  transaction held over vendor HTTP. See `src/oauth-tokens.ts` and the
+  ADR 005 slice-1 amendment.
+- Credential health is a non-secret lifecycle (`healthy`/`failed`/`revoked`,
+  consecutive-failure counting, visible failed-to-recovered transitions,
+  fail-closed use) with the same pure transitions as before, now persisted
+  per Connection beside the token row (migration 0031): vendor Faults mark
+  failed, successful rotation recovers, explicit revocation marks revoked.
+  Connection identity never moves on a token transition.
+- Token replacement persists without replacing Connection identity
+  (conditional generation-fenced writes in `src/oauth-tokens.ts`).
+  Per-tenant authorization-code consent storage and any scheduled refresh
+  path remain deferred (see below).
 
 Token refresh must not be implemented independently in every Saga.
 
@@ -226,7 +232,7 @@ Per issue #75 (lanes A: PRs #80, #83, #85, #88), extended by CON-01 (issue #146)
 - Integration registry: `src/integrations/index.ts` (`defineIntegration` validates stable UUID id, slug name, 1–280 char description, explicit `secretFields` list; definitions frozen via `Object.freeze`; `INTEGRATION_DEFINITIONS` canonical order; `integrationById`/`integrationByName` lookup).
 - Runtime capability boundary: the existing `ctx.integrations.<integration>.<action>()` shape is the public authoring contract. In-process Action execution remains valid. If an Integration is later split into a dedicated Worker for authority, scaling, or lifecycle reasons, prefer a typed Service Binding behind the same Wrangnarok SDK surface; do not expose the Integration Worker's raw secret bindings or require authored Sagas to depend on Cloudflare-specific `env.*` names.
 - Non-secret config schema (CON-01): each definition declares `configSchema` (typed non-secret fields with required/defaults/bounds, always including `endpoint`), `requiredSecrets` (provider-global credential names, each mapped to a deployment env var in `secretEnvVars`), and `health` (test hint + remediation copy). `validateConnectionConfig` applies defaults and rejects unknown keys, missing required fields, overlong values, and credential-shaped input with per-field 400 details. Credential-shaped names can never enter the non-secret schema.
-- Endpoint safe-URL policy (issue #236): every `endpoint` value — explicit or defaulted — must parse with `new URL` and satisfy the per-Integration policy before it can persist (create/update) or be used (vendor Action, management probe). Echo is loopback-only over plain http (the local fixture); ninjaone requires https under `.ninjarmm.com` or the never-routable `.invalid` test seam. Malformed, credential-bearing, non-web-scheme, and internal-address targets fail closed with per-field 400 details at write time; rows that predate the policy fail closed as `INVALID_CONNECTION` at use time without any outbound fetch.
+- Endpoint safe-URL policy (issue #236): every `endpoint` value — explicit or defaulted — must parse with `new URL` and satisfy the per-Integration policy before it can persist (create/update) or be used (vendor Action, management probe). Echo is loopback-only over plain http (the local fixture); ninjaone requires https under `.ninjarmm.com` or the never-routable `.invalid` test seam; cloudflare requires https under `api.cloudflare.com` or `.invalid`; halo admits only the lab origin `halo-lab.example.com` (the runtime pins the exact origin). Unknown Integrations fail closed instead of inheriting another vendor's allowlist. Malformed, credential-bearing, non-web-scheme, and internal-address targets fail closed with per-field 400 details at write time; rows that predate the policy fail closed as `INVALID_CONNECTION` at use time without any outbound fetch.
 - Connection entity: typed `Connection` in `src/integrations/index.ts` (stable IDs, non-secret endpoint, optional display label, enabled flag, managed_by marker; secret material referenced transiently at execution time, never stored there), returned by `resolveConnection` in `src/executions.ts`.
 - Resolution: `resolveConnection` in `src/executions.ts` looks up exactly one row for the current Organization (`WHERE org_id=? AND integration_id=?`, never a global cascade, never cross-org); declared-but-missing — including a disabled mapping — fails loud with structured `424 INTEGRATION_REQUIREMENT_UNSATISFIED`; undeclared (optional) access resolves to `None` with no throw. Pre-0007/0004 rows are read tolerantly with backfill-equivalent defaults.
 - Management boundary (CON-01): `src/connections.ts` is the one authorized path for non-secret mappings — list/create/read/update/delete plus a read-only connectivity test, all scoped to the caller's Organization. Managed rows reject live mutation with `MANAGED_RESOURCE` (installer-only writes); loose rows stay writable. The Worker serves `GET /api/integrations`, `GET/POST /api/connections`, `GET/PUT/DELETE /api/connections/:integrationId`, and `POST /api/connections/:integrationId/test`; every response is scrubbed with the deployment secrets and views carry required-secret names only, never values. The `/connections` admin screen plus typed client calls use the same routes.
@@ -234,4 +240,4 @@ Per issue #75 (lanes A: PRs #80, #83, #85, #88), extended by CON-01 (issue #146)
 - Secret-field declarations: `secretFields` on each `IntegrationDefinition` (`echo`: none; `ninjaone`: `clientSecret`), with selected output-shaping/sentinel tests. Universal output scrubbing remains the separate ADR 005/#110 mechanism gate.
 - Upstream 424 adaptation: upstream Bifrost serves declared-missing requirements as HTTP 424 at the API boundary (`SolutionConnectionSchema` resolution, org → defaults fallback). Wrangnarök keeps the stricter MVP posture — no global/default fallback — and the 424 surfaces in two places: as the structured step error inside ExecutionHistory on the submit path (existing ADR 010 contract), and as the HTTP status of `POST /api/connections/:integrationId/test` when the mapping is missing (CON-01 management parity for the same code).
 
-What stays deferred (not implemented by this closeout): per-tenant authorization-code consent storage, health-row D1 persistence (awaits the SEC-02 tripwire and its own migration number), token replacement persistence, any scheduled refresh path, per-Organization envelope encryption behind ADR 005's tripwire, generic global/default credential fallback, provider-organization mapping enumeration beyond the caller's own Organization, and cross-org mapping administration. Provider-global v0 credentials are accepted, not a claim that these broader features or production gates are complete.
+What stays deferred (not implemented by this closeout): per-tenant authorization-code consent storage (operator callback route plus consent rows), any scheduled refresh path, the Integration-list health aggregate (PR #762 semantics), generic global/default credential fallback, provider-organization mapping enumeration beyond the caller's own Organization, and cross-org mapping administration. Provider-global v0 credentials are accepted, not a claim that these broader features or production gates are complete.

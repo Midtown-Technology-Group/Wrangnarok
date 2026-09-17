@@ -5,17 +5,21 @@
 // Pure unit tests — no D1, no Workflow bindings.
 import { describe, expect, it } from "vitest";
 import {
+  cloudflareIntegrationDef,
   defineIntegration,
   echoIntegrationDef,
+  haloIntegrationDef,
   INTEGRATION_DEFINITIONS,
   integrationById,
   integrationByName,
   isInternalLiteralHost,
   isLoopbackHost,
   ninjaIntegrationDef,
+  openaiIntegrationDef,
   validateConnectionConfig,
 } from "../src/integrations";
-import { ECHO_INTEGRATION_ID, NINJA_INTEGRATION_ID } from "../src/domain";
+import { CLOUDFLARE_API_BASE, ECHO_INTEGRATION_ID, NINJA_INTEGRATION_ID } from "../src/domain";
+import { HALO_ALLOWED_ORIGIN } from "../src/integrations/halo";
 
 const BASE = {
   id: "aaaaaaaa-1111-4111-8111-111111111111",
@@ -30,7 +34,8 @@ const BASE = {
 
 describe("Integration registry (ADR 003)", () => {
   it("registers the built-in Integrations with stable identity", () => {
-    expect(INTEGRATION_DEFINITIONS).toHaveLength(4);
+    // 3 base Integrations plus the 5 AI-01 provider kinds (issue #164) plus Cloudflare.
+    expect(INTEGRATION_DEFINITIONS).toHaveLength(9);
     expect(echoIntegrationDef).toMatchObject({ id: ECHO_INTEGRATION_ID, name: "echo", secretFields: [] });
     expect(ninjaIntegrationDef).toMatchObject({
       id: NINJA_INTEGRATION_ID,
@@ -378,6 +383,53 @@ describe("Connection config validation (CON-01)", () => {
     });
   });
 
+  it("gates halo, cloudflare, and unknown Integrations per policy (issue #236)", () => {
+    const detailsOf = (run: () => unknown): { field: string; code: string }[] => {
+      try {
+        run();
+        expect.unreachable();
+      } catch (error) {
+        expect(error).toMatchObject({ code: "CONNECTION_SCHEMA_INVALID" });
+        return (error as { details: { field: string; code: string }[] }).details;
+      }
+    };
+    // Halo is lab-origin-only: the runtime pins the exact origin, so
+    // persist-time validation admits nothing else routable.
+    expect(validateConnectionConfig(haloIntegrationDef, { endpoint: HALO_ALLOWED_ORIGIN })).toEqual({
+      endpoint: HALO_ALLOWED_ORIGIN,
+    });
+    expect(validateConnectionConfig(haloIntegrationDef, { endpoint: `${HALO_ALLOWED_ORIGIN}/api` })).toEqual({
+      endpoint: `${HALO_ALLOWED_ORIGIN}/api`,
+    });
+    for (const [endpoint, code] of [
+      ["http://halo-lab.example.com/api", "INVALID_SCHEME"],
+      ["https://evil.example.com/api", "ENDPOINT_NOT_ALLOWED"],
+      ["https://us2.ninjarmm.com/api", "ENDPOINT_NOT_ALLOWED"],
+      ["https://halo.invalid/api", "ENDPOINT_NOT_ALLOWED"],
+      ["http://127.0.0.1:8788/echo", "ENDPOINT_NOT_ALLOWED"],
+      ["not-a-url", "INVALID_URL"],
+    ] as const) {
+      expect(detailsOf(() => validateConnectionConfig(haloIntegrationDef, { endpoint }))?.[0]).toMatchObject({
+        field: "endpoint",
+        code,
+      });
+    }
+    // Cloudflare admits its API base; unknown Integrations fail closed
+    // instead of inheriting another vendor's allowlist.
+    expect(validateConnectionConfig(cloudflareIntegrationDef, {})).toMatchObject({
+      endpoint: CLOUDFLARE_API_BASE,
+    });
+    expect(
+      detailsOf(() =>
+        validateConnectionConfig(cloudflareIntegrationDef, { endpoint: "https://evil.example.com/v4" }),
+      )?.[0],
+    ).toMatchObject({ field: "endpoint", code: "ENDPOINT_NOT_ALLOWED" });
+    const newVendor = defineIntegration({ ...BASE, name: "newvendor" });
+    expect(
+      detailsOf(() => validateConnectionConfig(newVendor, { endpoint: "https://api.example.com/" }))?.[0],
+    ).toMatchObject({ field: "endpoint", code: "ENDPOINT_NOT_ALLOWED" });
+  });
+
   it("classifies loopback and internal literal hosts (issue #236)", () => {
     expect(isLoopbackHost("localhost")).toBe(true);
     expect(isLoopbackHost("127.0.0.1")).toBe(true);
@@ -401,5 +453,21 @@ describe("Connection config validation (CON-01)", () => {
     expect(isInternalLiteralHost("fd00::1")).toBe(true);
     expect(isInternalLiteralHost("2001:db8::1")).toBe(false);
     expect(isInternalLiteralHost("example.com")).toBe(false);
+    // CodeRabbit Major (PR #403, CWE-918): IPv4-mapped IPv6 literals decode
+    // to their embedded quad before the internal check, so mapped loopback
+    // and private addresses cannot bypass the gate ahead of a vendor probe.
+    expect(isInternalLiteralHost("[::ffff:127.0.0.1]")).toBe(true);
+    expect(isInternalLiteralHost("[::ffff:7f00:1]")).toBe(true);
+    expect(isInternalLiteralHost("[::FFFF:7F00:1]")).toBe(true);
+    expect(isInternalLiteralHost("[::ffff:10.0.0.9]")).toBe(true);
+    expect(isInternalLiteralHost("[::ffff:a00:9]")).toBe(true);
+    expect(isInternalLiteralHost("[::ffff:192.168.0.1]")).toBe(true);
+    expect(isInternalLiteralHost("[::ffff:8.8.8.8]")).toBe(false);
+    expect(isInternalLiteralHost("[::ffff:808:808]")).toBe(false);
+  });
+
+  it("rejects IPv4-mapped IPv6 endpoints before any vendor contact (PR #403)", () => {
+    expect(() => validateConnectionConfig(openaiIntegrationDef, { endpoint: "https://[::ffff:127.0.0.1]/" })).toThrow();
+    expect(() => validateConnectionConfig(openaiIntegrationDef, { endpoint: "https://[::ffff:7f00:1]/v1" })).toThrow();
   });
 });
