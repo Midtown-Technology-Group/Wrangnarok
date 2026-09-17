@@ -167,6 +167,53 @@ and durability behavior that depends on production Workflow semantics) is
 periodic, uses only disposable test data and synthetic credentials, and is
 never required for ordinary development or merges.
 
+## Test placement (issue #249)
+
+Four layers, each with a home. When several could host a test, pick the
+shallowest layer that still exercises the behavior honestly:
+
+- **Node/Vitest (plain unit)** — pure TypeScript with no Worker surface: no
+  `cloudflare:*` imports, no `worker.fetch`, no `SELF`, no `wrangler` harness
+  import. Domain rules, parsers, error shaping, serialization. Enumerated by
+  `npm run test:unit` (membership computed in `scripts/test-group.mjs`, mirrored
+  by `UNIT_FILES` in `test/setup-unhandled-guard.ts`); runs inside the
+  `workers` Vitest project but never touches the runtime.
+- **Workers Vitest (`workers` project)** — the default for everything else:
+  tests execute in workerd via `@cloudflare/vitest-plugin` with real local
+  bindings and import `src/` handlers directly. Routing, D1 repositories and
+  migrations, authorization and context propagation, Workflow-backed Execution
+  paths (via `test/helpers/workflow-harness.ts`), Integration code on Worker
+  runtime APIs.
+- **Production harness (`harness` project)** — `test/production-harness.test.ts`
+  boots the production-built Worker from `wrangler.jsonc` via
+  `createTestHarness()` (from `wrangler`, plain Node — never `cloudflare:test`
+  imports) and asserts over HTTP. Reserve for behavior that is only meaningful
+  against the built bundle and real config: production routing and config
+  wiring, the auth gate in the built Worker, D1 migration-chain reads. Stays
+  credential-free via test-only `vars`/`secrets` overrides and ephemeral local
+  storage; tolerates a missing UI build (an empty `client/dist` suffices for
+  `/api/*` coverage, which runs the Worker first). Running the hostile/fake
+  provider (#248) as a second Worker in the same harness is future composition,
+  noted only — not implemented here.
+- **Real edge** — periodic, disposable-test-data-only confirmation of behavior
+  that depends on production Cloudflare semantics (Workflow timing, deployed
+  metering). Never required for ordinary development or merges.
+
+## Wrangler types drift (issue #249)
+
+`worker-configuration.d.ts` is generated and gitignored: every
+`npm run typecheck` regenerates it from the current `wrangler.jsonc` before
+`tsc` runs, and CI runs typecheck on every PR — so typechecking always observes
+fresh config-derived types and there is no committed generated artifact that
+could drift. A fail-closed `wrangler types` + git-diff gate is therefore
+**explicitly deferred**: with no committed artifact to diff, the gate would
+either no-op or force-commit generated noise. The hand-maintained `Bindings`
+interface in `src/bindings.ts` intentionally models a subset (optional and
+test-only bindings included), so a mechanical generated-vs-`Bindings`
+consistency check would also false-positive by design; `wrangler deploy
+--dry-run --env dev` in CI already validates config shape. Revisit if
+`Bindings` is ever generated from the Wrangler config.
+
 ## CI direction
 
 Initial CI should require:

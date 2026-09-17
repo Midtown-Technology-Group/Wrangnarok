@@ -39,6 +39,10 @@ function isUnit(source) {
     !source.includes("cloudflare:") &&
     !source.includes("../src/index") &&
     !source.includes("worker.fetch") &&
+    // Production-harness files boot a real local workerd via
+    // createTestHarness() (issue #249): no cloudflare:* imports, but not
+    // unit — keep the fast group fast.
+    !source.includes('from "wrangler"') &&
     !/\bSELF\b/.test(source)
   );
 }

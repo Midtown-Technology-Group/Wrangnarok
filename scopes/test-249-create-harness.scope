@@ -1,0 +1,12 @@
+# Production-harness smoke lane (issue #249, Brief 1): boot the
+# production-built Worker under createTestHarness() on GET /api/ops/version,
+# document testing-layer boundaries, record the wrangler-types drift defer.
+# Test + config + docs only: no src/ production changes, no migrated-suite
+# edits, no new Cloudflare primitive, no deployment, Free-tier neutral.
+scopes/test-249-create-harness.scope
+test/production-harness.test.ts
+vitest.config.ts
+docs/testing.md
+scripts/test-group.mjs
+package.json
+package-lock.json
