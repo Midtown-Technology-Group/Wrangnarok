@@ -53,6 +53,34 @@ export interface SagaPolicyRecord {
   readonly version: number;
   readonly updatedAt: string;
 }
+/** Load the applied runtime-policy snapshot for one Execution (RUN-01 Slice A,
+ * issue #135). This is the single execution-time policy read: every Saga
+ * step binder and vendor-deadline lookup must resolve through here instead
+ * of independently querying with a catch-to-null fallback.
+ *
+ * - An existing row with `policy_json NULL` (pre-migration rows) resolves to
+ *   the code default: the explicit legacy fallback, never a guess.
+ * - A missing `policy_json` column (pre-migration database) resolves the
+ *   same way: no operator surface existed there, so the default applies.
+ * - A missing row throws `NonRetryableError("Unknown Execution.")`.
+ * - Any other D1 read failure propagates: the caller must fail or retry
+ *   before running Saga/vendor work, never execute under invented defaults. */
+export async function loadExecutionPolicy(db: D1Database, executionId: string): Promise<SagaRuntimePolicy> {
+  let row: { policy_json: string | null } | null;
+  try {
+    row = await db
+      .prepare("SELECT policy_json FROM executions WHERE id=?")
+      .bind(executionId)
+      .first<{ policy_json: string | null }>();
+  } catch (error) {
+    if (error instanceof Error && /no such column/i.test(error.message)) return DEFAULT_SAGA_POLICY;
+    throw error;
+  }
+  if (!row) throw new NonRetryableError("Unknown Execution.");
+  if (row.policy_json == null) return DEFAULT_SAGA_POLICY;
+  return parseStoredPolicy(row.policy_json);
+}
+
 /** Parse a stored policy snapshot. Corrupt snapshots fail closed to the
  * default policy rather than inventing per-Saga behavior. */
 export function parseStoredPolicy(value: string | null): SagaRuntimePolicy {
@@ -69,7 +97,11 @@ function objectLike(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 /** Load the effective policy for one (org, Saga): the persisted operator row
- * when present, else DEFAULT_SAGA_POLICY. Never throws on missing rows. */
+ * when present, else DEFAULT_SAGA_POLICY. Never throws on missing rows.
+ * RUN-01 Slice A (issue #135): a missing `saga_policies` table (pre-migration
+ * database) still resolves to the default, but any other D1 read failure
+ * propagates so submit-time callers fail closed instead of dispatching under
+ * an invented default policy. */
 export async function loadSagaPolicy(db: D1Database, orgId: string, sagaId: string): Promise<SagaPolicyRecord> {
   try {
     const row = await db
@@ -80,10 +112,11 @@ export async function loadSagaPolicy(db: D1Database, orgId: string, sagaId: stri
       return { policy: DEFAULT_SAGA_POLICY, version: POLICY_VERSION, updatedAt: new Date(0).toISOString() };
     }
     return { policy: parseStoredPolicy(row.policy_json), version: row.version, updatedAt: row.updated_at };
-  } catch {
-    // Old DB before migration 0007 (or a missing table in a unit double):
-    // policy reverts to the code default rather than failing submit.
-    return { policy: DEFAULT_SAGA_POLICY, version: POLICY_VERSION, updatedAt: new Date(0).toISOString() };
+  } catch (error) {
+    if (error instanceof Error && /no such table/i.test(error.message)) {
+      return { policy: DEFAULT_SAGA_POLICY, version: POLICY_VERSION, updatedAt: new Date(0).toISOString() };
+    }
+    throw error;
   }
 }
 /** Persist one operator policy row. Partial bodies merge over the current row
@@ -163,14 +196,15 @@ export async function admitExecution(
   if (effective.policy.admission.maxConcurrent > 0) {
     // The row itself was just inserted (or reserved) as Pending: exempt it so
     // the first Execution under a limit of 1 still dispatches, while the next
-    // active row fences with 429.
+    // active row fences with 429. RUN-01 Slice A (issue #135): a count-query
+    // failure propagates instead of reading as zero, so a blind D1 fault can
+    // never over-admit concurrent Executions.
     const active = await db
       .prepare(
         "SELECT COUNT(*) AS n FROM executions WHERE org_id=? AND saga_id=? AND status IN ('Pending','Running','Cancelling') AND id<>?",
       )
       .bind(orgId, sagaId, selfId)
-      .first<{ n: number }>()
-      .catch(() => null);
+      .first<{ n: number }>();
     if ((active?.n ?? 0) >= effective.policy.admission.maxConcurrent) {
       return {
         effective,
