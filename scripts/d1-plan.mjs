@@ -57,6 +57,24 @@ const QUERIES = [
     params: ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"],
     expect: "search",
   },
+  {
+    operation: "executions.history-filtered",
+    sql: "SELECT id FROM executions WHERE org_id=? AND user_id=? AND status IN (?,?) ORDER BY created_at DESC,id DESC LIMIT 50",
+    params: ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002", "Running", "Pending"],
+    expect: "search",
+  },
+  {
+    operation: "execution-logs.tail",
+    sql: "SELECT seq,execution_id,org_id,user_id,saga_id,saga_name,level,message,data_json,created_at FROM execution_logs WHERE execution_id=? AND level IN (?,?) ORDER BY seq ASC LIMIT 51",
+    params: ["00000000-0000-4000-8000-000000000003", "INFO", "ERROR"],
+    expect: "search",
+  },
+  {
+    operation: "connections.lookup",
+    sql: "SELECT id,org_id,integration_id,endpoint,managed_by,display_name,enabled,updated_at FROM connections WHERE org_id=? AND integration_id=?",
+    params: ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000010"],
+    expect: "search",
+  },
 ];
 
 function literal(value) {

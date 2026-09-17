@@ -1,0 +1,8 @@
+# Issue #302 hot-path plan review (initial index/query-plan review slice).
+# Developer query-plan registry expansion plus review record: no DDL, no
+# production metering, no cost dashboard. TABLE #154, TOOL #170, and
+# workflow #250 files are out of scope.
+docs/d1-conventions.md
+scripts/d1-plan.mjs
+test/d1-plan.test.ts
+scopes/d1-302-hotpath-plan.scope

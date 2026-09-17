@@ -28,8 +28,8 @@ question, not just a latency question.
 - `node scripts/d1-plan.mjs [--operation <name>]` runs `EXPLAIN QUERY PLAN`
   for the registered hot-path queries against the local D1 (run
   `npm run db:migrate:local` first) and prints a coarse SCAN/SEARCH
-  verdict per query. Baseline (2026-09-17): `saga-policy.load` and
-  `executions.admission-count` both SEARCH.
+  verdict per query. Baseline (2026-09-17): all eight registered hot paths
+  SEARCH (see the review record below).
 - A `REVIEW` verdict means a human looks at the plan, not a CI failure:
   EQP output is debugging-oriented and not a stable machine API, so this
   script stays a local aid and out of CI gates.
@@ -47,6 +47,9 @@ question, not just a latency question.
 | `children.list` | SEARCH | `executions_parent (parent_execution_id)` — restored by 0032 |
 | `executions.detail` | SEARCH | `executions` PK `(id)` |
 | `executions.history` | SEARCH (covering) | `executions_history (org_id, user_id, …)` |
+| `executions.history-filtered` | SEARCH | `executions_history (org_id, user_id, …)` |
+| `execution-logs.tail` | SEARCH | `execution_logs_tail (execution_id, seq ASC)` |
+| `connections.lookup` | SEARCH | `UNIQUE(org_id, integration_id)` auto-index |
 
 No new indexes were needed: the one gap (`children.list`) was a missing
 column, not a missing index — migration 0026 rebuilt `executions` without
@@ -54,6 +57,18 @@ column, not a missing index — migration 0026 rebuilt `executions` without
 child lineage statements failed on fully migrated databases while
 à-la-carte tests stayed green. Fixed by 0032; guarded by
 `test/migrations-chain.test.ts`, which applies the whole chain.
+
+The three follow-up cases (2026-09-17, `node scripts/d1-plan.mjs` against
+the local D1 after `npm run db:migrate:local`) confirmed the same: the
+filtered history listing stays on `executions_history`, the per-Execution
+log tail (the 2 s detail-poll path) stays on `execution_logs_tail`, and
+the per-Execution Connection lookup stays on the `connections`
+`UNIQUE(org_id, integration_id)` auto-index. Representative shapes only —
+`IN (?,?)` stands in for the dynamically built status/level lists, and the
+registry SQLs mirror the exact caller statements in `src/executions.ts`
+(`listHistory`), `src/logs.ts` (`listExecutionLogs`), and
+`src/connections.ts` (`ownedRow`). Production metering and the
+cost-dashboard path stay open work (issue #302).
 
 ## Migration rules
 
