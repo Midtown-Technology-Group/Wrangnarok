@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0
 // Machine-readable usage block per ADR 004 (cost-logging requirement).
+import { observeD1 } from "./d1-observe";
 import { scrubValueWithSecrets } from "./secrets";
 // Counts are application-observed D1 statements/rows and Workflow steps —
 // not Cloudflare metering. Never carries secrets, tokens, or payload bodies:
@@ -82,12 +83,14 @@ export async function persistUsage(
   secrets: readonly unknown[] = [],
 ): Promise<void> {
   try {
-    await db
-      .prepare(
-        "INSERT INTO usage_blocks(execution_id,usage_json,created_at) VALUES (?,?,?) ON CONFLICT(execution_id) DO NOTHING",
-      )
-      .bind(executionId, JSON.stringify(scrubValueWithSecrets(usage, secrets)), new Date().toISOString())
-      .run();
+    await observeD1("usage.persist", "run", () =>
+      db
+        .prepare(
+          "INSERT INTO usage_blocks(execution_id,usage_json,created_at) VALUES (?,?,?) ON CONFLICT(execution_id) DO NOTHING",
+        )
+        .bind(executionId, JSON.stringify(scrubValueWithSecrets(usage, secrets)), new Date().toISOString())
+        .run(),
+    );
   } catch {
     console.warn(`WRANGNAROK_USAGE_PERSIST_SKIPPED ${executionId}`);
   }
