@@ -949,6 +949,8 @@ Local status: No model/provider/embedding configuration or verification surface 
 
 AI-01 design slice (issue #164, ADR 032, landed incrementally on main): provider kinds (`openai | anthropic | google | openrouter | openai-compatible`) and the six default-assignment keys pinned as stable vocabulary; credentials stay deployment-global in v0 (SEC-02 tripwire shut, no per-tenant keys); profiles/assignments/embedding/behavior scoped as separate entities with lifecycle guards; capability state resets on transport change. Build slices (registry definitions, migration 0028 DDL, routes, probes) follow.
 
+AI-01 build slice 1 (issue #164, landed incrementally on main): five provider Integration definitions (openai, anthropic, google, openrouter, openai-compatible) with deployment-global apiKey secrets, per-provider default endpoints (explicit origin required for openai-compatible), and public-https endpoint policy; migration 0028 DDL (profiles with NOCASE CI-unique names, six-key assignments, embedding singletons, behavior rows); Connection reachability probes that never send the key.
+
 Depends: SEC-01, CON-01, AUTH-02
 
 Acceptance:

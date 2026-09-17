@@ -101,7 +101,17 @@ describe("Integration discovery (CON-01)", () => {
     expect(response.status).toBe(200);
     const body = await jsonOf(response);
     const integrations = body.integrations as { id: string; name: string; requiredSecrets: string[] }[];
-    expect(integrations.map((entry) => entry.name).sort()).toEqual(["cloudflare", "echo", "halo", "ninjaone"]);
+    expect(integrations.map((entry) => entry.name).sort()).toEqual([
+      "anthropic",
+      "cloudflare",
+      "echo",
+      "google",
+      "halo",
+      "ninjaone",
+      "openai",
+      "openai-compatible",
+      "openrouter",
+    ]);
     const echo = integrations.find((entry) => entry.name === "echo");
     const text = JSON.stringify(body);
     // The echo default endpoint is a portable declaration (schema default),
