@@ -501,7 +501,8 @@ it("denies bootstrap for unknown grants, bad secrets, and foreign origins", asyn
   const corrupt = await seedGrantRow({ formId, formName: "aged", secretHash: "a".repeat(63) });
   const corruptDenied = await bootstrap(corrupt.id, "a".repeat(64), ORIGIN);
   expect(corruptDenied.status).toBe(401);
-  // A corrupt allowlist is a server defect (500), never caller input.
+  // A corrupt allowlist is a server defect (500), never caller input —
+  // whether the bytes are not JSON at all or JSON of the wrong shape.
   const broken = await seedGrantRow({
     formId,
     formName: "aged",
@@ -510,6 +511,14 @@ it("denies bootstrap for unknown grants, bad secrets, and foreign origins", asyn
   });
   const brokenDenied = await bootstrap(broken.id, broken.secret, ORIGIN);
   expect(brokenDenied.status).toBe(500);
+  const misshapen = await seedGrantRow({
+    formId,
+    formName: "aged",
+    secret: "misshapen-allowlist-secret",
+    origins: '{"origins":[]}',
+  });
+  const misshapenDenied = await bootstrap(misshapen.id, misshapen.secret, ORIGIN);
+  expect(misshapenDenied.status).toBe(500);
 });
 
 it("fails bootstrap closed when the form changes until rotation re-binds it", async () => {
