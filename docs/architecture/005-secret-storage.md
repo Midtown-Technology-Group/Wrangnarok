@@ -188,7 +188,7 @@ and no forced migration ships with this amendment.
   write-time scrubbing, then drop it. Encrypt-with-latest,
   decrypt-with-version.
 
-### Schema (migration 0028; 0017 stays RESERVED and is never used)
+### Schema (migration 0029; 0017 stays RESERVED and is never used)
 
 New `connection_secrets` table, separate from Connection identity/config
 metadata: `(org_id, connection_id, field)` → envelope columns plus
