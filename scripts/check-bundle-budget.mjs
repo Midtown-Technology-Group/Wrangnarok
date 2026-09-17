@@ -278,7 +278,14 @@ import { join } from "node:path";
 // 700963 bytes locally against the 670 KiB line: ~15 KiB of hand-written
 // migration code, no new dependencies (package.json unchanged versus main);
 // deliberate feature headroom only.
-const BUDGET_BYTES = 700 * 1024;
+// 2026-09-17 (TRG-02 follow-through, issue #138): 705 KiB. The webhook
+// hardening (canonical base64 HMAC decoder with strict alphabet/padding,
+// fail-closed rate-window and endpoint-lookup paths, single-verdict
+// signature compare after a shrink pass) measures 717659 bytes locally
+// (CI number governs) against the 700 KiB line: ~1.1 KiB of hand-written
+// security-boundary code, no new dependencies (package.json unchanged
+// versus main); deliberate feature headroom only.
+const BUDGET_BYTES = 705 * 1024;
 
 const dir = mkdtempSync(join(tmpdir(), "wrangnarok-bundle-"));
 const outfile = join(dir, "worker.js");

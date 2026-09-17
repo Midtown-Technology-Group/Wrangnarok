@@ -144,7 +144,6 @@ import {
   updateEndpoint,
   vendorChallenge,
 } from "./endpoints";
-import type { EndpointRow } from "./endpoints";
 import {
   createSchedule,
   deleteSchedule,
@@ -494,7 +493,10 @@ async function handlePublicDelivery(request: Request, env: Bindings): Promise<Re
   if (queryKeys.some((entry) => entry !== "challenge")) {
     throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
   }
-  const rows = await loadEndpointsByName(env.DB, name).catch(() => [] as EndpointRow[]);
+  // Fail closed: a D1/query/schema fault propagates to the sanitized 5xx
+  // path (a retryable infrastructure error for vendors), never to a
+  // permanent-looking 404. Only a genuine empty result answers NOT_FOUND.
+  const rows = await loadEndpointsByName(env.DB, name);
   if (rows.length === 0) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
   const challengeRow = findChallengeEndpoint(rows.filter((row) => row.kind === "webhook"));
   const challenge = challengeRow ? vendorChallenge(challengeRow, url) : null;
