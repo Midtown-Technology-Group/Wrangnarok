@@ -1,0 +1,4 @@
+# AUTH-02 archaeology slice S2 for issue #143: provider-route composition proof.
+# Test-only lane: no src/, migration, primitive, or role-policy change.
+test/resource-roles.test.ts
+scopes/auth-143-provider-composition-proof.scope
