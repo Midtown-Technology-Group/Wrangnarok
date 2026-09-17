@@ -11,14 +11,11 @@ import type { Bindings } from "../bindings";
 import {
   CLOUDFLARE_INTEGRATION_ID,
   CLOUDFLARE_TIMEOUT_MS,
-  Fault,
   cloudflareInventorySaga,
   cloudflareVerifySaga,
   parseCloudflareInventoryInput,
   parseCloudflareVerifyInput,
-  vendorDeadlineMs,
 } from "../domain";
-import { loadExecutionPolicy } from "../executions";
 import type {
   CloudflareInventoryInput,
   CloudflareInventoryResult,
@@ -26,17 +23,15 @@ import type {
   ExecutionParams,
   SafeError,
 } from "../domain";
-import { defineSaga, withOperation } from "../saga";
+import { defineSaga } from "../saga";
+import { integrationOperation } from "../saga-helpers";
 import { scrubExecutionError } from "../secrets";
 import {
   assertRunExecutionId,
-  beginOperation,
   failExecution,
-  finishOperation,
   persistRunFailure,
   persistRunSuccess,
   prepareExecution,
-  resolveConnection,
 } from "../executions";
 import { executeSaga } from "./shared";
 
@@ -106,34 +101,6 @@ const inventoryOutputSchema = Object.freeze({
   additionalProperties: false,
 });
 
-/** Resolve the vendor step inputs inside step.do(): Connection from the
- * step's own OrgCtx (declared required, so a miss fails loud with 424), the
- * account mapping from the Execution input binding, and the bearer token
- * straight through the Integration boundary (presence enforced inside the
- * Action). Returns a structured failure instead of throwing for expected
- * downstream errors; NonRetryableError stays reserved for contract bugs. */
-async function resolveCloudflareVendor(
-  db: D1Database,
-  orgCtx: { orgId: string },
-  required: readonly string[],
-  account: { readonly id: unknown; readonly name: unknown },
-): Promise<
-  | { ok: true; connection: { endpoint: string }; account: { readonly id: unknown; readonly name: unknown } }
-  | { ok: false; error: SafeError }
-> {
-  const resolved = await resolveConnection(
-    db,
-    orgCtx as Parameters<typeof resolveConnection>[1],
-    CLOUDFLARE_INTEGRATION_ID,
-    required,
-  );
-  if (!resolved.found && !resolved.declared) {
-    throw new NonRetryableError("Unexpected optional Integration access.");
-  }
-  if (!resolved.found) return { ok: false as const, error: resolved.error };
-  return { ok: true as const, connection: resolved.connection, account };
-}
-
 /** Stable verify Saga: read-only Cloudflare token check, one vendor GET. */
 export const cloudflareVerifySagaDef = defineSaga<CloudflareVerifyResult>({
   id: cloudflareVerifySaga.id,
@@ -159,43 +126,25 @@ export const cloudflareVerifySagaDef = defineSaga<CloudflareVerifyResult>({
           parseCloudflareVerifyInput,
         ),
       );
-      const outcome = await step.do("cloudflare-verify-v1", async () => {
-        await beginOperation(ctx.db, id, "cloudflare-verify-v1", 1);
-        // RUN-01 Slice A (issue #135): deadline from the Execution snapshot;
-        // a snapshot read failure throws before any vendor work.
-        const deadline = vendorDeadlineMs(await loadExecutionPolicy(ctx.db, id), CLOUDFLARE_TIMEOUT_MS);
-        const stepOrg = withOperation(prepared.orgCtx, "cloudflare-verify-v1");
-        // The account mapping rides the parsed Execution input (scenario
-        // `binding.entity_id/entity_name`, validated by the input parser and
-        // persisted through submit): read it from the prepared input, never
-        // from Workflow params. The Integration boundary owns the strict
-        // account-ID check.
+      // ADR-033-4: one Action convention — the helper supplies
+      // (connection, secrets, deadline, operationId) and each leg takes what
+      // its Action needs. The account mapping rides the parsed Execution input
+      // (scenario `binding.entity_id/entity_name`, validated by the input
+      // parser and persisted through submit): read it from the prepared
+      // input, never from Workflow params. The Integration boundary owns
+      // the strict account-ID check.
+      const outcome = await step.do("cloudflare-verify-v1", () => {
         const binding = prepared.input.account ?? { id: null, name: null };
-        const vendor = await resolveCloudflareVendor(
-          ctx.db,
-          stepOrg,
-          cloudflareVerifySagaDef.requiredIntegrations,
-          binding,
-        );
-        if (!vendor.ok) return { ok: false as const, error: vendor.error };
-        let result: CloudflareVerifyResult;
-        try {
-          result = await ctx.integrations.cloudflare.verifyConnection(
-            vendor.connection,
-            ctx.secrets,
-            vendor.account,
-            id,
-            deadline,
-          );
-        } catch (error) {
-          const safe =
-            error instanceof Fault
-              ? scrubExecutionError({ code: error.code, message: error.message }, id)
-              : { code: "CLOUDFLARE_INTEGRATION_FAILED", message: "The Cloudflare Integration could not complete." };
-          return { ok: false as const, error: safe };
-        }
-        await finishOperation(ctx.db, id, "cloudflare-verify-v1", result);
-        return { ok: true as const, result };
+        return integrationOperation(ctx, cloudflareVerifySagaDef, prepared, {
+          op: "cloudflare-verify-v1",
+          position: 1,
+          integrationId: CLOUDFLARE_INTEGRATION_ID,
+          vendorDefaultMs: CLOUDFLARE_TIMEOUT_MS,
+          failureCode: "CLOUDFLARE_INTEGRATION_FAILED",
+          failureMessage: "The Cloudflare Integration could not complete.",
+          call: (connection, secrets, deadline) =>
+            ctx.integrations.cloudflare.verifyConnection(connection, secrets, binding, id, deadline),
+        });
       });
       if (!outcome.ok) {
         expectedFailure = outcome.error;
@@ -240,40 +189,22 @@ export const cloudflareInventorySagaDef = defineSaga<CloudflareInventoryResult>(
           parseCloudflareInventoryInput,
         ),
       );
-      const outcome = await step.do("cloudflare-inventory-v1", async () => {
-        await beginOperation(ctx.db, id, "cloudflare-inventory-v1", 1);
-        // RUN-01 Slice A (issue #135): deadline from the Execution snapshot;
-        // a snapshot read failure throws before any vendor work.
-        const deadline = vendorDeadlineMs(await loadExecutionPolicy(ctx.db, id), CLOUDFLARE_TIMEOUT_MS);
-        const stepOrg = withOperation(prepared.orgCtx, "cloudflare-inventory-v1");
+      // ADR-033-4: same Action convention as the verify leg above and
+      // every other Saga. The bounded inventory input shapes from the
+      // prepared input beside the account mapping.
+      const outcome = await step.do("cloudflare-inventory-v1", () => {
         const binding = prepared.input.account ?? { id: null, name: null };
-        const vendor = await resolveCloudflareVendor(
-          ctx.db,
-          stepOrg,
-          cloudflareInventorySagaDef.requiredIntegrations,
-          binding,
-        );
-        if (!vendor.ok) return { ok: false as const, error: vendor.error };
         const input: CloudflareInventoryInput = { maxZones: prepared.input.maxZones };
-        let result: CloudflareInventoryResult;
-        try {
-          result = await ctx.integrations.cloudflare.inventoryZones(
-            vendor.connection,
-            ctx.secrets,
-            vendor.account,
-            input,
-            id,
-            deadline,
-          );
-        } catch (error) {
-          const safe =
-            error instanceof Fault
-              ? scrubExecutionError({ code: error.code, message: error.message }, id)
-              : { code: "CLOUDFLARE_INTEGRATION_FAILED", message: "The Cloudflare Integration could not complete." };
-          return { ok: false as const, error: safe };
-        }
-        await finishOperation(ctx.db, id, "cloudflare-inventory-v1", result);
-        return { ok: true as const, result };
+        return integrationOperation(ctx, cloudflareInventorySagaDef, prepared, {
+          op: "cloudflare-inventory-v1",
+          position: 1,
+          integrationId: CLOUDFLARE_INTEGRATION_ID,
+          vendorDefaultMs: CLOUDFLARE_TIMEOUT_MS,
+          failureCode: "CLOUDFLARE_INTEGRATION_FAILED",
+          failureMessage: "The Cloudflare Integration could not complete.",
+          call: (connection, secrets, deadline) =>
+            ctx.integrations.cloudflare.inventoryZones(connection, secrets, binding, input, id, deadline),
+        });
       });
       if (!outcome.ok) {
         expectedFailure = outcome.error;

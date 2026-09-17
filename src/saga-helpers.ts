@@ -11,7 +11,7 @@ import type { SafeError } from "./domain";
 import type { Connection } from "./integrations";
 import { scrubExecutionError } from "./secrets";
 import { withOperation } from "./saga";
-import type { SagaDefinition, SagaEventContext } from "./saga";
+import type { SagaDefinition, SagaEventContext, SagaSecrets } from "./saga";
 import {
   beginOperation,
   finishOperation,
@@ -56,9 +56,13 @@ export interface IntegrationOperationOptions<T> {
   readonly failureCode: string;
   readonly failureMessage: string;
   /** The Integration Action invocation only: receives the resolved
-   * Connection, the derived deadline, and the stable outbound operation ID.
-   * Input, secrets, and execution identity close over from the author. */
-  readonly call: (connection: Connection, deadline: number, operationId: string) => Promise<T>;
+   * Connection, the secret handle, the derived deadline, and the stable
+   * outbound operation ID. One convention across all Sagas (ADR-033-4):
+   * echo-style legs use connection/deadline/operationId, ninjaorgs-style
+   * legs use connection/secrets/deadline — every leg takes the same four
+   * and each Action adapts inside. Saga input, account mappings, and
+   * execution identity close over from the author. */
+  readonly call: (connection: Connection, secrets: SagaSecrets, deadline: number, operationId: string) => Promise<T>;
 }
 
 /** The Integration-step interior (ADR-033-1): begin, applied-policy deadline
@@ -93,7 +97,11 @@ export async function integrationOperation<T>(
   const connection = resolved.connection;
   let result: T;
   try {
-    result = await call(connection, deadline, `${id}-${stepOrg.operationId}`);
+    // The secret handle passes straight through the Action boundary —
+    // presence is enforced inside the Action, so legs never branch on
+    // credentials. Runs inside step.do at the call site, so reading
+    // ctx.secrets here keeps the determinism contract.
+    result = await call(connection, ctx.secrets, deadline, `${id}-${stepOrg.operationId}`);
   } catch (error) {
     // Raw transport errors must not leak vendor-shaped text into step
     // results: Faults already carry fixed safe text (scrubbed at the
