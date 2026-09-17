@@ -402,7 +402,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase 3; **Gated**; existing issue: new
 
-Local status: Accepted v0 deliberately uses deployment-global credentials for provider-global vendors. Per-org ciphertext/key lifecycle is not implemented and is not authorized merely by a parity audit.
+Local status: ADR 005 tripwire FIRED per owner stamp 2026-09-17 (issue #411, general operator velocity). Per-Organization envelope backend merged (#419, renumbered #424): migration 0029 `connection_secrets` (ciphertext/nonce/wrapped_dek/key_version/algorithm, FK-cascaded), `src/envelope.ts` AES-GCM-256 envelope (per-Connection DEK, per-environment KEK, AAD-bound org+Connection+field, encrypt-with-latest/decrypt-with-version), admin-only `PUT /api/connections/:id/secrets` with masked views, execution resolution preferring per-org over deployment. P4 matrix green in local workerd (wrong-org/key, per-column tamper, 25x nonce uniqueness, staged re-wrap rotation, ciphertext-only D1 scans, 403/404 isolation, delete cascade, per-org-wins e2e) plus dev/prod KEK separation and ciphertext-only backup/restore recovery drill (issue #148). Provider-global v0 retained, no forced migration. Stays shut: OAuth token persistence (fetch-and-discard) and CLI P2 / UI P3 operator slices.
 
 Depends: SEC-01, CON-01
 
@@ -420,7 +420,7 @@ Upstream evidence (paths relative to upstream repo root):
 - Upstream tests:
   - `api/tests/e2e/api/test_oauth.py`
 
-Related Wrangnarok issues: #110
+Related Wrangnarok issues: #110, #411
 
 ## OAUTH-01: Complete OAuth authorization, centralized refresh and credential health lifecycle
 

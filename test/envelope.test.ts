@@ -126,6 +126,25 @@ describe("connection secret envelope (SEC-02)", () => {
     await expect(opened(v2, { keks: { 1: KEK } })).rejects.toThrow("ENVELOPE_UNKNOWN_KEY_VERSION");
   });
 
+  it("keeps dev and prod KEK domains separate (dev/prod boundary)", async () => {
+    // ADR 005: dev and prod KEKs are distinct Secrets Store values, never
+    // shared. Ciphertext sealed under one environment's KEK is unreadable
+    // under the other's — no cross-environment move by KEK swap.
+    const DEV_KEK = "test-dev-kek-sentinel-fixture-only";
+    const PROD_KEK = "test-prod-kek-sentinel-fixture-only";
+    const devRow = await sealed({ kekMaterial: DEV_KEK });
+    await expect(opened(devRow, { keks: { [ENVELOPE_KEY_VERSION]: PROD_KEK } })).rejects.toThrow(
+      "ENVELOPE_DECRYPT_FAILED",
+    );
+    const prodRow = await sealed({ kekMaterial: PROD_KEK });
+    await expect(opened(prodRow, { keks: { [ENVELOPE_KEY_VERSION]: DEV_KEK } })).rejects.toThrow(
+      "ENVELOPE_DECRYPT_FAILED",
+    );
+    // Each generation still opens under its own KEK.
+    expect(await opened(devRow, { keks: { [ENVELOPE_KEY_VERSION]: DEV_KEK } })).toBe(VALUE);
+    expect(await opened(prodRow, { keks: { [ENVELOPE_KEY_VERSION]: PROD_KEK } })).toBe(VALUE);
+  });
+
   it("validates inputs and never leaks values in error codes", async () => {
     await expect(sealed({ plaintext: "" })).rejects.toThrow("ENVELOPE_INVALID_INPUT");
     await expect(sealed({ plaintext: "x".repeat(4097) })).rejects.toThrow("ENVELOPE_INVALID_INPUT");
