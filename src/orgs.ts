@@ -550,9 +550,11 @@ export async function ensureLabFixture(db: D1Database, orgId: string, userId: st
   // statement is independent: ALTERs fail on already-migrated databases,
   // CREATEs are IF NOT EXISTS, and D1 applies exec batches statement by
   // statement, so failures must never abort the survivors. The schedule
-  // tables (migrations 0016/0016b) ride along: hand-built schedule-test
-  // databases that run 0001+0002 only would otherwise fail the tick's
-  // membership re-check with a driver error instead of a clean gate.
+  // tables ride along verbatim from migrations/0016_schedules.sql (TRG-01,
+  // issue #436): hand-built schedule-test databases that run 0001+0002 only
+  // would otherwise fail the tick's membership re-check with a driver error
+  // instead of a clean gate, and any forked shape here would shadow the
+  // canonical schema (UNIQUE(org_id,name), schedule_deliveries).
   const stmts = [
     "CREATE TABLE IF NOT EXISTS organizations(id TEXT PRIMARY KEY,name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',created_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z',disabled_at TEXT)",
     "ALTER TABLE organizations ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
@@ -562,9 +564,9 @@ export async function ensureLabFixture(db: D1Database, orgId: string, userId: st
     "CREATE TABLE IF NOT EXISTS org_memberships(org_id TEXT NOT NULL REFERENCES organizations(id),user_id TEXT NOT NULL REFERENCES users(user_id),role TEXT NOT NULL DEFAULT 'member',status TEXT NOT NULL DEFAULT 'invited',kind TEXT NOT NULL DEFAULT 'ordinary',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(org_id,user_id))",
     "CREATE INDEX IF NOT EXISTS org_memberships_user ON org_memberships(user_id,status)",
     "CREATE INDEX IF NOT EXISTS org_memberships_org ON org_memberships(org_id,status)",
-    "CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY,org_id TEXT NOT NULL REFERENCES organizations(id),user_id TEXT NOT NULL,saga_id TEXT NOT NULL,input_json TEXT NOT NULL CHECK(length(input_json) <= 4096),kind TEXT NOT NULL CHECK(kind IN ('once','recurring')),status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled','deleted')),cron_expr TEXT,timezone TEXT NOT NULL DEFAULT 'UTC',run_at TEXT,next_due_at TEXT,overlap TEXT NOT NULL DEFAULT 'allow' CHECK(overlap IN ('allow','skip')),last_execution_id TEXT,last_skipped_window TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,CHECK((kind = 'once' AND cron_expr IS NULL AND run_at IS NOT NULL) OR (kind = 'recurring' AND cron_expr IS NOT NULL AND run_at IS NULL)))",
-    "CREATE INDEX IF NOT EXISTS schedules_due ON schedules(status,next_due_at)",
-    "CREATE INDEX IF NOT EXISTS schedules_org ON schedules(org_id,status)",
+    "CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), name TEXT NOT NULL, saga_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('recurring','one-off')), cron TEXT NOT NULL DEFAULT '' CHECK(length(cron) <= 64), timezone TEXT NOT NULL DEFAULT 'UTC' CHECK(length(timezone) <= 64), enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)), input_json TEXT NOT NULL DEFAULT '{}' CHECK(length(input_json) <= 4096), run_as_user_id TEXT NOT NULL, run_at TEXT, next_due_at TEXT, last_window TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(org_id, name))",
+    "CREATE INDEX IF NOT EXISTS schedules_org_due ON schedules(org_id, enabled, next_due_at)",
+    "CREATE TABLE IF NOT EXISTS schedule_deliveries(schedule_id TEXT NOT NULL REFERENCES schedules(id), window TEXT NOT NULL, input_json TEXT NOT NULL CHECK(length(input_json) <= 4096), execution_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(schedule_id, window))",
   ];
   for (const ddl of stmts) {
     try {
