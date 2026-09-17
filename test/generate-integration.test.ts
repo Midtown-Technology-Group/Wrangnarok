@@ -375,12 +375,12 @@ describe("INT-01 generator (issue #229)", () => {
     );
   });
 
-  it("detects bearer ApiToken schemes and emits the bearer shape (fix 1)", () => {
+  it("detects bearer schemes and emits the bearer shape (fix 1)", () => {
     const bearer = {
       openapi: "3.0.3",
       info: { version: "1.0.0", title: "Bearer API" },
-      components: { securitySchemes: { ApiToken: { type: "http", scheme: "bearer", bearerFormat: "dnkey" } } },
-      security: [{ ApiToken: [] }],
+      components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer", bearerFormat: "dnkey" } } },
+      security: [{ BearerAuth: [] }],
       paths: { "/v1/things": { get: { operationId: "Things_List", summary: "List things." } } },
     };
     expect(detectGeneratorAuthKind(bearer)).toBe("apiToken");
@@ -510,7 +510,7 @@ describe("INT-01 generator (issue #229)", () => {
     const bearer = JSON.stringify({
       openapi: "3.0.3",
       info: { version: "v1" },
-      components: { securitySchemes: { ApiToken: { type: "http", scheme: "bearer" } } },
+      components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
       paths: { "/a": { get: { operationId: "A_Get" } } },
     });
     // Mismatched override fails closed; agreeing override passes.
@@ -564,7 +564,7 @@ describe("INT-01 generator (issue #229)", () => {
     const spec = {
       openapi: "3.0.3",
       info: { version: "v1", title: "Deprecations" },
-      components: { securitySchemes: { ApiToken: { type: "http", scheme: "bearer" } } },
+      components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
       paths: {
         "/v1/old": { get: { operationId: "Old_Get", summary: "Old.", deprecated: true } },
         "/v1/new": { get: { operationId: "New_Get", summary: "New." } },
@@ -598,7 +598,7 @@ describe("INT-01 generator (issue #229)", () => {
     const fat = {
       openapi: "3.0.3",
       info: { version: "v1" },
-      components: { securitySchemes: { ApiToken: { type: "http", scheme: "bearer" } } },
+      components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
       paths: {
         "/v1/things": {
           get: {
@@ -622,7 +622,7 @@ describe("INT-01 generator (issue #229)", () => {
     const enormous = {
       openapi: "3.0.3",
       info: { version: "v1" },
-      components: { securitySchemes: { ApiToken: { type: "http", scheme: "bearer" } } },
+      components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
       paths: Object.fromEntries(
         Array.from({ length: 1200 }, (_, i) => [
           `/v1/thing${i}`,
@@ -645,7 +645,7 @@ describe("INT-01 generator (issue #229)", () => {
     const bearer = JSON.stringify({
       openapi: "3.0.3",
       info: { version: "1.0.0", title: "Bearer API" },
-      components: { securitySchemes: { ApiToken: { type: "http", scheme: "bearer" } } },
+      components: { securitySchemes: { BearerAuth: { type: "http", scheme: "bearer" } } },
       paths: { "/v1/things": { get: { operationId: "Things_List", summary: "List things." } } },
     });
     const digest = await sha256Hex(bearer);
