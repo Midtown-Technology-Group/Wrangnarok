@@ -300,6 +300,7 @@ export const SDK_ERROR_CODES = [
   "SUBSCRIPTION_DISABLED",
   "SUBSCRIPTION_GONE",
   "SUBSCRIPTION_MISCONFIGURED",
+  "DELIVERY_BOUND_EXCEEDED",
   "INVALID_CHALLENGE",
   "LOCAL_AUTH_NOT_CONFIGURED",
   "ACCESS_NOT_CONFIGURED",
@@ -2808,7 +2809,14 @@ export function describeContract(): SdkContractDescriptor {
       {
         method: "GET",
         path: "/api/event-sources/:name/subscriptions/:subscription/deliveries",
-        description: "Newest-first bounded delivery receipts for replay visibility (TRG-03 S2).",
+        description:
+          "Newest-first bounded delivery history for replay visibility (TRG-03 S2 receipts, S3a ?outcome=delivered|failed|all).",
+      },
+      {
+        method: "POST",
+        path: "/api/event-sources/:name/subscriptions/:subscription/deliveries/:eventId/retry",
+        description:
+          "Retry one failed delivery through the submit protocol with the identical evt- key (TRG-03 S3a; duplicates converge, fences fail closed).",
       },
       {
         method: "GET",
@@ -3439,7 +3447,7 @@ export function describeContract(): SdkContractDescriptor {
         name: "event-sources",
         status: "tracked",
         detail:
-          "Event-source registry plus durable org-scoped event log (TRG-03 S1, issue #139): operator create/enable/disable, typed dot-namespaced topics, deterministic (source, event) emit with same-content replay and 409 on mismatched content, best-effort delivery appends from schedule promotion and endpoint delivery, bounded newest-first history. S2 adds scoped subscriptions binding topic filters to a target Saga with bounded fan-out through the submit protocol (stable evt- keys, per-subscriber disable/authority fencing, explicit overflow, delivery receipts). Operator replay and built-in platform events stay deferred to S3.",
+          "Event-source registry plus durable org-scoped event log (TRG-03 S1, issue #139): operator create/enable/disable, typed dot-namespaced topics, deterministic (source, event) emit with same-content replay and 409 on mismatched content, best-effort delivery appends from schedule promotion and endpoint delivery, bounded newest-first history. S2 adds scoped subscriptions binding topic filters to a target Saga with bounded fan-out through the submit protocol (stable evt- keys, per-subscriber disable/authority fencing, explicit overflow, delivery receipts). S3a adds operator retry/replay of failed deliveries (derived failed set, identical evt- keys, dispatch-time authority revalidation, per-event bound honored). Built-in platform events and retention policy stay deferred.",
       },
       {
         name: "dynamic-forms",
