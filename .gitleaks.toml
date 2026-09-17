@@ -1,0 +1,46 @@
+# Wrangnarök secret-scan config (issue #247).
+#
+# Gitleaks extends its embedded default rule set (useDefault) and adds one
+# narrowly scoped synthetic canary rule used ONLY by the controlled test in
+# test/secret-scan.test.ts and the CI "canary" step. The canary prefix
+# (wrangnarok_canary_) is unknown to GitHub secret scanning, so committing the
+# fixture does not trip push protection; it is still reliably flagged by this
+# rule, proving the scanner path works end to end.
+#
+# Suppression policy: global allowlists are path-scoped to the controlled
+# fixture directory below. Do not add blanket exclusions (e.g. whole src/ or
+# file types). New suppressions need a comment with the reason and issue link.
+title = "Wrangnarok secret scan (#247)"
+
+[extend]
+useDefault = true
+
+# Synthetic canary rule: high confidence by prefix, no entropy gate, so the
+# controlled fixture is deterministically detected. Never use this prefix for
+# real credentials.
+[[rules]]
+id = "wrangnarok-canary"
+description = "Synthetic canary for #247 controlled test (not a real credential)."
+regex = '''wrangnarok_canary_[A-Za-z0-9]{32}'''
+keywords = ["wrangnarok_canary_"]
+
+# v8.25.0+: global allowlists use [[allowlists]] (not [allowlist]).
+#
+# Controlled fixture directory: committed canary content would otherwise fail
+# the main tree scan on every PR. The canary CI step copies the fixture to a
+# temp dir (outside this path) and scans it WITHOUT this allowlist matching,
+# so detection is still proven while normal scans stay green.
+[[allowlists]]
+description = "Controlled #247 canary fixtures (scanned in isolation by the canary step)."
+paths = ['''test/fixtures/secret-scan/.*''']
+
+# generic-api-key is the noisy heuristic: test scaffolding assigns key-shaped
+# idempotency strings (e.g. const key = "run02-parent-happy-001") that are not
+# credentials. Suppress it ONLY under test/ paths; src/scripts/client keep
+# generic coverage, and all vendor-specific high-confidence rules still apply
+# everywhere (a real PAT/AWS/Stripe key pasted into a test still fails).
+[[rules]]
+id = "generic-api-key"
+  [[rules.allowlists]]
+  description = "Test idempotency-key scaffolding is not a credential (#247)."
+  paths = ['''test/.*''']
