@@ -20,6 +20,7 @@ import {
   scrubExecutionValue,
   scrubTextWithDeploymentSecrets,
   scrubTextWithSecrets,
+  scrubValueWithDeploymentSecrets,
   scrubValueWithSecrets,
 } from "../src/secrets";
 
@@ -102,6 +103,56 @@ describe("execution secret registry (SEC-01)", () => {
     );
     expect(deploymentSecretsFromEnv({})).toEqual([]);
     clearExecutionSecrets(ID);
+  });
+
+  it("covers the five deployment-global AI provider keys on every shared surface", () => {
+    // AI-01 secret-scrub gap (issue #164, ADR 032 v0): the five provider
+    // API keys are deployment-global bindings (Bindings extends
+    // AiProviderCredentials). The Worker HTTP isolate scrubs with
+    // deploymentSecretsFromEnv, so each key must be registered there —
+    // otherwise errors, serialized responses, and audit/log rows built
+    // from env could carry raw key material. Safe test sentinels only.
+    const aiKeys = {
+      OPENAI_API_KEY: "test-openai-api-key-sentinel",
+      ANTHROPIC_API_KEY: "test-anthropic-api-key-sentinel",
+      GOOGLE_API_KEY: "test-google-api-key-sentinel",
+      OPENROUTER_API_KEY: "test-openrouter-api-key-sentinel",
+      OPENAI_COMPATIBLE_API_KEY: "test-openai-compatible-key-sentinel",
+    };
+    const values = Object.values(aiKeys);
+    // Registry enumeration: every key is governed by the shared scrubber.
+    const registered = deploymentSecretsFromEnv(aiKeys);
+    for (const value of values) expect(registered).toContain(value);
+    for (const value of values) {
+      // Error envelopes: a vendor-shaped failure embedding the key.
+      const error = scrubValueWithDeploymentSecrets(
+        { error: { code: `PROVIDER_FAILED with ${value}`, message: `probe rejected ${value}` } },
+        aiKeys,
+      );
+      expect(JSON.stringify(error)).not.toContain(value);
+      expect(JSON.stringify(error)).toContain(SCRUB_PLACEHOLDER);
+      // Serialized responses: keys embedded in URLs, headers, and object keys.
+      const response = scrubValueWithDeploymentSecrets(
+        {
+          endpoint: `https://vendor.invalid/v1?key=${value}`,
+          headers: { Authorization: `Bearer ${value}` },
+          [`note-${value}`]: "carrier",
+        },
+        aiKeys,
+      );
+      const serialized = JSON.stringify(response);
+      expect(serialized).not.toContain(value);
+      expect(serialized).toContain(SCRUB_PLACEHOLDER);
+      // Audit/log surfaces: recordAudit scrubs detail with the exact
+      // deploymentSecretsFromEnv(env) list the routes pass, so a hostile
+      // detail value carrying the key is replaced before the row lands.
+      const auditDetail = scrubValueWithDeploymentSecrets(
+        { operationId: "op-ai-probe", note: `key material ${value} in detail` },
+        aiKeys,
+      );
+      expect(JSON.stringify(auditDetail)).not.toContain(value);
+      expect(scrubTextWithDeploymentSecrets(`WRANGNAROK_USAGE key=${value}`, aiKeys)).not.toContain(value);
+    }
   });
 
   it("never exports secrets through discovery or portable shapes", () => {

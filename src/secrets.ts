@@ -39,6 +39,11 @@ type SecretEnv = {
   readonly NINJA_CLIENT_SECRET?: string;
   readonly HALO_CLIENT_ID?: string;
   readonly HALO_CLIENT_SECRET?: string;
+  readonly OPENAI_API_KEY?: string;
+  readonly ANTHROPIC_API_KEY?: string;
+  readonly GOOGLE_API_KEY?: string;
+  readonly OPENROUTER_API_KEY?: string;
+  readonly OPENAI_COMPATIBLE_API_KEY?: string;
   readonly CLOUDFLARE_API_TOKEN?: string;
   readonly SECRETS_KEK?: string;
 };
@@ -159,6 +164,15 @@ export function deploymentSecretsFromEnv(env: SecretEnv): string[] {
     env.NINJA_CLIENT_SECRET,
     env.HALO_CLIENT_ID,
     env.HALO_CLIENT_SECRET,
+    // AI-01 (issue #164, ADR 032 v0): the five deployment-global provider
+    // API keys ride the same registry as every other deployment secret, so
+    // write-time and Worker HTTP-layer scrubbing covers them with no
+    // second scrub path. Never persisted, never per-tenant.
+    env.OPENAI_API_KEY,
+    env.ANTHROPIC_API_KEY,
+    env.GOOGLE_API_KEY,
+    env.OPENROUTER_API_KEY,
+    env.OPENAI_COMPATIBLE_API_KEY,
     env.CLOUDFLARE_API_TOKEN,
     env.SECRETS_KEK,
   ]);
