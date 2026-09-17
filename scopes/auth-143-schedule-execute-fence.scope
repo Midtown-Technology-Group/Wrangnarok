@@ -1,0 +1,12 @@
+# AUTH-02 S3 wiring remainder (issue #143): pass the Saga execute
+# RoleCheck for the scheduled Saga into the canonical
+# resolveCurrentAuthority call in promoteWindow, with GRANT_REQUIRED as a
+# safe tick skip plus quarantine accrual, and real-tick regression for
+# grant revocation, admin-to-member demotion, and grant restore.
+# No migration, no new primitive, no alternate auth path, no S4 table/file
+# composition decision, no OAuth changes.
+src/schedules.ts
+test/schedule-lifecycle.test.ts
+test/schedule-branches.test.ts
+docs/upstream-parity.md
+scopes/auth-143-schedule-execute-fence.scope

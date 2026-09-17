@@ -177,9 +177,12 @@ describe("TRG-01 pre-dispatch fence (fake D1, no workerd)", () => {
   };
 
   it("promotes when the re-read row and run-as authority are live", async () => {
+    // AUTH-02 S3 (issue #143): promoteWindow enforces the saga execute
+    // grant at dispatch, so a live fixture needs live authority — the org
+    // admin bypass here — not just live lifecycle rows.
     const stub = stubSubmit();
     const report = await promoteWindow(
-      fenceDb({ schedule: scheduleRow(), ...ACTIVE }),
+      fenceDb({ schedule: scheduleRow(), ...ACTIVE, membership: { ...ACTIVE.membership, role: "admin" } }),
       { DB: fenceDb({}) } as never,
       scheduleRow(),
       "2026-09-12T10:01",
@@ -250,9 +253,18 @@ describe("TRG-01 pre-dispatch fence (fake D1, no workerd)", () => {
   it("treats pre-migration rows without a status column as active", async () => {
     // Covers the `?? "active"` fallbacks: rows predating the status column
     // read as active, so old databases fence on membership, not on shape.
+    // AUTH-02 S3 (issue #143): the org/user rows still carry no status (the
+    // fallback under test); the membership carries the admin role so the
+    // live fixture also holds dispatch authority under the saga execute
+    // grant fence.
     const stub = stubSubmit();
     const report = await promoteWindow(
-      fenceDb({ schedule: scheduleRow(), org: { id: ORG }, user: { user_id: USER }, membership: ACTIVE.membership }),
+      fenceDb({
+        schedule: scheduleRow(),
+        org: { id: ORG },
+        user: { user_id: USER },
+        membership: { ...ACTIVE.membership, role: "admin" },
+      }),
       { DB: fenceDb({}) } as never,
       scheduleRow(),
       "2026-09-12T10:01",

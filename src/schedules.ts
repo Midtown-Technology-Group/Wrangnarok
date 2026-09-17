@@ -535,6 +535,11 @@ const TICK_SKIP_CODES: ReadonlySet<string> = new Set([
   "USER_DISABLED",
   "MEMBERSHIP_SUSPENDED",
   "MEMBERSHIP_REVOKED",
+  // AUTH-02 S3 (issue #143): the promoteWindow saga execute grant fence
+  // denies with the same 403 GRANT_REQUIRED as the direct execution routes.
+  // A de-authorized window is a skip, never a tick failure — the next tick
+  // retries a live window once the run-as authority is restored.
+  "GRANT_REQUIRED",
 ]);
 
 /** Promote one due window through the submit protocol. Single-winner
@@ -574,11 +579,24 @@ export async function promoteWindow(
   // (roles.resolveCurrentAuthority) re-resolves organization, user, and
   // membership lifecycle at action time with the request path's lifecycle
   // semantics minus its invited-activation write — an unattended tick never
-  // activates membership, it only dispatches for active authority.
-  const { principal } = await resolveCurrentAuthority(db, env, {
-    orgId: fresh.org_id,
-    userId: fresh.run_as_user_id,
-  });
+  // activates membership, it only dispatches for active authority. The saga
+  // execute RoleCheck for the scheduled Saga rides the same call, so grant
+  // revocation and admin-to-member demotion fence the tick exactly like the
+  // direct execution routes (403 GRANT_REQUIRED, surfaced as a safe skip).
+  const { principal } = await resolveCurrentAuthority(
+    db,
+    env,
+    {
+      orgId: fresh.org_id,
+      userId: fresh.run_as_user_id,
+    },
+    {
+      orgId: fresh.org_id,
+      resourceKind: "saga",
+      resourceId: fresh.saga_id.toLowerCase(),
+      action: "execute",
+    },
+  );
   const saga = sagas.find((entry) => entry.id === fresh.saga_id);
   if (!saga) throw new Fault(500, "SCHEDULE_MISCONFIGURED", "This schedule is not configured correctly.");
   const key = await scheduleWindowKey(fresh.id, window);
@@ -791,6 +809,10 @@ const QUARANTINE_SKIP_CODES: ReadonlySet<string> = new Set([
   "USER_DISABLED",
   "MEMBERSHIP_SUSPENDED",
   "MEMBERSHIP_REVOKED",
+  // AUTH-02 S3 (issue #143): a persistently grant-fenced row must leave the
+  // head-of-line like every other persistent de-authorization, not sit at
+  // the scan head forever. Operator re-enable plus grant restore resumes it.
+  "GRANT_REQUIRED",
 ]);
 
 /** Parse the consecutive-skip streak from the quarantine marker
