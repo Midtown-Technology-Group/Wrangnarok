@@ -27,6 +27,7 @@ import { BODY_LIMIT, Fault, hash, parseKey, UUID } from "./domain";
 import type { Principal, SagaDef } from "./domain";
 import type { Bindings } from "./bindings";
 import { submit } from "./executions";
+import { SCHEDULE_DELIVERED_TOPIC, recordSourceDelivery } from "./events";
 import { instanceAdmins } from "./orgs";
 import type { AdminEnv } from "./orgs";
 
@@ -637,6 +638,16 @@ export async function promoteWindow(
   } catch {
     // Old DB without the table: the Execution row itself stays the receipt.
   }
+  // TRG-03 S1 (issue #139): best-effort delivery append. When the operator
+  // registered an enabled `schedule` source observing this row, the window
+  // lands in the event log with its Execution attribution; otherwise (or on
+  // any fault) this resolves to silence and promotion is unaffected.
+  await recordSourceDelivery(db, fresh.org_id, "schedule", fresh.id, {
+    eventId: window,
+    topic: SCHEDULE_DELIVERED_TOPIC,
+    payloadJson: fresh.input_json,
+    executionId: accepted.executionId,
+  });
   await db
     .prepare("UPDATE schedules SET last_window=?,updated_at=? WHERE id=?")
     .bind(window, new Date().toISOString(), fresh.id)

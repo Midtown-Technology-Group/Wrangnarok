@@ -306,7 +306,16 @@ import { fileURLToPath } from "node:url";
 // The 715 KiB line restores ~11.1 KiB of real margin with the reason
 // recorded here and in docs/feasibility-envelope.md (same PR, LIMITS-META
 // block). Legitimate feature code, no new dependencies.
-const BUDGET_BYTES = 715 * 1024;
+// 2026-09-17 (TRG-03 S1, issue #139): 730 KiB. The event-source registry
+// plus durable event-log surface (src/events.ts: parsers, registry CRUD,
+// deterministic emit with replay/conflict identity, bounded history,
+// best-effort delivery appends; event-source routes in src/index.ts plus
+// schedule/endpoint promotion hooks and SDK entries) measures 735730 bytes
+// locally against the 715 KiB line: ~14.6 KiB of hand-written feature code
+// over the AI-01-union main, no new dependencies (package.json unchanged
+// versus origin/main); deliberate feature headroom only. The 730 KiB line
+// restores ~11.5 KiB of real margin above the 8 KiB minimum headroom.
+const BUDGET_BYTES = 730 * 1024;
 // LIMITS-01 minimum operating headroom (issue #177): the budget must exceed
 // the measured bundle by at least this margin, so a `measured + a few
 // bytes` raise cannot pass. A feature PR that lands inside the budget but

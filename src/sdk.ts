@@ -288,6 +288,11 @@ export const SDK_ERROR_CODES = [
   "ENDPOINT_IDENTITY_FORBIDDEN",
   "ENDPOINT_RATE_LIMITED",
   "ENDPOINT_MISCONFIGURED",
+  "INVALID_EVENT_SOURCE",
+  "EVENT_SOURCE_EXISTS",
+  "EVENT_SOURCE_DISABLED",
+  "INVALID_EVENT",
+  "EVENT_CONFLICT",
   "INVALID_CHALLENGE",
   "LOCAL_AUTH_NOT_CONFIGURED",
   "ACCESS_NOT_CONFIGURED",
@@ -2720,6 +2725,47 @@ export function describeContract(): SdkContractDescriptor {
       },
       {
         method: "GET",
+        path: "/api/event-sources",
+        description: "Org-scoped event-source summaries (TRG-03 S1 registry).",
+      },
+      {
+        method: "POST",
+        path: "/api/event-sources",
+        description:
+          "Register an event source binding a name to schedule, webhook, or topic kind (TRG-03 S1; 409 on duplicate name).",
+      },
+      {
+        method: "GET",
+        path: "/api/event-sources/:name",
+        description: "Event-source detail with kind and enablement (TRG-03 S1).",
+      },
+      {
+        method: "DELETE",
+        path: "/api/event-sources/:name",
+        description: "Delete an event source; its log rows go with it (TRG-03 S1).",
+      },
+      {
+        method: "POST",
+        path: "/api/event-sources/:name/enable",
+        description: "Re-enable an event source for emits and delivery appends (TRG-03 S1).",
+      },
+      {
+        method: "POST",
+        path: "/api/event-sources/:name/disable",
+        description: "Disable an event source; logged events keep history (TRG-03 S1).",
+      },
+      {
+        method: "POST",
+        path: "/api/event-sources/:name/events",
+        description: "Emit one event into the source log (TRG-03 S1; same content replays, mismatched content 409s).",
+      },
+      {
+        method: "GET",
+        path: "/api/event-sources/:name/events",
+        description: "Newest-first bounded event history for replay visibility (TRG-03 S1).",
+      },
+      {
+        method: "GET",
         path: "/api/logs",
         description:
           "OBS-02 operator log search across the caller's own rows (level, sagaId, sagaName, startDate, endDate, limit, cursor).",
@@ -3339,6 +3385,12 @@ export function describeContract(): SdkContractDescriptor {
         status: "supported",
         detail:
           "One-off and recurring schedules bound to deployed Sagas (TRG-01, ADR 012): operator create/preview/disable, durable due-time with overdue promotion, deterministic window keys with same-window replay, and a bounded minute Cron tick (the only Cron trigger).",
+      },
+      {
+        name: "event-sources",
+        status: "tracked",
+        detail:
+          "Event-source registry plus durable org-scoped event log (TRG-03 S1, issue #139): operator create/enable/disable, typed dot-namespaced topics, deterministic (source, event) emit with same-content replay and 409 on mismatched content, best-effort delivery appends from schedule promotion and endpoint delivery, bounded newest-first history. Subscriptions, fan-out, operator replay, and built-in platform events stay deferred.",
       },
       {
         name: "dynamic-forms",

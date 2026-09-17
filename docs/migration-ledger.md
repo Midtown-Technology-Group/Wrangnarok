@@ -38,6 +38,7 @@ must update every importing test in the same commit.
 | 0027   | 0027_rename_replay_repair.sql   | codex-migration-replay | rename-replay convergence, IF NOT EXISTS (issues #367-371) |
 | 0028   | 0028_ai_profiles.sql            | AI-01  | model profiles, assignments, embedding config, behavior rows (issue #164) |
 | 0029   | 0029_connection_secrets.sql       | SEC-02 #411 | per-Organization envelope ciphertext (ciphertext/nonce/wrapped_dek/key_version/algorithm), FK-cascaded off connections |
+| 0030   | 0030_events.sql                 | TRG-03  | event-source registry + org-scoped event log (issue #139, S1) |
 
 ## Stuck-database recovery (codex findings #381, #367-371)
 

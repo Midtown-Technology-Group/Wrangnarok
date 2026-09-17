@@ -1,0 +1,18 @@
+# TRG-03 S1 lane scope (issue #139): event-source registry + durable event log.
+migrations/0030_events.sql
+docs/migration-ledger.md
+src/events.ts
+src/index.ts
+src/schedules.ts
+src/endpoints.ts
+src/sdk.ts
+test/events.test.ts
+test/event-branches.test.ts
+test/helpers/workflow-harness.ts
+docs/architecture/012-phase2-triggers.md
+scopes/trg-03.scope
+package.json
+# Coupled LIMITS-01 budget/META update for the event surface below
+# (deliberate 730 KiB raise with reason recorded, issue #139).
+scripts/check-bundle-budget.mjs
+docs/feasibility-envelope.md
