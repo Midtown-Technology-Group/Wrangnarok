@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0
 // Stable ninjaone-echo-digest Saga definition (ADR 002, Phase 2): read-only
 // NinjaOne census shaped into a bounded digest and echoed through the echo
-// Integration. Moved verbatim from src/sagas.ts; no behavior change.
-import { WorkflowEntrypoint } from "cloudflare:workers";
-import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
+// Integration. Migrated to the ADR 033 interior helpers (issue #416):
+// schemaOf, prepareInput, integrationOperation (since #415),
+// completeExecution/failSagaExecution, makeSagaWorkflow. Behavior unchanged;
+// both timeout-mark-v1 steps are gone — failSagaExecution classifies vendor
+// timeouts as TimedOut inside persist-failure-v1.
 import { NonRetryableError } from "cloudflare:workflows";
-import type { Bindings } from "../bindings";
 import {
   digestSaga,
   ECHO_INTEGRATION_ID,
@@ -15,18 +16,11 @@ import {
   shapeDigest,
   VENDOR_TIMEOUT_MS,
 } from "../domain";
-import type { DigestResult, ExecutionParams, SafeError } from "../domain";
-import { defineSaga } from "../saga";
-import { integrationOperation } from "../saga-helpers";
-import { scrubExecutionError } from "../secrets";
-import {
-  assertRunExecutionId,
-  failExecution,
-  persistRunFailure,
-  persistRunSuccess,
-  prepareExecution,
-} from "../executions";
-import { executeSaga } from "./shared";
+import type { DigestResult, SafeError } from "../domain";
+import { defineSaga, schemaOf } from "../saga";
+import { integrationOperation, prepareInput } from "../saga-helpers";
+import { assertRunExecutionId, completeExecution, failSagaExecution } from "../executions";
+import { makeSagaWorkflow } from "./shared";
 
 /** Stable ninjaone-echo-digest Saga (Phase 2): read-only NinjaOne census
  * shaped into a bounded digest and echoed through the echo Integration. Both
@@ -39,30 +33,17 @@ export const digestSagaDef = defineSaga<DigestResult>({
   description: digestSaga.description,
   tags: ["ninjaone", "echo", "read-only"],
   requiredIntegrations: [NINJA_INTEGRATION_ID, ECHO_INTEGRATION_ID],
-  inputSchema: Object.freeze({
-    type: "object" as const,
-    properties: Object.freeze({}),
-    required: Object.freeze([]),
-    additionalProperties: false,
-  }),
-  outputSchema: Object.freeze({
-    type: "object" as const,
-    properties: Object.freeze({
-      organizationCount: Object.freeze({ type: "number" }),
-      echoed: Object.freeze({ type: "object" }),
-    }),
-    required: Object.freeze(["organizationCount", "echoed"]),
-    additionalProperties: false,
-  }),
+  inputSchema: schemaOf({}, []),
+  outputSchema: schemaOf({ organizationCount: "number", echoed: "object" }, ["organizationCount", "echoed"]),
   parse: parseDigestInput,
   run: async (ctx, step): Promise<DigestResult> => {
     const id = assertRunExecutionId(ctx.executionId);
-    let expectedFailure: SafeError | undefined;
-    let timedOut = false;
+    // The expected-failure branches below persist before throwing, so the
+    // catch rethrows an already-persisted failure untouched: step names are
+    // unique per Execution, so exactly one persist-failure-v1 runs.
+    let terminalWritten = false;
     try {
-      const prepared = await step.do("prepare-input-v1", () =>
-        prepareExecution(ctx.db, id, digestSaga.id, digestSaga.revision, parseDigestInput),
-      );
+      const prepared = await step.do("prepare-input-v1", () => prepareInput(ctx, digestSaga, parseDigestInput));
       // ADR-033-4: one Action convention — the helper supplies
       // (connection, secrets, deadline, operationId) and each leg takes what
       // its Action needs. Credential use stays behind the Action boundary:
@@ -81,14 +62,8 @@ export const digestSagaDef = defineSaga<DigestResult>({
         }),
       );
       if (!orgs.ok) {
-        expectedFailure = orgs.error;
-        timedOut = orgs.error.code === "NINJA_VENDOR_TIMEOUT";
-        if (timedOut) {
-          // Explicit timeout step, same posture as the echo leg: a slow
-          // NinjaOne vendor surfaces TimedOut, never an inferred failure.
-          const failure: SafeError = scrubExecutionError(orgs.error, id);
-          await step.do("timeout-mark-v1", () => failExecution(ctx.db, id, failure, "TimedOut"));
-        }
+        await step.do("persist-failure-v1", () => failSagaExecution(ctx.db, id, orgs.error));
+        terminalWritten = true;
         throw new NonRetryableError(orgs.error.code);
       }
       // ADR-033-4: same Action convention as the census leg above and
@@ -107,28 +82,26 @@ export const digestSagaDef = defineSaga<DigestResult>({
         }),
       );
       if (!echoed.ok) {
-        expectedFailure = echoed.error;
-        timedOut = echoed.error.code === "ECHO_VENDOR_TIMEOUT";
-        if (timedOut) {
-          const failure: SafeError = scrubExecutionError(echoed.error, id);
-          await step.do("timeout-mark-v1", () => failExecution(ctx.db, id, failure, "TimedOut"));
-        }
+        await step.do("persist-failure-v1", () => failSagaExecution(ctx.db, id, echoed.error));
+        terminalWritten = true;
         throw new NonRetryableError(echoed.error.code);
       }
       const output: DigestResult = { organizationCount: orgs.result.organizationCount, echoed: echoed.result };
       // Native wait primitive, same posture as echo: infrastructure checkpoint,
       // not a product Operation.
       await step.sleep("settle-wait-v1", "1 second");
-      await step.do("persist-success-v1", () => persistRunSuccess(ctx.db, id, output));
+      await step.do("persist-success-v1", () => completeExecution(ctx.db, id, output));
       return output;
-    } catch {
-      return persistRunFailure(ctx, step, id, expectedFailure, timedOut);
+    } catch (error) {
+      if (terminalWritten) throw error;
+      const failure: SafeError = {
+        code: "EXECUTION_FAILED",
+        message: "The Execution could not complete. Inspect local runtime diagnostics.",
+      };
+      await step.do("persist-failure-v1", () => failSagaExecution(ctx.db, id, failure));
+      throw new NonRetryableError(failure.code);
     }
   },
 });
 
-export class NinjaEchoDigestWorkflow extends WorkflowEntrypoint<Bindings, ExecutionParams> {
-  async run(event: WorkflowEvent<ExecutionParams>, step: WorkflowStep): Promise<DigestResult> {
-    return executeSaga(this.env, event, step, digestSagaDef);
-  }
-}
+export class NinjaEchoDigestWorkflow extends makeSagaWorkflow(digestSagaDef) {}

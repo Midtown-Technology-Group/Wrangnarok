@@ -1,0 +1,9 @@
+# ADR-033-5 digest migration (issue #416, 5/6): ninjaone-echo-digest onto
+# the ADR 033 interior helpers with byte-identical behavior; both
+# timeout-mark-v1 steps removed (failSagaExecution classifies inside
+# persist-failure-v1). Pins the migrated TimedOut path in the digest
+# suite. No other Saga, no contract change, no new primitive. Worker+D1
+# only.
+scopes/416-digest.scope
+src/sagas/digest.ts
+test/ninja-echo-digest.test.ts
