@@ -641,7 +641,9 @@ boundary, so spreading one request over several batch() calls is several
 transactions, never one atomic batch. Each INSERT carries at most ~4.6 KB
 against the 100 KB statement cap. The batch route body caps at 256 KB (25
 capped documents plus ids and envelope fit; what persists still answers to
-the per-document CHECK). Upstream's 1000-document batch has no truthful
+the per-document CHECK; over/under-limit pins plus the below-transport CHECK
+proof live in `test/tables.test.ts` "TABLE-02 retention-posture pins").
+Upstream's 1000-document batch has no truthful
 single-invocation Cloudflare mapping: 1000 statements plus preflight and
 policy overhead exceed the 50-query Free cap and even the 1000-query Paid
 cap (1000 statements + ~15 overhead > 1000), so a 1000-wide batch would need
@@ -651,13 +653,21 @@ several sequential batch requests; each request stays atomic on its own.
 Unsupported
 query operators fail closed (UNSUPPORTED_QUERY / INVALID_ORDER / INVALID_CURSOR
 for offset or custom sorts: no offset pagination, no custom sorts, no
-projection, no managed indexes, no version tokens). D1 limits recorded as
+projection, no managed indexes, no version tokens; fail-closed pins in
+`test/tables.test.ts` "tables query parser units"). D1 limits recorded as
 blockers: 500 MB Free per-database cap (10 GB Paid) needs a
 retention/partitioning policy before
-large Tables are production-shaped (explicit deletion only in this slice);
+large Tables are production-shaped (explicit deletion only in this slice,
+pinned by `test/tables.test.ts` "TABLE-02 retention-posture pins" and the
+`test/tables-unit.test.ts` DDL pins: deleteTable cascade, no TTL/partition
+columns, per-document CHECK);
 single-database transactions only (batch() is one-database atomic, no
-cross-database semantics); JSON filtering is application-side over the bounded
-keyset window (no PostgreSQL JSONB assumptions, no managed indexes yet).
+cross-database semantics; single-`batch()` discipline in `runSingleBatch`,
+`src/tables.ts`, with raced-abort pins in `test/tables-unit.test.ts`); JSON
+filtering is application-side over the bounded
+keyset window (no PostgreSQL JSONB assumptions, no managed indexes yet;
+bounded walk in `queryRows`, `src/tables.ts`, with the bounded-memory
+regression in `test/tables.test.ts`).
 
 Canonical batch adaptations (labeled, Cloudflare-driven): upsert modes
 compose insert plus update grants fail-closed — upstream row-policies have no
