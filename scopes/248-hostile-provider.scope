@@ -1,0 +1,7 @@
+# Hostile-provider regression slice (issue #248): dependency-ready,
+# test-only proof on the echo Integration path. No production code.
+# Fixture plus focused fault coverage; workflow #250, TABLE/TOOL, and
+# docs/testing.md paths are intentionally absent.
+scopes/248-hostile-provider.scope
+test/helpers/hostile-provider.ts
+test/hostile-provider.test.ts
