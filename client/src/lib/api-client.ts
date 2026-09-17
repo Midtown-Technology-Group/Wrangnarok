@@ -51,6 +51,10 @@ import type {
   FileLocationsResponse,
   FileMeta,
   FilesResponse,
+  EmbedGrantIssuedResponse,
+  EmbedGrantResponse,
+  EmbedGrantsResponse,
+  EmbedGrantSummary,
   FormDetail,
   FormProvidersResponse,
   FormStartupResponse,
@@ -1160,6 +1164,81 @@ export async function submitForm(
     ...(data.scheduled === true ? { scheduled: true as const } : {}),
     ...(typeof data.scheduleAt === "string" ? { scheduleAt: data.scheduleAt } : {}),
   };
+}
+
+function isEmbedGrantSummary(value: unknown): value is EmbedGrantSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    STABLE_UUID.test(v["id"]) &&
+    typeof v["formName"] === "string" &&
+    FORM_NAME.test(v["formName"]) &&
+    Array.isArray(v["allowedOrigins"]) &&
+    (v["allowedOrigins"] as unknown[]).every((entry) => typeof entry === "string") &&
+    typeof v["fingerprint"] === "string" &&
+    typeof v["enabled"] === "boolean" &&
+    (v["expiresAt"] === null || typeof v["expiresAt"] === "string") &&
+    typeof v["createdAt"] === "string" &&
+    (v["rotatedAt"] === null || typeof v["rotatedAt"] === "string") &&
+    (v["lastUsedAt"] === null || typeof v["lastUsedAt"] === "string")
+  );
+}
+
+function checkGrantId(grantId: string): void {
+  if (!STABLE_UUID.test(grantId)) throw new Error("Unexpected embed grant ID shape.");
+}
+
+/** GET /api/forms/:name/embeds — admin grant inventory (summaries only,
+ * never secret material). */
+export async function listFormEmbeds(name: string): Promise<EmbedGrantsResponse> {
+  checkFormName(name);
+  const data = await get(`/api/forms/${name}/embeds`);
+  const embeds = (data as { embeds?: unknown }).embeds;
+  if (!Array.isArray(embeds) || !embeds.every(isEmbedGrantSummary)) {
+    throw new Error("Unexpected embed grants response shape.");
+  }
+  return { embeds };
+}
+
+/** POST /api/forms/:name/embeds — issue a grant. The raw secret renders
+ * once from this response and is never fetched again. */
+export async function createFormEmbed(
+  name: string,
+  body: { allowedOrigins: string[]; expiresAt?: string | null },
+): Promise<EmbedGrantIssuedResponse> {
+  checkFormName(name);
+  const data = await postJson(`/api/forms/${name}/embeds`, body);
+  const grant = (data as { grant?: unknown }).grant;
+  const secret = (data as { secret?: unknown }).secret;
+  if (!isEmbedGrantSummary(grant) || typeof secret !== "string") {
+    throw new Error("Unexpected embed grant response shape.");
+  }
+  return { grant, secret };
+}
+
+/** POST /api/forms/:name/embeds/:id/rotate — fresh secret plus a
+ * re-fingerprint against the live declaration (secret shown once). */
+export async function rotateFormEmbed(name: string, grantId: string): Promise<EmbedGrantIssuedResponse> {
+  checkFormName(name);
+  checkGrantId(grantId);
+  const data = await postJson(`/api/forms/${name}/embeds/${grantId}/rotate`, {});
+  const grant = (data as { grant?: unknown }).grant;
+  const secret = (data as { secret?: unknown }).secret;
+  if (!isEmbedGrantSummary(grant) || typeof secret !== "string") {
+    throw new Error("Unexpected embed grant response shape.");
+  }
+  return { grant, secret };
+}
+
+/** POST /api/forms/:name/embeds/:id/revoke — terminal disable. */
+export async function revokeFormEmbed(name: string, grantId: string): Promise<EmbedGrantResponse> {
+  checkFormName(name);
+  checkGrantId(grantId);
+  const data = await postJson(`/api/forms/${name}/embeds/${grantId}/revoke`, {});
+  const grant = (data as { grant?: unknown }).grant;
+  if (!isEmbedGrantSummary(grant)) throw new Error("Unexpected embed grant response shape.");
+  return { grant };
 }
 
 const ORG_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
