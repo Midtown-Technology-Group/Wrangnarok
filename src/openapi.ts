@@ -70,12 +70,18 @@ export interface OperationPolicy {
 }
 
 /** Minimal OpenAPI 3.x shape the host validates before pinning. Only the
- * fields Code Mode reads are modeled; everything else is ignored. */
+ * fields Code Mode reads are modeled; everything else is ignored.
+ * `components.securitySchemes` plus `security` blocks are modeled for the
+ * INT-01 generator auth-kind detection (never trusted as egress authority). */
 export interface OpenApiDocument {
   readonly openapi?: unknown;
   readonly info?: { readonly version?: unknown; readonly title?: unknown };
   readonly servers?: readonly { readonly url?: unknown }[];
   readonly paths?: Record<string, Record<string, OperationDef>>;
+  readonly components?: {
+    readonly securitySchemes?: Record<string, unknown>;
+  };
+  readonly security?: unknown;
 }
 
 export interface OperationDef {
@@ -85,6 +91,7 @@ export interface OperationDef {
   readonly tags?: unknown;
   readonly parameters?: unknown;
   readonly deprecated?: unknown;
+  readonly security?: unknown;
 }
 
 /** Generator auth kinds (INT-01, issue #229): how the emitted Integration

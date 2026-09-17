@@ -425,6 +425,77 @@ describe("INT-01 generator (issue #229)", () => {
     expect(() => generateIntegrationModule(JSON.stringify(implicit), { ...opts(), id: "implicit" }, DIGEST)).toThrow(
       expect.objectContaining({ code: "GENERATOR_INVALID_OPTIONS" }),
     );
+    // Branch cover: malformed scheme entries are skipped, not trusted.
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        components: { securitySchemes: { Broken: null, AlsoBroken: [1] } },
+        paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+      }),
+    ).toBe("unknown");
+    // Empty and missing flows objects grant client-credentials (fail open would
+    // be wrong here only if the type were not oauth2; the type gate holds).
+    for (const flows of [{}, undefined]) {
+      expect(
+        detectGeneratorAuthKind({
+          openapi: "3.0.3",
+          info: { version: "1.0.0" },
+          components: { securitySchemes: { O: { type: "oauth2", ...(flows === undefined ? {} : { flows }) } } },
+          paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+        }),
+      ).toBe("clientCredentials");
+    }
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        components: { securitySchemes: { O: { type: "oauth2", flows: { authorizationCode: {} } } } },
+        paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+      }),
+    ).toBe("unknown");
+    // No declared schemes: a bearer-shaped security reference still detects;
+    // a non-bearer reference or malformed blocks stay unknown.
+    const refOnly = {
+      openapi: "3.0.3",
+      info: { version: "1.0.0" },
+      security: [{ ServiceToken: [] }],
+      paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+    };
+    expect(detectGeneratorAuthKind(refOnly)).toBe("apiToken");
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        security: [{ SessionCookie: [] }],
+        paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+      }),
+    ).toBe("unknown");
+    // Per-operation security references detect too, even when top-level is absent.
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        paths: {
+          "/v1/things": {
+            get: { operationId: "Things_List", security: [{ BearerAuth: [] }] },
+          },
+        },
+      }),
+    ).toBe("apiToken");
+    // Malformed security blocks (non-arrays, non-objects) never detect.
+    expect(
+      detectGeneratorAuthKind({
+        openapi: "3.0.3",
+        info: { version: "1.0.0" },
+        security: "bearer",
+        paths: {
+          "/v1/things": {
+            get: { operationId: "Things_List", security: [{ Bad: [] }, null, "x"] },
+          },
+        },
+      }),
+    ).toBe("unknown");
   });
 
   it("fails closed on unknown schemes and mismatched overrides (fix 1)", () => {
