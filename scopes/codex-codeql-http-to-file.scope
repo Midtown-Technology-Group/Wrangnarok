@@ -1,0 +1,9 @@
+# Lane scope: codex/codeql-http-to-file (CodeQL js/http-to-file-access alerts 57-61).
+# Offline generator dispatch split in the local CLI scripts plus the generator
+# dispatch test. Nothing else.
+scopes/codex-codeql-http-to-file.scope
+scripts/wrangnarok.mjs
+scripts/wrangnarok.d.mts
+scripts/wrangnarok-core.mjs
+scripts/wrangnarok-core.d.mts
+test/generate-integration.test.ts

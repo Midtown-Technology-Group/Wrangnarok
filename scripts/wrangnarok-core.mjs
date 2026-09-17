@@ -641,6 +641,242 @@ export function parseContext(argv = process.argv) {
   };
 }
 
+// Offline generator for `generate-integration` (INT-01): builds the module
+// from the operator-supplied --spec only, with no fetch and no token use.
+// Kept as a direct entry so CLI dispatch never routes generator output
+// through the shared network-result object (CodeQL js/http-to-file-access).
+export async function runGenerateIntegration(ctx) {
+  // Offline: no fetch, no token use. Self-contained emitter mirroring
+  // src/generate-integration.ts (the canonical tested implementation):
+  // the plain-node CLI cannot import TS source, so the validation plus
+  // emit logic lives inline here exactly as scaffold inlines its
+  // template. Same spec plus same options yields identical source, so
+  // regeneration diffs cleanly on spec drift.
+  const id = ctx.genId;
+  if (!id || !/^[a-z][a-z0-9-]{1,63}$/.test(id)) {
+    fail("USAGE", "generate-integration needs --id ID (1-64 chars [a-z0-9-], starting with a letter).");
+  }
+  const rawSpec = ctx.genSpec;
+  if (typeof rawSpec !== "string" || rawSpec.length === 0) {
+    fail("USAGE", "generate-integration needs --spec JSON|@FILE (OpenAPI 3.x JSON).");
+  }
+  const specText = rawSpec.startsWith("@") ? readFileSync(rawSpec.slice(1), "utf-8") : rawSpec;
+  if (new TextEncoder().encode(specText).length > 2 * 1024 * 1024) {
+    fail("GENERATOR_INVALID_SPEC", "The OpenAPI spec exceeds the 2 MiB generator bound.");
+  }
+  const origins = ctx.genOrigins ?? [];
+  if (origins.length === 0) {
+    fail("USAGE", "generate-integration needs --origin URL (repeatable; never the spec servers entries).");
+  }
+  for (const origin of origins) {
+    try {
+      const url = new URL(origin);
+      if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("scheme");
+    } catch {
+      fail("GENERATOR_INVALID_OPTIONS", `Allowed origin ${JSON.stringify(origin)} must be http(s).`);
+    }
+  }
+  const classifications = ctx.genClassifications ?? {};
+  const RISKS = ["read", "mutation", "destructive", "credential", "billing", "security", "tenant-admin"];
+  for (const [op, risk] of Object.entries(classifications)) {
+    if (typeof op !== "string" || op.length === 0 || typeof risk !== "string" || !RISKS.includes(risk)) {
+      fail(
+        "USAGE",
+        `generate-integration --classify needs op=CLASS with CLASS one of ${RISKS.join(", ")} (e.g. Ticket_Delete=destructive).`,
+      );
+    }
+  }
+  for (const origin of origins) {
+    const url = new URL(origin);
+    const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+    if (url.protocol !== "https:" && !loopback) {
+      fail(
+        "GENERATOR_INVALID_OPTIONS",
+        `Allowed origin ${JSON.stringify(origin)} must be https (credentials ride the Authorization header).`,
+      );
+    }
+  }
+  let doc;
+  try {
+    doc = JSON.parse(specText);
+  } catch {
+    fail("GENERATOR_INVALID_SPEC", "The OpenAPI spec must parse as JSON (convert YAML to JSON before generating).");
+  }
+  if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
+    fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract must be a JSON object.");
+  }
+  if (typeof doc.openapi !== "string" || !doc.openapi.startsWith("3.")) {
+    fail("GENERATOR_INVALID_SPEC", "Only OpenAPI 3.x contracts can be generated.");
+  }
+  const version =
+    doc.info && typeof doc.info === "object" && typeof doc.info.version === "string"
+      ? doc.info.version.slice(0, 64)
+      : "";
+  if (!version) fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract needs info.version.");
+  if (!doc.paths || typeof doc.paths !== "object" || Array.isArray(doc.paths)) {
+    fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract needs a paths object.");
+  }
+  const OPERATION_ID = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
+  const SAFE_METHODS = new Set(["get", "head", "options"]);
+  const seen = new Set();
+  const operations = [];
+  for (const [path, methods] of Object.entries(doc.paths)) {
+    if (!path.startsWith("/") || methods === null || typeof methods !== "object" || Array.isArray(methods)) {
+      fail("GENERATOR_INVALID_SPEC", `Contract path ${JSON.stringify(path)} is malformed.`);
+    }
+    for (const [method, def] of Object.entries(methods)) {
+      if (def === null || typeof def !== "object" || Array.isArray(def)) continue;
+      const operationId = def.operationId;
+      if (typeof operationId !== "string" || !OPERATION_ID.test(operationId)) {
+        fail(
+          "GENERATOR_INVALID_SPEC",
+          `Contract operation ${method.toUpperCase()} ${path} needs a stable operationId.`,
+        );
+      }
+      if (seen.has(operationId)) {
+        fail("GENERATOR_INVALID_SPEC", `Duplicate operationId ${JSON.stringify(operationId)}.`);
+      }
+      seen.add(operationId);
+      const summary = typeof def.summary === "string" ? def.summary.slice(0, 280) : "";
+      const classified = classifications[operationId];
+      const risk = classified !== undefined ? classified : SAFE_METHODS.has(method.toLowerCase()) ? "read" : "mutation";
+      operations.push({ operationId, method: method.toLowerCase(), path, summary, risk });
+    }
+  }
+  if (operations.length === 0) {
+    fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract declares no operations.");
+  }
+  const { createHash } = await import("node:crypto");
+  const digestHex = createHash("sha256").update(specText, "utf-8").digest("hex");
+  const prefix = id
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const cap = prefix
+    .split("_")
+    .map((part) => (part.length === 0 ? part : part[0].toUpperCase() + part.slice(1).toLowerCase()))
+    .join("");
+  const opsLiteral = operations
+    .map(
+      (op) =>
+        `    ${JSON.stringify(op.operationId)}: ${JSON.stringify(op.risk)}, // ${op.method.toUpperCase()} ${op.path}`,
+    )
+    .join("\n");
+  const originsLiteral = origins.map((o) => `  ${JSON.stringify(o)},`).join("\n");
+  const content = [
+    "// SPDX-License-Identifier: AGPL-3.0",
+    "// Generated by `wrangnarok generate-integration` (INT-01, issue #229).",
+    "// DO NOT EDIT BY HAND: regenerate from the pinned spec instead.",
+    `// Spec digest: ${digestHex}`,
+    `// Spec version: ${version}`,
+    `// Operations: ${operations.length}`,
+    'import { Fault } from "../domain";',
+    'import type { Principal } from "../domain";',
+    "import {",
+    "  authorizeOperation,",
+    "  buildProvenance,",
+    "  indexOperations,",
+    "  inspectOperation,",
+    "  pinContract,",
+    "  resolveRequestUrl,",
+    "  searchOperations,",
+    '} from "../openapi";',
+    'import type { CodeModeProvenance, ContractOperation, OpenApiDocument, OperationPolicy, OperationRisk } from "../openapi";',
+    'import { getConnection } from "../connections";',
+    'import { scrubTextWithSecrets, scrubValueWithSecrets } from "../secrets";',
+    "",
+    "/** Stable Integration identity for this generated provider. */",
+    `export const ${prefix}_INTEGRATION_ID = ${JSON.stringify(id)};`,
+    "",
+    "/** Allowed origins for this Integration (operator-configured, never spec servers). */",
+    `export const ${prefix}_ALLOWED_ORIGINS: readonly string[] = Object.freeze([`,
+    originsLiteral,
+    "]);",
+    "",
+    "/** Default Code Mode policy: reads execute under Connection authority; mutations need explicit per-operation enablement. */",
+    `export const ${prefix}_DEFAULT_POLICY: OperationPolicy = {`,
+    "  enabledOperations: [],",
+    "  deniedOperations: [],",
+    "  enabledRisks: [],",
+    "};",
+    "",
+    "/** Risk classification per operationId (method defaults refined here). */",
+    `export const ${prefix}_CLASSIFICATIONS: Readonly<Record<string, OperationRisk>> = Object.freeze({`,
+    opsLiteral,
+    "});",
+    "",
+    `export interface ${prefix}Secrets {`,
+    "  readonly clientId?: string;",
+    "  readonly clientSecret?: string;",
+    "}",
+    "",
+    `export function require${cap}Secrets(secrets: ${prefix}Secrets): { clientId: string; clientSecret: string } {`,
+    "  const { clientId, clientSecret } = secrets;",
+    "  if (!clientId || !clientSecret) {",
+    `    throw new Fault(502, "${prefix}_NOT_CONFIGURED", "Integration credentials are not configured.");`,
+    "  }",
+    "  return { clientId, clientSecret };",
+    "}",
+    "",
+    `export interface ${prefix}Env {`,
+    `  readonly ${prefix}_CLIENT_ID?: string;`,
+    `  readonly ${prefix}_CLIENT_SECRET?: string;`,
+    "}",
+    "",
+    "export interface CodeModeCall {",
+    "  readonly operationId: string;",
+    "  readonly path?: Readonly<Record<string, string>>;",
+    "  readonly query?: Readonly<Record<string, string>>;",
+    "  readonly body?: unknown;",
+    "}",
+    "",
+    "export interface CodeModeResult {",
+    "  readonly result: unknown;",
+    "  readonly provenance: CodeModeProvenance;",
+    "}",
+    "",
+    `export async function execute${cap}Operation(`,
+    "  db: D1Database,",
+    "  caller: Principal,",
+    `  secrets: ${prefix}Secrets,`,
+    "  call: CodeModeCall,",
+    "  vendor: { readonly fetchImpl?: typeof fetch } = {},",
+    "): Promise<CodeModeResult> {",
+    `  const { clientId, clientSecret } = require${cap}Secrets(secrets);`,
+    `  const view = await getConnection(db, caller, ${prefix}_INTEGRATION_ID).catch(() => null);`,
+    "  if (!view) {",
+    '    throw new Fault(424, "OPENAPI_CONNECTION_MISSING", "No Connection exists for this Organization.");',
+    "  }",
+    "  if (!view.enabled) {",
+    '    throw new Fault(404, "OPENAPI_CONNECTION_MISSING", "The Connection is disabled.");',
+    "  }",
+    "  // NOTE: the generated module embeds its pinned spec document plus",
+    "  // contract helpers; this CLI preview returns the source for the",
+    "  // operator to commit. Host execution resolves the committed module.",
+    `  const operation = { operationId: call.operationId, method: "get", path: "/", summary: "", risk: "read" } as ContractOperation;`,
+    "  void authorizeOperation; void buildProvenance; void indexOperations; void inspectOperation;",
+    "  void pinContract; void resolveRequestUrl; void searchOperations;",
+    "  void getConnection; void scrubTextWithSecrets; void scrubValueWithSecrets;",
+    "  void operation; void view; void vendor; void call; void caller; void db;",
+    `  return { result: null, provenance: {} as CodeModeProvenance };`,
+    "}",
+    "",
+  ].join("\n");
+  return {
+    generated: {
+      path: `src/integrations/${id}.ts`,
+      content,
+      operations: operations.length,
+      specDigest: digestHex,
+      next: [
+        `Commit ${id}.ts under src/integrations/ and register its ID in the Integration inventory.`,
+        "Wire the Connection config schema plus secret env vars per ADR 003/005.",
+        "Run npm run typecheck plus the generator tests before opening a PR.",
+      ],
+    },
+  };
+}
+
 export async function runCommand(ctx, deps = {}) {
   const rawFetch = deps.fetchImpl ?? globalThis.fetch;
   const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -777,236 +1013,10 @@ export async function runCommand(ctx, deps = {}) {
       };
     }
     case "generate-integration": {
-      // Offline: no fetch, no token use. Self-contained emitter mirroring
-      // src/generate-integration.ts (the canonical tested implementation):
-      // the plain-node CLI cannot import TS source, so the validation plus
-      // emit logic lives inline here exactly as scaffold inlines its
-      // template. Same spec plus same options yields identical source, so
-      // regeneration diffs cleanly on spec drift.
-      const id = ctx.genId;
-      if (!id || !/^[a-z][a-z0-9-]{1,63}$/.test(id)) {
-        fail("USAGE", "generate-integration needs --id ID (1-64 chars [a-z0-9-], starting with a letter).");
-      }
-      const rawSpec = ctx.genSpec;
-      if (typeof rawSpec !== "string" || rawSpec.length === 0) {
-        fail("USAGE", "generate-integration needs --spec JSON|@FILE (OpenAPI 3.x JSON).");
-      }
-      const specText = rawSpec.startsWith("@") ? readFileSync(rawSpec.slice(1), "utf-8") : rawSpec;
-      if (new TextEncoder().encode(specText).length > 2 * 1024 * 1024) {
-        fail("GENERATOR_INVALID_SPEC", "The OpenAPI spec exceeds the 2 MiB generator bound.");
-      }
-      const origins = ctx.genOrigins ?? [];
-      if (origins.length === 0) {
-        fail("USAGE", "generate-integration needs --origin URL (repeatable; never the spec servers entries).");
-      }
-      for (const origin of origins) {
-        try {
-          const url = new URL(origin);
-          if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("scheme");
-        } catch {
-          fail("GENERATOR_INVALID_OPTIONS", `Allowed origin ${JSON.stringify(origin)} must be http(s).`);
-        }
-      }
-      const classifications = ctx.genClassifications ?? {};
-      const RISKS = ["read", "mutation", "destructive", "credential", "billing", "security", "tenant-admin"];
-      for (const [op, risk] of Object.entries(classifications)) {
-        if (typeof op !== "string" || op.length === 0 || typeof risk !== "string" || !RISKS.includes(risk)) {
-          fail(
-            "USAGE",
-            `generate-integration --classify needs op=CLASS with CLASS one of ${RISKS.join(", ")} (e.g. Ticket_Delete=destructive).`,
-          );
-        }
-      }
-      for (const origin of origins) {
-        const url = new URL(origin);
-        const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
-        if (url.protocol !== "https:" && !loopback) {
-          fail(
-            "GENERATOR_INVALID_OPTIONS",
-            `Allowed origin ${JSON.stringify(origin)} must be https (credentials ride the Authorization header).`,
-          );
-        }
-      }
-      let doc;
-      try {
-        doc = JSON.parse(specText);
-      } catch {
-        fail("GENERATOR_INVALID_SPEC", "The OpenAPI spec must parse as JSON (convert YAML to JSON before generating).");
-      }
-      if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
-        fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract must be a JSON object.");
-      }
-      if (typeof doc.openapi !== "string" || !doc.openapi.startsWith("3.")) {
-        fail("GENERATOR_INVALID_SPEC", "Only OpenAPI 3.x contracts can be generated.");
-      }
-      const version =
-        doc.info && typeof doc.info === "object" && typeof doc.info.version === "string"
-          ? doc.info.version.slice(0, 64)
-          : "";
-      if (!version) fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract needs info.version.");
-      if (!doc.paths || typeof doc.paths !== "object" || Array.isArray(doc.paths)) {
-        fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract needs a paths object.");
-      }
-      const OPERATION_ID = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
-      const SAFE_METHODS = new Set(["get", "head", "options"]);
-      const seen = new Set();
-      const operations = [];
-      for (const [path, methods] of Object.entries(doc.paths)) {
-        if (!path.startsWith("/") || methods === null || typeof methods !== "object" || Array.isArray(methods)) {
-          fail("GENERATOR_INVALID_SPEC", `Contract path ${JSON.stringify(path)} is malformed.`);
-        }
-        for (const [method, def] of Object.entries(methods)) {
-          if (def === null || typeof def !== "object" || Array.isArray(def)) continue;
-          const operationId = def.operationId;
-          if (typeof operationId !== "string" || !OPERATION_ID.test(operationId)) {
-            fail(
-              "GENERATOR_INVALID_SPEC",
-              `Contract operation ${method.toUpperCase()} ${path} needs a stable operationId.`,
-            );
-          }
-          if (seen.has(operationId)) {
-            fail("GENERATOR_INVALID_SPEC", `Duplicate operationId ${JSON.stringify(operationId)}.`);
-          }
-          seen.add(operationId);
-          const summary = typeof def.summary === "string" ? def.summary.slice(0, 280) : "";
-          const classified = classifications[operationId];
-          const risk =
-            classified !== undefined ? classified : SAFE_METHODS.has(method.toLowerCase()) ? "read" : "mutation";
-          operations.push({ operationId, method: method.toLowerCase(), path, summary, risk });
-        }
-      }
-      if (operations.length === 0) {
-        fail("GENERATOR_INVALID_SPEC", "The OpenAPI contract declares no operations.");
-      }
-      const { createHash } = await import("node:crypto");
-      const digestHex = createHash("sha256").update(specText, "utf-8").digest("hex");
-      const prefix = id
-        .toUpperCase()
-        .replace(/[^A-Z0-9]+/g, "_")
-        .replace(/^_+|_+$/g, "");
-      const cap = prefix
-        .split("_")
-        .map((part) => (part.length === 0 ? part : part[0].toUpperCase() + part.slice(1).toLowerCase()))
-        .join("");
-      const opsLiteral = operations
-        .map(
-          (op) =>
-            `    ${JSON.stringify(op.operationId)}: ${JSON.stringify(op.risk)}, // ${op.method.toUpperCase()} ${op.path}`,
-        )
-        .join("\n");
-      const originsLiteral = origins.map((o) => `  ${JSON.stringify(o)},`).join("\n");
-      const content = [
-        "// SPDX-License-Identifier: AGPL-3.0",
-        "// Generated by `wrangnarok generate-integration` (INT-01, issue #229).",
-        "// DO NOT EDIT BY HAND: regenerate from the pinned spec instead.",
-        `// Spec digest: ${digestHex}`,
-        `// Spec version: ${version}`,
-        `// Operations: ${operations.length}`,
-        'import { Fault } from "../domain";',
-        'import type { Principal } from "../domain";',
-        "import {",
-        "  authorizeOperation,",
-        "  buildProvenance,",
-        "  indexOperations,",
-        "  inspectOperation,",
-        "  pinContract,",
-        "  resolveRequestUrl,",
-        "  searchOperations,",
-        '} from "../openapi";',
-        'import type { CodeModeProvenance, ContractOperation, OpenApiDocument, OperationPolicy, OperationRisk } from "../openapi";',
-        'import { getConnection } from "../connections";',
-        'import { scrubTextWithSecrets, scrubValueWithSecrets } from "../secrets";',
-        "",
-        "/** Stable Integration identity for this generated provider. */",
-        `export const ${prefix}_INTEGRATION_ID = ${JSON.stringify(id)};`,
-        "",
-        "/** Allowed origins for this Integration (operator-configured, never spec servers). */",
-        `export const ${prefix}_ALLOWED_ORIGINS: readonly string[] = Object.freeze([`,
-        originsLiteral,
-        "]);",
-        "",
-        "/** Default Code Mode policy: reads execute under Connection authority; mutations need explicit per-operation enablement. */",
-        `export const ${prefix}_DEFAULT_POLICY: OperationPolicy = {`,
-        "  enabledOperations: [],",
-        "  deniedOperations: [],",
-        "  enabledRisks: [],",
-        "};",
-        "",
-        "/** Risk classification per operationId (method defaults refined here). */",
-        `export const ${prefix}_CLASSIFICATIONS: Readonly<Record<string, OperationRisk>> = Object.freeze({`,
-        opsLiteral,
-        "});",
-        "",
-        `export interface ${prefix}Secrets {`,
-        "  readonly clientId?: string;",
-        "  readonly clientSecret?: string;",
-        "}",
-        "",
-        `export function require${cap}Secrets(secrets: ${prefix}Secrets): { clientId: string; clientSecret: string } {`,
-        "  const { clientId, clientSecret } = secrets;",
-        "  if (!clientId || !clientSecret) {",
-        `    throw new Fault(502, "${prefix}_NOT_CONFIGURED", "Integration credentials are not configured.");`,
-        "  }",
-        "  return { clientId, clientSecret };",
-        "}",
-        "",
-        `export interface ${prefix}Env {`,
-        `  readonly ${prefix}_CLIENT_ID?: string;`,
-        `  readonly ${prefix}_CLIENT_SECRET?: string;`,
-        "}",
-        "",
-        "export interface CodeModeCall {",
-        "  readonly operationId: string;",
-        "  readonly path?: Readonly<Record<string, string>>;",
-        "  readonly query?: Readonly<Record<string, string>>;",
-        "  readonly body?: unknown;",
-        "}",
-        "",
-        "export interface CodeModeResult {",
-        "  readonly result: unknown;",
-        "  readonly provenance: CodeModeProvenance;",
-        "}",
-        "",
-        `export async function execute${cap}Operation(`,
-        "  db: D1Database,",
-        "  caller: Principal,",
-        `  secrets: ${prefix}Secrets,`,
-        "  call: CodeModeCall,",
-        "  vendor: { readonly fetchImpl?: typeof fetch } = {},",
-        "): Promise<CodeModeResult> {",
-        `  const { clientId, clientSecret } = require${cap}Secrets(secrets);`,
-        `  const view = await getConnection(db, caller, ${prefix}_INTEGRATION_ID).catch(() => null);`,
-        "  if (!view) {",
-        '    throw new Fault(424, "OPENAPI_CONNECTION_MISSING", "No Connection exists for this Organization.");',
-        "  }",
-        "  if (!view.enabled) {",
-        '    throw new Fault(404, "OPENAPI_CONNECTION_MISSING", "The Connection is disabled.");',
-        "  }",
-        "  // NOTE: the generated module embeds its pinned spec document plus",
-        "  // contract helpers; this CLI preview returns the source for the",
-        "  // operator to commit. Host execution resolves the committed module.",
-        `  const operation = { operationId: call.operationId, method: "get", path: "/", summary: "", risk: "read" } as ContractOperation;`,
-        "  void authorizeOperation; void buildProvenance; void indexOperations; void inspectOperation;",
-        "  void pinContract; void resolveRequestUrl; void searchOperations;",
-        "  void getConnection; void scrubTextWithSecrets; void scrubValueWithSecrets;",
-        "  void operation; void view; void vendor; void call; void caller; void db;",
-        `  return { result: null, provenance: {} as CodeModeProvenance };`,
-        "}",
-        "",
-      ].join("\n");
-      return {
-        generated: {
-          path: `src/integrations/${id}.ts`,
-          content,
-          operations: operations.length,
-          specDigest: digestHex,
-          next: [
-            `Commit ${id}.ts under src/integrations/ and register its ID in the Integration inventory.`,
-            "Wire the Connection config schema plus secret env vars per ADR 003/005.",
-            "Run npm run typecheck plus the generator tests before opening a PR.",
-          ],
-        },
-      };
+      // Offline by construction (see runGenerateIntegration): no fetch,
+      // no token use. Delegates so the generator result never shares an
+      // object with network results (CodeQL js/http-to-file-access).
+      return runGenerateIntegration(ctx);
     }
     case "diagnose": {
       const detail = await pollDetail(full, checkExecutionId(ctx.id), {
@@ -1757,10 +1767,18 @@ async function main() {
     memberStatus: command === "member-update" ? arg("status") : undefined,
     kind: command === "invite" || command === "member-update" ? arg("kind") : undefined,
   };
-  const result = await runCommand(ctx).catch((error) => {
+  // generate-integration is offline (no fetch): keep its result in a
+  // dedicated variable so it never shares an object with network results,
+  // which CodeQL js/http-to-file-access otherwise flags at the file writers
+  // in the generate-integration branch below. (A single union variable here
+  // reintroduces the taint merge even with a direct dispatch.)
+  const onGenerate = command === "generate-integration";
+  const failClosed = (error) => {
     if (error instanceof Error && error.message.startsWith("WRANGNAROK_CLI")) throw error;
     fail("NETWORK", `request failed: ${error instanceof Error ? error.message : error}`);
-  });
+  };
+  const genResult = onGenerate ? await runGenerateIntegration(ctx).catch(failClosed) : null;
+  const result = onGenerate ? null : await runCommand(ctx).catch(failClosed);
   if (command === "sagas") printSagas(result.sagas);
   else if (command === "inspect") printInspect(result.saga);
   else if (command === "diagnose") printDiagnosis(result.diagnosis);
@@ -1771,21 +1789,21 @@ async function main() {
       for (const step of result.scaffold.next) console.log(`next: ${step}`);
     }
   } else if (command === "generate-integration") {
-    if (parsed.json) console.log(JSON.stringify(result));
+    if (parsed.json) console.log(JSON.stringify(genResult));
     else {
       // Human mode writes the file like scaffold previews it: the operator
       // commits the result. --out overrides the reported path (tests use a
       // temp dir); refusal to overwrite an existing file without --force
       // keeps regeneration explicit.
-      const outPath = arg("out") ?? result.generated.path;
+      const outPath = arg("out") ?? genResult.generated.path;
       const force = process.argv.includes("--force");
       // Atomic exclusive create (flag "wx") instead of existsSync-then-write:
       // the check-then-write form has a TOCTOU race and trips CodeQL.
       if (force) {
-        writeFileSync(outPath, result.generated.content, "utf-8");
+        writeFileSync(outPath, genResult.generated.content, "utf-8");
       } else {
         try {
-          writeFileSync(outPath, result.generated.content, { encoding: "utf-8", flag: "wx" });
+          writeFileSync(outPath, genResult.generated.content, { encoding: "utf-8", flag: "wx" });
         } catch (error) {
           if (error && error.code === "EEXIST") {
             fail(
@@ -1796,9 +1814,9 @@ async function main() {
           throw error;
         }
       }
-      console.log(`generated ${outPath} (${result.generated.operations} operations)`);
-      console.log(`spec: ${result.generated.specDigest.slice(0, 12)}`);
-      for (const step of result.generated.next) console.log(`next: ${step}`);
+      console.log(`generated ${outPath} (${genResult.generated.operations} operations)`);
+      console.log(`spec: ${genResult.generated.specDigest.slice(0, 12)}`);
+      for (const step of genResult.generated.next) console.log(`next: ${step}`);
     }
   } else if (command === "history") printHistory(result.executions, result.hasMore, { pages: result.pages ?? 1 });
   else if (command === "audit") printAudit(result.events, result.hasMore, { pages: result.pages ?? 1 });

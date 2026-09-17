@@ -5,3 +5,4 @@ export interface CliContext {
 
 export function parseContext(argv?: string[]): CliContext;
 export function runCommand(ctx: CliContext, deps?: Record<string, unknown>): Promise<unknown>;
+export function validateAndGenerate(ctx: CliContext): unknown;
