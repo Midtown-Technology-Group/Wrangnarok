@@ -11,7 +11,8 @@
 // aggregate (instances 9, steps 36, D1 reads 36, D1 writes 72). It emits
 // exactly one WRANGNAROK_LOCAL_LOAD JSON line labeled "locally measured":
 // local runtime counters, never Cloudflare provider billing or production
-// quota evidence. Timings are informational only; no wall-clock thresholds.
+// quota evidence. The payload carries no wall-clock fields, so the emitted
+// line is deterministic; no timing thresholds are asserted.
 import { env } from "cloudflare:workers";
 import { expect, it, vi } from "vitest";
 import worker from "../src/index";
@@ -103,7 +104,6 @@ useWorkflowHarness(bindings.DB, {
 });
 
 it("runs 3 orgs x 3 smoke executions with isolation and budget evidence", async () => {
-  const startedMs = Date.now();
   const stamp = new Date().toISOString();
   // Explicit Organization and membership records behind every per-request
   // identity: org admins (active, ordinary) so the Saga execute grant
@@ -251,30 +251,48 @@ it("runs 3 orgs x 3 smoke executions with isolation and budget evidence", async 
       }
     }
 
-    console.log(
-      `WRANGNAROK_LOCAL_LOAD ${JSON.stringify({
-        version: "wrangnarok.local-load.v1",
-        evidenceClass: "locally measured",
-        workload: { organizations: ORGS.length, executionsPerOrg: RUNS_PER_ORG, instances: EXPECTED.instances },
-        totals: { instances: totalInstances, steps: totalSteps, d1Reads: totalReads, d1Writes: totalWrites },
-        perRunBudgets: {
-          d1Reads: PER_RUN_BUDGETS.d1Reads,
-          d1Writes: PER_RUN_BUDGETS.d1Writes,
-          workflowSteps: PER_RUN_BUDGETS.workflowSteps,
-          workflowInstances: PER_RUN_BUDGETS.workflowInstances,
-        },
-        isolation: {
-          crossOrgDetail: 404,
-          workflowBindingUntouched: true,
-          historyScopedPerOrg: true,
-          historyOmitsInputResult: true,
-        },
-        billing:
-          "Local workerd/D1/Workflow application-observed counters only; not Cloudflare provider billing meters and not production quota evidence. Deployed D1 meta plus Workers analytics metering still requires deployment authority.",
-        durationMs: Date.now() - startedMs,
-      })}`,
-    );
-    expect(lines.filter((line) => line.startsWith("WRANGNAROK_LOCAL_LOAD "))).toHaveLength(1);
+    // The evidence line bypasses the capture above: it must reach the test
+    // output, not the lines array. The payload is fully deterministic (no
+    // wall-clock fields); the emission count proves exactly-one delivery.
+    const loadLine = `WRANGNAROK_LOCAL_LOAD ${JSON.stringify({
+      version: "wrangnarok.local-load.v1",
+      evidenceClass: "locally measured",
+      workload: { organizations: ORGS.length, executionsPerOrg: RUNS_PER_ORG, instances: EXPECTED.instances },
+      totals: { instances: totalInstances, steps: totalSteps, d1Reads: totalReads, d1Writes: totalWrites },
+      perRunBudgets: {
+        d1Reads: PER_RUN_BUDGETS.d1Reads,
+        d1Writes: PER_RUN_BUDGETS.d1Writes,
+        workflowSteps: PER_RUN_BUDGETS.workflowSteps,
+        workflowInstances: PER_RUN_BUDGETS.workflowInstances,
+      },
+      isolation: {
+        crossOrgDetail: 404,
+        workflowBindingUntouched: true,
+        historyScopedPerOrg: true,
+        historyOmitsInputResult: true,
+      },
+      billing:
+        "Local workerd/D1/Workflow application-observed counters only; not Cloudflare provider billing meters and not production quota evidence. Deployed D1 meta plus Workers analytics metering still requires deployment authority.",
+    })}`;
+    originalLog(loadLine);
+    // Exactly-one contract: the call above is the only LOAD writer, and the
+    // capture proves no second LOAD line leaked anywhere else.
+    expect(lines.filter((line) => line.startsWith("WRANGNAROK_LOCAL_LOAD "))).toHaveLength(0);
+    expect(JSON.parse(loadLine.replace("WRANGNAROK_LOCAL_LOAD ", ""))).toEqual({
+      version: "wrangnarok.local-load.v1",
+      evidenceClass: "locally measured",
+      workload: { organizations: 3, executionsPerOrg: 3, instances: 9 },
+      totals: { instances: 9, steps: 36, d1Reads: 36, d1Writes: 72 },
+      perRunBudgets: { d1Reads: 10, d1Writes: 20, workflowSteps: 10, workflowInstances: 1 },
+      isolation: {
+        crossOrgDetail: 404,
+        workflowBindingUntouched: true,
+        historyScopedPerOrg: true,
+        historyOmitsInputResult: true,
+      },
+      billing:
+        "Local workerd/D1/Workflow application-observed counters only; not Cloudflare provider billing meters and not production quota evidence. Deployed D1 meta plus Workers analytics metering still requires deployment authority.",
+    });
   } finally {
     console.log = originalLog;
   }
