@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bindings } from "../src/bindings";
 import { NINJA_INTEGRATION_ID } from "../src/domain";
 import { createConnection, deleteConnection, getConnection } from "../src/connections";
-import { clearOAuthInflight, type OAuthFaultTable } from "../src/oauth";
+import { clearOAuthInflight, isTokenUsable, type OAuthFaultTable } from "../src/oauth";
 import { OAuthRefreshFence } from "../src/oauth-refresh-fence";
 import {
   loadOAuthToken,
@@ -852,6 +852,160 @@ describe("persisted revocation", () => {
         fetchImpl,
       }),
     ).rejects.toMatchObject({ code: "OAUTH_TOKEN_NOT_FOUND" });
+  });
+});
+
+describe("stale-generation health/revocation fencing (issue #149)", () => {
+  it("a gen1 refresh failure landing after a gen2 replacement leaves gen2 healthy", async () => {
+    const connectionId = await seedMapping();
+    await storeInitialOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      accessToken: ACCESS,
+      refreshToken: REFRESH,
+      kekMaterial: KEK,
+      checkedAt: AT,
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const enteredGate = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const { fetchImpl } = stubVendor([
+      async () => {
+        entered();
+        await gate;
+        return tokenJson({ error: "invalid_grant" }, 400);
+      },
+    ]);
+    const pending = refreshPersistedOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      endpoint: ENDPOINT,
+      tokenPath: TOKEN_PATH,
+      credentials: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET },
+      faults: FAULTS,
+      keks: { 1: KEK },
+      kekMaterial: KEK,
+      fetchImpl,
+      checkedAt: LATER,
+    });
+    // The gen1 refresh is inside vendor HTTP; land gen2 before it completes.
+    await enteredGate;
+    await replaceOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      expectedGeneration: 1,
+      accessToken: ACCESS_NEXT,
+      refreshToken: REFRESH_NEXT,
+      kekMaterial: KEK,
+      checkedAt: LATER,
+    });
+    release();
+    // The stale failure observes the fencing authority, not the vendor fault;
+    // gen2 stands untouched: healthy and usable with the replacement tokens.
+    await expect(pending).rejects.toMatchObject({ code: "OAUTH_TOKEN_GENERATION_STALE" });
+    const health = (await readOAuthTokenState(bindings.DB, ORG, connectionId))?.health;
+    expect(health).toMatchObject({ status: "healthy", consecutiveFailures: 0 });
+    expect(health && isTokenUsable(health)).toBe(true);
+    expect(await loadOAuthToken(bindings.DB, ORG, connectionId, { 1: KEK })).toMatchObject({
+      accessToken: ACCESS_NEXT,
+      refreshToken: REFRESH_NEXT,
+      generation: 2,
+    });
+    expect(secretsOf(await storedRows())).not.toContain(REFRESH);
+  });
+
+  it("a gen1 vendor revocation landing after a gen2 replacement leaves gen2 usable", async () => {
+    const connectionId = await seedMapping();
+    await storeInitialOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      accessToken: ACCESS,
+      refreshToken: REFRESH,
+      kekMaterial: KEK,
+      checkedAt: AT,
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const enteredGate = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const { fetchImpl } = stubVendor([
+      async () => {
+        entered();
+        await gate;
+        return new Response(null, { status: 200 });
+      },
+    ]);
+    const pending = revokePersistedOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      endpoint: ENDPOINT,
+      revocationPath: REVOKE_PATH,
+      keks: { 1: KEK },
+      fetchImpl,
+      checkedAt: LATER,
+    });
+    // The gen1 revocation is inside vendor HTTP; land gen2 before it returns.
+    // The vendor only confirms revocation of the gen1 token, never gen2.
+    await enteredGate;
+    await replaceOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      expectedGeneration: 1,
+      accessToken: ACCESS_NEXT,
+      refreshToken: REFRESH_NEXT,
+      kekMaterial: KEK,
+      checkedAt: LATER,
+    });
+    release();
+    await expect(pending).rejects.toMatchObject({ code: "OAUTH_TOKEN_GENERATION_STALE" });
+    const health = (await readOAuthTokenState(bindings.DB, ORG, connectionId))?.health;
+    expect(health).toMatchObject({ status: "healthy", consecutiveFailures: 0 });
+    expect(health && isTokenUsable(health)).toBe(true);
+    expect(await loadOAuthToken(bindings.DB, ORG, connectionId, { 1: KEK })).toMatchObject({
+      accessToken: ACCESS_NEXT,
+      generation: 2,
+    });
+  });
+
+  it("conditional health writes reject stale generations without touching the row", async () => {
+    const connectionId = await seedMapping();
+    await storeInitialOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      accessToken: ACCESS,
+      refreshToken: REFRESH,
+      kekMaterial: KEK,
+      checkedAt: AT,
+    });
+    await replaceOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      expectedGeneration: 1,
+      accessToken: ACCESS_NEXT,
+      refreshToken: REFRESH_NEXT,
+      kekMaterial: KEK,
+      checkedAt: LATER,
+    });
+    await expect(
+      recordOAuthTokenFailure(bindings.DB, ORG, connectionId, "TEST_UNAUTHORIZED", LATER, 1),
+    ).rejects.toMatchObject({ code: "OAUTH_TOKEN_GENERATION_STALE" });
+    await expect(recordOAuthTokenRevoked(bindings.DB, ORG, connectionId, LATER, 1)).rejects.toMatchObject({
+      code: "OAUTH_TOKEN_GENERATION_STALE",
+    });
+    // The gen2 row stands exactly as the replacement left it.
+    expect(await readOAuthTokenState(bindings.DB, ORG, connectionId)).toMatchObject({
+      generation: 2,
+      health: { status: "healthy", consecutiveFailures: 0 },
+    });
   });
 });
 

@@ -19,10 +19,11 @@
 // Ordering invariant (Cloudflare-native equivalent of the upstream PR #741
 // row-lock pin): D1 is read BEFORE vendor HTTP and written AFTER it, in
 // separate statements with no transaction held across the vendor call.
-// Replacement writes are conditional on the expected persisted generation
-// (`UPDATE ... WHERE generation=?`): a superseded writer observes zero
-// changed rows and fails with OAUTH_TOKEN_GENERATION_STALE instead of
-// overwriting the newer token.
+// Replacement, failure, and revocation writes are all conditional on the
+// expected persisted generation (`UPDATE ... WHERE generation=?`): a
+// superseded writer observes zero changed rows and fails with
+// OAUTH_TOKEN_GENERATION_STALE instead of marking a newer generation failed
+// or revoked after vendor HTTP returns.
 //
 // Deliberately out of this slice (stays deferred per the #149 archaeology
 // matrix): operator callback routes, per-org consent rows beyond the token
@@ -444,65 +445,141 @@ export async function replaceOAuthToken(db: D1Database, input: ReplaceOAuthToken
 
 /** Persist a failed token use: marks failed, counts consecutively, keeps the
  * vendor failure code for remediation copy. Health columns only — ciphertext
- * is untouched, so a later successful rotation still recovers the row. */
+ * is untouched, so a later successful rotation still recovers the row.
+ *
+ * When `expectedGeneration` is supplied the write is conditional on the
+ * persisted generation (`UPDATE ... WHERE generation=?`): an operation that
+ * started on generation N but lands after a newer generation replaced it
+ * observes OAUTH_TOKEN_GENERATION_STALE and the newer row stands untouched.
+ * Vendor-coupled callers (refresh/revoke around vendor HTTP) always supply
+ * the generation they read before the vendor call; direct operator writes
+ * with no vendor HTTP in between may omit it. */
 export async function recordOAuthTokenFailure(
   db: D1Database,
   orgId: string,
   connectionId: string,
   code: string,
   checkedAt: string,
+  expectedGeneration?: number,
 ): Promise<TokenHealth> {
   if (typeof code !== "string" || code.length === 0 || code.length > 128) {
+    throw invalid("OAUTH_REQUEST_INVALID", "The OAuth request is invalid.");
+  }
+  if (expectedGeneration !== undefined && (!Number.isInteger(expectedGeneration) || expectedGeneration < 1)) {
     throw invalid("OAUTH_REQUEST_INVALID", "The OAuth request is invalid.");
   }
   const state = await readOAuthTokenState(db, orgId, connectionId);
   if (!state) throw invalid("OAUTH_TOKEN_NOT_FOUND", "No OAuth token is stored for this Connection.", 404);
   const next = recordTokenFailure(state.health, code, checkedAt);
-  await db
-    .prepare(
-      "UPDATE oauth_tokens SET status=?,consecutive_failures=?,last_failure_code=?,last_success_at=?,checked_at=?,updated_at=? WHERE org_id=? AND connection_id=?",
-    )
-    .bind(
-      next.status,
-      next.consecutiveFailures,
-      next.lastFailureCode,
-      next.lastSuccessAt,
-      next.checkedAt,
-      checkedAt,
-      orgId,
-      connectionId,
-    )
-    .run();
+  const applied =
+    expectedGeneration === undefined
+      ? await db
+          .prepare(
+            "UPDATE oauth_tokens SET status=?,consecutive_failures=?,last_failure_code=?,last_success_at=?,checked_at=?,updated_at=? WHERE org_id=? AND connection_id=?",
+          )
+          .bind(
+            next.status,
+            next.consecutiveFailures,
+            next.lastFailureCode,
+            next.lastSuccessAt,
+            next.checkedAt,
+            checkedAt,
+            orgId,
+            connectionId,
+          )
+          .run()
+      : await db
+          .prepare(
+            "UPDATE oauth_tokens SET status=?,consecutive_failures=?,last_failure_code=?,last_success_at=?,checked_at=?,updated_at=? WHERE org_id=? AND connection_id=? AND generation=?",
+          )
+          .bind(
+            next.status,
+            next.consecutiveFailures,
+            next.lastFailureCode,
+            next.lastSuccessAt,
+            next.checkedAt,
+            checkedAt,
+            orgId,
+            connectionId,
+            expectedGeneration,
+          )
+          .run();
+  if (applied.meta.changes === 0 && expectedGeneration !== undefined) {
+    const current = await db
+      .prepare("SELECT generation FROM oauth_tokens WHERE org_id=? AND connection_id=?")
+      .bind(orgId, connectionId)
+      .first<{ generation: number }>();
+    if (!current) throw invalid("OAUTH_TOKEN_NOT_FOUND", "No OAuth token is stored for this Connection.", 404);
+    throw invalid("OAUTH_TOKEN_GENERATION_STALE", "A newer OAuth token generation already replaced this one.", 409);
+  }
   return next;
 }
 
 /** Persist an explicit revocation: terminal until a fresh authorization (a
  * new initial store or a successful replacement) succeeds. Connection
- * identity is untouched — only the health status moves. */
+ * identity is untouched — only the health status moves.
+ *
+ * When `expectedGeneration` is supplied the write is conditional on the
+ * persisted generation (`UPDATE ... WHERE generation=?`): a revocation that
+ * started on generation N but lands after a newer generation replaced it
+ * observes OAUTH_TOKEN_GENERATION_STALE and the newer row — whose token the
+ * vendor never confirmed revoked — stays healthy and usable. Vendor-coupled
+ * callers always supply the generation they read before the vendor call;
+ * direct operator writes with no vendor HTTP in between may omit it. */
 export async function recordOAuthTokenRevoked(
   db: D1Database,
   orgId: string,
   connectionId: string,
   checkedAt: string,
+  expectedGeneration?: number,
 ): Promise<TokenHealth> {
+  if (expectedGeneration !== undefined && (!Number.isInteger(expectedGeneration) || expectedGeneration < 1)) {
+    throw invalid("OAUTH_REQUEST_INVALID", "The OAuth request is invalid.");
+  }
   const state = await readOAuthTokenState(db, orgId, connectionId);
   if (!state) throw invalid("OAUTH_TOKEN_NOT_FOUND", "No OAuth token is stored for this Connection.", 404);
   const next = recordTokenRevoked(state.health, checkedAt);
-  await db
-    .prepare(
-      "UPDATE oauth_tokens SET status=?,consecutive_failures=?,last_failure_code=?,last_success_at=?,checked_at=?,updated_at=? WHERE org_id=? AND connection_id=?",
-    )
-    .bind(
-      next.status,
-      next.consecutiveFailures,
-      next.lastFailureCode,
-      next.lastSuccessAt,
-      next.checkedAt,
-      checkedAt,
-      orgId,
-      connectionId,
-    )
-    .run();
+  const applied =
+    expectedGeneration === undefined
+      ? await db
+          .prepare(
+            "UPDATE oauth_tokens SET status=?,consecutive_failures=?,last_failure_code=?,last_success_at=?,checked_at=?,updated_at=? WHERE org_id=? AND connection_id=?",
+          )
+          .bind(
+            next.status,
+            next.consecutiveFailures,
+            next.lastFailureCode,
+            next.lastSuccessAt,
+            next.checkedAt,
+            checkedAt,
+            orgId,
+            connectionId,
+          )
+          .run()
+      : await db
+          .prepare(
+            "UPDATE oauth_tokens SET status=?,consecutive_failures=?,last_failure_code=?,last_success_at=?,checked_at=?,updated_at=? WHERE org_id=? AND connection_id=? AND generation=?",
+          )
+          .bind(
+            next.status,
+            next.consecutiveFailures,
+            next.lastFailureCode,
+            next.lastSuccessAt,
+            next.checkedAt,
+            checkedAt,
+            orgId,
+            connectionId,
+            expectedGeneration,
+          )
+          .run();
+  if (applied.meta.changes === 0 && expectedGeneration !== undefined) {
+    const current = await db
+      .prepare("SELECT generation FROM oauth_tokens WHERE org_id=? AND connection_id=?")
+      .bind(orgId, connectionId)
+      .first<{ generation: number }>();
+    if (!current) throw invalid("OAUTH_TOKEN_NOT_FOUND", "No OAuth token is stored for this Connection.", 404);
+    throw invalid("OAUTH_TOKEN_GENERATION_STALE", "A newer OAuth token generation already replaced this one.", 409);
+  }
   return next;
 }
 
@@ -555,7 +632,11 @@ export interface RefreshedPersistedToken {
  * - A vendor Fault persists the failure lifecycle honestly
  *   (failed + consecutive count + code) and then rethrows. Raw transport
  *   errors propagate without a health write: reachability is unknown, so the
- *   credential must not be marked failed on a network error.
+ *   credential must not be marked failed on a network error. The failure
+ *   write carries the generation read before the vendor call, so a failure
+ *   that lands after a newer generation replaced the row observes
+ *   OAUTH_TOKEN_GENERATION_STALE instead — the fencing authority wins over
+ *   the stale vendor outcome and the newer row stands untouched.
  * - A superseded racer (its generation already replaced) observes
  *   OAUTH_TOKEN_GENERATION_STALE from the conditional write; the newer row
  *   stands untouched. */
@@ -594,7 +675,7 @@ export async function refreshPersistedOAuthToken(
     });
   } catch (error) {
     if (error instanceof Fault) {
-      await recordOAuthTokenFailure(db, request.orgId, request.connectionId, error.code, checkedAt);
+      await recordOAuthTokenFailure(db, request.orgId, request.connectionId, error.code, checkedAt, loaded.generation);
     }
     throw error;
   }
@@ -641,7 +722,11 @@ export interface RevokePersistedTokenRequest {
 /** Ask the vendor to invalidate the persisted access token, then persist the
  * revoked lifecycle. A vendor revocation failure rethrows without touching
  * health: only a confirmed revoke (or an explicit operator decision via
- * `recordOAuthTokenRevoked`) moves the credential to revoked. */
+ * `recordOAuthTokenRevoked`) moves the credential to revoked. The revoked
+ * write carries the generation read before the vendor call, so a revocation
+ * that lands after a newer generation replaced the row observes
+ * OAUTH_TOKEN_GENERATION_STALE instead — the vendor only confirmed
+ * revocation of the older token, never the replacement. */
 export async function revokePersistedOAuthToken(
   db: D1Database,
   request: RevokePersistedTokenRequest,
@@ -659,6 +744,6 @@ export async function revokePersistedOAuthToken(
     ...(request.fetchImpl === undefined ? {} : { fetchImpl: request.fetchImpl }),
     ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
   });
-  const health = await recordOAuthTokenRevoked(db, request.orgId, request.connectionId, checkedAt);
+  const health = await recordOAuthTokenRevoked(db, request.orgId, request.connectionId, checkedAt, loaded.generation);
   return Object.freeze({ revoked: true as const, health });
 }
