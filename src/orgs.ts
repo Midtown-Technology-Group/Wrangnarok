@@ -16,6 +16,8 @@
 import { encodeHistoryCursor, Fault, UUID, type HistoryQuery, type Principal } from "./domain";
 import { summary } from "./executions";
 import type { ExecutionRow } from "./executions";
+import { deleteEventSource } from "./events";
+import { deleteSchedule } from "./schedules";
 
 export interface AdminEnv {
   ADMIN_USER_IDS?: string;
@@ -648,6 +650,15 @@ export interface DeletePreview {
   readonly files: number;
   readonly artifacts: number;
   readonly endpoints: number;
+  readonly schedules: number;
+  readonly eventSources: number;
+  readonly eventSubscriptions: number;
+  readonly aiProfiles: number;
+  readonly aiAssignments: number;
+  readonly aiEmbedding: number;
+  readonly aiBehavior: number;
+  readonly sagaPolicies: number;
+  readonly toolEnrollments: number;
   readonly configsLoose: number;
   readonly configsManaged: number;
   readonly auditEvents: number;
@@ -693,6 +704,19 @@ async function optionalExec(db: D1Database, sql: string, ...binds: (string | num
   }
 }
 
+/** Run one source-local delete, reading a raced-away row as already gone.
+ * A schedule or event source deleted by an operator between org-delete's
+ * name list and its per-row delete throws NOT_FOUND; that is convergence,
+ * not failure, and matches the idempotent DELETEs elsewhere in this
+ * cascade. Anything else fails loud. */
+async function deleteIfPresent(task: () => Promise<void>): Promise<void> {
+  try {
+    await task();
+  } catch (error) {
+    if (!(error instanceof Fault) || error.code !== "NOT_FOUND") throw error;
+  }
+}
+
 /** Tolerant select for the same post-AUTH-01 tables. */
 async function selectAll<T>(db: D1Database, sql: string, ...binds: (string | number)[]): Promise<T[]> {
   try {
@@ -734,9 +758,15 @@ export interface OrgDeleteStores {
  * Managed Connections, bundle install records, and Solution-owned rows
  * (solution-owned apps, managed bundle rows) block deletion until the owning
  * bundle is uninstalled. Every other org-owned row (forms, loose apps,
- * tables, files, artifacts, endpoints, configs, audit) is counted and removed
- * with the org; the empty-tables fallback (`.catch(() => 0)`) keeps old
- * databases previewing cleanly.
+ * tables, files, artifacts, endpoints, schedules, event sources and
+ * subscriptions, AI profiles/assignments/embedding/behavior, runtime policies,
+ * tool enrollments, configs) is counted and removed with the org; the
+ * empty-tables fallback (`.catch(() => 0)`) keeps old databases previewing
+ * cleanly.
+ *
+ * Fail-closed rule (#226): only optionalCount() owns old-schema tolerance
+ * (missing table reads as zero). Any other query failure rethrows — a
+ * faulted count must never read as "nothing to protect".
  */
 export async function deletePreview(db: D1Database, orgId: string): Promise<DeletePreview> {
   const id = parseOrgId(orgId);
@@ -773,16 +803,32 @@ export async function deletePreview(db: D1Database, orgId: string): Promise<Dele
   const files = await optionalCount(db, "SELECT COUNT(*) AS n FROM files WHERE org_id=?", id);
   const artifacts = await optionalCount(db, "SELECT COUNT(*) AS n FROM artifacts WHERE org_id=?", id);
   const endpoints = await optionalCount(db, "SELECT COUNT(*) AS n FROM endpoints WHERE org_id=?", id);
+  const schedules = await optionalCount(db, "SELECT COUNT(*) AS n FROM schedules WHERE org_id=?", id);
+  const eventSources = await optionalCount(db, "SELECT COUNT(*) AS n FROM event_sources WHERE org_id=?", id);
+  const eventSubscriptions = await optionalCount(
+    db,
+    "SELECT COUNT(*) AS n FROM event_subscriptions WHERE org_id=?",
+    id,
+  );
+  const aiProfiles = await optionalCount(db, "SELECT COUNT(*) AS n FROM ai_model_profiles WHERE org_id=?", id);
+  const aiAssignments = await optionalCount(db, "SELECT COUNT(*) AS n FROM ai_assignments WHERE org_id=?", id);
+  const aiEmbedding = await optionalCount(db, "SELECT COUNT(*) AS n FROM ai_embedding_config WHERE org_id=?", id);
+  const aiBehavior = await optionalCount(db, "SELECT COUNT(*) AS n FROM ai_behavior WHERE org_id=?", id);
+  const sagaPolicies = await optionalCount(db, "SELECT COUNT(*) AS n FROM saga_policies WHERE org_id=?", id);
+  const toolEnrollments = await optionalCount(db, "SELECT COUNT(*) AS n FROM tool_enrollments WHERE org_id=?", id);
   const configsLoose = await optionalCount(
     db,
     "SELECT COUNT(*) AS n FROM configs WHERE org_id=? AND managed_by IS NULL",
     id,
   );
+  // No terminal `.catch(() => 0)`: the configs table has carried managed_by
+  // since migration 0023, so optionalCount's missing-table tolerance is the
+  // only old-schema case and every other failure must throw (#226).
   const configsManaged = await optionalCount(
     db,
     "SELECT COUNT(*) AS n FROM configs WHERE org_id=? AND managed_by IS NOT NULL",
     id,
-  ).catch(() => 0);
+  );
   const auditEvents = await optionalCount(db, "SELECT COUNT(*) AS n FROM audit_events WHERE org_id=?", id);
   const notifications = await optionalCount(db, "SELECT COUNT(*) AS n FROM notifications WHERE org_id=?", id);
   const bundleActive = await optionalCount(db, "SELECT COUNT(*) AS n FROM bundle_active WHERE org_id=?", id);
@@ -817,6 +863,15 @@ export async function deletePreview(db: D1Database, orgId: string): Promise<Dele
     files,
     artifacts,
     endpoints,
+    schedules,
+    eventSources,
+    eventSubscriptions,
+    aiProfiles,
+    aiAssignments,
+    aiEmbedding,
+    aiBehavior,
+    sagaPolicies,
+    toolEnrollments,
     configsLoose,
     configsManaged,
     auditEvents,
@@ -842,6 +897,15 @@ export interface OrgDeleteResult {
   readonly deletedArtifacts: number;
   readonly deletedArtifactBindings: number;
   readonly deletedEndpoints: number;
+  readonly deletedSchedules: number;
+  readonly deletedEventSources: number;
+  readonly deletedEventSubscriptions: number;
+  readonly deletedAiProfiles: number;
+  readonly deletedAiAssignments: number;
+  readonly deletedAiEmbedding: number;
+  readonly deletedAiBehavior: number;
+  readonly deletedSagaPolicies: number;
+  readonly deletedToolEnrollments: number;
   readonly deletedConfigs: number;
   readonly deletedNotifications: number;
   readonly deletedFileObjects: number;
@@ -862,7 +926,21 @@ export interface OrgDeleteResult {
  * interruption between the byte deletes and the D1 batch leaves D1 rows the
  * next delete (or artifact retention cleanup) picks up, never a deleted org
  * over surviving bytes. R2 deletes are idempotent. Missing buckets are a
- * 503: bytes must not be silently abandoned. */
+ * 503: bytes must not be silently abandoned.
+ *
+ * Schedules and event sources delete through their owning modules'
+ * source-local paths (deleteSchedule, deleteEventSource), one owned row at
+ * a time: deliveries and log rows cascade exactly as the operator routes
+ * define them, so the org path cannot drift from the source-local one. AI
+ * rows (assignments before profiles, everything before Connections),
+ * runtime policies, and tool enrollments are loose org-owned config with no
+ * managed_by semantics and cascade inline child-first.
+ *
+ * Backstop: any FOREIGN KEY failure inside the D1 cascade (an owned table
+ * a newer migration added that this version does not remove yet) answers
+ * 409 DELETE_BLOCKED with a fixed message instead of a raw 500-class
+ * driver error. The org row survives, so the delete is retryable once the
+ * drift is handled. Non-FK faults still fail loud. */
 export async function deleteOrg(db: D1Database, orgId: string, stores?: OrgDeleteStores): Promise<OrgDeleteResult> {
   const preview = await deletePreview(db, orgId);
   if (!preview.canDelete) {
@@ -942,6 +1020,13 @@ export async function deleteOrg(db: D1Database, orgId: string, stores?: OrgDelet
     deletedArtifactBindings = bound?.n ?? 0;
   }
   const tableIds = await selectAll<{ id: string }>(db, "SELECT id FROM tables WHERE org_id=?", id);
+  // AI rows carry ON DELETE RESTRICT links (assignments to profiles,
+  // profiles and embedding config to Connections), so they go child-first
+  // and strictly before the Connections batch below.
+  await optionalExec(db, "DELETE FROM ai_assignments WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM ai_embedding_config WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM ai_behavior WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM ai_model_profiles WHERE org_id=?", id);
   // Core tables exist on every migrated database (forms is 0005, before the
   // 0007 org store). Everything newer than AUTH-01 goes through optionalExec
   // so old databases delete cleanly.
@@ -950,6 +1035,21 @@ export async function deleteOrg(db: D1Database, orgId: string, stores?: OrgDelet
     db.prepare("DELETE FROM connections WHERE org_id=?").bind(id),
     db.prepare("DELETE FROM forms WHERE org_id=?").bind(id),
   ]);
+  // TRG-01/TRG-03 reuse (#226): schedules and event sources delete through
+  // the same source-local functions the operator routes use, one owned row
+  // at a time, so deliveries and log rows cascade exactly as defined there
+  // and the two paths cannot drift. The source-local deletes scope by
+  // orgId only (the instance-admin gate above already authorized this
+  // call).
+  const scope: Principal = { userId: "", orgId: id };
+  const scheduleNames = await selectAll<{ name: string }>(db, "SELECT name FROM schedules WHERE org_id=?", id);
+  for (const schedule of scheduleNames) {
+    await deleteIfPresent(() => deleteSchedule(db, scope, schedule.name));
+  }
+  const sourceNames = await selectAll<{ name: string }>(db, "SELECT name FROM event_sources WHERE org_id=?", id);
+  for (const source of sourceNames) {
+    await deleteIfPresent(() => deleteEventSource(db, scope, source.name));
+  }
   await optionalExec(db, "DELETE FROM file_capabilities WHERE org_id=?", id);
   await optionalExec(db, "DELETE FROM file_policies WHERE org_id=?", id);
   await optionalExec(db, "DELETE FROM files WHERE org_id=?", id);
@@ -966,6 +1066,8 @@ export async function deleteOrg(db: D1Database, orgId: string, stores?: OrgDelet
   );
   await optionalExec(db, "DELETE FROM endpoints WHERE org_id=?", id);
   await optionalExec(db, "DELETE FROM configs WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM saga_policies WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM tool_enrollments WHERE org_id=?", id);
   await optionalExec(db, "DELETE FROM notifications WHERE org_id=?", id);
   await optionalExec(db, "DELETE FROM table_grants WHERE table_id IN (SELECT id FROM tables WHERE org_id=?)", id);
   await optionalExec(db, "DELETE FROM table_rows WHERE org_id=?", id);
@@ -1002,7 +1104,23 @@ export async function deleteOrg(db: D1Database, orgId: string, stores?: OrgDelet
   await optionalExec(db, "DELETE FROM role_assignments WHERE org_id=?", id);
   await optionalExec(db, "DELETE FROM role_grants WHERE role_id IN (SELECT id FROM resource_roles WHERE org_id=?)", id);
   await optionalExec(db, "DELETE FROM resource_roles WHERE org_id=?", id);
-  await db.batch([db.prepare("DELETE FROM organizations WHERE id=?").bind(id)]);
+  try {
+    await db.batch([db.prepare("DELETE FROM organizations WHERE id=?").bind(id)]);
+  } catch (error) {
+    // Drift backstop (#226): an org-FK table this version does not remove
+    // yet (a newer migration's owned rows, or the known-residual
+    // execution_logs) blocks here. Answer structured DELETE_BLOCKED with a
+    // fixed message — never the raw driver text — so the org survives and
+    // the delete is retryable once the drift is handled.
+    if (error instanceof Error && /foreign key constraint failed/i.test(error.message)) {
+      throw new Fault(
+        409,
+        "DELETE_BLOCKED",
+        "Organization cannot be deleted: it still owns rows this version does not remove.",
+      );
+    }
+    throw error;
+  }
   return {
     orgId: id,
     deletedMemberships: preview.memberships,
@@ -1016,6 +1134,15 @@ export async function deleteOrg(db: D1Database, orgId: string, stores?: OrgDelet
     deletedArtifacts: preview.artifacts,
     deletedArtifactBindings,
     deletedEndpoints: preview.endpoints,
+    deletedSchedules: preview.schedules,
+    deletedEventSources: preview.eventSources,
+    deletedEventSubscriptions: preview.eventSubscriptions,
+    deletedAiProfiles: preview.aiProfiles,
+    deletedAiAssignments: preview.aiAssignments,
+    deletedAiEmbedding: preview.aiEmbedding,
+    deletedAiBehavior: preview.aiBehavior,
+    deletedSagaPolicies: preview.sagaPolicies,
+    deletedToolEnrollments: preview.toolEnrollments,
     deletedConfigs: preview.configsLoose,
     deletedNotifications: preview.notifications,
     deletedFileObjects,
