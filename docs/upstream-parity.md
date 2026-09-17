@@ -8,7 +8,7 @@ Status vocabulary: **Implemented** (shipped locally), **Partial** (materially na
 
 Upstream tests are evidence of intended assertions, not passing-test claims. Upstream sources were inspected, not executed; no upstream production instance was used.
 
-Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 29 Partial, 12 Missing, 1 Gated.
+Total: 47 capability rows — 5 Implemented, 1 Complete (pending review), 28 Partial, 12 Missing, 1 Gated.
 
 | ID | Title | Phase | Status | Depends | Existing issue |
 | --- | --- | --- | --- | --- | --- |
@@ -40,7 +40,7 @@ Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 29 Par
 | FILE-02 | Manage generated artifacts and attachment lifecycles with retention | 4+6 | Partial | FILE-01, AUTH-02 | #158 |
 | APP-01 | Deploy authored applications with explicit lifecycle, ownership and recovery | 4+5 | Partial | AUTH-02, DEV-02, SOL-01 | #159 |
 | APP-02 | Provide the browser App SDK with scoped workflows, Tables, files and live updates | 4 | Partial | APP-01, TABLE-02, FILE-01, OBS-02 | #160 |
-| SOL-01 | Close the existing bundle reconciliation and activation contract gaps | 5 | Partial | — | new |
+| SOL-01 | Close the existing bundle reconciliation and activation contract gaps | 5 | Implemented | — | #479 |
 | SOL-02 | Install and manage complete reusable Solutions across Organizations | 5 | Partial | SOL-01, AUTH-02, CON-02, TABLE-02, FORM-02, APP-01, AI-02, TRG-03 | new |
 | SOL-03 | Export, capture and import portable Solution source without tenant state | 5 | Partial | SOL-01, MIG-01, SEC-01 | #163 |
 | MIG-01 | Deliver the existing workspace-to-bundle bridge without false compatibility claims | 5 | Partial | — | #116 |
@@ -973,9 +973,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## SOL-01: Close the existing bundle reconciliation and activation contract gaps
 
-Phase 5; **Partial**; existing issue: new
+Phase 5; **Implemented**; existing issue: #479
 
-Local status: Current installBundle reconciles declared endpoints and appends a ledger. There is no absent-managed-row deletion, active-install execution gate or atomic activation pointer; #35 being closed does not prove these guarantees.
+Local status: Shipped. installBundle (`src/solutions.ts`, ADR 011) reconciles the full desired state per org — Connection endpoints plus sibling config (`connections.config_json`), the manifest config list (`bundle_config`), and saga pins (`bundle_sagas`) — with scoped managed-absentee deletion, same-version fencing (`INSTALL_CONFLICT`), an immutable ledger (`bundle_installs` triggers), and a fenced per-org activation pointer (`bundle_active`) moved only on full reconcile success; `requireActiveInstall` fails execution closed (`NO_ACTIVE_INSTALL`/`STALE_INSTALL_REVISION`/`INCONSISTENT_INSTALL`) with the explicit local/loose exception for orgs with no install rows. #479 verify-first: the silent-config omission, stale-marker skip, and saga-only derivation gaps carried from #161 were re-checked against main — full-config reconcile and saga-only org derivation (plus explicit `ORG_NOT_DECLARED`/`INVALID_MANIFEST` rejection) already ship with tests since #161; the one genuinely missing case, the version-only upgrade marker bump, is now pinned by test. Proven in `test/solutions-activation.test.ts` (26 tests), `test/solutions-install.test.ts`, and `test/solutions-validation.test.ts` against real local D1.
 
 Depends: none
 
@@ -993,7 +993,7 @@ Upstream evidence (paths relative to upstream repo root):
 - `api/src/routers/solutions.py`
 - `api/src/jobs/platform/application_deploy.py`
 
-Related Wrangnarok issues: #35
+Related Wrangnarok issues: #35, #161, #479
 
 ## SOL-02: Install and manage complete reusable Solutions across Organizations
 

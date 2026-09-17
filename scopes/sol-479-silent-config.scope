@@ -1,0 +1,9 @@
+# SOL-01 follow-up lane scope (issue #479, parent #161 closed): verify-first on
+# the silent-config omission, stale managed_by on version-only skip, and
+# Saga-only bundle install derivation. Test + SOL-01 ledger rows only: no
+# src changes (behavior already correct on main), no new Cloudflare
+# primitive, no migration, Free-tier neutral, Organization isolation kept,
+# single authoritative activation path unchanged. Owns the whole diff below.
+scopes/sol-479-silent-config.scope
+test/solutions-activation.test.ts
+docs/upstream-parity.md
