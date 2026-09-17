@@ -580,6 +580,35 @@ export interface FormSubmitResponse {
   scheduleAt?: string;
 }
 
+// Signed form embeds (EMBED-01 slice 1, issue #156). Summaries carry
+// identity, policy, and binding state only — never secret material. The
+// raw secret rides the create/rotate response once and is never read back.
+
+export interface EmbedGrantSummary {
+  id: string;
+  formName: string;
+  allowedOrigins: string[];
+  fingerprint: string;
+  enabled: boolean;
+  expiresAt: string | null;
+  createdAt: string;
+  rotatedAt: string | null;
+  lastUsedAt: string | null;
+}
+
+export interface EmbedGrantsResponse {
+  embeds: EmbedGrantSummary[];
+}
+
+export interface EmbedGrantIssuedResponse {
+  grant: EmbedGrantSummary;
+  secret: string;
+}
+
+export interface EmbedGrantResponse {
+  grant: EmbedGrantSummary;
+}
+
 // Organization branding + own profile (UX-01 slice 1, issue #176). The
 // branding view is the safe public shape (name, colors, logo metadata);
 // the profile view is caller-scoped. Neither carries credentials.

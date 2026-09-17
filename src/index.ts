@@ -150,6 +150,22 @@ import {
   vendorChallenge,
 } from "./endpoints";
 import {
+  assertNoEmbedFileRefs,
+  checkEmbedBinding,
+  checkEmbedOrigin,
+  createEmbedGrant,
+  embedGrantIdFromUser,
+  embedSummary,
+  fingerprintFormDef,
+  listEmbedGrants,
+  loadEmbedGrant,
+  parseEmbedGrantId,
+  revokeEmbedGrant,
+  rotateEmbedGrant,
+  touchEmbedGrantUse,
+  verifyEmbedSecret,
+} from "./embeds";
+import {
   createEventSource,
   createSubscription,
   deleteEventSource,
@@ -195,6 +211,7 @@ import {
   parseScheduleAt,
   parseStartupHandle,
   peekStartupHandle,
+  peekStartupIdentity,
   resolveFormProviders,
   saveForm,
   startFormSession,
@@ -786,6 +803,171 @@ async function scheduleFormExecution(
   };
 }
 
+/** Shared FORM-02 submit core: one authoritative path from a live startup
+ * handle to dispatch, entered by the operator submit route (caller holds
+ * the form submit grant) and the signed-embed submit route (caller holds
+ * the grant secret plus an allowed origin and a fresh fingerprint).
+ * Authorization happens in the routes; everything below is identical: peek
+ * the session without consuming, re-resolve provider options, run the
+ * declaration gate (422 + per-field details, handle left live for a
+ * corrected retry), apply the file posture, run the Saga parse gate, then
+ * schedule or dispatch down the standard Execution path and consume the
+ * handle only after durable admission (consume-after-admission keeps 503
+ * DISPATCH_UNCONFIRMED retries on the idempotent recovery path).
+ *
+ * File posture is the single deliberate fork: operator submissions
+ * re-validate merged file references against the live FILE-01 rows, while
+ * embed submissions first refuse any caller-supplied file reference
+ * (slice 1 ships no embed upload path, so no reference can prove session
+ * ownership) and then re-validate the merged remainder the same way — a
+ * merged file ref past the refusal can only come from an author-declared
+ * default, and stale defaults fail identically on both paths. `extraHeaders`
+ * rides both receipts as-is (the embed route passes its CORS headers; the
+ * operator route passes nothing). */
+async function runFormSubmit(
+  env: Bindings,
+  caller: Principal,
+  key: string,
+  def: FormDefinition,
+  body: unknown,
+  files: "check" | "refuse",
+  extraHeaders: Record<string, string> = {},
+): Promise<Response> {
+  const name = def.name;
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    throw new Fault(422, "FORM_VALIDATION_FAILED", "The form submission must be a JSON object.", [
+      { field: "", code: "NOT_OBJECT", message: "The form submission must be a JSON object." },
+    ]);
+  }
+  const record = body as Record<string, unknown>;
+  if (Object.keys(record).some((entry) => !["handle", "values", "scheduleAt"].includes(entry))) {
+    throw new Fault(422, "FORM_VALIDATION_FAILED", "Submissions carry handle, values, and scheduleAt only.", [
+      { field: "", code: "UNKNOWN_FIELD", message: "Submissions carry handle, values, and scheduleAt only." },
+    ]);
+  }
+  const handle = parseStartupHandle(record.handle);
+  const scheduleAt = parseScheduleAt(record.scheduleAt);
+  // Peek the session without consuming: validation, provider refresh,
+  // and the file check all run first so a submission that fails them
+  // leaves the handle live for a corrected retry. The handle binds to
+  // the current definition id, so delete/recreate under the same name
+  // invalidates sessions minted against the old form. The caller's key
+  // rides along so a handle spent by THIS key still peeks live for
+  // same-key retries and canonical replays.
+  const session = await peekStartupHandle(env.DB, caller, name, handle, def.id, key);
+  // One provider pass per submit too: fresh options re-check membership
+  // while auto-fill values ride the persisted snapshot, never the scan.
+  const fresh = await resolveFormProviders(env.DB, caller, def.fields, readProviderRows);
+  const values = record.values === undefined ? {} : record.values;
+  // Order matters: form-gate validation + defaults merge first, then
+  // the file posture, then the Saga parse gate last — so a stale file
+  // pointer answers 422 even when the declaration drifts from its Saga
+  // schema (which answers the Saga 400 instead).
+  const merged = validateAndMerge(def, values, { allowedOptions: fresh.options, values: session.snapshot });
+  if (files === "refuse") assertNoEmbedFileRefs(def.fields, values);
+  await checkFormFiles(env.DB, caller, def, merged);
+  const { saga, input } = parseSubmission({ sagaId: def.sagaId, input: merged });
+  // FORM-02 recovery (#155): consume AFTER durable admission, not
+  // before. The old consume-then-dispatch order burned the one-time
+  // handle when submit answered 503 DISPATCH_UNCONFIRMED, making the
+  // documented same-request retry impossible (STALE_FORM_HANDLE instead
+  // of the idempotent recovery path). The flow below:
+  // 1. peek the fence (unused + live + same form id),
+  // 2. dispatch (or durable schedule insert) first,
+  // 3. consume only on success, tolerating a lost consume race only
+  //    when the Execution row proves OUR submission admitted (same
+  //    deterministic execution id + same input). A lost race over a
+  //    foreign admission still answers stale, never a replay of ours.
+  if (scheduleAt !== null) {
+    const scheduled = await scheduleFormExecution(env.DB, caller, key, name, saga, input, scheduleAt);
+    // Consume on every confirmed admission, including idempotent
+    // replay: the replay proves OUR key admitted, so the handle binds
+    // to it here. A live handle after replay would stay reusable under
+    // a different key (PR 320 review).
+    const scheduledInput = { ...(input as Record<string, unknown>), __form: name, __scheduleAt: scheduleAt };
+    await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, scheduledInput);
+    return json({ form: name, ...scheduled }, scheduled.replayed ? 200 : 202, {
+      Location: scheduled.statusUrl,
+      ...extraHeaders,
+    });
+  }
+  // Defensive strip before the immediate Saga parse gate: a form
+  // field can never declare __-prefixed names (FIELD_NAME), so any
+  // such key would be internal linkage, never caller input.
+  const { __form: _internalForm, __scheduleAt: _internalAt, ...sagaInput } = input as Record<string, unknown>;
+  void _internalForm;
+  void _internalAt;
+  const accepted = await submit(env, caller, key, saga, sagaInput);
+  // Consume on every confirmed admission, including idempotent replay
+  // (same rationale as the scheduled path above): the replayed row
+  // proves OUR key, so the handle binds to it and cannot be reused
+  // under a different key afterwards.
+  await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, sagaInput);
+  // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
+  return json({ form: name, ...accepted }, accepted.replayed ? 200 : 202, {
+    Location: accepted.statusUrl,
+    ...extraHeaders,
+  });
+}
+
+/** Serialize a route Fault (or an unexpected error) to its error response:
+ * status challenges, the FORM-01 422 details channel, and the outward
+ * secret scrub. Shared by the main catch-all and the embed routes, which
+ * add their CORS headers through `extra` so browsers can read embed
+ * failures as well as receipts. */
+function faultResponse(error: unknown, env: Bindings, url: URL, extra: Record<string, string> = {}): Response {
+  const fault =
+    error instanceof Fault ? error : new Fault(500, "INTERNAL_ERROR", "The request could not be completed.");
+  const headers: Record<string, string> = { ...extra };
+  // TOOL-01 S1: MCP clients learn the discovery document URL from the
+  // rejection itself (RFC 9728 resource_metadata pointer). Every other
+  // route keeps the bare Bearer [REDACTED]
+  if (fault.status === 401)
+    headers["WWW-Authenticate"] = url.pathname === "/api/mcp" ? mcpUnauthorizedChallenge(url.origin) : "Bearer";
+  if (fault.status === 503) headers["Retry-After"] = "5";
+  // Outward error path: a secret substring embedded in a Fault message
+  // (caller input echoed back, miswired env text) is replaced before send.
+  // FORM-01 details channel: the 422 form-validation Fault carries its
+  // per-field failure list here. No other Fault sets details; details are
+  // field names and fixed reason strings, scrubbed like the rest.
+  const faultBody =
+    fault.details === undefined
+      ? { code: fault.code, message: fault.message }
+      : { code: fault.code, message: fault.message, details: fault.details };
+  return json(scrubValueWithDeploymentSecrets({ error: faultBody }, env), fault.status, headers);
+}
+
+/** CORS headers for the embed routes: browser embeds are cross-origin by
+ * design, so the JSON POSTs preflight and their responses must be
+ * readable. The request Origin reflects only as
+ * `Access-Control-Allow-Origin` plus `Vary: Origin`; reflection alone
+ * authorizes nothing — the POST handlers still enforce the grant
+ * allowlist before doing anything. Error responses carry the same headers
+ * so browsers can read embed failures (codes and fixed messages, never
+ * secrets) instead of surfacing opaque TypeErrors. Missing origins yield
+ * `Vary` only. */
+function embedCorsHeaders(origin: string | null): Record<string, string> {
+  return origin === null ? { Vary: "Origin" } : { "Access-Control-Allow-Origin": origin, Vary: "Origin" };
+}
+
+/** Answer a CORS preflight for one embed route: reflect the request Origin
+ * with the route's allowed methods/headers (cached 10 minutes). Carries
+ * no grant context and touches no D1 — the submit preflight has no body
+ * to resolve a handle from, and preflight authorizes nothing either way;
+ * the POST enforces the allowlist. Unknown or malformed grant IDs still
+ * answer 204 here and fail on the POST. */
+function embedPreflight(request: Request, allowHeaders: string): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      ...embedCorsHeaders(request.headers.get("Origin")),
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": allowHeaders,
+      "Access-Control-Max-Age": "600",
+    },
+  });
+}
+
 async function handleFetch(request: Request, env: Bindings): Promise<Response> {
   const url = new URL(request.url);
   // Single-Worker full-stack app (ADR 008): the browser UI ships as Static
@@ -859,6 +1041,122 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         });
       }
       return json({ branding: await getBranding(env.DB, orgId) });
+    }
+    // EMBED-01 slice 1 (issue #156): signed form-embed bootstrap. Pre-gate
+    // like endpoint deliveries — the grant secret authenticates, never an
+    // operator session. Secret, origin, and fingerprint all verify before
+    // any session exists; success mints a standard FORM-02 startup handle
+    // bound to the embed principal, plus the inspectable snapshot, the
+    // resolved options, and the server-authoritative declaration (the
+    // external host cannot call the authed designer routes). Unknown
+    // grants answer 404; revoked grants 410; expired or wrong secrets 401;
+    // foreign origins 403; a form changed since issue/rotate 409.
+    const embedStartup = /^\/api\/embeds\/([0-9a-fA-F-]{36})\/startup$/.exec(url.pathname);
+    if (embedStartup?.[1] && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin, X-Embed-Secret");
+    }
+    if (embedStartup?.[1] && request.method === "POST") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read embed receipts and embed errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        requireJson(request);
+        const grantId = parseEmbedGrantId(embedStartup[1]);
+        const grant = await loadEmbedGrant(env.DB, grantId).catch(() => null);
+        if (!grant) throw new Fault(404, "NOT_FOUND", "Not found.");
+        const principal = await verifyEmbedSecret(grant, request.headers.get("X-Embed-Secret"));
+        checkEmbedOrigin(grant, request.headers.get("Origin"));
+        const def = await loadForm(env.DB, grant.org_id, grant.form_name);
+        if (!def) throw new Fault(404, "FORM_NOT_FOUND", "Form not found.");
+        checkEmbedBinding(grant, { formId: def.id, fingerprint: await fingerprintFormDef(def) });
+        const started = await startFormSession(
+          env.DB,
+          principal,
+          def,
+          await boundedJson(request.body),
+          readProviderRows,
+        );
+        await touchEmbedGrantUse(env.DB, grant.id);
+        return json(
+          {
+            form: def.name,
+            handle: started.handle,
+            expiresAt: started.expiresAt,
+            snapshot: started.snapshot,
+            options: started.options,
+            declaration: serializeForm(def),
+            fingerprint: grant.capability_fingerprint,
+          },
+          201,
+          cors,
+        );
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // Signed-embed submit: the handle binds the pre-gate request to its
+    // session (org, embed principal, form) before any other check. The
+    // grant re-resolves on every submit — revocation and expiry kill
+    // outstanding sessions with STALE, no grace — the browser Origin
+    // re-verifies against the allowlist, and the live declaration
+    // re-fingerprints (a form changed after startup answers STALE, the
+    // FORM-02 definition-mismatch contract; 409 exists only at bootstrap,
+    // where no session exists to be stale). Operator handles are rejected
+    // here exactly as embed handles are rejected on the operator route:
+    // the two paths never accept each other's sessions. Dispatch enters
+    // the shared submit core — the standard submit protocol, never a fork.
+    if (url.pathname === "/api/embeds/submit" && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Idempotency-Key, Origin");
+    }
+    if (url.pathname === "/api/embeds/submit" && request.method === "POST") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read embed receipts and embed errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        const key = parseCallerKey(request.headers.get("Idempotency-Key"));
+        requireJson(request);
+        const body: unknown = await boundedJson(request.body);
+        const presented =
+          body !== null && typeof body === "object" && !Array.isArray(body)
+            ? ((body as Record<string, unknown>).handle ?? null)
+            : null;
+        const bound = await peekStartupIdentity(env.DB, presented);
+        const grantId = bound ? embedGrantIdFromUser(bound.userId) : null;
+        const grant = grantId ? await loadEmbedGrant(env.DB, grantId).catch(() => null) : null;
+        if (!bound || !grant || grant.org_id !== bound.orgId || grant.form_name !== bound.formName) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        if (grant.enabled !== 1 || (grant.expires_at !== null && Date.parse(grant.expires_at) <= Date.now())) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        checkEmbedOrigin(grant, request.headers.get("Origin"));
+        const def = await loadForm(env.DB, grant.org_id, grant.form_name);
+        if (!def) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        const live = { formId: def.id, fingerprint: await fingerprintFormDef(def) };
+        if (grant.form_id !== live.formId || grant.capability_fingerprint !== live.fingerprint) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        // Awaited (not returned): a bare `return runFormSubmit(...)` would
+        // adopt the rejection past this try/catch, escaping Faults as worker
+        // exceptions instead of serialized error responses.
+        return await runFormSubmit(
+          env,
+          { orgId: grant.org_id, userId: `embed:${grant.id}` },
+          key,
+          def,
+          body,
+          "refuse",
+          cors,
+        );
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
     }
     const identity = await authenticate(request, env);
     // AUTH-01 membership gate (ADR 015): every /api/* request resolves the
@@ -1628,19 +1926,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     const formSubmit = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/submit$/.exec(url.pathname);
     if (formSubmit?.[1] && request.method === "POST") {
-      // Form-to-Saga submission (FORM-01 binding, FORM-02 lifecycle):
-      // the caller presents a live startup handle bound to (org, user,
-      // form); the server peeks it, re-resolves provider options,
-      // validates against the persisted declaration (422 + per-field
-      // details), re-validates file references against the live FILE-01
-      // rows, merges validated values over declared defaults, and submits
-      // down the standard Execution path, consuming the handle only after
-      // validation passes so failed validation leaves it live for retry. `{
-      // scheduleAt }` defers dispatch (deferred receipt, undispatched
-      // Pending row with `__scheduleAt` linkage for TRG-01 promotion).
+      // Form-to-Saga submission (FORM-01 binding, FORM-02 lifecycle): the
+      // caller presents a live startup handle bound to (org, user, form);
+      // authorization is the form submit grant, and the consumed handle is
+      // the form-to-Saga delegation (never a separate direct-Saga grant).
       // Unknown, expired, foreign, or replayed handles answer 422
-      // STALE_FORM_HANDLE and dispatch nothing. The consumed handle is
-      // the form-to-Saga grant: no separate direct-Saga grant required.
+      // STALE_FORM_HANDLE and dispatch nothing. Peek, validation,
+      // dispatch, and consume live in the shared submit core (signed
+      // embeds enter the same core after grant authentication).
       const name = formSubmit[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
       rejectQuery(url);
@@ -1657,76 +1950,64 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "submit" },
         "Submitting this Form requires a submit grant.",
       );
-      const body: unknown = await boundedJson(request.body);
-      if (body === null || typeof body !== "object" || Array.isArray(body)) {
-        throw new Fault(422, "FORM_VALIDATION_FAILED", "The form submission must be a JSON object.", [
-          { field: "", code: "NOT_OBJECT", message: "The form submission must be a JSON object." },
-        ]);
+      // Awaited (not returned): a bare `return runFormSubmit(...)` would
+      // adopt the rejection past this try/catch, escaping Faults as worker
+      // exceptions instead of serialized error responses.
+      return await runFormSubmit(env, caller, key, def, await boundedJson(request.body), "check");
+    }
+    const embedAdminList = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/embeds$/.exec(url.pathname);
+    if (embedAdminList?.[1] && (request.method === "GET" || request.method === "POST")) {
+      // EMBED-01 slice 1 (issue #156): signed form-embed grant inventory.
+      // Admin-only (requireManageOrg): grants are external capabilities, so
+      // ordinary members neither list nor mint them. Unknown or foreign
+      // forms answer 404 FORM_NOT_FOUND. Create returns the raw secret
+      // once; every other response carries summaries only (no readback).
+      const name = embedAdminList[1];
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      rejectQuery(url);
+      if (request.method === "POST") requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      const def = await loadForm(env.DB, caller.orgId, name);
+      if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      if (request.method === "GET") {
+        return json({ embeds: await listEmbedGrants(env.DB, caller.orgId, name).catch(() => []) });
+      }
+      const body = await boundedJson(request.body);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(400, "INVALID_EMBED", "Provide allowedOrigins and an optional expiresAt.");
       }
       const record = body as Record<string, unknown>;
-      if (Object.keys(record).some((entry) => !["handle", "values", "scheduleAt"].includes(entry))) {
-        throw new Fault(422, "FORM_VALIDATION_FAILED", "Submissions carry handle, values, and scheduleAt only.", [
-          { field: "", code: "UNKNOWN_FIELD", message: "Submissions carry handle, values, and scheduleAt only." },
-        ]);
+      const created = await createEmbedGrant(env.DB, def, {
+        allowedOrigins: record.allowedOrigins,
+        ...(record.expiresAt === undefined ? {} : { expiresAt: record.expiresAt }),
+      });
+      return json({ grant: embedSummary(created.row), secret: created.secret }, 201);
+    }
+    const embedAdminAction =
+      /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/embeds\/([0-9a-fA-F-]{36})\/(rotate|revoke)$/.exec(url.pathname);
+    if (embedAdminAction?.[1] && embedAdminAction[2] && embedAdminAction[3] && request.method === "POST") {
+      // Rotate mints a fresh secret and re-fingerprints against the live
+      // declaration (the old secret stops verifying); revoke disables the
+      // grant terminally (410 on bootstrap, STALE on outstanding submits).
+      // Unknown shapes, foreign grants, and cross-form IDs answer 404.
+      const name = embedAdminAction[1];
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      rejectQuery(url);
+      requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      const grantId = parseEmbedGrantId(embedAdminAction[2]);
+      const def = await loadForm(env.DB, caller.orgId, name);
+      if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      // Drain the body: rotation and revocation are state changes, so they
+      // share the JSON-write gate (unencoded application/json rejects
+      // cross-origin form posts against Access-authenticated sessions).
+      await boundedJson(request.body);
+      if (embedAdminAction[3] === "rotate") {
+        const rotated = await rotateEmbedGrant(env.DB, def, grantId);
+        return json({ grant: embedSummary(rotated.row), secret: rotated.secret });
       }
-      const handle = parseStartupHandle(record.handle);
-      const scheduleAt = parseScheduleAt(record.scheduleAt);
-      // Peek the session without consuming: validation, provider refresh,
-      // and the file check all run first so a submission that fails them
-      // leaves the handle live for a corrected retry. The handle binds to
-      // the current definition id, so delete/recreate under the same name
-      // invalidates sessions minted against the old form. The caller's key
-      // rides along so a handle spent by THIS key still peeks live for
-      // same-key retries and canonical replays.
-      const session = await peekStartupHandle(env.DB, caller, name, handle, def.id, key);
-      // One provider pass per submit too: fresh options re-check membership
-      // while auto-fill values ride the persisted snapshot, never the scan.
-      const fresh = await resolveFormProviders(env.DB, caller, def.fields, readProviderRows);
-      const values = record.values === undefined ? {} : record.values;
-      // Order matters: form-gate validation + defaults merge first, then
-      // the live FILE-01 file check, then the Saga parse gate last — so a
-      // stale file pointer answers 422 even when the declaration drifts
-      // from its Saga schema (which answers the Saga 400 instead).
-      const merged = validateAndMerge(def, values, { allowedOptions: fresh.options, values: session.snapshot });
-      await checkFormFiles(env.DB, caller, def, merged);
-      const { saga, input } = parseSubmission({ sagaId: def.sagaId, input: merged });
-      // FORM-02 recovery (#155): consume AFTER durable admission, not
-      // before. The old consume-then-dispatch order burned the one-time
-      // handle when submit answered 503 DISPATCH_UNCONFIRMED, making the
-      // documented same-request retry impossible (STALE_FORM_HANDLE instead
-      // of the idempotent recovery path). The flow below:
-      // 1. peek the fence (unused + live + same form id),
-      // 2. dispatch (or durable schedule insert) first,
-      // 3. consume only on success, tolerating a lost consume race only
-      //    when the Execution row proves OUR submission admitted (same
-      //    deterministic execution id + same input). A lost race over a
-      //    foreign admission still answers stale, never a replay of ours.
-      if (scheduleAt !== null) {
-        const scheduled = await scheduleFormExecution(env.DB, caller, key, name, saga, input, scheduleAt);
-        // Consume on every confirmed admission, including idempotent
-        // replay: the replay proves OUR key admitted, so the handle binds
-        // to it here. A live handle after replay would stay reusable under
-        // a different key (PR 320 review).
-        const scheduledInput = { ...(input as Record<string, unknown>), __form: name, __scheduleAt: scheduleAt };
-        await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, scheduledInput);
-        return json({ form: name, ...scheduled }, scheduled.replayed ? 200 : 202, {
-          Location: scheduled.statusUrl,
-        });
-      }
-      // Defensive strip before the immediate Saga parse gate: a form
-      // field can never declare __-prefixed names (FIELD_NAME), so any
-      // such key would be internal linkage, never caller input.
-      const { __form: _internalForm, __scheduleAt: _internalAt, ...sagaInput } = input as Record<string, unknown>;
-      void _internalForm;
-      void _internalAt;
-      const accepted = await submit(env, caller, key, saga, sagaInput);
-      // Consume on every confirmed admission, including idempotent replay
-      // (same rationale as the scheduled path above): the replayed row
-      // proves OUR key, so the handle binds to it and cannot be reused
-      // under a different key afterwards.
-      await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, sagaInput);
-      // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
-      return json({ form: name, ...accepted }, accepted.replayed ? 200 : 202, { Location: accepted.statusUrl });
+      const revoked = await revokeEmbedGrant(env.DB, caller.orgId, name, grantId);
+      return json({ grant: embedSummary(revoked) });
     }
     if (url.pathname === "/api/dev/preview" && request.method === "POST") {
       // DEV-02 no-registration local preview (ADR 017): read-only by
@@ -4004,25 +4285,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       501,
     );
   } catch (error) {
-    const fault =
-      error instanceof Fault ? error : new Fault(500, "INTERNAL_ERROR", "The request could not be completed.");
-    const headers: Record<string, string> = {};
-    // TOOL-01 S1: MCP clients learn the discovery document URL from the
-    // rejection itself (RFC 9728 resource_metadata pointer). Every other
-    // route keeps the bare bearer challenge.
-    if (fault.status === 401)
-      headers["WWW-Authenticate"] = url.pathname === "/api/mcp" ? mcpUnauthorizedChallenge(url.origin) : "Bearer";
-    if (fault.status === 503) headers["Retry-After"] = "5";
-    // Outward error path: a secret substring embedded in a Fault message
-    // (caller input echoed back, miswired env text) is replaced before send.
-    // FORM-01 details channel: the 422 form-validation Fault carries its
-    // per-field failure list here. No other Fault sets details; details are
-    // field names and fixed reason strings, scrubbed like the rest.
-    const faultBody =
-      fault.details === undefined
-        ? { code: fault.code, message: fault.message }
-        : { code: fault.code, message: fault.message, details: fault.details };
-    return json(scrubValueWithDeploymentSecrets({ error: faultBody }, env), fault.status, headers);
+    return faultResponse(error, env, url);
   }
 }
 

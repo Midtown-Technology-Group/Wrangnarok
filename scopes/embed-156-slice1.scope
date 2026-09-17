@@ -1,0 +1,25 @@
+# EMBED-01 signed form-embed lane scope (issue #156, slice 1):
+# revocable external capabilities for forms (per-org/form secrets,
+# exact-match origins, fingerprint rotation, FORM-02 startup/submit
+# binding through a shared submit core, terminal revocation, admin-only
+# inventory with no secret readback), the Forms-page embed admin section,
+# migration 0035 + ledger + chain entry, EMBED-01 parity row, and the TBD
+# capability-model ADR (numbering per #225). No anonymous route, no app
+# embeds (src/apps.ts untouched), no CAPTCHA/vendor anti-abuse, no auth
+# login-path change, no branding/profile code, no new Cloudflare
+# primitive, no test/helpers or workflow changes.
+migrations/0035_embeds.sql
+src/embeds.ts
+src/forms.ts
+src/index.ts
+client/src/components/FormEmbeds.tsx
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+client/src/pages/Forms.tsx
+test/embeds.test.ts
+test/embeds-ui.test.tsx
+test/migrations-chain.test.ts
+docs/architecture/TBD-form-embed-capabilities.md
+docs/upstream-parity.md
+docs/migration-ledger.md
+scopes/embed-156-slice1.scope

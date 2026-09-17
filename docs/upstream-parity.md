@@ -8,7 +8,7 @@ Status vocabulary: **Implemented** (shipped locally), **Partial** (materially na
 
 Upstream tests are evidence of intended assertions, not passing-test claims. Upstream sources were inspected, not executed; no upstream production instance was used.
 
-Total: 47 capability rows — 5 Implemented, 1 Complete (pending review), 29 Partial, 11 Missing, 1 Gated.
+Total: 47 capability rows — 5 Implemented, 1 Complete (pending review), 30 Partial, 10 Missing, 1 Gated.
 
 | ID | Title | Phase | Status | Depends | Existing issue |
 | --- | --- | --- | --- | --- | --- |
@@ -35,7 +35,7 @@ Total: 47 capability rows — 5 Implemented, 1 Complete (pending review), 29 Par
 | TABLE-02 | Extend author Tables to policy-safe querying, batch mutations and realtime visibility | 4 | Partial | TABLE-01, AUTH-02, OBS-02 | #154 |
 | FORM-01 | Deliver the existing Forms-to-Saga input binding slice | 4 | Partial | — | #118 |
 | FORM-02 | Deliver usable dynamic forms with safe startup, providers and submissions | 4 | Partial | FORM-01, RUN-03, TRG-01, AUTH-02, FILE-01 | #155 |
-| EMBED-01 | Publish and embed forms/apps with revocable external capabilities | 4 | Missing | FORM-02, APP-01, AUTH-03, AUTH-02 | new |
+| EMBED-01 | Publish and embed forms/apps with revocable external capabilities | 4 | Partial | FORM-02, APP-01, AUTH-03, AUTH-02 | new |
 | FILE-01 | Deliver managed file locations with policy-checked upload, download and mutation | 4 | Implemented | AUTH-02, SEC-01 | #157 |
 | FILE-02 | Manage generated artifacts and attachment lifecycles with retention | 4+6 | Partial | FILE-01, AUTH-02 | #158 |
 | APP-01 | Deploy authored applications with explicit lifecycle, ownership and recovery | 4+5 | Partial | AUTH-02, DEV-02, SOL-01 | #159 |
@@ -852,9 +852,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## EMBED-01: Publish and embed forms/apps with revocable external capabilities
 
-Phase 4; **Missing**; existing issue: new
+Phase 4; **Partial**; existing issue: new
 
-Local status: Neither authenticated embeds nor anonymous/public form publication exists. everyone access is not synonymous with anonymous access.
+Local status: Slice 1 shipped (issue #156): signed form-embed grants on Worker + D1 — per-org/form secrets with show-once issuance and no readback, exact-match origin allowlists (no wildcards), capability fingerprints that fail closed on form edits until rotation, bootstrap/submit sessions bound to the FORM-02 startup path (STALE_FORM_HANDLE throughout) with dispatch through the shared submit core, terminal revocation with no grace, and an admin-only console inventory on the form detail page. The embed principal holds no grants, so Tables deny by absence and caller file references are refused (no embed upload path in slice 1). Remaining: app embeds (slice 2), anonymous/public-form publication with its anti-abuse/CAPTCHA decision, honeypot/submission nonce, session-owned uploads, republish review, and confirmation-only disclosure rules. everyone access is not synonymous with anonymous access.
 
 Depends: FORM-02, APP-01, AUTH-03, AUTH-02
 
