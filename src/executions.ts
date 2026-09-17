@@ -2,6 +2,7 @@
 import { NonRetryableError } from "cloudflare:workflows";
 import {
   DEFAULT_SAGA_POLICY,
+  EXECUTION_ID,
   cloudflareInventorySaga,
   cloudflareVerifySaga,
   digestSaga,
@@ -21,7 +22,7 @@ import type { ExecutionStatus, HistoryQuery, Principal, SafeError, SagaDef, Saga
 import { executionId as hashExecutionId } from "./domain";
 import type { Connection } from "./integrations";
 import { buildOrgCtx } from "./saga";
-import type { OrgCtx } from "./saga";
+import type { OrgCtx, SagaEventContext, SagaStep } from "./saga";
 import { requireActiveInstall } from "./solutions";
 import type { Bindings } from "./bindings";
 import { scrubExecutionError, scrubExecutionValue } from "./secrets";
@@ -521,6 +522,49 @@ export async function failExecution(
       )
       .bind(status, now, json, id),
   ]);
+}
+/** Shared Saga run prologue guard (issue #438): the byte-identical Execution
+ * identity check every Saga run body opens with. Returns the validated id so
+ * call sites stay one line; the message is the contract tests pin. */
+export function assertRunExecutionId(id: unknown): string {
+  if (typeof id !== "string" || !EXECUTION_ID.test(id)) {
+    throw new NonRetryableError("Invalid local Execution invocation.");
+  }
+  return id;
+}
+/** Shared Saga run success epilogue (issue #438): the byte-identical
+ * Succeeded UPDATE every Saga run body checkpoints. Call sites keep their own
+ * `persist-success-v1` step name; smoke's usage lines stay in its own step. */
+export async function persistRunSuccess(db: D1Database, id: string, output: unknown): Promise<void> {
+  await db
+    .prepare("UPDATE executions SET status='Succeeded',completed_at=?,result_json=? WHERE id=? AND status='Running'")
+    .bind(new Date().toISOString(), JSON.stringify(scrubExecutionValue(output, id)), id)
+    .run();
+}
+/** Shared Saga run failure epilogue (issue #438): map an undefined raw to the
+ * generic EXECUTION_FAILED marker, scrub, the guarded `persist-failure-v1`
+ * checkpoint, then the terminal throw. Takes ctx (not
+ * ctx.db) and dereferences inside its own step, so run bodies keep no runtime
+ * binding outside step.do and the determinism gate stays green. Never
+ * returns: call sites return the promise so rejection semantics match the
+ * previous terminal throw. Expected failures arrive as serialized step
+ * results, never as Error subclasses transported by Workflows. */
+export async function persistRunFailure(
+  ctx: SagaEventContext,
+  step: SagaStep,
+  id: string,
+  raw: SafeError | undefined,
+  timedOut: boolean,
+): Promise<never> {
+  const failure: SafeError = raw ?? {
+    code: "EXECUTION_FAILED",
+    message: "The Execution could not complete. Inspect local runtime diagnostics.",
+  };
+  const safe: SafeError = scrubExecutionError(failure, id);
+  if (!timedOut) {
+    await step.do("persist-failure-v1", () => failExecution(ctx.db, id, safe));
+  }
+  throw new NonRetryableError(safe.code);
 }
 export async function cancelExecution(db: D1Database, id: string): Promise<void> {
   // Second half of Running/Pending -> Cancelling -> Cancelled. Conditional on
