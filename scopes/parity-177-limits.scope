@@ -1,0 +1,9 @@
+# parity-177-limits lane scope (issue #177, LIMITS-01): Cloudflare
+# feasibility envelope, bundle-budget headroom governance, and the
+# reproducible limits checks. No new primitives, no deploys, no purchases.
+docs/feasibility-envelope.md
+docs/upstream-parity.md
+docs/architecture/000-steward-checklist.md
+scripts/check-bundle-budget.mjs
+test/limits-envelope.test.ts
+scopes/parity-177-limits.scope
