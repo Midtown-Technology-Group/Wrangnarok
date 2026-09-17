@@ -297,7 +297,16 @@ import { fileURLToPath } from "node:url";
 // closed instead of silently ratcheting again. This lane adds zero Worker
 // bytes (docs/tests/governance only). Hand-written platform governance,
 // no new dependencies.
-const BUDGET_BYTES = 710 * 1024;
+// 2026-09-17 (LIMITS-01 merge queue, AI-01 union): 715 KiB. The AI-01
+// provider-definitions slice (five provider defs plus probes, issue #164)
+// adds ~4.1 KiB of Worker bytes: the TRG-02 union measured 716690 locally
+// but the AI-01 union measures 720796 locally (byte-identical in CI),
+// leaving 6244 bytes of headroom under the 710 KiB line — below the 8 KiB
+// minimum, so the gate fired exactly as designed (budget itself unbroken).
+// The 715 KiB line restores ~11.1 KiB of real margin with the reason
+// recorded here and in docs/feasibility-envelope.md (same PR, LIMITS-META
+// block). Legitimate feature code, no new dependencies.
+const BUDGET_BYTES = 715 * 1024;
 // LIMITS-01 minimum operating headroom (issue #177): the budget must exceed
 // the measured bundle by at least this margin, so a `measured + a few
 // bytes` raise cannot pass. A feature PR that lands inside the budget but
