@@ -2,7 +2,7 @@
 
 Dated: 2026-09-17. Baseline: upstream `gobifrost/bifrost@3543c7ebee0e1bd9a2cab6dfba080a30621b1c5f` vs Wrangnarok `origin/main@0331492` (lane `lane/parity-177-limits`).
 
-<!-- LIMITS-META {"budgetKiB":730,"measuredBytes":735730,"measuredDate":"2026-09-17","minHeadroomBytes":8192} -->
+<!-- LIMITS-META {"budgetKiB":730,"measuredBytes":736279,"measuredDate":"2026-09-17","minHeadroomBytes":8192} -->
 
 This is the dated capability-versus-limit matrix LIMITS-01 requires. It answers one question per capability:
 
@@ -50,7 +50,7 @@ Correction vs the 2026-09-12 matrix: the Free per-database cap is **500 MB**, no
 
 - `test/smoke.test.ts` pins the deterministic smoke path: D1 reads 4, writes 8, operation rows 4, Workflow steps 4, instances 1, with per-run budgets (reads ≤ 10, writes ≤ 20, rows ≤ 10, instances = 1, steps ≤ 10) failing closed on growth. These are application-observed counters, not D1 `meta.rows_read`/`meta.rows_written` billing telemetry.
 - `src/usage.ts` emits one `WRANGNAROK_USAGE` block per Execution (counts/IDs/durations only, SEC-01 scrubbed). Worker requests and CPU-ms are `null` locally (not exposed by workerd); a deployed smoke artifact using D1 `meta` plus Workers analytics is still required before claiming production metering accuracy.
-- Worker bundle: **735,730 bytes raw** measured 2026-09-17 via `npm run check:bundle` on the TRG-03-S1 union (event registry plus log over the AI-01-union main; CI number governs) against a **730 KiB** soft budget (see headroom rule below). The provider hard cap is 3 MB, so the soft budget — not Cloudflare — is the binding constraint, by design: it is the early warning for CPU/memory pressure.
+- Worker bundle: **736,279 bytes raw** measured 2026-09-17 via `npm run check:bundle` on current `origin/main` (TRG-03-S1 union plus the #449 OAuth-fence fix; CI number governs) against a **730 KiB** soft budget (see headroom rule below). The provider hard cap is 3 MB, so the soft budget — not Cloudflare — is the binding constraint, by design: it is the early warning for CPU/memory pressure.
 - Client JS: 367,436 bytes raw / 105.12 kB gzip (measured 2026-09-17 via `npm run build:ui`). Served as Static Assets from the same Worker; asset requests are free and unlimited per Workers pricing.
 
 ### Soft-budget headroom rule (mechanical, not advisory)
@@ -63,7 +63,7 @@ Correction vs the 2026-09-12 matrix: the Free per-database cap is **500 MB**, no
 | --- | --- | --- | --- |
 | Workers requests | 100,000 requests/day | `null` locally (not exposed by workerd) | One request per API call plus one Cron tick per minute (1,440/day for the TRG-01 tick). Small deployments fit; high-frequency polling does not. |
 | Workers CPU | 10 ms CPU per invocation | `null` locally | Pure request shaping plus D1/Workflow calls; no measured pressure. Heavy per-request computation (embeddings, large transforms) is unproven. |
-| Workers bundle | 3 MB hard cap; 730 KiB soft budget + 8 KiB min headroom | 735,730 bytes raw of 747,520 | Soft budget binds first by design; ~11.5 KiB margin. Growth is deliberate per-lane headroom; no new dependencies. |
+| Workers bundle | 3 MB hard cap; 730 KiB soft budget + 8 KiB min headroom | 736,279 bytes raw of 747,520 | Soft budget binds first by design; ~11.0 KiB margin. Growth is deliberate per-lane headroom; no new dependencies. |
 | Workflows instances | 100,000 executions/day (shared with Workers) | 1 per smoke run | One instance per Execution by design. Fits unless per-minute schedules fan out across many orgs. |
 | Workflows steps | 3,000 steps/day (billing allowance) | 4 per smoke run | Bounded Operations per Saga (serial, fanout cap 8). ~750 smoke-runs/day is the first Free ceiling (see workloads). |
 | Workflows history retention | Completed state retained 3 days | Not archived by local/CI tests | The 15-minute same-revision refusal window plus retained D1 receipts carry recovery; native history older than retention surfaces as unavailable, never invented success (ADR 001). |
@@ -110,7 +110,7 @@ All workload math is **estimate**: smoke actuals (4 steps, 4 reads, 8 writes, ~2
 
 ### External analogue notes (architecture reviews #254–#259, estimates labeled ours)
 
-- **Pocketflare (#256):** publishes ~8.9 MiB gzip deployed bundle exceeding the 3 MB Workers Free script cap, hence requiring Workers Paid ($5/mo base). Lesson for us: our 716,545-byte raw bundle (≈ 0.68 MB, gzip smaller) fits Free with large provider margin — the binding constraint is our own soft budget, which is exactly where governance belongs.
+- **Pocketflare (#256):** publishes ~8.9 MiB gzip deployed bundle exceeding the 3 MB Workers Free script cap, hence requiring Workers Paid ($5/mo base). Lesson for us: our 736,279-byte raw bundle (≈ 0.70 MB, gzip smaller) fits Free with large provider margin — the binding constraint is our own soft budget, which is exactly where governance belongs.
 - **EdgeBase (#255):** publishes a Cloudflare-vs-Supabase/Appwrite comparison but warns its own estimate is optimistic; real costs hinge on write volume, R2 ops, and DO duration. Same caution applies to our W1–W3 models: they are estimates until deployed metering exists.
 - **OpenConnector (#254), Ottabase (#257), Nodrix (#258):** no published operating-cost model found in triage; any figures constructed for them are ours, not upstream's.
 - **VibeSDK / Workers for Platforms (#259):** first-party examples note some remote D1/R2 features may require a paid plan; do not assume first-party examples are cost-optimized or Free-viable.

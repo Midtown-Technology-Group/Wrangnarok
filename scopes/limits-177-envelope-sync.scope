@@ -1,0 +1,10 @@
+# LIMITS-01 envelope sync (issue #177, newest audit 2026-09-17 vs origin/main@c9954ce).
+# Docs-only sync: measured Worker bytes 736279 / 730 KiB soft budget + 8 KiB
+# minimum headroom, parity-map prose, and the PocketThought analogue figure.
+# No production code, binding, primitive, budget-policy, deployment, or
+# product change. test/limits-envelope.test.ts only if an existing assertion
+# must be updated.
+docs/feasibility-envelope.md
+docs/upstream-parity.md
+test/limits-envelope.test.ts
+scopes/limits-177-envelope-sync.scope
