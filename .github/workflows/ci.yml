@@ -15,9 +15,11 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Two parallel gates with identical coverage to the old serial job: wall time
-# is the max, not the sum. `Validate` aggregates both so branch protection
-# keeps requiring exactly one check name.
+# Three parallel gates with identical coverage to the old serial job (issue
+# #448): wall time is the max, not the sum. Static (~40s) overlaps both
+# runtime shards; the critical path is the slower runtime shard instead of
+# the old serial Runtime (~4.5m). `Validate` aggregates all three so branch
+# protection keeps requiring exactly one check name.
 jobs:
   static:
     name: Static checks
@@ -172,8 +174,19 @@ jobs:
           grep -q "GNU AFFERO GENERAL PUBLIC LICENSE" LICENSE
           grep -q "END OF TERMS AND CONDITIONS" LICENSE
 
-  runtime:
-    name: Runtime checks
+      # CI topology contract (issue #448): deterministic check that the
+      # parallel split below preserves every gate exactly once and that
+      # Validate aggregates every shard fail-closed. No credentials, no
+      # network, no live store.
+      - name: CI topology contract
+        run: node scripts/ci-topology.mjs --check
+
+  # Runtime test shard (issue #448): typecheck + coverage-gated tests +
+  # conditional Codecov upload + credential-free smoke. Independent checkout
+  # and install per shard: no shared artifacts, so this shard never waits
+  # for (and never breaks on) the build/platform shard below.
+  runtime-test:
+    name: Runtime tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Step-level `if:` cannot read the secrets context, so expose token
@@ -222,8 +235,32 @@ jobs:
       # system.smoke exercises the same path locally that post-deploy smoke
       # exercises in dev: Worker request handling, D1, Workflow Operations,
       # terminal persistence, and the usage block. Credential-free workerd.
+      # Runs before any UI build, exactly as in the old serial job, so smoke
+      # provably needs no client/dist artifact.
       - name: Smoke saga (local, credential-free)
         run: npx vitest run test/smoke.test.ts
+
+  # Runtime build shard (issue #448): UI build + Wrangler dev dry-run +
+  # bundle budget + local D1 migration application. Keeps the old serial
+  # order (build UI first: wrangler.jsonc serves ./client/dist/ as assets,
+  # so the dry-run and the budget measurement observe the built UI).
+  runtime-build:
+    name: Runtime build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Build UI
         run: npm run build:ui
@@ -247,10 +284,12 @@ jobs:
 
   validate:
     name: Validate
-    needs: [static, runtime]
-    # Issue #359: without if:always(), a failed static/runtime SKIPS this
-    # job — and branch protection accepts skipped required checks. Run
-    # always and fail unless BOTH gates succeeded.
+    needs: [static, runtime-test, runtime-build]
+    # Issue #359: without if:always(), a failed shard SKIPS this job — and
+    # branch protection accepts skipped required checks. Run always and fail
+    # unless ALL THREE gates succeeded. Each result must equal "success", so
+    # failure, cancellation, or skip of any shard fails closed (issue #448:
+    # the contract script above pins this shape against drift).
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -259,5 +298,6 @@ jobs:
       - name: Gates green
         run: |
           test "${{ needs.static.result }}" == "success"
-          test "${{ needs.runtime.result }}" == "success"
-          echo "static and runtime checks passed."
+          test "${{ needs.runtime-test.result }}" == "success"
+          test "${{ needs.runtime-build.result }}" == "success"
+          echo "static, runtime-test, and runtime-build checks passed."
