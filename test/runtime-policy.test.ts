@@ -596,3 +596,145 @@ describe("RUN-01 Slice A execution-time fail-closed (workerd, issue #135)", () =
     expect(vendorCall).not.toHaveBeenCalled();
   });
 });
+
+describe("RUN-01 Slice C lost-runtime-history convergence (issue #135)", () => {
+  // Upstream e9b66020 invariant in Cloudflare-native shape: terminal
+  // processing converges from authoritative D1 when ephemeral native Workflow
+  // history/status is missing or unavailable. No native instance is ever
+  // dispatched below, so the real local Workflow binding has nothing to
+  // report and detail must serve stored D1 state with advisory runtimeStatus
+  // null — never invented success, never a D1 rewrite, fences intact. Only
+  // outbound vendor HTTP is mocked, to assert zero calls.
+  async function seedTerminalExecution(options: { key: string; status: "Succeeded" | "Failed" }): Promise<string> {
+    const id = await executionId(principal, options.key);
+    const now = new Date().toISOString();
+    const terminal = options.status === "Succeeded";
+    const outcomeJson = terminal
+      ? JSON.stringify({ message: "hello" })
+      : JSON.stringify({
+          code: "ECHO_INTEGRATION_FAILED",
+          message: "The echo Integration could not complete.",
+        });
+    await bindings.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at,started_at,completed_at,result_json,error_json,policy_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        id,
+        echoSaga.id,
+        echoSaga.name,
+        echoSaga.revision,
+        principal.orgId,
+        principal.userId,
+        JSON.stringify({ message: "hello" }),
+        1,
+        options.status,
+        now,
+        now,
+        now,
+        terminal ? outcomeJson : null,
+        terminal ? null : outcomeJson,
+        policySnapshot(parseSagaPolicy({ timeout: { vendorTimeoutMs: 250 } })),
+      )
+      .run();
+    await bindings.DB.prepare(
+      "INSERT INTO operations(execution_id,name,position,status,started_at,completed_at,result_json,error_json) VALUES (?,?,?,?,?,?,?,?)",
+    )
+      .bind(id, "prepare-input-v1", 0, "Succeeded", now, now, JSON.stringify({ message: "hello" }), null)
+      .run();
+    await bindings.DB.prepare(
+      "INSERT INTO operations(execution_id,name,position,status,started_at,completed_at,result_json,error_json) VALUES (?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        id,
+        "echo-http-v1",
+        1,
+        options.status,
+        now,
+        now,
+        terminal ? outcomeJson : null,
+        terminal ? null : outcomeJson,
+      )
+      .run();
+    return id;
+  }
+  function cancelRequest(id: string) {
+    return new Request(`https://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } });
+  }
+
+  it("serves terminal Succeeded history from D1 with advisory null runtime and keeps every fence", async () => {
+    const vendor = mockEcho(async () => Response.json({ message: "hello" }));
+    const key = "run01-slicec-succeeded-001";
+    const id = await seedTerminalExecution({ key, status: "Succeeded" });
+    const detail = await worker.fetch(detailRequest(id), bindings);
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toMatchObject({
+      executionId: id,
+      status: "Succeeded",
+      dispatchConfirmed: true,
+      runtimeStatus: null,
+      result: { message: "hello" },
+      error: null,
+      policy: { sagaId: echoSaga.id, version: 1, policy: { timeout: { vendorTimeoutMs: 250 } } },
+      operations: [
+        { name: "prepare-input-v1", status: "Succeeded" },
+        { name: "echo-http-v1", status: "Succeeded" },
+      ],
+    });
+    // Read-only convergence: missing native history rewrites nothing.
+    const stored = await bindings.DB.prepare("SELECT status,dispatched,result_json FROM executions WHERE id=?")
+      .bind(id)
+      .first<{ status: string; dispatched: number; result_json: string }>();
+    expect(stored).toMatchObject({
+      status: "Succeeded",
+      dispatched: 1,
+      result_json: JSON.stringify({ message: "hello" }),
+    });
+    // Idempotency fence: same-key replay converges without redispatch or vendor work.
+    const replay = await worker.fetch(submitRequest(key), bindings);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ executionId: id, replayed: true });
+    expect(vendor).not.toHaveBeenCalled();
+    // Cancel fence: terminal rows answer 409 and are never rewritten.
+    const cancelled = await worker.fetch(cancelRequest(id), bindings);
+    expect(cancelled.status).toBe(409);
+    expect(await cancelled.json()).toMatchObject({ error: { code: "EXECUTION_NOT_CANCELLABLE" } });
+    const after = (await (await worker.fetch(detailRequest(id), bindings)).json()) as { status: string };
+    expect(after.status).toBe("Succeeded");
+  }, 20000);
+
+  it("serves terminal Failed history from D1 with advisory null runtime and keeps every fence", async () => {
+    const vendor = mockEcho(async () => Response.json({ message: "hello" }));
+    const key = "run01-slicec-failed-0001";
+    const id = await seedTerminalExecution({ key, status: "Failed" });
+    const detail = await worker.fetch(detailRequest(id), bindings);
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toMatchObject({
+      executionId: id,
+      status: "Failed",
+      dispatchConfirmed: true,
+      runtimeStatus: null,
+      result: null,
+      error: { code: "ECHO_INTEGRATION_FAILED" },
+      policy: { sagaId: echoSaga.id, version: 1, policy: { timeout: { vendorTimeoutMs: 250 } } },
+      operations: [
+        { name: "prepare-input-v1", status: "Succeeded" },
+        { name: "echo-http-v1", status: "Failed" },
+      ],
+    });
+    const stored = await bindings.DB.prepare("SELECT status,dispatched,error_json FROM executions WHERE id=?")
+      .bind(id)
+      .first<{ status: string; dispatched: number; error_json: string }>();
+    expect(stored?.status).toBe("Failed");
+    expect(stored?.dispatched).toBe(1);
+    expect(JSON.parse(stored?.error_json ?? "")).toMatchObject({ code: "ECHO_INTEGRATION_FAILED" });
+    const replay = await worker.fetch(submitRequest(key), bindings);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ executionId: id, replayed: true });
+    expect(vendor).not.toHaveBeenCalled();
+    const cancelled = await worker.fetch(cancelRequest(id), bindings);
+    expect(cancelled.status).toBe(409);
+    expect(await cancelled.json()).toMatchObject({ error: { code: "EXECUTION_NOT_CANCELLABLE" } });
+    const after = (await (await worker.fetch(detailRequest(id), bindings)).json()) as { status: string };
+    expect(after.status).toBe("Failed");
+  }, 20000);
+});

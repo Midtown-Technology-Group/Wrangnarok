@@ -64,7 +64,7 @@ Total: 47 capability rows — 4 Implemented, 1 Complete (pending review), 28 Par
 
 Phase 2; **Implemented**; existing issue: #135
 
-Local status: Per-Saga runtime policy persists as org-scoped rows (migration 0012) with applied-policy snapshots on every Execution (ADR 018). Operator inspect/change rides GET/PUT /api/sagas/:id/policy on the AUTH-01 membership gate (admin-only writes); the typed SDK (getSagaPolicy/updateSagaPolicy), the CLI (saga-policy/saga-policy-set), and ExecutionDetail all expose it. The behavioral matrix (timeout 0/default/custom, engine-loss-only retry ceilings, business-error non-retry, pause/admission, CompletedWithErrors-as-Failed, Stuck-as-Running-until-cancel, stale fencing, crash/recovery) is proven by test/runtime-policy.test.ts on local Workflows/D1.
+Local status: Per-Saga runtime policy persists as org-scoped rows (migration 0012) with applied-policy snapshots on every Execution (ADR 018). Operator inspect/change rides GET/PUT /api/sagas/:id/policy on the AUTH-01 membership gate (admin-only writes); the typed SDK (getSagaPolicy/updateSagaPolicy), the CLI (saga-policy/saga-policy-set), and ExecutionDetail all expose it. The behavioral matrix (timeout 0/default/custom, engine-loss-only retry ceilings, business-error non-retry, pause/admission, CompletedWithErrors-as-Failed, Stuck-as-Running-until-cancel, stale fencing, crash/recovery) is proven by test/runtime-policy.test.ts on local Workflows/D1. Slice C (issue #135) proves lost-runtime-history convergence there too: terminal Execution detail converges from authoritative D1 with advisory `runtimeStatus: null` when native Workflow history/status is missing, preserving idempotency, cancel, and stale-completion fences.
 
 Depends: AUTH-02
 
