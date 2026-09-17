@@ -1,24 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0
 // Stable hello-parent Saga definition (RUN-02, ADR 018): the nested
-// invocation demo. Prepare input, dispatch the hello Saga as an authorized
-// child with typed input, await its JSON output, and persist the greeting
-// plus the child lineage. A child failure is actionable (CHILD_FAILED) and
-// can never become fabricated parent success.
-import { WorkflowEntrypoint } from "cloudflare:workers";
-import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
-import type { Bindings } from "../bindings";
+// invocation demo. Migrated to the ADR 033 interior helpers (issue #416):
+// schemaOf, prepareInput, completeExecution/failSagaExecution,
+// makeSagaWorkflow. Behavior unchanged: prepare input, dispatch the hello
+// Saga as an authorized child with typed input, await its JSON output, and
+// persist the greeting plus the child lineage. A child failure is actionable
+// (CHILD_FAILED) and can never become fabricated parent success.
+import { NonRetryableError } from "cloudflare:workflows";
 import { Fault, helloParentSaga, helloSaga, parseHelloParentInput } from "../domain";
-import type { ExecutionParams, HelloParentResult, HelloResult, SafeError } from "../domain";
-import { defineSaga } from "../saga";
+import type { HelloParentResult, HelloResult, SafeError } from "../domain";
+import { defineSaga, schemaOf } from "../saga";
 import {
   assertRunExecutionId,
   beginOperation,
+  completeExecution,
+  failSagaExecution,
   finishOperation,
-  persistRunFailure,
-  persistRunSuccess,
-  prepareExecution,
 } from "../executions";
-import { executeSaga } from "./shared";
+import { prepareInput } from "../saga-helpers";
+import { makeSagaWorkflow } from "./shared";
 
 /** Stable hello-parent Saga: invoke hello as a child and await its greeting. */
 export const helloParentSagaDef = defineSaga<HelloParentResult>({
@@ -28,31 +28,18 @@ export const helloParentSagaDef = defineSaga<HelloParentResult>({
   description: helloParentSaga.description,
   tags: ["examples", "children"],
   requiredIntegrations: [],
-  inputSchema: Object.freeze({
-    type: "object" as const,
-    properties: Object.freeze({
-      name: Object.freeze({ type: "string" }),
-      childKey: Object.freeze({ type: "string" }),
-    }),
-    required: Object.freeze(["name"]),
-    additionalProperties: false,
-  }),
-  outputSchema: Object.freeze({
-    type: "object" as const,
-    properties: Object.freeze({
-      greeting: Object.freeze({ type: "string" }),
-      name: Object.freeze({ type: "string" }),
-      childExecutionId: Object.freeze({ type: "string" }),
-    }),
-    required: Object.freeze(["greeting", "name", "childExecutionId"]),
-    additionalProperties: false,
-  }),
+  inputSchema: schemaOf({ name: "string", childKey: "string" }, ["name"]),
+  outputSchema: schemaOf({ greeting: "string", name: "string", childExecutionId: "string" }, [
+    "greeting",
+    "name",
+    "childExecutionId",
+  ]),
   parse: parseHelloParentInput,
   run: async (ctx, step): Promise<HelloParentResult> => {
     const id = assertRunExecutionId(ctx.executionId);
     try {
       const prepared = await step.do("prepare-input-v1", () =>
-        prepareExecution(ctx.db, id, helloParentSaga.id, helloParentSaga.revision, parseHelloParentInput),
+        prepareInput(ctx, helloParentSaga, parseHelloParentInput),
       );
       // Child dispatch is a convergent Operation: the deterministic child ID
       // makes retries safe, so this step joins the checkpoint retry ceiling
@@ -81,13 +68,15 @@ export const helloParentSagaDef = defineSaga<HelloParentResult>({
         name: greeted.name,
         childExecutionId: dispatched.executionId,
       };
-      await step.do("persist-success-v1", () => persistRunSuccess(ctx.db, id, output));
+      await step.do("persist-success-v1", () => completeExecution(ctx.db, id, output));
       return output;
     } catch (error) {
       // Child faults are actionable SafeErrors (CHILD_FAILED,
       // CHILD_DISPATCH_UNCONFIRMED, ...): persist their code/message, never
       // the generic marker. Anything else keeps the generic marker so the
-      // parent can never invent success from an unknown failure.
+      // parent can never invent success from an unknown failure. The catch
+      // is the only persist-failure-v1 writer (no pre-persisting branch
+      // above), so no already-persisted guard is needed.
       const raw: SafeError =
         error instanceof Fault
           ? { code: error.code, message: error.message }
@@ -95,13 +84,10 @@ export const helloParentSagaDef = defineSaga<HelloParentResult>({
               code: "EXECUTION_FAILED",
               message: "The Execution could not complete. Inspect local runtime diagnostics.",
             };
-      return persistRunFailure(ctx, step, id, raw, false);
+      await step.do("persist-failure-v1", () => failSagaExecution(ctx.db, id, raw));
+      throw new NonRetryableError(raw.code);
     }
   },
 });
 
-export class HelloParentWorkflow extends WorkflowEntrypoint<Bindings, ExecutionParams> {
-  async run(event: WorkflowEvent<ExecutionParams>, step: WorkflowStep): Promise<HelloParentResult> {
-    return executeSaga(this.env, event, step, helloParentSagaDef);
-  }
-}
+export class HelloParentWorkflow extends makeSagaWorkflow(helloParentSagaDef) {}
