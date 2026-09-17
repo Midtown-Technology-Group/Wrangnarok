@@ -5,13 +5,22 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
-import { echoSaga, ECHO_INTEGRATION_ID, EXECUTION_ID, Fault, parseInput, VENDOR_TIMEOUT_MS } from "../domain";
+import { echoSaga, ECHO_INTEGRATION_ID, Fault, parseInput, VENDOR_TIMEOUT_MS } from "../domain";
 import { loadExecutionPolicy } from "../executions";
 import { vendorDeadlineMs } from "../domain";
 import type { EchoInput, ExecutionParams, SafeError } from "../domain";
 import { defineSaga, withOperation } from "../saga";
-import { scrubExecutionError, scrubExecutionValue } from "../secrets";
-import { beginOperation, failExecution, finishOperation, prepareExecution, resolveConnection } from "../executions";
+import { scrubExecutionError } from "../secrets";
+import {
+  assertRunExecutionId,
+  beginOperation,
+  failExecution,
+  finishOperation,
+  persistRunFailure,
+  persistRunSuccess,
+  prepareExecution,
+  resolveConnection,
+} from "../executions";
 import { executeSaga } from "./shared";
 
 const echoInputSchema = Object.freeze({
@@ -33,10 +42,7 @@ export const echoSagaDef = defineSaga<EchoInput>({
   outputSchema: echoInputSchema,
   parse: parseInput,
   run: async (ctx, step): Promise<EchoInput> => {
-    const id = ctx.executionId;
-    if (typeof id !== "string" || !EXECUTION_ID.test(id)) {
-      throw new NonRetryableError("Invalid local Execution invocation.");
-    }
+    const id = assertRunExecutionId(ctx.executionId);
     let expectedFailure: SafeError | undefined;
     let timedOut = false;
     try {
@@ -106,26 +112,10 @@ export const echoSagaDef = defineSaga<EchoInput>({
       // Native wait primitive. Deliberately not a product Operation: not every
       // infrastructure checkpoint is ExecutionHistory.
       await step.sleep("settle-wait-v1", "1 second");
-      await step.do("persist-success-v1", async () => {
-        await ctx.db
-          .prepare(
-            "UPDATE executions SET status='Succeeded',completed_at=?,result_json=? WHERE id=? AND status='Running'",
-          )
-          .bind(new Date().toISOString(), JSON.stringify(scrubExecutionValue(output, id)), id)
-          .run();
-      });
+      await step.do("persist-success-v1", () => persistRunSuccess(ctx.db, id, output));
       return output;
     } catch {
-      // Expected failures are serialized step results, not Error subclasses transported by Workflows.
-      const raw: SafeError = expectedFailure ?? {
-        code: "EXECUTION_FAILED",
-        message: "The Execution could not complete. Inspect local runtime diagnostics.",
-      };
-      const safe: SafeError = scrubExecutionError(raw, id);
-      if (!timedOut) {
-        await step.do("persist-failure-v1", () => failExecution(ctx.db, id, safe));
-      }
-      throw new NonRetryableError(safe.code);
+      return persistRunFailure(ctx, step, id, expectedFailure, timedOut);
     }
   },
 });

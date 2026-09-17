@@ -1,0 +1,6 @@
+# TABLE-02 document_ids slice (issue #154): physical document-ID query filter.
+src/tables.ts
+test/tables.test.ts
+test/tables-unit.test.ts
+docs/upstream-parity.md
+scopes/table-154-document-ids.scope

@@ -6,13 +6,18 @@
 // can never become fabricated parent success.
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
-import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
-import { EXECUTION_ID, Fault, helloParentSaga, helloSaga, parseHelloParentInput } from "../domain";
+import { Fault, helloParentSaga, helloSaga, parseHelloParentInput } from "../domain";
 import type { ExecutionParams, HelloParentResult, HelloResult, SafeError } from "../domain";
 import { defineSaga } from "../saga";
-import { scrubExecutionError, scrubExecutionValue } from "../secrets";
-import { beginOperation, failExecution, finishOperation, prepareExecution } from "../executions";
+import {
+  assertRunExecutionId,
+  beginOperation,
+  finishOperation,
+  persistRunFailure,
+  persistRunSuccess,
+  prepareExecution,
+} from "../executions";
 import { executeSaga } from "./shared";
 
 /** Stable hello-parent Saga: invoke hello as a child and await its greeting. */
@@ -44,10 +49,7 @@ export const helloParentSagaDef = defineSaga<HelloParentResult>({
   }),
   parse: parseHelloParentInput,
   run: async (ctx, step): Promise<HelloParentResult> => {
-    const id = ctx.executionId;
-    if (typeof id !== "string" || !EXECUTION_ID.test(id)) {
-      throw new NonRetryableError("Invalid local Execution invocation.");
-    }
+    const id = assertRunExecutionId(ctx.executionId);
     try {
       const prepared = await step.do("prepare-input-v1", () =>
         prepareExecution(ctx.db, id, helloParentSaga.id, helloParentSaga.revision, parseHelloParentInput),
@@ -79,14 +81,7 @@ export const helloParentSagaDef = defineSaga<HelloParentResult>({
         name: greeted.name,
         childExecutionId: dispatched.executionId,
       };
-      await step.do("persist-success-v1", async () => {
-        await ctx.db
-          .prepare(
-            "UPDATE executions SET status='Succeeded',completed_at=?,result_json=? WHERE id=? AND status='Running'",
-          )
-          .bind(new Date().toISOString(), JSON.stringify(scrubExecutionValue(output, id)), id)
-          .run();
-      });
+      await step.do("persist-success-v1", () => persistRunSuccess(ctx.db, id, output));
       return output;
     } catch (error) {
       // Child faults are actionable SafeErrors (CHILD_FAILED,
@@ -100,9 +95,7 @@ export const helloParentSagaDef = defineSaga<HelloParentResult>({
               code: "EXECUTION_FAILED",
               message: "The Execution could not complete. Inspect local runtime diagnostics.",
             };
-      const safe: SafeError = scrubExecutionError(raw, id);
-      await step.do("persist-failure-v1", () => failExecution(ctx.db, id, safe));
-      throw new NonRetryableError(safe.code);
+      return persistRunFailure(ctx, step, id, raw, false);
     }
   },
 });
