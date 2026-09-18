@@ -32,8 +32,10 @@ permissions:
 
 jobs:
   review:
-    # Drafts get reviewed on ready_for_review; skip runs while still draft.
-    if: github.event.pull_request.draft == false
+    # Skip gracefully until the owner stores OPENCODE_API_KEY (avoids a red
+    # run on every PR before setup), and skip drafts — they are reviewed on
+    # ready_for_review.
+    if: ${{ secrets.OPENCODE_API_KEY != '' && github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
