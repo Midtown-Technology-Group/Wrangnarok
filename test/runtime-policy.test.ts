@@ -389,6 +389,65 @@ describe("RUN-01 enforcement matrix (workerd)", () => {
   }, 25000);
 });
 
+describe("RUN-01 Slice B long-wait lifetime + timeout=0 (issue #135)", () => {
+  // Upstream ca669e3 invariant in Cloudflare-native shape:
+  // timeout.vendorTimeoutMs = 0 keeps the Integration default — it is NOT
+  // upstream's no-execution-timeout — and an Execution that waits past short
+  // request/vendor windows keeps the authority it started with (stamped
+  // snapshot, org Connection, D1 terminal gates) across sleep/resume and
+  // mid-flight operator edits. Real workerd Workflows + D1; only vendor HTTP
+  // is mocked.
+  it("treats timeout=0 as the Integration default, not no-timeout", async () => {
+    await worker.fetch(policyPut(echoSaga.id, { timeout: { vendorTimeoutMs: 0 } }), bindings);
+    const key = "run01-sliceb-zero-0001";
+    const id = await executionId(principal, key);
+    const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+    // The vendor answers at ~1200ms: past the 1000ms echo default, so a
+    // no-timeout reading of 0 would succeed while the Integration-default
+    // reading surfaces ECHO_VENDOR_TIMEOUT through failSagaExecution.
+    mockEcho(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      return Response.json({ message: "hello" });
+    });
+    expect((await worker.fetch(submitRequest(key), bindings)).status).toBe(202);
+    await instance.waitForStatus("errored");
+    const detail = (await (await worker.fetch(detailRequest(id), bindings)).json()) as {
+      status: string;
+      error: { code: string };
+      policy: { policy: { timeout: { vendorTimeoutMs: number } } };
+    };
+    expect(detail).toMatchObject({ status: "TimedOut", error: { code: "ECHO_VENDOR_TIMEOUT" } });
+    expect(detail.policy.policy.timeout.vendorTimeoutMs).toBe(0);
+  }, 20000);
+  it("keeps snapshot authority across a wait past the default window despite a mid-flight edit", async () => {
+    const set = await worker.fetch(policyPut(echoSaga.id, { timeout: { vendorTimeoutMs: 5000 } }), bindings);
+    expect(set.status).toBe(200);
+    const key = "run01-sliceb-wait-00001";
+    const id = await executionId(principal, key);
+    const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
+    // Slow vendor: answers at ~1200ms, past the 1000ms Integration default.
+    // The 5000ms snapshot stamped at submit must govern the whole wait; the
+    // mid-flight edit to 50ms below must not rewrite in-flight behavior, and
+    // the post-sleep terminal persist still runs under the original snapshot.
+    mockEcho(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      return Response.json({ message: "hello" });
+    });
+    expect((await worker.fetch(submitRequest(key), bindings)).status).toBe(202);
+    const edited = await worker.fetch(policyPut(echoSaga.id, { timeout: { vendorTimeoutMs: 50 } }), bindings);
+    expect(edited.status).toBe(200);
+    await instance.waitForStatus("complete");
+    await waitForExecutionStatus(id, "Succeeded");
+    const detail = (await (await worker.fetch(detailRequest(id), bindings)).json()) as {
+      status: string;
+      policy: { policy: { timeout: { vendorTimeoutMs: number } }; version: number };
+    };
+    expect(detail).toMatchObject({ status: "Succeeded", policy: { policy: { timeout: { vendorTimeoutMs: 5000 } } } });
+    // Reset the live row so later suites start from defaults.
+    await worker.fetch(policyPut(echoSaga.id, { timeout: { vendorTimeoutMs: 0 } }), bindings);
+  }, 25000);
+});
+
 describe("RUN-01 saga submission still parses (identity intact)", () => {
   it("keeps stable IDs and catalog discovery untouched by policy", () => {
     expect(parseSubmission({ sagaId: echoSaga.id, input: { message: "hi" } }).saga.id).toBe(echoSaga.id);

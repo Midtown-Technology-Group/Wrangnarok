@@ -36,12 +36,16 @@ Every Execution snapshots the effective policy into `executions.policy_json` at 
 
 Authorization follows the authoritative Organization membership boundary: any authenticated caller in the Organization may inspect policy (`GET /api/sagas/:id/policy`), while `PUT` requires an active Organization-admin membership or instance-admin identity through `requireManageOrg`. Ordinary members may read policy but cannot change it (`403 ADMIN_ONLY`), even if they supply forged operator headers. Unknown Saga IDs answer 404, never an existence leak across tenants.
 
+Execution lifetime (Slice B, issue #135): `timeout.vendorTimeoutMs = 0` keeps the Integration default — it is explicitly not upstream's `timeout_seconds = 0` (no execution timeout, upstream `ca669e3`). Wrangnarok has no per-Execution execution-timeout knob: once dispatched, an Execution is Running-until-cancel with authoritative D1 state; the native step bound stays fixed at `"10 seconds"` and vendor overrides cap at 30000ms. There is likewise no per-Execution expiring credential to retain: Workflow authority is the Worker's bindings plus the Organization-scoped D1 rows (membership, Connection, policy snapshot) re-resolved at each step, so a long wait loses nothing that must be refreshed — post-wait steps run under the stamped snapshot even when the operator edits the live row mid-flight. Bounded-runtime parity exception: Cloudflare owns Workflow duration/sleep bounds on the platform (including Free-tier limits); approval-gated or day-long waits beyond those bounds are an explicit non-goal until a concrete Saga use case earns its own ADR — no 24h-token equivalent is minted.
+
 ## Behavioral matrix (proven by `test/runtime-policy.test.ts` plus existing suites)
 
 | Case | Expectation |
 | --- | --- |
 | Timeout 0 (default) | Integration default applies (echo 1000ms, ninjaone 5000ms). Slow vendor surfaces `*_VENDOR_TIMEOUT` through `failSagaExecution` as `TimedOut`. |
 | Timeout custom | A short custom override (e.g. 50ms) turns a normally-fast vendor into `TimedOut`; a long override lets a slow vendor succeed. The snapshot records the override; later edits do not rewrite history. |
+| Timeout 0 is the Integration default, not no-timeout (Slice B) | `vendorTimeoutMs: 0` with a ~1200ms vendor on the 1000ms echo default surfaces `ECHO_VENDOR_TIMEOUT` as `TimedOut`; the snapshot records 0. |
+| Long-wait snapshot retention (Slice B) | A 5000ms snapshot with a ~1200ms vendor succeeds even after the live row is edited to 50ms mid-flight; detail keeps the 5000ms snapshot through sleep/resume to terminal. |
 | Engine-loss-only retry ceilings | Vendor steps default 0 (one outbound call on failure, proven by existing resilience tests). Operator `vendorRetries` raises only the native retry budget for lost checkpoints; checkpoint retries cap at 2. |
 | Business-error non-retry | `NonRetryableError` on every expected failure (`INVALID_INPUT`, `424 INTEGRATION_REQUIREMENT_UNSATISFIED`, vendor `*_FAILED`); no automatic retry of mutations. |
 | Pause / admission | `enabled=false` answers `409 SAGA_PAUSED` with no dispatch and no vendor call; re-enable resumes dispatch. `maxConcurrent=1` answers `429 ADMISSION_LIMITED` for the second active Execution. Pausing never touches in-flight rows. |
@@ -58,3 +62,4 @@ Authorization follows the authoritative Organization membership boundary: any au
 - Free-tier cost stays flat: one extra indexed D1 lookup per submit plus one snapshot column; no Cron, no Queue, no Durable Object, no background job.
 - Policy writes reuse the single Organization-admin authorization path rather than introducing a header- or service-identity exception. `stepTimeout` stays fixed platform text because per-Saga native bounds need their own cost and venue decision.
 - `CompletedWithErrors` and `Stuck` remain explicit non-adoptions with the semantics above. If a concrete Saga use case demonstrates behavior distinct from `Succeeded` with warnings, `Failed`, or `Running`-until-cancel, that case earns its own ADR and migration.
+- Execution lifetime stays bounded by the platform: no execution-timeout knob and no 24h authority token exist locally (parity exception above); long waits are Running-until-cancel under the stamped snapshot, never under re-derived live policy.
