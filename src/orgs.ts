@@ -8,11 +8,15 @@
 // closed. Every request re-resolves membership, so revocation applies to the
 // next request with no redeploy and no server sessions to expire.
 //
-// Roles are deliberately small: member vs admin per Organization, plus an
-// instance admin list (ADMIN_USER_IDS env, install state like D1 IDs, never
-// in Git) for creating/disabling Organizations and recovering stuck tenants.
-// External users are first-class members whose kind is recorded and who can
-// never hold admin: scope selection can never elevate privilege.
+// Roles are deliberately small and closed (AUTH-02 narrow profile, ADR 035
+// addendum): admin vs operator vs viewer per Organization, plus an instance
+// admin list (ADMIN_USER_IDS env, install state like D1 IDs, never in Git)
+// for creating/disabling Organizations and recovering stuck tenants.
+// operator may hold action grants but never administers Organization state;
+// viewer is read-only (the evaluator ignores action grants naming a
+// viewer). External users are first-class members whose kind is recorded
+// and who can never hold admin: scope selection can never elevate
+// privilege. Legacy `member` rows read as operator (migration 0039).
 import { encodeHistoryCursor, Fault, UUID, type HistoryQuery, type Principal } from "./domain";
 import { summary } from "./executions";
 import type { ExecutionRow } from "./executions";
@@ -23,7 +27,7 @@ export interface AdminEnv {
   ADMIN_USER_IDS?: string;
 }
 
-export type OrgRole = "member" | "admin";
+export type OrgRole = "admin" | "operator" | "viewer";
 export type MembershipStatus = "invited" | "active" | "suspended" | "revoked";
 export type MembershipKind = "ordinary" | "external";
 export type OrgStatus = "active" | "disabled";
@@ -77,7 +81,16 @@ interface MembershipRow {
   updated_at: string;
 }
 
-const ROLES: readonly string[] = ["member", "admin"];
+const ROLES: readonly string[] = ["admin", "operator", "viewer"];
+
+/** Normalize a stored membership role to the closed set. Legacy `member`
+ * rows (pre-migration 0039) and unknown values read as operator: action
+ * authority, never administration, never the viewer ceiling. */
+export function normalizeOrgRole(value: string): OrgRole {
+  if (value === "admin") return "admin";
+  if (value === "viewer") return "viewer";
+  return "operator";
+}
 const MEMBER_STATUSES: readonly string[] = ["invited", "active", "suspended", "revoked"];
 const KINDS: readonly string[] = ["ordinary", "external"];
 
@@ -133,7 +146,7 @@ function toOrgSummary(row: OrgRow): OrgSummary {
 function toMember(row: MembershipRow): MemberRow {
   return {
     userId: row.user_id,
-    role: (row.role === "admin" ? "admin" : "member") as OrgRole,
+    role: normalizeOrgRole(row.role),
     status: MEMBER_STATUSES.includes(row.status) ? (row.status as MembershipStatus) : "suspended",
     kind: (row.kind === "external" ? "external" : "ordinary") as MembershipKind,
     createdAt: row.created_at,
@@ -318,6 +331,29 @@ export async function requireManageOrg(db: D1Database, ctx: CallerCtx, orgId: st
   if (!(await canManageOrg(db, ctx, orgId))) throw new Fault(403, "ADMIN_ONLY", "Organization admin only.");
 }
 
+/**
+ * Org-role ceiling probe for the tables/files legs (AUTH-02 narrow profile
+ * composition: role ceiling, then resource policy). True when the user
+ * holds an ACTIVE viewer membership in the Organization. Operators, admins,
+ * legacy `member` rows, and unknown memberships all read as non-viewer, so
+ * this narrows authority and never widens it. Missing tables fail loud
+ * (503) rather than defaulting open.
+ */
+export async function isViewer(db: D1Database, orgId: string, userId: string): Promise<boolean> {
+  try {
+    const row = await db
+      .prepare("SELECT role FROM org_memberships WHERE org_id=? AND user_id=? AND status='active'")
+      .bind(orgId, userId)
+      .first<{ role: string }>();
+    return row?.role === "viewer";
+  } catch (error) {
+    if (error instanceof Error && /no such table/i.test(error.message)) {
+      throw new Fault(503, "ORG_STORE_NOT_MIGRATED", "Organization storage is not migrated: apply migration 0007.");
+    }
+    throw error;
+  }
+}
+
 export async function createOrg(db: D1Database, name: string): Promise<OrgSummary> {
   const clean = parseOrgName(name);
   const existing = await db.prepare("SELECT id FROM organizations WHERE name=?").bind(clean).first<{ id: string }>();
@@ -396,12 +432,12 @@ export async function inviteMember(
   db: D1Database,
   orgId: string,
   userId: string,
-  role: OrgRole = "member",
+  role: OrgRole = "operator",
   kind: MembershipKind = "ordinary",
 ): Promise<MemberRow> {
   const id = parseOrgId(orgId);
   const user = parseUserId(userId);
-  if (!ROLES.includes(role)) throw new Fault(400, "INVALID_MEMBERSHIP", "Role must be member or admin.");
+  if (!ROLES.includes(role)) throw new Fault(400, "INVALID_MEMBERSHIP", "Role must be admin, operator, or viewer.");
   if (!KINDS.includes(kind)) throw new Fault(400, "INVALID_MEMBERSHIP", "Kind must be ordinary or external.");
   if (kind === "external" && role === "admin") {
     throw new Fault(400, "INVALID_MEMBERSHIP", "External users cannot hold admin.");
@@ -463,7 +499,7 @@ export async function updateMember(
   const id = parseOrgId(orgId);
   const user = parseUserId(userId);
   if (update.role !== undefined && !ROLES.includes(update.role)) {
-    throw new Fault(400, "INVALID_MEMBERSHIP", "Role must be member or admin.");
+    throw new Fault(400, "INVALID_MEMBERSHIP", "Role must be admin, operator, or viewer.");
   }
   if (update.status !== undefined && !MEMBER_STATUSES.includes(update.status)) {
     throw new Fault(400, "INVALID_MEMBERSHIP", "Status must be invited, active, suspended, or revoked.");
@@ -479,7 +515,9 @@ export async function updateMember(
     .bind(id, user)
     .first<MembershipRow>();
   if (!current) throw new Fault(404, "USER_NOT_FOUND", "No membership for this user.");
-  const nextRole = update.role ?? current.role;
+  // Normalize the carried-forward role so a status/kind-only change on a
+  // legacy `member` row persists the closed vocabulary, never the old label.
+  const nextRole = normalizeOrgRole(update.role ?? current.role);
   const nextKind = update.kind ?? current.kind;
   const nextStatus = update.status ?? current.status;
   if (nextKind === "external" && nextRole === "admin") {
@@ -581,7 +619,7 @@ export async function ensureLabFixture(db: D1Database, orgId: string, userId: st
     "ALTER TABLE organizations ADD COLUMN created_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z'",
     "ALTER TABLE organizations ADD COLUMN disabled_at TEXT",
     "CREATE TABLE IF NOT EXISTS users(user_id TEXT PRIMARY KEY,status TEXT NOT NULL DEFAULT 'active',created_at TEXT NOT NULL,disabled_at TEXT)",
-    "CREATE TABLE IF NOT EXISTS org_memberships(org_id TEXT NOT NULL REFERENCES organizations(id),user_id TEXT NOT NULL REFERENCES users(user_id),role TEXT NOT NULL DEFAULT 'member',status TEXT NOT NULL DEFAULT 'invited',kind TEXT NOT NULL DEFAULT 'ordinary',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(org_id,user_id))",
+    "CREATE TABLE IF NOT EXISTS org_memberships(org_id TEXT NOT NULL REFERENCES organizations(id),user_id TEXT NOT NULL REFERENCES users(user_id),role TEXT NOT NULL DEFAULT 'operator',status TEXT NOT NULL DEFAULT 'invited',kind TEXT NOT NULL DEFAULT 'ordinary',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(org_id,user_id))",
     "CREATE INDEX IF NOT EXISTS org_memberships_user ON org_memberships(user_id,status)",
     "CREATE INDEX IF NOT EXISTS org_memberships_org ON org_memberships(org_id,status)",
     "CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), name TEXT NOT NULL, saga_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('recurring','one-off')), cron TEXT NOT NULL DEFAULT '' CHECK(length(cron) <= 64), timezone TEXT NOT NULL DEFAULT 'UTC' CHECK(length(timezone) <= 64), enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)), input_json TEXT NOT NULL DEFAULT '{}' CHECK(length(input_json) <= 4096), run_as_user_id TEXT NOT NULL, run_at TEXT, next_due_at TEXT, last_window TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(org_id, name))",

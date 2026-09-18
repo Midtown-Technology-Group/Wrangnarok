@@ -1047,7 +1047,7 @@ describe("FORM-02 recovery fence: consume-after-admission arms (#155)", () => {
     await createForm("gated", [{ name: "name", type: "text", required: true }]);
     const memberCtx = {
       principal: { userId: OTHER_USER, orgId: ORG },
-      role: "member" as const,
+      role: "operator" as const,
       kind: "ordinary" as const,
       isInstanceAdmin: false,
       isOrgAdmin: false,

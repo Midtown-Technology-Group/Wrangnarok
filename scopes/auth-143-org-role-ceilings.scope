@@ -1,0 +1,18 @@
+# AUTH-02 narrow profile (issue #143, ADR 035 addendum): fixed org roles
+# admin/operator/viewer with closed ceilings, viewer inert-grant rule,
+# delegation via vocabulary, per-action table/file composition under the
+# role ceiling. No ADR/ledger edits (steward lane owns docs/architecture/03x
+# and scripts/check-adr-ledger.mjs); requireManageOrg signature untouched
+# for lane-135; no new Cloudflare primitive (Worker + D1 only).
+migrations/0039_org_roles.sql
+src/orgs.ts
+src/roles.ts
+src/tables.ts
+src/files.ts
+src/index.ts
+test/org-roles-ceilings.test.ts
+test/org-lifecycle.test.ts
+test/machine-credentials.test.ts
+test/resource-roles-unit.test.ts
+test/form-lifecycle.test.ts
+scopes/auth-143-org-role-ceilings.scope
