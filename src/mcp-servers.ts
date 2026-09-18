@@ -352,7 +352,13 @@ export async function updateMcpServerTemplate(
   // The view is built from the pre-update row plus the applied values —
   // no re-read: the UPDATE above succeeding on the visible row is the
   // existence proof.
-  return toView({ ...row, server_url: serverUrl, provider_flow: providerFlow, discovery_metadata: discoveryMetadata, updated_at: now });
+  return toView({
+    ...row,
+    server_url: serverUrl,
+    provider_flow: providerFlow,
+    discovery_metadata: discoveryMetadata,
+    updated_at: now,
+  });
 }
 
 /** Flip the active flag (disable/enable). Disabling hides the template
