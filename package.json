@@ -43,7 +43,7 @@
     "react-router-dom": "7.18.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "1.1.8",
+    "@cloudflare/vitest-plugin": "1.1.9",
     "@eslint/js": "10.0.1",
     "@types/node": "22.20.3",
     "@types/react": "19.3.0",
