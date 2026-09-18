@@ -1,0 +1,23 @@
+# EMBED-01 session-owned uploads lane scope (issue #156, slice 3):
+# external form sessions stage bytes into the form field's declared
+# FILE-01 location and submit references to exactly what they staged.
+# Server-minted paths plus the form_session_uploads ownership claim
+# table (migration 0040 + ledger entry), pre-gate issuance/byte-PUT/
+# finalize bound to the live startup session (revocation and capability
+# drift kill outstanding finalizes with no grace), submit ownership
+# check in the shared core (both external routes; operator path
+# unchanged), traversal/revocation/stale/cap tests, and the slice-3
+# capability-model ADR (numbering per #225). No new Cloudflare
+# primitive (R2 FILES binding already earned); no CAPTCHA/Turnstile
+# binding; no authenticated external-user access (owner cost decision);
+# no app-embed or operator upload-path change; no client change.
+migrations/0040_session_uploads.sql
+src/session-uploads.ts
+src/embeds.ts
+src/public-forms.ts
+src/index.ts
+test/embed-session-uploads.test.ts
+docs/architecture/TBD-embed-session-uploads.md
+docs/upstream-parity.md
+docs/migration-ledger.md
+scopes/embed-156-slice3.scope

@@ -48,9 +48,10 @@
 // and no grants: Table providers resolve through the same caller-scoped
 // gate as the operator path and deny by absence, so a form grant can never
 // traverse to Tables, live file bytes, another form, an unrelated Saga, or
-// another tenant. File-field values are refused outright in slice 1 (there
-// is no embed upload path yet, so no reference can prove session
-// ownership); session-owned uploads ride a later slice.
+// another tenant. File-field values must name a (location, path) triple
+// the submitting session itself staged through the session-upload routes
+// (EMBED-01 slice 3, src/session-uploads.ts); anything else answers
+// FILE_NOT_SESSION_OWNED.
 //
 // What this module is NOT: anonymous/public-form publication (no anonymous
 // route ships here — every external call presents the grant secret),
@@ -405,14 +406,17 @@ export function embedGrantIdFromUser(userId: string): string | null {
 }
 
 /** Slice-1 file posture: embedded submissions carry no caller-supplied file
- * references. There is no embed upload path yet, so no reference can prove
- * session ownership ("session-owned file uploads only" over an empty
- * session-owned set). Runs on the raw submitted values after the declaration
- * gate (same slot as the operator FILE-01 re-validation): unknown shapes
- * are the validator's to reject, absent or explicitly cleared fields pass,
- * and any presented reference fails closed with 422. Author-declared file
- * defaults are server-side, never caller input, so they are out of scope
- * here and merge normally. */
+ * references outside their session-owned set. Over an empty owned set (a
+ * session that staged nothing) every presented reference fails closed
+ * with 422 — the traversal verdict the slice-1 tests pin. The live submit
+ * path (EMBED-01 slice 3) enforces the same envelope through
+ * assertSessionOwnedFileRefs in src/session-uploads.ts with the
+ * submitting session's claim set. Runs on the raw submitted values after
+ * the declaration gate (same slot as the operator FILE-01 re-validation):
+ * unknown shapes are the validator's to reject, absent or explicitly
+ * cleared fields pass, and any presented reference fails closed with 422.
+ * Author-declared file defaults are server-side, never caller input, so
+ * they are out of scope here and merge normally. */
 export function assertNoEmbedFileRefs(
   fields: readonly { readonly name: string; readonly type: string }[],
   values: unknown,

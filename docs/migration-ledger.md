@@ -46,6 +46,7 @@ must update every importing test in the same commit.
 | 0035   | 0035_embeds.sql                   | EMBED-01 | form_embeds: signed form-embed grants (secret digest, exact-match origins, capability fingerprint, enable/expiry) (issue #156, slice 1) |
 | 0036   | 0036_anon_app_embeds.sql          | EMBED-01 | app_embeds: signed app-embed grants (secret digest, exact-match origins, deployment fingerprint, enable/expiry) + form_publications: anonymous publication (honeypot field, capability fingerprint, enable) (issue #156, slice 2) |
 | 0037   | 0037_executions_org_fk_drop.sql   | #493     | drop reintroduced executions org FK (issue #493): 0008-pattern rebuild without REFERENCES organizations(id), carrying policy_json + parent_execution_id/parent_step |
+| 0040   | 0040_session_uploads.sql            | EMBED-01 | form_session_uploads: session-owned upload claims (session hash, org, location, path, field, size/type bounds) for external form sessions (issue #156, slice 3) |
 
 ## Stuck-database recovery (codex findings #381, #367-371)
 
