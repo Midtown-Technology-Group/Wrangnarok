@@ -9,16 +9,31 @@
 # convention (release v1.18.31, `github/action.yml` verified present at
 # this SHA via the GitHub API).
 #
-# NOTE on auth/model (Zen): the GitHub doc only shows provider keys, but the
-# action passes `env` through to the OpenCode run, so Zen auth is
-# `OPENCODE_API_KEY` (owner-stored secret; only referenced here, never a
-# value). Per the Zen doc, Zen "works like any other provider" and the model
-# selector is `opencode/<model-id>` (documented example: `opencode/gpt-5.5`).
+# NOTE on auth/model (OpenCode Go subscription, NOT Zen metered): the GitHub
+# doc only shows provider keys, but the action passes `env` through to the
+# OpenCode run. Verified against upstream (2026-09-18):
+# - Model selector MUST be `opencode-go/<model-id>` (Go doc, `go.mdx`:
+#   "for Kimi K3, you would use `opencode-go/kimi-k3`"). The `opencode/`
+#   prefix is the separate Zen pay-as-you-go catalog, and bare
+#   `provider/model` strings (e.g. `anthropic/...`) route to that provider
+#   and would bill a separate provider key — never use them here.
+# - Env stays `OPENCODE_API_KEY` (owner-stored secret; only referenced here,
+#   never a value): the models.dev registry — the same source opencode core
+#   reads for provider auth (`provider.env` in `provider.ts`) — declares
+#   `env = ["OPENCODE_API_KEY"]` for BOTH `opencode` and `opencode-go`.
+#   The subscription routing comes from the `opencode-go/` model prefix
+#   (base URL `https://opencode.ai/zen/go/v1`), not from a separate env var.
 #
 # Advisory-only by construction: `use_github_token: true` (no GitHub App
-# install, no OIDC exchange, so no `id-token: write`) plus read-only
-# permissions (`contents:read`, `pull-requests:read`, `issues:read`). The
-# reviewer can comment, never push.
+# install, no OIDC exchange, so no `id-token: write`). Permissions are the
+# minimal set that lets the reviewer COMMENT but never push: `contents: read`
+# (no pushes, ever — plus `persist-credentials: false` on checkout) with
+# `pull-requests: write` / `issues: write` for review comments and reactions.
+# Verified empirically 2026-09-18: read-only tokens make the action fail with
+# 403 `Resource not accessible by integration` when posting its review, so
+# read-only is not a working option — this matches upstream's own
+# `use_github_token` example, which likewise grants write on
+# pull-requests/issues.
 name: opencode-review
 
 on:
@@ -27,15 +42,17 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
-  issues: read
+  pull-requests: write
+  issues: write
 
 jobs:
   review:
-    # Skip gracefully until the owner stores OPENCODE_API_KEY (avoids a red
-    # run on every PR before setup), and skip drafts — they are reviewed on
-    # ready_for_review.
-    if: ${{ secrets.OPENCODE_API_KEY != '' && github.event.pull_request.draft == false }}
+    # NOTE (issue #225, same as preview.yml): GitHub rejects `secrets.*` in
+    # job-level `if:` (zero-job failed runs on every push), so the job always
+    # evaluates: drafts skip here, and the credential-needing step gates on
+    # the probe below. Without the owner-stored secret the run completes as
+    # a normal skip.
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -44,13 +61,29 @@ jobs:
         with:
           persist-credentials: false
 
+      # Credential-presence probe: exposes the secret through env (the
+      # supported pattern) and publishes a non-secret signal for the
+      # step-level conditional below.
+      - name: Check review credentials
+        id: creds
+        env:
+          REVIEW_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          if [[ -z "$REVIEW_KEY" ]]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No OPENCODE_API_KEY; review step will skip."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run OpenCode review
+        if: steps.creds.outputs.present == 'true'
         uses: anomalyco/opencode/github@014614d35b397775e5d397a490fc72368c894ec2 # v1.18.31
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          model: opencode/gpt-5.5
+          model: opencode-go/kimi-k3
           use_github_token: true
           prompt: |
             Review this pull request. Your findings are ADVISORY comments only;
