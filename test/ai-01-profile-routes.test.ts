@@ -4,8 +4,9 @@
 // binding (CON-01 chain plus 0028); only outbound vendor HTTP is mocked.
 // Pins: admin-gated CRUD reusing the CON-01 boundary, all four lifecycle
 // guards, fail-closed resolution, 404-on-foreign, ownership/disabled checks,
-// bounded verify/discovery with mocked vendor HTTP, and identities-only
-// browser views (no provider model ids, no key material anywhere).
+// bounded verify/discovery/conformance with mocked vendor HTTP, and
+// identities-only browser views (no provider model ids, no key material
+// anywhere).
 import { env } from "cloudflare:workers";
 import { reset } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,6 +22,7 @@ import {
 } from "../src/domain";
 import {
   AI_VENDOR_TIMEOUT_MS,
+  checkConformance,
   collectVendorModelIds,
   deleteProfile,
   discoverModels,
@@ -766,6 +768,7 @@ describe("AI authorization and isolation (issue #164)", () => {
       [`/api/ai/profiles/${profile.id}`, "DELETE", undefined],
       ["/api/ai/profiles/merge", "POST", { profileIds: [], targetProfileId: profile.id }],
       [`/api/ai/profiles/${profile.id}/verify`, "POST", {}],
+      [`/api/ai/profiles/${profile.id}/conformance`, "GET", undefined],
       ["/api/ai/assignments/tuning", "PUT", { profileId: null }],
       ["/api/ai/embedding", "PUT", { connectionId: connection.id, modelId: "x" }],
       ["/api/ai/behavior", "PUT", { defaultSystemPrompt: "x" }],
@@ -1128,6 +1131,125 @@ describe("AI verify-with-key (issue #164)", () => {
   });
 });
 
+describe("AI capability conformance (issue #164)", () => {
+  const keyed = () => ({ ...bindings, OPENAI_API_KEY: KEY_SENTINEL });
+
+  it("conforms when the vendor lists the model and nothing asserted contradicts it", async () => {
+    const connection = await createConnection(OPENAI_INTEGRATION_ID);
+    const profile = await createProfile(
+      connection.id,
+      { capabilities: { tool_calling: true, image_input: false }, capabilityState: "supported" },
+      "asserted",
+    );
+    const calls = remockVendor((seen) => {
+      if (seen.url === "https://api.openai.com/v1/models") return Response.json(openaiModels);
+      throw new Error(`Unexpected outbound request: ${seen.url}`);
+    });
+    const checked = await worker.fetch(call(`/api/ai/profiles/${profile.id}/conformance`), keyed());
+    expect(checked.status).toBe(200);
+    const body = await checked.json();
+    expect(body).toMatchObject({
+      conformance: {
+        ok: true,
+        profileId: profile.id,
+        modelAvailable: true,
+        capabilityState: "supported",
+        assertedCapabilities: ["image_input", "tool_calling"],
+        conforms: true,
+        mismatches: [],
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain(KEY_SENTINEL);
+    expect(JSON.stringify(body)).not.toContain(MODEL_SENTINEL);
+    // One bounded key-authenticated probe, like verify.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ url: "https://api.openai.com/v1/models", method: "GET" });
+    expect(calls[0]?.headers["authorization"]).toBe(`Bearer ${KEY_SENTINEL}`);
+  });
+
+  it("flags asserted capabilities and supported state when the vendor omits the model", async () => {
+    const connection = await createConnection(OPENAI_INTEGRATION_ID);
+    await createProfile(connection.id);
+    const profile = await createProfile(
+      connection.id,
+      {
+        enabledForChat: false,
+        modelId: "gpt-zzz-absent",
+        capabilities: { tool_calling: true },
+        capabilityState: "supported",
+      },
+      "absent",
+    );
+    const checked = await worker.fetch(call(`/api/ai/profiles/${profile.id}/conformance`), keyed());
+    expect(checked.status).toBe(200);
+    const body = await checked.json();
+    expect(body).toMatchObject({
+      conformance: {
+        ok: true,
+        profileId: profile.id,
+        modelAvailable: false,
+        conforms: false,
+        mismatches: ["asserted-capabilities-unconfirmed", "state-supported-but-model-absent"],
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain(KEY_SENTINEL);
+  });
+
+  it("conforms for an absent model when nothing asserted depends on it", async () => {
+    const connection = await createConnection(OPENAI_INTEGRATION_ID);
+    await createProfile(connection.id);
+    const profile = await createProfile(
+      connection.id,
+      { enabledForChat: false, modelId: "gpt-zzz-absent", capabilityState: "unknown" },
+      "bare",
+    );
+    const checked = await worker.fetch(call(`/api/ai/profiles/${profile.id}/conformance`), keyed());
+    expect(checked.status).toBe(200);
+    expect(await checked.json()).toMatchObject({
+      conformance: { ok: true, modelAvailable: false, conforms: true, mismatches: [] },
+    });
+  });
+
+  it("tolerates corrupt capability blobs, direct", async () => {
+    const connection = await createConnection(OPENAI_INTEGRATION_ID);
+    const profile = await createProfile(connection.id);
+    await bindings.DB.prepare("UPDATE ai_model_profiles SET capabilities_json=? WHERE id=?")
+      .bind("{not-json", profile.id)
+      .run();
+    const outcome = await checkConformance(bindings.DB, caller, profile.id, { OPENAI_API_KEY: KEY_SENTINEL }, {});
+    expect(outcome).toMatchObject({ ok: true, conforms: true, mismatches: [] });
+    if (outcome.ok) expect(outcome.assertedCapabilities).toEqual([]);
+  });
+
+  it("presence-checks the key and maps vendor failures without leaking", async () => {
+    const connection = await createConnection(OPENAI_INTEGRATION_ID);
+    const profile = await createProfile(connection.id);
+    const refused = await worker.fetch(call(`/api/ai/profiles/${profile.id}/conformance`), bindings);
+    expect(refused.status).toBe(502);
+    expect(await refused.json()).toMatchObject({ conformance: { ok: false, code: "SECRET_NOT_CONFIGURED" } });
+    expect(vendorCalls).toHaveLength(0);
+    remockVendor(() => new Response(`keyed detail ${KEY_SENTINEL}`, { status: 503 }));
+    const failed = await worker.fetch(call(`/api/ai/profiles/${profile.id}/conformance`), keyed());
+    expect(failed.status).toBe(502);
+    const body = await failed.json();
+    expect(body).toMatchObject({ conformance: { ok: false, code: "AI_CONFORMANCE_FAILED" } });
+    expect(JSON.stringify(body)).not.toContain(KEY_SENTINEL);
+  });
+
+  it("404s foreign profiles and disabled Connections before any vendor contact", async () => {
+    const connection = await createConnection(OPENAI_INTEGRATION_ID);
+    const profile = await createProfile(connection.id);
+    const foreign = { ...bindings, LAB_ORG_ID: OTHER_ORG, LAB_USER_ID: OTHER_USER, OPENAI_API_KEY: KEY_SENTINEL };
+    const before = vendorCalls.length;
+    expect((await worker.fetch(call(`/api/ai/profiles/${profile.id}/conformance`), foreign)).status).toBe(404);
+    await worker.fetch(call(`/api/connections/${OPENAI_INTEGRATION_ID}`, "PUT", { enabled: false }), bindings);
+    const gated = await worker.fetch(call(`/api/ai/profiles/${profile.id}/conformance`), keyed());
+    expect(gated.status).toBe(404);
+    expect(await gated.json()).toMatchObject({ error: { code: "CONNECTION_DISABLED" } });
+    expect(vendorCalls.length).toBe(before);
+  });
+});
+
 describe("AI model discovery (issue #164)", () => {
   it("answers counts plus per-profile availability, never vendor ids or keys", async () => {
     const connection = await createConnection(OPENAI_INTEGRATION_ID);
@@ -1275,6 +1397,7 @@ describe("AI secret redaction and SDK contract (issue #164)", () => {
       [`/api/ai/profiles/${profile.id}`, "GET", undefined],
       [`/api/ai/profiles/${profile.id}`, "PUT", { name: "renamed" }],
       [`/api/ai/profiles/${profile.id}/verify`, "POST", {}],
+      [`/api/ai/profiles/${profile.id}/conformance`, "GET", undefined],
       [`/api/ai/discover/${OPENAI_INTEGRATION_ID}`, "GET", undefined],
       ["/api/ai/assignments", "GET", undefined],
       ["/api/ai/resolve/primary", "GET", undefined],
@@ -1308,6 +1431,7 @@ describe("AI secret redaction and SDK contract (issue #164)", () => {
         "DELETE /api/ai/profiles/:id",
         "POST /api/ai/profiles/merge",
         "POST /api/ai/profiles/:id/verify",
+        "GET /api/ai/profiles/:id/conformance",
         "GET /api/ai/discover/:integrationId",
         "GET /api/ai/assignments",
         "PUT /api/ai/assignments/:key",
@@ -1333,6 +1457,7 @@ describe("AI secret redaction and SDK contract (issue #164)", () => {
       "AI_INVALID_EMBEDDING",
       "AI_INVALID_BEHAVIOR",
       "AI_VERIFY_FAILED",
+      "AI_CONFORMANCE_FAILED",
       "AI_DISCOVERY_FAILED",
     ]) {
       expect(SDK_ERROR_CODES).toContain(code);

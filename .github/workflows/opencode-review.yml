@@ -1,0 +1,209 @@
+# Automatic advisory PR review via the native OpenCode GitHub Action.
+#
+# NOTE on the action source: the task brief named `sst/opencode/github`, but
+# upstream's own GitHub-integration doc (the reference for this lane,
+# `sst/opencode` repo, `packages/web/src/content/docs/github.mdx`) documents
+# the action as `anomalyco/opencode/github` — the `sst/opencode` repo has no
+# `action.yml`, so that path does not exist. This workflow uses the
+# upstream-documented path, pinned to a commit SHA per repo supply-chain
+# convention (release v1.18.31, `github/action.yml` verified present at
+# this SHA via the GitHub API).
+#
+# NOTE on auth/model (OpenCode Go subscription, NOT Zen metered): the GitHub
+# doc only shows provider keys, but the action passes `env` through to the
+# OpenCode run. Verified against upstream (2026-09-18):
+# - Model selector MUST be `opencode-go/<model-id>` (Go doc, `go.mdx`), and
+#   per owner directive the reviewer MUST be Meta Muse Spark: verified
+#   2026-09-18 that `muse-spark-1.3-contributor` is in the current Go catalog
+#   (both `go.mdx` model list and the models.dev registry
+#   `providers/opencode-go/models/muse-spark-1.3-contributor.toml`: Meta
+#   "muse" family, reasoning + tool_call capable, served from
+#   `https://opencode.ai/zen/go/v1`). So `opencode-go/muse-spark-1.3-contributor`
+#   bills through the Go subscription under OPENCODE_API_KEY. Pin proof,
+#   re-verified 2026-09-18 against the LIVE serving catalogs (public,
+#   no auth): `https://opencode.ai/zen/go/v1/models` (37 models) lists
+#   `muse-spark-1.3-contributor`, while `https://opencode.ai/zen/v1/models`
+#   (70 models) lists only `muse-spark-1.3` and
+#   `muse-spark-1.3-contributor-free` — i.e. `opencode/muse-spark-1.3-contributor`
+#   does NOT exist, so the Zen-prefixed form must never be substituted.
+#   Key-tier proof: run 35400194654 (PR #538) executed
+#   `MODEL: opencode-go/muse-spark-1.3-contributor` with
+#   `run_opencode outcome=success` under the owner-stored key.
+#   Caveat from the Go doc: Muse models have limited regions
+#   (https://ai.developer.meta.com/legal/geographic-use-policy) — if reviews
+#   start failing with region errors, that page is the first place to look.
+#   The `opencode/` prefix is the separate Zen pay-as-you-go catalog, and bare
+#   `provider/model` strings (e.g. `anthropic/...`, OpenAI-routed slugs like
+#   the earlier `opencode/gpt-5.5`) bill outside the subscription — never use
+#   non-Muse, non-Go slugs here.
+# - Env stays `OPENCODE_API_KEY` (owner-stored secret; only referenced here,
+#   never a value): the models.dev registry — the same source opencode core
+#   reads for provider auth (`provider.env` in `provider.ts`) — declares
+#   `env = ["OPENCODE_API_KEY"]` for BOTH `opencode` and `opencode-go`.
+#   The subscription routing comes from the `opencode-go/` model prefix
+#   (base URL `https://opencode.ai/zen/go/v1`), not from a separate env var.
+#
+# Advisory-only by construction: `use_github_token: true` (no GitHub App
+# install, no OIDC exchange, so no `id-token: write`). Permissions are the
+# minimal set that lets the reviewer COMMENT but never push: `contents: read`
+# (no pushes, ever — plus `persist-credentials: false` on checkout) with
+# `pull-requests: write` / `issues: write` for review comments and reactions.
+# Verified empirically 2026-09-18: read-only tokens make the action fail with
+# 403 `Resource not accessible by integration` when posting its review, so
+# read-only is not a working option — this matches upstream's own
+# `use_github_token` example, which likewise grants write on
+# pull-requests/issues.
+name: opencode-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    # NOTE (issue #225, same as preview.yml): GitHub rejects `secrets.*` in
+    # job-level `if:` (zero-job failed runs on every push), so the job always
+    # evaluates: drafts skip here, and the credential-needing step gates on
+    # the probe below. Without the owner-stored secret the run completes as
+    # a normal skip.
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      # Credential-presence probe: exposes the secret through env (the
+      # supported pattern) and publishes a non-secret signal for the
+      # step-level conditional below.
+      - name: Check review credentials
+        id: creds
+        env:
+          REVIEW_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          if [[ -z "$REVIEW_KEY" ]]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No OPENCODE_API_KEY; review step will skip."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run OpenCode review
+        # Advisory jobs must never block merges: model outages, region
+        # limits, or billing gaps (e.g. CreditsError) degrade to a missing
+        # comment, not a red build. The failure stays visible as an
+        # annotation on the run.
+        continue-on-error: true
+        if: steps.creds.outputs.present == 'true'
+        uses: anomalyco/opencode/github@014614d35b397775e5d397a490fc72368c894ec2 # v1.18.31
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          model: opencode-go/muse-spark-1.3-contributor
+          use_github_token: true
+          prompt: |
+            Review this pull request. Your findings are ADVISORY comments only;
+            you cannot push, so never propose taking direct action beyond
+            commenting. Stay silent (post no comment) when nothing material
+            is found.
+
+            First read the repo review contract: AGENTS.md, docs/lexicon.md,
+            and docs/architecture/adr-index.md. Every finding must cite the
+            project convention it invokes. Enforce in particular:
+            - Cloudflare primitives keep their native names (Worker,
+              Workflow, step, Queue, Durable Object, D1, R2, KV, binding).
+              Flag aliases or abstractions that hide Cloudflare.
+            - The change must stay viable on Cloudflare Free; flag anything
+              that needs a paid feature without an approved exception.
+            - Organization context and authorization boundaries must stay
+              explicit; flag anything that softens tenant isolation.
+            - Never embed environment credentials in portable Saga or
+              Integration source; Integration definitions and
+              Organization-specific Connections are separate concepts.
+            - Sagas are code-first TypeScript. Flag any new YAML/JSON
+              workflow DSL.
+            - Saga identity must survive ordinary source edits.
+
+            If the PR body references an owning issue, check the diff against
+            that issue's acceptance criteria and report gaps.
+
+            Format: one finding per item, each with a file:line reference and
+            the violated convention. Do not restate the diff. Do not comment
+            on style or formatting covered by the repo's linters.
+
+  triage:
+    # Same advisory posture as `review` (issue #225: no `secrets.*` in
+    # job-level `if:`): the job always evaluates and the credential-needing
+    # step gates on the probe below. Permission note: this job inherits the
+    # workflow-level `issues: write` ONLY so it can post its single triage
+    # comment — verified 2026-09-18 that read-only tokens make the action
+    # fail with 403 when commenting. Suggest-only is enforced by the prompt:
+    # never close, label, assign, or push; contents stays read-only.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      # Credential-presence probe: exposes the secret through env (the
+      # supported pattern) and publishes a non-secret signal for the
+      # step-level conditional below.
+      - name: Check triage credentials
+        id: creds
+        env:
+          REVIEW_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          if [[ -z "$REVIEW_KEY" ]]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No OPENCODE_API_KEY; triage step will skip."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run OpenCode triage
+        # Same fail-open contract as `review`: outages degrade to a missing
+        # comment, never a red build.
+        continue-on-error: true
+        if: steps.creds.outputs.present == 'true'
+        uses: anomalyco/opencode/github@014614d35b397775e5d397a490fc72368c894ec2 # v1.18.31
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          model: opencode-go/muse-spark-1.3-contributor
+          use_github_token: true
+          prompt: |
+            Triage this GitHub issue. You are ADVISORY only: post at most ONE
+            comment, and never close, label, assign, milestone, or push —
+            suggest only. Stay silent (post no comment) when the issue is
+            already clear, correctly labeled, or needs nothing from you.
+
+            First read the repo context: AGENTS.md, docs/lexicon.md, and
+            docs/architecture/adr-index.md, so your reading uses the
+            project's own vocabulary (Saga, Execution, Operation,
+            Integration, Connection, Organization) and Cloudflare-native
+            names. Then:
+            - Reproduce or verify the report against the checked-out tree
+              where feasible; say explicitly what you could and could not
+              verify, with file:line refs for anything you cite.
+            - Classify exactly one: parity gap (upstream Bifrost behavior not
+              yet ported — cite docs/upstream-spec.md), bug, chore, or
+              question. If it is a parity gap, name the upstream behavior.
+            - Suggest labels (names only, do not apply them) and, for bugs,
+              the smallest next reproduction step.
+
+            Format: verdict line first (e.g. `Verdict: bug — ...`), then at
+            most three short bullets. Do not restate the issue. Do not
+            comment on style or formatting.

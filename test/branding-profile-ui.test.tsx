@@ -33,8 +33,8 @@ import {
   formatContrastRatio,
   parseBrandHex,
 } from "../client/src/lib/brand-contrast";
-import { BrandingAdmin, LOGO_MAX_BYTES, publicLogoUrl } from "../client/src/pages/Branding";
-import { applyTheme, AVATAR_MAX_BYTES, OwnProfile } from "../client/src/pages/Profile";
+import { BrandingAdmin, LOGO_MAX_BYTES, LOGO_MIME_ALLOWLIST, publicLogoUrl } from "../client/src/pages/Branding";
+import { applyTheme, AVATAR_MAX_BYTES, AVATAR_MIME_ALLOWLIST, OwnProfile } from "../client/src/pages/Profile";
 
 const ORG = "00000000-0000-4000-8000-000000000001";
 const USER = "00000000-0000-4000-8000-000000000002";
@@ -259,6 +259,34 @@ it("renders the unset-logo empty state and the branding loading state", () => {
 it("pins the client-side upload bounds to the server caps", () => {
   expect(AVATAR_MAX_BYTES).toBe(2 * 1024 * 1024);
   expect(LOGO_MAX_BYTES).toBe(5 * 1024 * 1024);
+});
+
+it("admits sanitized SVG uploads client-side and surfaces SVG rejections", async () => {
+  // Allowlist (and the file-input accept lists that mirror it) admits SVG —
+  // the server validator, proven in test/branding-profile.test.ts, still
+  // fences active markup with UNSUPPORTED_LOGO / UNSUPPORTED_AVATAR.
+  expect([...LOGO_MIME_ALLOWLIST]).toEqual(["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"]);
+  expect([...AVATAR_MIME_ALLOWLIST]).toEqual(["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"]);
+  const seen: { url: string; contentType: string | null }[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    seen.push({ url: String(input), contentType: new Headers(init?.headers).get("Content-Type") });
+    return Response.json(brandingPayload);
+  });
+  const svg = new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`);
+  expect(await uploadLogo(svg, "image/svg+xml")).toEqual(brandingPayload);
+  expect(seen[0]).toEqual({ url: "/api/branding/logo", contentType: "image/svg+xml" });
+  // A scripted SVG that clears the client precheck still fails loudly at the
+  // server fence, and the settings error path renders the server message.
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json(
+      { error: { code: "UNSUPPORTED_LOGO", message: "SVG images must be self-contained." } },
+      { status: 415 },
+    ),
+  );
+  const failure = await uploadLogo(svg, "image/svg+xml").catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(ApiError);
+  expect((failure as ApiError).code).toBe("UNSUPPORTED_LOGO");
+  expect(getErrorMessage(failure, "Could not upload the logo.")).toBe("SVG images must be self-contained.");
 });
 
 it("applies loaded branding to the shell header with a static fallback", () => {

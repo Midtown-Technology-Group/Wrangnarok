@@ -1,0 +1,7 @@
+# Triage lane scope: add an advisory issue-triage job (issues opened/labeled)
+# alongside the PR review job in the OpenCode workflow. Same Muse-Spark Go
+# model, same advisory posture (suggest-only: never close/label/assign/push;
+# single comment max, silent otherwise). CI-config only: the one workflow
+# file plus this scope file. No src/, no product code.
+.github/workflows/opencode-review.yml
+scopes/lane-opencode-review-triage.scope

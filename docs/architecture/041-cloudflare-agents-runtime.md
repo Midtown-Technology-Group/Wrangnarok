@@ -1,6 +1,6 @@
 # ADR 041: Cloudflare Agents SDK as the Platform-Agent Runtime
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-18; owner decision recorded on issue #165)
 - **Date:** 2026-09-12
 - **Renumber note (2026-09-18, issue #225):** formerly ADR 023. The number
   collided with ADR 023 (Bounded synchronous and data-provider execution,

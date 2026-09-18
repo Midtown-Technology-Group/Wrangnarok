@@ -1,8 +1,8 @@
 # Cloudflare feasibility envelope (LIMITS-01, issue #177)
 
-Dated: 2026-09-17. Baseline: upstream `gobifrost/bifrost@3543c7ebee0e1bd9a2cab6dfba080a30621b1c5f` vs Wrangnarok `origin/main@0331492` (lane `lane/parity-177-limits`).
+Dated: 2026-09-18. Baseline: upstream `gobifrost/bifrost@3543c7ebee0e1bd9a2cab6dfba080a30621b1c5f` vs Wrangnarok `origin/main@9cc00ed` (lane `lane/177-sync-slice`; provider allowances re-checked 2026-09-17, unchanged).
 
-<!-- LIMITS-META {"budgetKiB":730,"measuredBytes":800067,"measuredDate":"2026-09-17","minHeadroomBytes":8192} -->
+<!-- LIMITS-META {"budgetKiB":730,"measuredBytes":975852,"measuredDate":"2026-09-18","minHeadroomBytes":8192} -->
 
 This is the dated capability-versus-limit matrix LIMITS-01 requires. It answers one question per capability:
 
@@ -50,8 +50,8 @@ Correction vs the 2026-09-12 matrix: the Free per-database cap is **500 MB**, no
 
 - `test/smoke.test.ts` pins the deterministic smoke path: D1 reads 4, writes 8, operation rows 4, Workflow steps 4, instances 1, with per-run budgets (reads ≤ 10, writes ≤ 20, rows ≤ 10, instances = 1, steps ≤ 10) failing closed on growth. These are application-observed counters, not D1 `meta.rows_read`/`meta.rows_written` billing telemetry.
 - `src/usage.ts` emits one `WRANGNAROK_USAGE` block per Execution (counts/IDs/durations only, SEC-01 scrubbed). Worker requests and CPU-ms are `null` locally (not exposed by workerd); a deployed smoke artifact using D1 `meta` plus Workers analytics is still required before claiming production metering accuracy.
-- Worker bundle: **800,067 bytes raw** measured 2026-09-17 via `npm run check:bundle` on this lane (`lane/ai-164-slice2`, AI-01 build slice 2: profiles/assignments/embedding/behavior + verify/discovery; CI number governs) against a **730 KiB** advisory soft reference level (see reference levels below). The run exits zero: the soft reference is an early warning, never a merge gate. Delta vs base `1c611c3` (757,413 B): +42,654 B (~41.7 KiB) of hand-written entity/route/SDK code (`src/ai-profiles.ts` +31,676 B, routes +7,318 B, SDK +3,136 B per metafile attribution); `package.json` unchanged. The read-only probe estimated +21,632 B; the as-built slice is larger (full verify/discovery vendor table, merge, singletons, 15 routes) — the supervision decision accepts the warn-only advisory overrun and the new level is recorded here deliberately, not silently absorbed. The provider hard cap is 3 MB — enforced by Wrangler at deploy time, not duplicated locally.
-- Client JS: 376,662 bytes raw / 106.65 kB gzip (measured 2026-09-17 via `npm run build:ui` on this lane). Served as Static Assets from the same Worker; asset requests are free and unlimited per Workers pricing.
+- Worker bundle: **975,852 bytes raw** measured 2026-09-18 via `npm run check:bundle` on this lane (`lane/177-sync-slice` sync at `origin/main@9cc00ed`; CI number governs) against a **730 KiB** advisory soft reference level (see reference levels below). The run exits zero: the soft reference is an early warning, never a merge gate. Delta vs the last META record (800,067 B): +175,785 B (~171.7 KiB), of which +15,959 B landed after the 2026-09-18 scout reading (959,893 B) via merges #525 (RUN-02 child-saga grant gate), #526/#524 (TRG-03 emissions, OAuth lifecycle), and #527 (EMBED-01 slice 3 session uploads). Top metafile contributors: `src/index.ts` 182,384 B (18.8%), `src/forms.ts` 56,091, `src/sdk.ts` 45,097, `src/orgs.ts` 35,516, `src/ops.ts` 32,643 (66 inputs, all `src/*`); no new runtime dependencies. The 228,332 B advisory overrun is recorded here deliberately per the supervision decision accepting warn-only overruns (issue #177 policy), not silently absorbed — any reference raise stays a #177 policy decision with shrink-before-raise first. The provider hard cap is 3 MB (~31.0% consumed, ~2.07 MB of provider headroom remains) — enforced by Wrangler at deploy time, not duplicated locally.
+- Client JS: 410,492 bytes raw / 112,373 B gzip (measured 2026-09-18 via `npm run build:ui` on this lane; `index-14PWmEuZ.js`) + 12,315 B CSS. Served as Static Assets from the same Worker; asset requests are free and unlimited per Workers pricing. Static Assets consume 0 Worker script bytes (Worker-side frontend code is only the `env.ASSETS.fetch` pass-through plus the asset-security shim).
 
 ### Soft-budget reference levels (advisory, not a gate)
 
@@ -63,7 +63,7 @@ Per the owner-approved policy decision (issue #177), the repository Worker bundl
 | --- | --- | --- | --- |
 | Workers requests | 100,000 requests/day | `null` locally (not exposed by workerd) | One request per API call plus one Cron tick per minute (1,440/day for the TRG-01 tick). Small deployments fit; high-frequency polling does not. |
 | Workers CPU | 10 ms CPU per invocation | `null` locally | Pure request shaping plus D1/Workflow calls; no measured pressure. Heavy per-request computation (embeddings, large transforms) is unproven. |
-| Workers bundle | 3 MB provider hard cap; 730 KiB advisory soft reference + 8 KiB advisory reserve | 800,067 bytes raw vs 747,520 | Soft reference is warn-only by design; 52,547 B over the reference on this lane (AI-01 build slice 2, +42,654 B vs base `1c611c3`). Growth is deliberate per-lane headroom under the accepted advisory overrun (probe +21,632 B under-measured; actuals recorded); no new dependencies. |
+| Workers bundle | 3 MB provider hard cap; 730 KiB advisory soft reference + 8 KiB advisory reserve | 975,852 bytes raw vs 747,520 | Soft reference is warn-only by design; 228,332 B over the reference on this lane (sync at `origin/main@9cc00ed`; +175,785 B vs the last 800,067 B META record, hand-written domain breadth across #525/#526/#524/#527). Growth is deliberate per-lane headroom under the accepted advisory overrun (recorded, not silently absorbed); no new runtime dependencies. |
 | Workflows instances | 100,000 executions/day (shared with Workers) | 1 per smoke run | One instance per Execution by design. Fits unless per-minute schedules fan out across many orgs. |
 | Workflows steps | 3,000 steps/day (billing allowance) | 4 per smoke run | Bounded Operations per Saga (serial, fanout cap 8). ~750 smoke-runs/day is the first Free ceiling (see workloads). |
 | Workflows history retention | Completed state retained 3 days | Not archived by local/CI tests | The 15-minute same-revision refusal window plus retained D1 receipts carry recovery; native history older than retention surfaces as unavailable, never invented success (ADR 001). |
@@ -97,7 +97,7 @@ All workload math is **estimate**: smoke actuals (4 steps, 4 reads, 8 writes, ~2
 | OAuth refresh fence (OAUTH-01 DO) | free | Memory-only SQLite-backed DO: ~1 RPC per refresh round, no storage. Earned by the distributed-execution requirement (Workers gives no single-instance guarantee); classified here explicitly — no silent inheritance. |
 | Tables over D1 (TABLE-01/02) | free | Bounded keyset queries; subject to the 500 MB Free per-database retention gate at scale. |
 | Forms, file locations, artifacts over R2 (FORM-01/02, FILE-01/02) | free | R2 earned by ADR 036/040; per-surface size caps bound bytes. |
-| Full-stack UI as Static Assets (ADR 008) | free | Served from the same Worker; client JS 377 kB raw / 107 kB gzip; asset requests free. |
+| Full-stack UI as Static Assets (ADR 008) | free | Served from the same Worker; client JS 410 kB raw / 112 kB gzip; asset requests free. |
 | MCP gateway, Code Mode, agent tooling (TOOL-01/02, AI-01..06) | paid-adaptation | External model inference is never in Cloudflare Free; Connections carry the vendor cost. Host-mediated execution keeps credentials out of model code. |
 | Usage metering/billing accuracy (OPS-04) | redesign | Application-observed counters are honest estimates, not provider meters. Financial claims need deployed metering plus explicit assumptions. |
 | Encrypted export/restore (OPS-03) | free | Bounded durable export jobs with download expiry; ciphertext never in portable source. |
@@ -110,7 +110,7 @@ All workload math is **estimate**: smoke actuals (4 steps, 4 reads, 8 writes, ~2
 
 ### External analogue notes (architecture reviews #254–#259, estimates labeled ours)
 
-- **Pocketflare (#256):** publishes ~8.9 MiB gzip deployed bundle exceeding the 3 MB Workers Free script cap, hence requiring Workers Paid ($5/mo base). Lesson for us: our 739,082-byte raw bundle (≈ 0.70 MB, gzip smaller) fits Free with large provider margin — our own soft reference stays advisory early warning, never the binding constraint.
+- **Pocketflare (#256):** publishes ~8.9 MiB gzip deployed bundle exceeding the 3 MB Workers Free script cap, hence requiring Workers Paid ($5/mo base). Lesson for us: our 975,852-byte raw bundle (≈ 0.93 MB, gzip smaller) fits Free with large provider margin (~2.07 MB under the 3 MB cap) — our own soft reference stays advisory early warning, never the binding constraint.
 - **EdgeBase (#255):** publishes a Cloudflare-vs-Supabase/Appwrite comparison but warns its own estimate is optimistic; real costs hinge on write volume, R2 ops, and DO duration. Same caution applies to our W1–W3 models: they are estimates until deployed metering exists.
 - **OpenConnector (#254), Ottabase (#257), Nodrix (#258):** no published operating-cost model found in triage; any figures constructed for them are ours, not upstream's.
 - **VibeSDK / Workers for Platforms (#259):** first-party examples note some remote D1/R2 features may require a paid plan; do not assume first-party examples are cost-optimized or Free-viable.

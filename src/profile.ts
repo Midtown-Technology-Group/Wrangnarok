@@ -13,18 +13,22 @@
 // AUTH-03, and this module must never grow a second credential store.
 //
 // Upload limits adopt the upstream pins recorded in docs/upstream-spec.md
-// §16: avatars 2 MiB (upstream routers/profile.py:27). The raster
-// allowlist is the same deliberate SVG exclusion as branding.
+// §16: avatars 2 MiB (upstream routers/profile.py:27). Raster types verify
+// by magic bytes; SVG verifies by the shared inert-markup guard
+// (src/svg-image.ts, UX-01 slice 3) and serves under the API
+// default-src-'none' CSP, so stored SVG can never run script.
 import { Fault, object } from "./domain";
 import type { Principal } from "./domain";
 import { sha256Hex } from "./files";
+import { SVG_CONTENT_TYPE, validateSvgImage } from "./svg-image";
 
 /** Upstream pin: avatars 2 MiB (routers/profile.py:27). */
 export const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
 export const PROFILE_NAME_MAX = 80;
 
-/** Slice-1 raster allowlist, shared semantics with branding. */
-export const AVATAR_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+/** Image allowlist: raster types plus sanitized inline SVG (slice 3),
+ * shared semantics with branding. */
+export const AVATAR_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", SVG_CONTENT_TYPE] as const;
 export type AvatarImageType = (typeof AVATAR_IMAGE_TYPES)[number];
 
 export const PROFILE_THEMES = ["light", "dark", "system"] as const;
@@ -172,13 +176,22 @@ export async function updateProfile(db: D1Database, caller: Principal, body: unk
 export function parseAvatarContentType(value: string | null): AvatarImageType {
   const type = (value ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
   if (!(AVATAR_IMAGE_TYPES as readonly string[]).includes(type)) {
-    throw fail(415, "UNSUPPORTED_AVATAR", "Avatars must be PNG, JPEG, GIF, or WebP images.");
+    throw fail(415, "UNSUPPORTED_AVATAR", "Avatars must be PNG, JPEG, GIF, WebP, or SVG images.");
   }
   return type as AvatarImageType;
 }
 
-/** Magic-byte verification, same discipline as logo bytes. */
+/** Byte verification, same discipline as logo bytes: magic bytes for
+ * raster, the inert-markup guard for SVG. */
 export function verifyAvatarBytes(contentType: AvatarImageType, bytes: Uint8Array): void {
+  if (contentType === SVG_CONTENT_TYPE) {
+    try {
+      validateSvgImage(bytes);
+    } catch (error) {
+      throw fail(415, "UNSUPPORTED_AVATAR", error instanceof Error ? error.message : "Avatar SVG is not allowed.");
+    }
+    return;
+  }
   const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
   const startsWith = (magic: number[]): boolean =>
     bytes.byteLength >= magic.length && magic.every((byte, index) => bytes[index] === byte);
