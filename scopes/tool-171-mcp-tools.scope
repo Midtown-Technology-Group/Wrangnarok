@@ -18,6 +18,7 @@ test/mcp-servers.test.ts
 test/mcp-connections.test.ts
 test/mcp-auth-resolution.test.ts
 test/mcp-external-dispatch.test.ts
+test/mcp-branches.test.ts
 test/helpers/workflow-harness.ts
 docs/architecture/044-external-mcp-servers.md
 docs/architecture/adr-index.md
