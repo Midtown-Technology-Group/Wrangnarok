@@ -27,7 +27,12 @@ import { BODY_LIMIT, Fault, hash, parseKey, UUID } from "./domain";
 import type { Principal, SagaDef } from "./domain";
 import type { Bindings } from "./bindings";
 import { submit } from "./executions";
-import { SCHEDULE_DELIVERED_TOPIC, recordSourceDelivery } from "./events";
+import {
+  PLATFORM_SCHEDULE_DELIVERED_TOPIC,
+  SCHEDULE_DELIVERED_TOPIC,
+  recordPlatformDelivery,
+  recordSourceDelivery,
+} from "./events";
 import { resolveCurrentAuthority } from "./roles";
 
 export const SCHEDULE_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -621,6 +626,17 @@ export async function promoteWindow(
     eventId: window,
     topic: SCHEDULE_DELIVERED_TOPIC,
     payloadJson: fresh.input_json,
+    executionId: accepted.executionId,
+  });
+  // TRG-03 S3b (issue #139): built-in platform emission. When the operator
+  // opted in with an enabled `platform` topic source, the same window lands
+  // there as platform.schedule.delivered and fans out through the standard
+  // submit protocol. Best-effort: never fails the promotion above.
+  await recordPlatformDelivery(db, env, submitFn, {
+    orgId: fresh.org_id,
+    topic: PLATFORM_SCHEDULE_DELIVERED_TOPIC,
+    distinctId: `${fresh.id}.${window}`,
+    payload: { schedule: fresh.name, window, executionId: accepted.executionId, sagaId: fresh.saga_id },
     executionId: accepted.executionId,
   });
   await db

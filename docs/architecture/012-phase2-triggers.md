@@ -119,9 +119,75 @@ duplicate retries converge on it via same-key submit replay. Authority
 revalidates at dispatch time (disabled/deleted/revoked fail closed with
 no Execution), foreign rows answer 404, and the per-event 10-dispatch
 bound holds on replay (an event that already dispatched 10 times refuses
-further retries). Built-in platform events and retention policy stay
-deferred. Still Worker + Workflows + D1 only: no Queue, no Durable
+further retries). Built-in platform events and retention policy ship in
+S3b below. Still Worker + Workflows + D1 only: no Queue, no Durable
 Object, no second auth or execution path.
+
+### TRG-03 S3b implementation (2026-09-18, issue #139)
+
+The final slice adds built-in platform emissions plus the documented
+retention/admission posture, still with no new migration, route, or
+primitive. The platform is a third event producer alongside operator
+emits and per-source delivery appends: when the operator opts in by
+registering an enabled topic-kind source named `platform` (an ordinary
+row through the ordinary registry — no auto-provisioning, no
+reserved-name rule), each schedule promotion lands
+`platform.schedule.delivered` and each endpoint delivery lands
+`platform.webhook.delivered` there, then fans out through the shared
+`dispatchEventFanout` helper with the same stable `evt-` keys and
+per-subscriber fences as operator emits. No platform source (or a
+disabled one, or one registered under another kind): one indexed lookup
+misses and the promotion/delivery proceeds untouched, so the unused cost
+is a single SELECT. Payloads are descriptive delivery attribution
+(`{schedule, window, executionId, sagaId}` /
+`{endpoint, eventId, executionId, sagaId}`), consumed through the usual
+Saga parse gate; the `plat-` event ID is deterministic per (org, topic,
+producer delivery), so redelivery converges on one row and one Execution
+(the restart-recovery story, like every other re-emit). Fan-out is
+exactly one level deep: nothing observes Execution terminals (see below),
+so platform-dispatched Executions complete without emitting.
+
+Execution-lifecycle topics (succeeded/failed) stay deferred by design,
+not by backlog: the terminal checkpoints run inside Workflow steps with
+no submit access, dispatching new Workflow instances from inside a step
+would be a second execution path, and a polling emitter (a Cron tick
+scanning for newly-terminal rows) would be sweeper-shaped — the exact
+second recovery path ADR 001 rejects. If a concrete need arrives, it
+must earn its hook the same way every other primitive was earned.
+
+### TRG-03 retention and admission limits (issue #139, S3b)
+
+Admission bounds (all code-enforced, all shared by operator emits,
+platform emissions, and retries — one bound, not three):
+
+- At most `EVENT_FANOUT_LIMIT` (10) dispatches per accepted event; the
+  remainder report as `overflowSkipped`, and retries past the bound
+  refuse with `DELIVERY_BOUND_EXCEEDED`. Never silently dropped.
+- History reads are newest-first and bounded: `EVENT_LIST_LIMIT` (50)
+  per event-log read, `SUBSCRIPTION_DELIVERY_LIMIT` (50) per delivery
+  read. No keyset pagination until a subscriber slice needs it.
+- Event payloads fit `BODY_LIMIT` (4096 bytes); topics and filters fit
+  128 dot-namespaced characters; event IDs fit 128 safe-alphabet
+  characters; source/subscription names fit 64 lowercase/dash characters.
+
+Retention posture (deliberate, not missing):
+
+- No automatic purge. Event, subscription, and receipt rows live until
+  the operator DELETEs the source (one batch removing log, subscriptions,
+  and receipts) or the subscription (removing it plus its receipts).
+  Dispatched Executions keep their ExecutionHistory rows either way
+  (keyed by Execution ID, never by event or subscription).
+- No sweeper, reconciler, or TTL loop by design: a background
+  purge/replay mechanism would be a second recovery path alongside
+  same-key convergence, and the steward gate forbids it without an ADR.
+- Capacity envelope: the 4 KiB payload bound keeps rows small; history
+  scale is bounded by the D1 per-database cap (500 MB on Free per
+  `docs/feasibility-envelope.md`). Workflow completed-state retention
+  (3 days on Free) is separate: it covers Execution results, not the
+  event log.
+- Free-tier fit: Worker + Workflows + D1 only, unchanged from S1. The
+  S3b addition costs one indexed SELECT per promotion/delivery when
+  unused, and at most the standard bounded fan-out when opted in.
 
 ### Same-window deduplication is not cross-window overlap policy
 
