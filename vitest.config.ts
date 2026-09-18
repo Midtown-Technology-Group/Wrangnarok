@@ -42,6 +42,13 @@ export default defineConfig({
           name: "workers",
           include: ["test/**/*.test.{ts,tsx}"],
           exclude: ["test/production-harness.test.ts", "test/entrypoint-proof/**/*.test.ts"],
+          // Degraded-runner headroom (PR #516): 134 workerd files share one
+          // CI runner, and a slow runner stretched cumulative test time ~3x
+          // (357s on main vs 1195s on the bump run) with timeouts scattering
+          // run to run under the 5s default. 15s/30s absorbs that without
+          // hiding real hangs: a wedged test still fails, just later.
+          testTimeout: 15000,
+          hookTimeout: 30000,
           // Unhandled-rejection guard (issues #332/#333): records every rejection
           // escaping a test with an explicit allowlist for asserted stress paths
           // and a HARD-FAIL marker for anything unexpected. See the header comment
