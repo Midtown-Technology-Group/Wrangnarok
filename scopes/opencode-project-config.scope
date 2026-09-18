@@ -1,0 +1,6 @@
+# Lane scope: opencode project customization.
+# Adds Wrangnarok project subagents and untracks the opencode-generated
+# .opencode/package.json so every worktree stays clean.
+scopes/
+.gitignore
+.opencode/
