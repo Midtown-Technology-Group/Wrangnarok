@@ -20,6 +20,17 @@ import {
 import { prepareInput } from "../saga-helpers";
 import { makeSagaWorkflow } from "./shared";
 
+/** Map a dispatch/await failure to a persistable SafeError. Faults keep
+ * their actionable code/message; anything else keeps the generic marker so
+ * the parent can never invent success from an unknown failure. */
+function toSafeChildError(error: unknown): SafeError {
+  if (error instanceof Fault) return { code: error.code, message: error.message };
+  return {
+    code: "EXECUTION_FAILED",
+    message: "The Execution could not complete. Inspect local runtime diagnostics.",
+  };
+}
+
 /** Stable hello-parent Saga: invoke hello as a child and await its greeting. */
 export const helloParentSagaDef = defineSaga<HelloParentResult>({
   id: helloParentSaga.id,
@@ -37,6 +48,14 @@ export const helloParentSagaDef = defineSaga<HelloParentResult>({
   parse: parseHelloParentInput,
   run: async (ctx, step): Promise<HelloParentResult> => {
     const id = assertRunExecutionId(ctx.executionId);
+    // A step.do boundary rehydrates a thrown Fault as a plain Error (the
+    // engine rebuilds it from String(error), dropping the code), so an
+    // outer catch can only persist the generic marker. Dispatch/await
+    // faults are therefore mapped to SafeError outcomes INSIDE their step
+    // callbacks — while the Fault is intact — persisted there, and only the
+    // safe code crosses the boundary as a NonRetryableError. terminalWritten
+    // keeps failure persistence single-writer like the echo Saga.
+    let terminalWritten = false;
     try {
       const prepared = await step.do("prepare-input-v1", () =>
         prepareInput(ctx, helloParentSaga, parseHelloParentInput),
@@ -46,44 +65,53 @@ export const helloParentSagaDef = defineSaga<HelloParentResult>({
       // via the child-dispatch- prefix rule in stepRetryLimit.
       const dispatched = await step.do("child-dispatch-invoke-v1", async () => {
         await beginOperation(ctx.db, id, "child-dispatch-invoke-v1", 1);
-        const receipt = await ctx.children.invoke(
-          helloSaga.id,
-          { name: prepared.input.name },
-          prepared.input.childKey === undefined ? undefined : { key: prepared.input.childKey },
-        );
-        await finishOperation(ctx.db, id, "child-dispatch-invoke-v1", receipt);
-        return receipt;
+        try {
+          const receipt = await ctx.children.invoke(
+            helloSaga.id,
+            { name: prepared.input.name },
+            prepared.input.childKey === undefined ? undefined : { key: prepared.input.childKey },
+          );
+          await finishOperation(ctx.db, id, "child-dispatch-invoke-v1", receipt);
+          return { ok: true as const, receipt };
+        } catch (error) {
+          const raw = toSafeChildError(error);
+          await failSagaExecution(ctx.db, id, raw);
+          terminalWritten = true;
+          return { ok: false as const, raw };
+        }
       });
+      if (!dispatched.ok) throw new NonRetryableError(dispatched.raw.code);
       // The await is a read loop over the child D1 row (retry limit 0):
       // terminal child state resolves here, never from native introspection.
       // Recorded as an Operation so ExecutionHistory shows the wait.
       const greeted = await step.do("child-await-invoke-v1", async () => {
         await beginOperation(ctx.db, id, "child-await-invoke-v1", 2);
-        const result = await ctx.children.awaitResult<HelloResult>(dispatched);
-        await finishOperation(ctx.db, id, "child-await-invoke-v1", result);
-        return result;
+        try {
+          const result = await ctx.children.awaitResult<HelloResult>(dispatched.receipt);
+          await finishOperation(ctx.db, id, "child-await-invoke-v1", result);
+          return { ok: true as const, result };
+        } catch (error) {
+          const raw = toSafeChildError(error);
+          await failSagaExecution(ctx.db, id, raw);
+          terminalWritten = true;
+          return { ok: false as const, raw };
+        }
       });
+      if (!greeted.ok) throw new NonRetryableError(greeted.raw.code);
       const output: HelloParentResult = {
-        greeting: greeted.greeting,
-        name: greeted.name,
-        childExecutionId: dispatched.executionId,
+        greeting: greeted.result.greeting,
+        name: greeted.result.name,
+        childExecutionId: dispatched.receipt.executionId,
       };
       await step.do("persist-success-v1", () => completeExecution(ctx.db, id, output));
       return output;
     } catch (error) {
-      // Child faults are actionable SafeErrors (CHILD_FAILED,
-      // CHILD_DISPATCH_UNCONFIRMED, ...): persist their code/message, never
-      // the generic marker. Anything else keeps the generic marker so the
-      // parent can never invent success from an unknown failure. The catch
-      // is the only persist-failure-v1 writer (no pre-persisting branch
-      // above), so no already-persisted guard is needed.
-      const raw: SafeError =
-        error instanceof Fault
-          ? { code: error.code, message: error.message }
-          : {
-              code: "EXECUTION_FAILED",
-              message: "The Execution could not complete. Inspect local runtime diagnostics.",
-            };
+      // Child faults are already persisted above with their actionable
+      // code/message: rethrow untouched, never the generic marker. Anything
+      // else keeps the generic marker so the parent can never invent success
+      // from an unknown failure.
+      if (terminalWritten) throw error;
+      const raw = toSafeChildError(error);
       await step.do("persist-failure-v1", () => failSagaExecution(ctx.db, id, raw));
       throw new NonRetryableError(raw.code);
     }
