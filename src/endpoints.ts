@@ -39,7 +39,12 @@
 // fields, which are rejected loudly.
 import { BODY_LIMIT, Fault, hash, parseKey, parseSubmission, UUID } from "./domain";
 import type { Principal, SagaDef } from "./domain";
-import { WEBHOOK_DELIVERED_TOPIC, recordSourceDelivery } from "./events";
+import {
+  PLATFORM_WEBHOOK_DELIVERED_TOPIC,
+  WEBHOOK_DELIVERED_TOPIC,
+  recordPlatformDelivery,
+  recordSourceDelivery,
+} from "./events";
 import { submit } from "./executions";
 
 export const ENDPOINT_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -757,6 +762,22 @@ export async function executeEndpointDelivery(
     eventId: opts.eventId,
     topic: WEBHOOK_DELIVERED_TOPIC,
     payloadJson: JSON.stringify(input),
+    executionId: accepted.executionId,
+  });
+  // TRG-03 S3b (issue #139): built-in platform emission. When the operator
+  // opted in with an enabled `platform` topic source, the same vendor event
+  // lands there as platform.webhook.delivered and fans out through the
+  // standard submit protocol. Best-effort: never fails the delivery above.
+  await recordPlatformDelivery(db, env, submitFn, {
+    orgId: endpoint.org_id,
+    topic: PLATFORM_WEBHOOK_DELIVERED_TOPIC,
+    distinctId: `${endpoint.id}.${opts.eventId}`,
+    payload: {
+      endpoint: endpoint.name,
+      eventId: opts.eventId,
+      executionId: accepted.executionId,
+      sagaId: opts.saga.id,
+    },
     executionId: accepted.executionId,
   });
   return { ...accepted, eventReplayed };
