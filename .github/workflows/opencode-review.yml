@@ -25,9 +25,15 @@
 #   (base URL `https://opencode.ai/zen/go/v1`), not from a separate env var.
 #
 # Advisory-only by construction: `use_github_token: true` (no GitHub App
-# install, no OIDC exchange, so no `id-token: write`) plus read-only
-# permissions (`contents:read`, `pull-requests:read`, `issues:read`). The
-# reviewer can comment, never push.
+# install, no OIDC exchange, so no `id-token: write`). Permissions are the
+# minimal set that lets the reviewer COMMENT but never push: `contents: read`
+# (no pushes, ever — plus `persist-credentials: false` on checkout) with
+# `pull-requests: write` / `issues: write` for review comments and reactions.
+# Verified empirically 2026-09-18: read-only tokens make the action fail with
+# 403 `Resource not accessible by integration` when posting its review, so
+# read-only is not a working option — this matches upstream's own
+# `use_github_token` example, which likewise grants write on
+# pull-requests/issues.
 name: opencode-review
 
 on:
@@ -36,8 +42,8 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
-  issues: read
+  pull-requests: write
+  issues: write
 
 jobs:
   review:
