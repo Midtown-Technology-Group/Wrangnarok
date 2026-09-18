@@ -2,7 +2,6 @@
 import { describe, expect, it } from "vitest";
 import opencodeConfig from "../.opencode/opencode.json";
 import tuiConfig from "../.opencode/tui.json";
-import opencodePackage from "../.opencode/package.json";
 import {
   MailboxFault,
   MailboxMessage,
@@ -154,13 +153,13 @@ describe("mailbox sender presentation (issue #382)", () => {
 describe("opencode plugin pin (issue #383)", () => {
   it("pins the goal plugin to one exact immutable version everywhere", () => {
     // Bare specifiers float to latest at startup; a hijacked publish then
-    // runs as the developer. Every entry must name the same exact version,
-    // and the config package.json pins it for integrity-verified installs.
+    // runs as the developer. Every tracked entry must name the same exact
+    // version. (.opencode/package.json also pins it at runtime, but opencode
+    // regenerates that manifest on every run so it is untracked — see
+    // .gitignore — and is not asserted here.)
     const plugins = (opencodeConfig as { plugin?: readonly unknown[] }).plugin;
     const tuiPlugins = (tuiConfig as { plugin?: readonly unknown[] }).plugin;
-    const deps = (opencodePackage as { dependencies?: Record<string, string> }).dependencies;
     expect(plugins).toEqual(["@prevalentware/opencode-goal-plugin@0.1.49"]);
     expect(tuiPlugins).toEqual(["@prevalentware/opencode-goal-plugin@0.1.49"]);
-    expect(deps?.["@prevalentware/opencode-goal-plugin"]).toBe("0.1.49");
   });
 });
