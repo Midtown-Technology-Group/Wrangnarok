@@ -510,6 +510,10 @@ it("denies issuance without a live grant, origin, session, or file field", async
     field: "nope",
   });
   expect(missingField.status).toBe(400);
+  // A non-object issuance body presents no session at all.
+  const arrayBody = await issueEmbedUpload(grant.id, grant.secret, ORIGIN, ["doc"]);
+  expect(arrayBody.status).toBe(422);
+  expect(await arrayBody.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
 
   // A deleted form blocks issuance (blocked publication): the grant
   // dangles and issuance answers 404 FORM_NOT_FOUND.
@@ -656,6 +660,30 @@ it("fails replayed tokens, mismatched assertions, and field bounds closed", asyn
 
   // Malformed finalize bodies never reach the claim check.
   expect((await sessionFinalize({ handle: started.handle })).status).toBe(400);
+  // A well-formed claim without a handle presents no session; a foreign
+  // origin fails the grant fence before any claim resolves.
+  const handleless = await sessionFinalize({
+    location: slot.location,
+    path: slot.path,
+    contentType: "text/plain",
+    size: bytes.byteLength,
+    sha256: digest,
+  });
+  expect(handleless.status).toBe(422);
+  expect(await handleless.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+  const foreignOrigin = await sessionFinalize(
+    {
+      handle: started.handle,
+      location: slot.location,
+      path: slot.path,
+      contentType: "text/plain",
+      size: bytes.byteLength,
+      sha256: digest,
+    },
+    OTHER_ORIGIN,
+  );
+  expect(foreignOrigin.status).toBe(403);
+  expect(await foreignOrigin.json()).toMatchObject({ error: { code: "EMBED_ORIGIN_DENIED" } });
 });
 
 it("rejects field type drift at finalize and staged-only refs at submit", async () => {
