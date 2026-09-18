@@ -21,6 +21,7 @@ import {
   uploadLogo,
 } from "../lib/api-client";
 import { getErrorMessage } from "../lib/api-error";
+import { brandContrastChecks, formatContrastRatio } from "../lib/brand-contrast";
 import type { BrandingResponse, BrandingView } from "../lib/client-types";
 
 export const LOGO_MIME_ALLOWLIST = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
@@ -257,6 +258,25 @@ export function BrandingAdmin(props: {
               accent
             </span>
           </p>
+          <h3>Contrast safeguards</h3>
+          <p className="muted">
+            Advisory only: custom colors always save. Ratios below the 3:1 floor stay live but may be hard to read.
+          </p>
+          <ul className="contrast-list">
+            {brandContrastChecks(branding).map((entry) => (
+              <li key={entry.id} className={entry.passes ? undefined : "contrast-warning"}>
+                {entry.label}:{" "}
+                {entry.ratio === null ? (
+                  "could not compute"
+                ) : (
+                  <>
+                    <code className="mono">{formatContrastRatio(entry.ratio)}</code>
+                    {entry.passes ? " (ok)" : " — below the 3:1 floor"}
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
           {canWrite ? (
             <>
               <h2>Admin settings</h2>

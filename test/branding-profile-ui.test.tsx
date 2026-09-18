@@ -24,6 +24,15 @@ import {
 import { ApiError, getErrorMessage } from "../client/src/lib/api-error";
 import type { BrandingResponse, CallerResponse, ProfileResponse } from "../client/src/lib/client-types";
 import { Nav } from "../client/src/components/Nav";
+import {
+  applyBrandingToDocument,
+  BRAND_CONTRAST_FLOOR,
+  brandContrastChecks,
+  contrastRatioHex,
+  DEFAULT_DOCUMENT_TITLE,
+  formatContrastRatio,
+  parseBrandHex,
+} from "../client/src/lib/brand-contrast";
 import { BrandingAdmin, LOGO_MAX_BYTES, publicLogoUrl } from "../client/src/pages/Branding";
 import { applyTheme, AVATAR_MAX_BYTES, OwnProfile } from "../client/src/pages/Profile";
 
@@ -288,6 +297,126 @@ it("writes the theme preference to the document shell", () => {
     expect(dataset["theme"]).toBe("dark");
     applyTheme("light");
     expect(dataset["theme"]).toBe("light");
+  } finally {
+    if (prior === undefined) delete (globalThis as Record<string, unknown>)["document"];
+    else (globalThis as Record<string, unknown>)["document"] = prior;
+  }
+});
+
+it("pins the WCAG contrast math to known anchors", () => {
+  expect(BRAND_CONTRAST_FLOOR).toBe(3);
+  expect(contrastRatioHex("#000000", "#ffffff")).toBeCloseTo(21, 10);
+  expect(contrastRatioHex("#ffffff", "#ffffff")).toBe(1);
+  expect(formatContrastRatio(3.266)).toBe("3.3:1");
+  // #rgb expands to #rrggbb.
+  expect(contrastRatioHex("#abc", "#ffffff")).toBe(contrastRatioHex("#aabbcc", "#ffffff"));
+  // Case and surrounding whitespace are tolerated.
+  expect(contrastRatioHex("  #ABCDEF  ", "#ffffff")).toBe(contrastRatioHex("#abcdef", "#ffffff"));
+  // Unparseable endpoints answer null, never throw.
+  expect(contrastRatioHex("red", "#ffffff")).toBeNull();
+  expect(contrastRatioHex("#12345", "#ffffff")).toBeNull();
+  expect(parseBrandHex("not-a-color")).toBeNull();
+  // Alpha resolves against the paint surface: fully transparent white over
+  // black reads as black (1:1), while translucent black over white lightens
+  // toward the page.
+  expect(contrastRatioHex("#ffffff00", "#000000")).toBe(1);
+  const translucent = contrastRatioHex("#00000080", "#ffffff");
+  expect(translucent).not.toBeNull();
+  expect(translucent as number).toBeGreaterThan(1);
+  expect(translucent as number).toBeLessThan(contrastRatioHex("#000000", "#ffffff") as number);
+});
+
+it("passes the shipped brand and fails each low-contrast surface honestly", () => {
+  const shipped = brandContrastChecks({ primaryColor: "#F45D0B", accentColor: "#F59E0B" });
+  expect(shipped.map((entry) => entry.id)).toEqual(["primary-button-text", "primary-on-header", "accent-on-body"]);
+  for (const entry of shipped) {
+    expect(entry.ratio).not.toBeNull();
+    expect(entry.passes).toBe(true);
+  }
+  // Near-white primary: white button text vanishes, header accents stay fine.
+  const washed = brandContrastChecks({ primaryColor: "#f7f7f4", accentColor: "#F59E0B" });
+  expect(washed.find((entry) => entry.id === "primary-button-text")?.passes).toBe(false);
+  expect(washed.find((entry) => entry.id === "primary-on-header")?.passes).toBe(true);
+  // Header-colored primary: header accents vanish, button text stays fine.
+  const dark = brandContrastChecks({ primaryColor: "#0b0f14", accentColor: "#F59E0B" });
+  expect(dark.find((entry) => entry.id === "primary-on-header")?.passes).toBe(false);
+  expect(dark.find((entry) => entry.id === "primary-button-text")?.passes).toBe(true);
+});
+
+it("renders the contrast safeguards with ratios and warn-only failures", () => {
+  // The shipped brand passes every check; the existing #112233/#445566
+  // fixture payload honestly does not, so the ok-case uses shipped colors.
+  const shipped: BrandingResponse = {
+    branding: { ...brandingPayload.branding, primaryColor: "#F45D0B", accentColor: "#F59E0B" },
+  };
+  const ok = renderToStaticMarkup(
+    <MemoryRouter>
+      <BrandingAdmin initial={shipped} initialRole="admin" />
+    </MemoryRouter>,
+  );
+  expect(ok).toContain("Contrast safeguards");
+  expect(ok).toContain("Advisory only");
+  expect(ok).toContain("(ok)");
+  expect(ok).not.toContain("— below the 3:1 floor");
+  const washed: BrandingResponse = {
+    branding: { ...brandingPayload.branding, primaryColor: "#f7f7f4" },
+  };
+  const warned = renderToStaticMarkup(
+    <MemoryRouter>
+      <BrandingAdmin initial={washed} initialRole="admin" />
+    </MemoryRouter>,
+  );
+  expect(warned).toContain("Contrast safeguards");
+  expect(warned).toContain("— below the 3:1 floor");
+  expect(warned).toContain("contrast-warning");
+  // Members see the read view including the safeguards, never the admin form.
+  const member = renderToStaticMarkup(
+    <MemoryRouter>
+      <BrandingAdmin initial={washed} initialRole="member" />
+    </MemoryRouter>,
+  );
+  expect(member).toContain("— below the 3:1 floor");
+  expect(member).not.toContain("Save branding");
+});
+
+it("applies branding to the document shell and restores defaults", () => {
+  const appended: unknown[] = [];
+  let content: string | null = null;
+  let removed = false;
+  const meta = {
+    setAttribute: (key: string, value: string) => {
+      if (key === "content") content = value;
+    },
+    remove: () => {
+      removed = true;
+    },
+  };
+  let existing: unknown = null;
+  const stub = {
+    title: "before",
+    head: { appendChild: (node: unknown) => void appended.push(node) },
+    querySelector: () => existing,
+    createElement: () => meta,
+  };
+  const prior = (globalThis as Record<string, unknown>)["document"];
+  (globalThis as Record<string, unknown>)["document"] = stub;
+  try {
+    // No theme-color meta yet: one is created carrying the primary color.
+    applyBrandingToDocument({ appName: "Acme Realm", primaryColor: "#112233" });
+    expect(stub.title).toBe("Acme Realm");
+    expect(content).toBe("#112233");
+    expect(appended).toHaveLength(1);
+    // An existing meta is reused, never duplicated.
+    existing = meta;
+    content = null;
+    applyBrandingToDocument({ appName: "Acme Realm", primaryColor: "#445566" });
+    expect(content).toBe("#445566");
+    expect(appended).toHaveLength(1);
+    // Null branding restores the static title and drops the meta.
+    applyBrandingToDocument(null);
+    expect(stub.title).toBe(DEFAULT_DOCUMENT_TITLE);
+    expect(DEFAULT_DOCUMENT_TITLE).toBe("Wrangnarök");
+    expect(removed).toBe(true);
   } finally {
     if (prior === undefined) delete (globalThis as Record<string, unknown>)["document"];
     else (globalThis as Record<string, unknown>)["document"] = prior;
