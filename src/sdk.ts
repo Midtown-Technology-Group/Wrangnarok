@@ -340,6 +340,7 @@ export const SDK_ERROR_CODES = [
   "AI_INVALID_EMBEDDING",
   "AI_INVALID_BEHAVIOR",
   "AI_VERIFY_FAILED",
+  "AI_CONFORMANCE_FAILED",
   "AI_DISCOVERY_FAILED",
 ] as const;
 
@@ -3253,6 +3254,11 @@ export function describeContract(): SdkContractDescriptor {
         method: "POST",
         path: "/api/ai/profiles/:id/verify",
         description: "Bounded key-authenticated model verification, admin-gated (AI-01).",
+      },
+      {
+        method: "GET",
+        path: "/api/ai/profiles/:id/conformance",
+        description: "Read-only asserted-vs-observed capability conformance, admin-gated (AI-01).",
       },
       {
         method: "GET",
