@@ -995,20 +995,15 @@ async function fetchVendorModelIds(
   return { ok: true, ids, failure: "" };
 }
 
-/** Verify one profile against its provider with the deployment key
- * (upstream test-before-save, ADR 032 ladder): presence-check the declared
- * secret (no fetch without it), re-parse the persisted endpoint, run the
- * bounded key-authenticated list, and report whether the profile's model
- * rides it. Read-only by construction; the key and the model id never
- * appear in the outcome. Client errors throw; vendor failures answer
- * ok:false with fixed details. */
-export async function verifyProfile(
+/** Shared guard ladder for the key-authenticated probes (verify,
+ * conformance): exact org ownership (foreign rows 404, never leak), AI
+ * provider kind only, and enabled. Returns the owned triple; every message
+ * below is the verify wording both probes share. */
+async function loadProbeTarget(
   db: D1Database,
   caller: Principal,
   id: string,
-  env: AiSecretEnv,
-  vendor: AiVendorOpts = {},
-): Promise<AiVerifyOutcome> {
+): Promise<{ row: AiProfileRow; connection: AiConnectionRow; def: IntegrationDefinition }> {
   const row = await ownedProfileRow(db, caller.orgId, id);
   if (!row) throw invalid("AI_PROFILE_NOT_FOUND", "No model profile exists for this Organization.", 404);
   const connection = await db
@@ -1025,6 +1020,105 @@ export async function verifyProfile(
   if (connection.enabled === 0) {
     throw invalid("CONNECTION_DISABLED", "This Connection is disabled: enable it before verifying profiles.", 404);
   }
+  return { row, connection, def };
+}
+
+/** Capability-conformance outcome: the operator-asserted posture
+ * (capability override keys + capabilityState) compared against the observed
+ * vendor list (model listed or not). Read-only by construction: no D1
+ * writes, no state mutation. The vendor list only observes availability, so
+ * conformance flags exactly the provable contradictions — asserted keys or
+ * a supported state with the model absent — and never claims per-capability
+ * verification it cannot observe. Key and model id never ride the outcome. */
+export type AiConformanceOutcome =
+  | {
+      readonly ok: true;
+      readonly checkedAt: string;
+      readonly profileId: string;
+      readonly modelAvailable: boolean;
+      readonly capabilityState: AiCapabilityState;
+      /** Sorted asserted override keys (non-secret operator config). */
+      readonly assertedCapabilities: readonly string[];
+      readonly conforms: boolean;
+      /** Fixed mismatch tokens, empty when conforming. */
+      readonly mismatches: readonly string[];
+      readonly detail: string;
+    }
+  | { readonly ok: false; readonly checkedAt: string; readonly code: string; readonly detail: string };
+
+/** Check one profile's asserted capabilities against the observed vendor
+ * list with the deployment key (same ADR 032 ladder as verify: presence
+ * check, endpoint re-parse, bounded list). Client errors throw; vendor
+ * failures answer ok:false with fixed details. */
+export async function checkConformance(
+  db: D1Database,
+  caller: Principal,
+  id: string,
+  env: AiSecretEnv,
+  vendor: AiVendorOpts = {},
+): Promise<AiConformanceOutcome> {
+  const { row, connection, def } = await loadProbeTarget(db, caller, id);
+  const checkedAt = new Date().toISOString();
+  const failed = (code: string, detail: string): AiConformanceOutcome => ({ ok: false, checkedAt, code, detail });
+  const envVar = def.secretEnvVars["apiKey"] as string;
+  const key = secretValue(env, envVar);
+  if (key === undefined) {
+    return failed(
+      "SECRET_NOT_CONFIGURED",
+      `Deployment credential ${envVar} is not configured: refusing a half-credentialed conformance check.`,
+    );
+  }
+  try {
+    assertSafeEndpoint(def.name, connection.endpoint);
+  } catch {
+    return failed("INVALID_CONNECTION", "This Connection endpoint is not a safe URL: update it before checking.");
+  }
+  const target = vendorTarget(def.name);
+  const fetchImpl = vendor.fetchImpl ?? globalThis.fetch;
+  const timeoutMs = vendor.timeoutMs ?? AI_VENDOR_TIMEOUT_MS;
+  const listed = await fetchVendorModelIds(connection.endpoint, target, key, fetchImpl, timeoutMs);
+  if (!listed.ok) return failed("AI_CONFORMANCE_FAILED", listed.failure);
+  const modelAvailable = listed.ids.includes(row.model_id);
+  const assertedCapabilities = Object.freeze(Object.keys(storedCapabilities(row.capabilities_json)).sort());
+  const capabilityState = row.capability_state as AiCapabilityState;
+  const mismatches: string[] = [];
+  if (!modelAvailable) {
+    if (assertedCapabilities.length > 0) mismatches.push("asserted-capabilities-unconfirmed");
+    if (capabilityState === "supported") mismatches.push("state-supported-but-model-absent");
+  }
+  const conforms = mismatches.length === 0;
+  return {
+    ok: true,
+    checkedAt,
+    profileId: row.id,
+    modelAvailable,
+    capabilityState,
+    assertedCapabilities,
+    conforms,
+    mismatches: Object.freeze(mismatches),
+    detail: !conforms
+      ? "The asserted capabilities do not conform to the observed vendor list."
+      : modelAvailable
+        ? "The provider lists the profile model and nothing asserted contradicts it."
+        : "The provider list does not include the profile model; nothing asserted depends on it.",
+  };
+}
+
+/** Verify one profile against its provider with the deployment key
+ * (upstream test-before-save, ADR 032 ladder): presence-check the declared
+ * secret (no fetch without it), re-parse the persisted endpoint, run the
+ * bounded key-authenticated list, and report whether the profile's model
+ * rides it. Read-only by construction; the key and the model id never
+ * appear in the outcome. Client errors throw; vendor failures answer
+ * ok:false with fixed details. */
+export async function verifyProfile(
+  db: D1Database,
+  caller: Principal,
+  id: string,
+  env: AiSecretEnv,
+  vendor: AiVendorOpts = {},
+): Promise<AiVerifyOutcome> {
+  const { row, connection, def } = await loadProbeTarget(db, caller, id);
   const checkedAt = new Date().toISOString();
   const failed = (code: string, detail: string): AiVerifyOutcome => ({ ok: false, checkedAt, code, detail });
   // The registry pins secretEnvVars.apiKey on all five AI defs (ai-01-build
