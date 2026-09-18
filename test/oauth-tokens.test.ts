@@ -63,14 +63,15 @@ function tokenJson(body: unknown, status = 200): Response {
 
 interface StubCall {
   readonly body: string;
+  readonly method: string;
 }
 
-/** Vendor stub: records every POST body, answers from a queue. */
+/** Vendor stub: records every POST body plus the request method, answers from a queue. */
 function stubVendor(responses: Array<Response | ((body: string) => Response | Promise<Response>) | Error>) {
   const calls: StubCall[] = [];
   const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const body = typeof init?.body === "string" ? init.body : "";
-    calls.push({ body });
+    calls.push({ body, method: typeof init?.method === "string" ? init.method : "GET" });
     const next = responses.shift();
     if (next instanceof Error) throw next;
     if (typeof next === "function") return next(body);
@@ -532,6 +533,9 @@ describe("persisted refresh rotation (no D1 across vendor HTTP)", () => {
       checkedAt: LATER,
     });
     expect(calls).toHaveLength(1);
+    // The rotation reaches the vendor as exactly one POST: a regression to
+    // any other method fails here, not silently downstream.
+    expect(calls[0]?.method).toBe("POST");
     expect(rotated).toMatchObject({ rotated: true, refreshToken: REFRESH_NEXT, generation: 2 });
     expect(rotated.health).toMatchObject({ status: "healthy", lastSuccessAt: LATER });
     expect(rotated.token.expiresAtMs).toBeGreaterThan(Date.now());
