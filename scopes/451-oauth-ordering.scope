@@ -1,0 +1,5 @@
+# Same-generation OAuth health-write ordering (issue #451).
+src/oauth-tokens.ts
+test/oauth-tokens.test.ts
+docs/architecture/005-secret-storage.md
+scopes/451-oauth-ordering.scope
