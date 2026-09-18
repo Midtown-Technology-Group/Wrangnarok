@@ -1,7 +1,11 @@
-# ADR 015: Organization and User Lifecycle (AUTH-01)
+# ADR 034: Organization and User Lifecycle (AUTH-01)
 
 - **Status:** Accepted
 - **Date:** 2026-09-11
+- **Renumber note (2026-09-18, issue #225):** formerly ADR 015. The number
+  collided with ADR 015 (Forms-to-Saga input binding, FORM-01); per the
+  steward-delegated later-landed-moves rule the later-landed file moves, and
+  034 is the next free number above the highest assigned (033).
 - **Extends:** ADR 014 (Access authentication), ADR 003 (Integrations and Connections), ADR 005 (secret storage), `docs/upstream-spec.md` auth rows, `docs/upstream-parity.md` AUTH-01
 - **Steward review requested** on the implementing PR (security-adjacent; Phase 3 gate).
 

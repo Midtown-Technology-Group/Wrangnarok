@@ -7,11 +7,11 @@
   revocable external capabilities`, slice 1)
 - **Extends:** ADR 005 (secret storage, v0 digests-only posture), ADR 015
   (form binding — see #225 for the number collision; this reference means
-  `015-form-binding.md`), ADR 018 endpoint-triggers (`018-endpoint-triggers.md`,
-  same #225 caveat), `docs/upstream-spec.md` §17
+  `015-form-binding.md`), ADR 037 endpoint-triggers (`037-endpoint-triggers.md`,
+  renumbered from 018 by issue #225), `docs/upstream-spec.md` §17
 - **Numbering note:** this document carries no ADR number until the steward
-  reserves one. Issue #225 (ADR number governance) is open with collisions
-  still present at 015/016/018/019/023 on `main`; per the #225 convention,
+  reserves one. Issue #225 (ADR number governance) renumbered the
+  015/016/018/019/023 collisions to 034-041; per the #225 convention,
   unreserved decisions stay at non-numeric filenames. This file follows the
   `TBD-saga-authoring-ergonomics.md` precedent deliberately.
 - **Phase gate:** EMBED-01 is Phase 4 (Missing → Partial in this slice).

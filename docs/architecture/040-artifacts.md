@@ -1,7 +1,11 @@
-# ADR 019: Generated Artifacts — D1 identity plus R2 bytes, attachment bindings, retention
+# ADR 040: Generated Artifacts — D1 identity plus R2 bytes, attachment bindings, retention
 
 - **Status:** Accepted (2026-09-11; gates FILE-02 per issue #158)
 - **Date:** 2026-09-11
+- **Renumber note (2026-09-18, issue #225):** formerly ADR 019. The number
+  collided with ADR 019 (Browser App SDK runtime, APP-02); per the
+  steward-delegated later-landed-moves rule the later-landed file moves, and
+  040 is the next free number above the highest assigned (033).
 - **Extends:** ADR 002 (stable identity), ADR 003 (Integration vs Connection split), ADR 011 (portable bundles exclude tenant state)
 - **Upstream compatibility:** shaped from upstream `gobifrost/bifrost` artifact machinery at baseline `3543c7ebee0e1bd9a2cab6dfba080a30621b1c5f` (`api/src/routers/chat.py`, `api/src/routers/maintenance.py`, `api/src/models/contracts/artifacts.py`, `api/bifrost/artifacts.py`, `docs/guides/chat-artifacts.md`; test `api/tests/e2e/api/test_artifact_retention.py`). Ideology preserved; divergences below are explicit and Cloudflare-driven. The files/artifacts surface was additionally pinned by the upstream sweep in `docs/upstream-spec.md` §16 (presigned URLs, finalize-after-PUT, versioned deletes, opt-in scheduled cleanup default 90 days range 1–3650, per-surface size caps).
 
@@ -27,7 +31,7 @@ Project constraint 7 requires documenting why each new primitive is needed. Arti
 
 Two separate gates, tested independently, both behind the AUTH-01 membership gate (every request resolves the CallerCtx first; strangers get the membership 404 before artifact policy runs):
 
-- **Canonical access** (metadata, bytes, rename, delete): the row must sit in the caller's resolved Organization (else 404 via the AUTH-01 membership gate), and the caller must be the creator or an admin (else 403). Admin composes with AUTH-01 (ADR 015): instance admins (the deployment `ADMIN_USER_IDS` list, install state never in Git) and Organization admins (the membership row) bypass the creator check. There is no self-asserted admin and no separate artifact role table (finer roles belong to AUTH-02). Deleted rows answer 404 to non-admins and 410 to admins (gone versus never-existed).
+- **Canonical access** (metadata, bytes, rename, delete): the row must sit in the caller's resolved Organization (else 404 via the AUTH-01 membership gate), and the caller must be the creator or an admin (else 403). Admin composes with AUTH-01 (ADR 034): instance admins (the deployment `ADMIN_USER_IDS` list, install state never in Git) and Organization admins (the membership row) bypass the creator check. There is no self-asserted admin and no separate artifact role table (finer roles belong to AUTH-02). Deleted rows answer 404 to non-admins and 410 to admins (gone versus never-existed).
 - **Attachment-binding access** (chat/conversation readers): a binding names the (scope, refId) an Artifact backs. Listing bindings answers the triple only — never bytes, never canonical metadata — so a chat reader resolves which Artifact backs an attachment without gaining byte access. Byte reads always re-pass the canonical gate.
 
 ### 4. Retention and cleanup

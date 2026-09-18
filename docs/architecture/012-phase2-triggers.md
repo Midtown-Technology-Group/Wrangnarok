@@ -1,6 +1,6 @@
 # ADR 012: Phase 2 Trigger investigation — schedules and webhooks
 
-**Status:** Schedule direction accepted and implemented (TRG-01, issue #137, 2026-09-12). Webhook direction ships separately (TRG-02, ADR 018). Implements the schedule slice; constrains later topic lanes. Defers to ADR 001 (Execution identity, idempotency) and ADR 010 (OrgCtx, declared requirements) where silent.
+**Status:** Schedule direction accepted and implemented (TRG-01, issue #137, 2026-09-12). Webhook direction ships separately (TRG-02, ADR 037, renumbered from 018 by issue #225). Implements the schedule slice; constrains later topic lanes. Defers to ADR 001 (Execution identity, idempotency) and ADR 010 (OrgCtx, declared requirements) where silent.
 
 ## Context
 

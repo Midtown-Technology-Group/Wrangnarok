@@ -1,6 +1,11 @@
-# ADR 018: Nested Saga invocation (RUN-02)
+# ADR 039: Nested Saga invocation (RUN-02)
 
 **Status:** Accepted (RUN-02, issue #136).
+
+**Renumber note (2026-09-18, issue #225):** formerly ADR 018. The number was
+shared by five ADRs; per the steward-delegated later-landed-moves rule the
+earliest-landed file keeps 018 and the rest move in landing order, and 039 is
+the next free number above the highest assigned (033).
 
 ## Context
 

@@ -5,7 +5,7 @@
   wider renumber in issue #225 stays open and untouched by this lane)
 - **Date:** 2026-09-16 (RFC revised per steward feedback on PR #404 and #408;
   accepted 2026-09-17)
-- **Extends:** ADR 002 (stable Saga identity), ADR 010 (source boundary), ADR 018 RUN-01/RUN-02 (runtime policy, child invocation), `docs/upstream-spec.md` findings 1, 3, 15, 18
+- **Extends:** ADR 002 (stable Saga identity), ADR 010 (source boundary), ADR 018 RUN-01 (runtime policy), ADR 039 RUN-02 (child invocation, renumbered from 018 by issue #225), `docs/upstream-spec.md` findings 1, 3, 15, 18
 - **Implements:** ADR-033 Saga authoring ergonomics (issues #412–#416).
   #412 landed interior helpers, #413 scanner/manifest gates, #414 terminal
   outcome helpers, #415 Action vocabulary (six Integration legs onto

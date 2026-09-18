@@ -72,7 +72,7 @@ Per the owner-approved policy decision (issue #177), the repository Worker bundl
 | D1 rows read/written | 5,000,000 read/day; 100,000 written/day | 4 reads / 8 writes per smoke run (application-observed) | Bounded scans per route (history pages ≤ 50, tick scan ≤ 50, repairs inspect-then-act). Fits small deployments. |
 | D1 transactions | Single-statement plus explicit batch discipline | `createBatch` retained-ID dedup; no multi-statement transactions | No cross-row atomicity beyond PRIMARY KEY/UNIQUE fencing. Complex multi-entity writes need explicit design. |
 | D1 per-invocation queries | 50 (Free subrequest cap) | Smoke path uses a handful per request | Routes that fan out per-row queries must stay under 50; batch where possible. Unproven for wide history scans. |
-| R2 objects | 10 GB-month + 1M/10M ops per month; egress free | FILE-01/FILE-02 surfaces; per-surface 5 MiB caps | Earned by ADR 018/019. Bytes never ride D1 or Worker memory; multipart/abort parity is unproven and out of scope. |
+| R2 objects | 10 GB-month + 1M/10M ops per month; egress free | FILE-01/FILE-02 surfaces; per-surface 5 MiB caps | Earned by ADR 036/040. Bytes never ride D1 or Worker memory; multipart/abort parity is unproven and out of scope. |
 | Access users | Plan-dependent seat count (unverified) | Fixture auth locally; Access verification in `src/access.ts` | Delegated human identity (SSO/MFA/passkeys) stays the IdP's job (ADR 014). No local user password store exists by design. |
 | Egress | Per-Integration allowlist; no private registries or IP allowlists; no platform egress charge | Echo fixture plus NinjaOne vendor boundary | Non-HTTP transports, private endpoints, and self-hosted registries are explicit non-goals (Phase 2 egress note). |
 
@@ -96,7 +96,7 @@ All workload math is **estimate**: smoke actuals (4 steps, 4 reads, 8 writes, ~2
 | Runtime policy, child Sagas, sync/data-provider execution (RUN-01..03) | free | D1 rows plus existing Workflow bindings; no new primitives. |
 | OAuth refresh fence (OAUTH-01 DO) | free | Memory-only SQLite-backed DO: ~1 RPC per refresh round, no storage. Earned by the distributed-execution requirement (Workers gives no single-instance guarantee); classified here explicitly — no silent inheritance. |
 | Tables over D1 (TABLE-01/02) | free | Bounded keyset queries; subject to the 500 MB Free per-database retention gate at scale. |
-| Forms, file locations, artifacts over R2 (FORM-01/02, FILE-01/02) | free | R2 earned by ADR 018/019; per-surface size caps bound bytes. |
+| Forms, file locations, artifacts over R2 (FORM-01/02, FILE-01/02) | free | R2 earned by ADR 036/040; per-surface size caps bound bytes. |
 | Full-stack UI as Static Assets (ADR 008) | free | Served from the same Worker; client JS 377 kB raw / 107 kB gzip; asset requests free. |
 | MCP gateway, Code Mode, agent tooling (TOOL-01/02, AI-01..06) | paid-adaptation | External model inference is never in Cloudflare Free; Connections carry the vendor cost. Host-mediated execution keeps credentials out of model code. |
 | Usage metering/billing accuracy (OPS-04) | redesign | Application-observed counters are honest estimates, not provider meters. Financial claims need deployed metering plus explicit assumptions. |
