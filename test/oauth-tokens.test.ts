@@ -63,14 +63,15 @@ function tokenJson(body: unknown, status = 200): Response {
 
 interface StubCall {
   readonly body: string;
+  readonly method: string;
 }
 
-/** Vendor stub: records every POST body, answers from a queue. */
+/** Vendor stub: records every POST body plus the request method, answers from a queue. */
 function stubVendor(responses: Array<Response | ((body: string) => Response | Promise<Response>) | Error>) {
   const calls: StubCall[] = [];
   const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const body = typeof init?.body === "string" ? init.body : "";
-    calls.push({ body });
+    calls.push({ body, method: typeof init?.method === "string" ? init.method : "GET" });
     const next = responses.shift();
     if (next instanceof Error) throw next;
     if (typeof next === "function") return next(body);
@@ -494,6 +495,50 @@ describe("persisted refresh rotation (no D1 across vendor HTTP)", () => {
     // Transient values registered for write-time scrubbing, then dropped by
     // the caller (afterEach clears; the registry held them during the call).
     expect(getExecutionSecrets("e".repeat(64))).toContain(ACCESS_NEXT);
+  });
+
+  it("recovers an expired token on demand with no scheduler (issue #149 scheduled-path decision)", async () => {
+    // Upstream refreshes on a 15-minute scheduler within 20 minutes of
+    // expiry; Wrangnarok covers that job on demand instead. A token already
+    // past expires_at rotates through the same fenced path — one vendor
+    // POST, generation advance, recovery to healthy — so no Cron Trigger or
+    // second refresh path is needed until a concrete requirement (vendor
+    // refresh-token idle expiry, warm-token latency SLO) earns it.
+    const connectionId = await seedMapping();
+    await storeInitialOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      accessToken: ACCESS,
+      refreshToken: REFRESH,
+      scope: "monitoring",
+      expiresAtMs: Date.now() - 3600_000,
+      kekMaterial: KEK,
+      checkedAt: AT,
+    });
+    const before = await readOAuthTokenState(bindings.DB, ORG, connectionId);
+    expect(before?.expiresAtMs).toBeLessThan(Date.now());
+    const { calls, fetchImpl } = stubVendor([
+      tokenJson({ access_token: ACCESS_NEXT, refresh_token: REFRESH_NEXT, expires_in: 3600 }),
+    ]);
+    const rotated = await refreshPersistedOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      endpoint: ENDPOINT,
+      tokenPath: TOKEN_PATH,
+      credentials: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET },
+      faults: FAULTS,
+      keks: { 1: KEK },
+      kekMaterial: KEK,
+      fetchImpl,
+      checkedAt: LATER,
+    });
+    expect(calls).toHaveLength(1);
+    // The rotation reaches the vendor as exactly one POST: a regression to
+    // any other method fails here, not silently downstream.
+    expect(calls[0]?.method).toBe("POST");
+    expect(rotated).toMatchObject({ rotated: true, refreshToken: REFRESH_NEXT, generation: 2 });
+    expect(rotated.health).toMatchObject({ status: "healthy", lastSuccessAt: LATER });
+    expect(rotated.token.expiresAtMs).toBeGreaterThan(Date.now());
   });
 
   it("honors a scope override and the default vendor path", async () => {
