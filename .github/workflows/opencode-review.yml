@@ -1,0 +1,81 @@
+# Automatic advisory PR review via the native OpenCode GitHub Action.
+#
+# NOTE on the action source: the task brief named `sst/opencode/github`, but
+# upstream's own GitHub-integration doc (the reference for this lane,
+# `sst/opencode` repo, `packages/web/src/content/docs/github.mdx`) documents
+# the action as `anomalyco/opencode/github` — the `sst/opencode` repo has no
+# `action.yml`, so that path does not exist. This workflow uses the
+# upstream-documented path, pinned to a commit SHA per repo supply-chain
+# convention (release v1.18.31, `github/action.yml` verified present at
+# this SHA via the GitHub API).
+#
+# NOTE on auth/model (Zen): the GitHub doc only shows provider keys, but the
+# action passes `env` through to the OpenCode run, so Zen auth is
+# `OPENCODE_API_KEY` (owner-stored secret; only referenced here, never a
+# value). Per the Zen doc, Zen "works like any other provider" and the model
+# selector is `opencode/<model-id>` (documented example: `opencode/gpt-5.5`).
+#
+# Advisory-only by construction: `use_github_token: true` (no GitHub App
+# install, no OIDC exchange, so no `id-token: write`) plus read-only
+# permissions (`contents:read`, `pull-requests:read`, `issues:read`). The
+# reviewer can comment, never push.
+name: opencode-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  review:
+    # Drafts get reviewed on ready_for_review; skip runs while still draft.
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Run OpenCode review
+        uses: anomalyco/opencode/github@014614d35b397775e5d397a490fc72368c894ec2 # v1.18.31
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          model: opencode/gpt-5.5
+          use_github_token: true
+          prompt: |
+            Review this pull request. Your findings are ADVISORY comments only;
+            you cannot push, so never propose taking direct action beyond
+            commenting. Stay silent (post no comment) when nothing material
+            is found.
+
+            First read the repo review contract: AGENTS.md, docs/lexicon.md,
+            and docs/architecture/adr-index.md. Every finding must cite the
+            project convention it invokes. Enforce in particular:
+            - Cloudflare primitives keep their native names (Worker,
+              Workflow, step, Queue, Durable Object, D1, R2, KV, binding).
+              Flag aliases or abstractions that hide Cloudflare.
+            - The change must stay viable on Cloudflare Free; flag anything
+              that needs a paid feature without an approved exception.
+            - Organization context and authorization boundaries must stay
+              explicit; flag anything that softens tenant isolation.
+            - Never embed environment credentials in portable Saga or
+              Integration source; Integration definitions and
+              Organization-specific Connections are separate concepts.
+            - Sagas are code-first TypeScript. Flag any new YAML/JSON
+              workflow DSL.
+            - Saga identity must survive ordinary source edits.
+
+            If the PR body references an owning issue, check the diff against
+            that issue's acceptance criteria and report gaps.
+
+            Format: one finding per item, each with a file:line reference and
+            the violated convention. Do not restate the diff. Do not comment
+            on style or formatting covered by the repo's linters.
