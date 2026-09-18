@@ -70,6 +70,11 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  # Read-only Actions metadata: lets the fail-open diagnostic steps below
+  # fetch their own job log to echo the billed workspace ID on model/billing
+  # failure. Without this, the Actions API answers 403 and diagnostics fall
+  # back to pointing at the step annotation.
+  actions: read
 
 jobs:
   review:
@@ -160,16 +165,23 @@ jobs:
         run: |
           echo "::warning::OpenCode review step failed; merge NOT blocked (fail-open). Run $GITHUB_RUN_ID."
           LOG_FILE="$(mktemp)"
-          if JOB_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" --paginate -q '.jobs[] | select(.name == "'"${JOB_NAME}"'") | .id' 2>/dev/null | head -n 1)" \
-            && [[ -n "$JOB_ID" ]] \
-            && gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${JOB_ID}/logs" > "$LOG_FILE" 2>/dev/null; then
+          ERR_FILE="$(mktemp)"
+          fetch_logs() {
+            JOB_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" --paginate -q '.jobs[] | select(.name == "'"${JOB_NAME}"'") | .id' 2>"$ERR_FILE" | head -n 1)" \
+              && [[ -n "$JOB_ID" ]] \
+              && gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${JOB_ID}/logs" > "$LOG_FILE" 2>"$ERR_FILE"
+          }
+          if ! fetch_logs; then sleep 15; fetch_logs; fi
+          if [[ -s "$LOG_FILE" ]]; then
             echo "--- billed-entity markers from failed-step log (if present) ---"
             grep -Eoi '(workspace[ _-]?id[^,}"]{0,80}|credits[A-Za-z]*[^,}"]{0,60}|billing[^,}"]{0,80}|402 [^,}"]{0,80}|quota[^,}"]{0,80})' "$LOG_FILE" | sort -u | head -n 20 \
               || echo "(no workspace/billing markers found in job log)"
           else
             echo "(job log unavailable; find the billed workspace ID in the failed 'Run OpenCode review' step annotation above)"
+            echo "--- fetch error (first 500 bytes, token-safe) ---"
+            head -c 500 "$ERR_FILE"; echo
           fi
-          rm -f "$LOG_FILE"
+          rm -f "$LOG_FILE" "$ERR_FILE"
 
   triage:
     # Same advisory posture as `review` (issue #225: no `secrets.*` in
@@ -259,13 +271,20 @@ jobs:
         run: |
           echo "::warning::OpenCode triage step failed; merge NOT blocked (fail-open). Run $GITHUB_RUN_ID."
           LOG_FILE="$(mktemp)"
-          if JOB_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" --paginate -q '.jobs[] | select(.name == "'"${JOB_NAME}"'") | .id' 2>/dev/null | head -n 1)" \
-            && [[ -n "$JOB_ID" ]] \
-            && gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${JOB_ID}/logs" > "$LOG_FILE" 2>/dev/null; then
+          ERR_FILE="$(mktemp)"
+          fetch_logs() {
+            JOB_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" --paginate -q '.jobs[] | select(.name == "'"${JOB_NAME}"'") | .id' 2>"$ERR_FILE" | head -n 1)" \
+              && [[ -n "$JOB_ID" ]] \
+              && gh api "repos/${GITHUB_REPOSITORY}/actions/jobs/${JOB_ID}/logs" > "$LOG_FILE" 2>"$ERR_FILE"
+          }
+          if ! fetch_logs; then sleep 15; fetch_logs; fi
+          if [[ -s "$LOG_FILE" ]]; then
             echo "--- billed-entity markers from failed-step log (if present) ---"
             grep -Eoi '(workspace[ _-]?id[^,}"]{0,80}|credits[A-Za-z]*[^,}"]{0,60}|billing[^,}"]{0,80}|402 [^,}"]{0,80}|quota[^,}"]{0,80})' "$LOG_FILE" | sort -u | head -n 20 \
               || echo "(no workspace/billing markers found in job log)"
           else
-            echo "(job log unavailable; find the billed workspace ID in the failed 'Run OpenCode triage' step annotation above)"
+            echo "(job log unavailable; find the billed workspace ID in the failed 'Run OpenCode review' step annotation above)"
+            echo "--- fetch error (first 500 bytes, token-safe) ---"
+            head -c 500 "$ERR_FILE"; echo
           fi
-          rm -f "$LOG_FILE"
+          rm -f "$LOG_FILE" "$ERR_FILE"
