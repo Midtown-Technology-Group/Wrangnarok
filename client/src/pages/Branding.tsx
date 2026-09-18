@@ -24,7 +24,7 @@ import { getErrorMessage } from "../lib/api-error";
 import { brandContrastChecks, formatContrastRatio } from "../lib/brand-contrast";
 import type { BrandingResponse, BrandingView } from "../lib/client-types";
 
-export const LOGO_MIME_ALLOWLIST = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+export const LOGO_MIME_ALLOWLIST = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"] as const;
 export const LOGO_MAX_BYTES = 5 * 1024 * 1024;
 
 function TokenForm({
@@ -68,7 +68,7 @@ export function publicLogoUrl(orgId: string): string {
 
 function precheckLogo(file: File): string | null {
   if (!(LOGO_MIME_ALLOWLIST as readonly string[]).includes(file.type.toLowerCase())) {
-    return "Logos must be PNG, JPEG, GIF, or WebP images.";
+    return "Logos must be PNG, JPEG, GIF, WebP, or SVG images.";
   }
   if (file.size === 0) return "Logo bytes must not be empty.";
   if (file.size > LOGO_MAX_BYTES) return "Logo bytes must fit 5 MiB.";
@@ -320,12 +320,12 @@ export function BrandingAdmin(props: {
               </form>
               <h2>Logo</h2>
               <form className="token-form" onSubmit={(e) => e.preventDefault()}>
-                <label htmlFor="branding-logo">Logo image (PNG, JPEG, GIF, or WebP, up to 5 MiB)</label>
+                <label htmlFor="branding-logo">Logo image (PNG, JPEG, GIF, WebP, or SVG, up to 5 MiB)</label>
                 <input
                   id="branding-logo"
                   name="logo"
                   type="file"
-                  accept="image/png,image/jpeg,image/gif,image/webp"
+                  accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
                   disabled={uploading}
                   onChange={(e) => void onUpload(e.target.files)}
                 />

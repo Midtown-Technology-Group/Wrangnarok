@@ -19,7 +19,7 @@ import {
 import { getErrorMessage } from "../lib/api-error";
 import type { ProfileResponse, ProfileTheme, ProfileView } from "../lib/client-types";
 
-export const AVATAR_MIME_ALLOWLIST = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+export const AVATAR_MIME_ALLOWLIST = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"] as const;
 export const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
 
 function TokenForm({
@@ -64,7 +64,7 @@ export function applyTheme(theme: ProfileTheme): void {
 
 function precheckAvatar(file: File): string | null {
   if (!(AVATAR_MIME_ALLOWLIST as readonly string[]).includes(file.type.toLowerCase())) {
-    return "Avatars must be PNG, JPEG, GIF, or WebP images.";
+    return "Avatars must be PNG, JPEG, GIF, WebP, or SVG images.";
   }
   if (file.size === 0) return "Avatar bytes must not be empty.";
   if (file.size > AVATAR_MAX_BYTES) return "Avatar bytes must fit 2 MiB.";
@@ -250,12 +250,12 @@ export function OwnProfile(props: { initial?: ProfileResponse }): React.JSX.Elem
             <p className="empty-state">No avatar set.</p>
           )}
           <form className="token-form" onSubmit={(e) => e.preventDefault()}>
-            <label htmlFor="profile-avatar">Avatar image (PNG, JPEG, GIF, or WebP, up to 2 MiB)</label>
+            <label htmlFor="profile-avatar">Avatar image (PNG, JPEG, GIF, WebP, or SVG, up to 2 MiB)</label>
             <input
               id="profile-avatar"
               name="avatar"
               type="file"
-              accept="image/png,image/jpeg,image/gif,image/webp"
+              accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
               disabled={uploading}
               onChange={(e) => void onUpload(e.target.files)}
             />

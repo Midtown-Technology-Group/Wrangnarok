@@ -517,6 +517,101 @@ it("roundtrips an avatar upload with type/size abuse fenced", async () => {
   expect(again.status).toBe(200);
 });
 
+it("accepts inert SVG logos and avatars, rejects active SVG abuse", async () => {
+  const clean =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">` +
+    `<defs><linearGradient id="g"><stop offset="0" stop-color="#F45D0B"/></linearGradient></defs>` +
+    `<rect width="16" height="16" fill="url(#g)"/><circle cx="8" cy="8" r="4" fill="#ffffff"/></svg>`;
+  const svgBytes = (markup: string): Uint8Array => new TextEncoder().encode(markup);
+  const cleanBytes = svgBytes(clean);
+  // The stock xmlns identifier is not a remote reference; an XML prolog is fine.
+  const prologBytes = svgBytes(`<?xml version="1.0" encoding="UTF-8"?>${clean}`);
+
+  const logo = await putBytes("/api/branding/logo", cleanBytes, "image/svg+xml");
+  expect(logo.status).toBe(200);
+  expect(await logo.json()).toMatchObject({
+    branding: { logo: { contentType: "image/svg+xml", sizeBytes: cleanBytes.byteLength } },
+  });
+  const memberLogo = await call("/api/branding/logo");
+  expect(memberLogo.status).toBe(200);
+  expect(memberLogo.headers.get("Content-Type")).toBe("image/svg+xml");
+  expect(new Uint8Array(await memberLogo.arrayBuffer())).toEqual(cleanBytes);
+  // The safe public read serves the same SVG bytes to pre-auth shells.
+  const publicLogo = await worker.fetch(new Request(`https://local.test/api/branding/public/${ORG}/logo`), bindings);
+  expect(publicLogo.status).toBe(200);
+  expect(publicLogo.headers.get("Content-Type")).toBe("image/svg+xml");
+  expect(new Uint8Array(await publicLogo.arrayBuffer())).toEqual(cleanBytes);
+  // Prolog-prefixed SVG also passes; members still cannot write any logo type.
+  expect((await putBytes("/api/branding/logo", prologBytes, "image/svg+xml")).status).toBe(200);
+  const memberWrite = await putBytes("/api/branding/logo", cleanBytes, "image/svg+xml", ORG, OTHER_USER);
+  expect(memberWrite.status).toBe(403);
+  expect(await memberWrite.json()).toMatchObject({ error: { code: "ADMIN_ONLY" } });
+
+  const avatar = await putBytes("/api/profile/avatar", cleanBytes, "image/svg+xml");
+  expect(avatar.status).toBe(200);
+  expect(await avatar.json()).toMatchObject({
+    profile: { avatar: { contentType: "image/svg+xml", sizeBytes: cleanBytes.byteLength } },
+  });
+  const read = await call("/api/profile/avatar");
+  expect(read.status).toBe(200);
+  expect(read.headers.get("Content-Type")).toBe("image/svg+xml");
+  expect(new Uint8Array(await read.arrayBuffer())).toEqual(cleanBytes);
+  // Owner-only even for SVG: another member reads their own (unset) slot.
+  expect((await call("/api/profile/avatar", "GET", undefined, ORG, OTHER_USER)).status).toBe(404);
+
+  // Active, remote, or malformed SVG answers 415 on both surfaces — nothing
+  // scriptable or off-document ever reaches R2.
+  const hostile = [
+    ["script", `<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`],
+    ["event-handler", `<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><rect width="1" height="1"/></svg>`],
+    [
+      "javascript-href",
+      `<svg xmlns="http://www.w3.org/2000/svg"><a href="javascript:alert(1)"><rect width="1" height="1"/></a></svg>`,
+    ],
+    ["foreign-object", `<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><p>x</p></foreignObject></svg>`],
+    ["iframe", `<svg xmlns="http://www.w3.org/2000/svg"><iframe src="https://evil.test/"/></svg>`],
+    [
+      "remote-image",
+      `<svg xmlns="http://www.w3.org/2000/svg"><image href="https://evil.test/x.png" width="1" height="1"/></svg>`,
+    ],
+    [
+      "remote-url",
+      `<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1" fill="url(https://evil.test/x)"/></svg>`,
+    ],
+    ["not-svg", "just text, no markup at all"],
+    ["truncated", `<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/>`],
+    [
+      "doctype",
+      `<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">${clean}`,
+    ],
+  ] as const;
+  for (const [name, markup] of hostile) {
+    const logoRejected = await putBytes("/api/branding/logo", svgBytes(markup), "image/svg+xml");
+    expect([name, logoRejected.status]).toEqual([name, 415]);
+    expect(await logoRejected.json()).toMatchObject({ error: { code: "UNSUPPORTED_LOGO" } });
+    const avatarRejected = await putBytes("/api/profile/avatar", svgBytes(markup), "image/svg+xml");
+    expect([name, avatarRejected.status]).toEqual([name, 415]);
+    expect(await avatarRejected.json()).toMatchObject({ error: { code: "UNSUPPORTED_AVATAR" } });
+  }
+  // Type/bytes cross-mismatch still fenced both directions.
+  expect((await putBytes("/api/branding/logo", cleanBytes, "image/png")).status).toBe(415);
+  expect((await putBytes("/api/profile/avatar", imageBytes("image/png"), "image/svg+xml")).status).toBe(415);
+  // Rejected uploads store nothing: the last accepted logo is still the prolog SVG.
+  const kept = await call("/api/branding/logo");
+  expect(kept.status).toBe(200);
+  expect(new Uint8Array(await kept.arrayBuffer())).toEqual(prologBytes);
+  // SVG rides the same byte caps and empty-body fence as raster.
+  const oversized = svgBytes(clean.repeat(Math.ceil((BRANDING_LOGO_MAX_BYTES + 1) / clean.length)));
+  const logoHuge = await putBytes("/api/branding/logo", oversized, "image/svg+xml");
+  expect(logoHuge.status).toBe(413);
+  expect(await logoHuge.json()).toMatchObject({ error: { code: "LOGO_TOO_LARGE" } });
+  const avatarHuge = await putBytes("/api/profile/avatar", oversized, "image/svg+xml");
+  expect(avatarHuge.status).toBe(413);
+  expect(await avatarHuge.json()).toMatchObject({ error: { code: "AVATAR_TOO_LARGE" } });
+  expect((await putBytes("/api/branding/logo", new Uint8Array(0), "image/svg+xml")).status).toBe(400);
+  expect((await putBytes("/api/profile/avatar", new Uint8Array(0), "image/svg+xml")).status).toBe(400);
+});
+
 it("fails byte writes loudly when R2 is unbound, and degrades reads", async () => {
   const caller = { userId: ADMIN_USER, orgId: ORG };
   const bytes = imageBytes("image/png");
