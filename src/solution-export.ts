@@ -49,6 +49,7 @@ import {
   ninjaSaga,
   NINJA_INTEGRATION_ID,
   object,
+  onboardingSaga,
   smokeSaga,
   UUID,
 } from "./domain";
@@ -148,6 +149,7 @@ const CODE_SAGAS: readonly CodeSagaPin[] = Object.freeze([
   { ...helloParentSaga, requiredIntegrations: Object.freeze([]) },
   { ...cloudflareVerifySaga, requiredIntegrations: Object.freeze([CLOUDFLARE_INTEGRATION_ID]) },
   { ...cloudflareInventorySaga, requiredIntegrations: Object.freeze([CLOUDFLARE_INTEGRATION_ID]) },
+  { ...onboardingSaga, requiredIntegrations: Object.freeze([]) },
 ]);
 
 /** Node-safe static catalogs: no Workflows runtime import, so plain-node

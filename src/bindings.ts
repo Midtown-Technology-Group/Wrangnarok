@@ -65,6 +65,7 @@ export interface Bindings
   HELLO_PARENT_WORKFLOW: Workflow<ExecutionParams>;
   CLOUDFLARE_VERIFY_WORKFLOW: Workflow<ExecutionParams>;
   CLOUDFLARE_INVENTORY_WORKFLOW: Workflow<ExecutionParams>;
+  ONBOARDING_WORKFLOW: Workflow<ExecutionParams>;
   ASSETS?: Fetcher;
   /** TRG-02 (issue #138, ADR 018): JSON object mapping endpoint ID to its
    * raw webhook HMAC secret. Populated from the deployment secret store in

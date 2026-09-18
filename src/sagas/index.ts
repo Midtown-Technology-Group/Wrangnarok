@@ -32,6 +32,7 @@ import { helloParentSagaDef, HelloParentWorkflow } from "./hello-parent";
 import { helloSagaDef, HelloWorkflow } from "./hello";
 import { echoSagaDef, EchoWorkflow } from "./echo";
 import { ninjaOrgsSagaDef, NinjaOrgsWorkflow } from "./ninjaorgs";
+import { onboardingSagaDef, OnboardingWorkflow } from "./onboarding";
 import { smokeSagaDef, SmokeWorkflow } from "./smoke";
 
 export { SAGA_DEFINITIONS };
@@ -41,6 +42,7 @@ export { helloParentSagaDef, HelloParentWorkflow };
 export { helloSagaDef, HelloWorkflow };
 export { echoSagaDef, EchoWorkflow };
 export { ninjaOrgsSagaDef, NinjaOrgsWorkflow };
+export { onboardingSagaDef, OnboardingWorkflow };
 export { smokeSagaDef, SmokeWorkflow };
 
 /** Static Git-owned Catalog (ADR 002): duplicate stable IDs or names throw at

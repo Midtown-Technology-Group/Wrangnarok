@@ -49,6 +49,9 @@ export interface SagaSummary {
   /** Stable Integration IDs this Saga requires in its Organization context
    * (ADR 010 section 3): discovery only, no endpoints or credentials. */
   requiredIntegrations: string[];
+  /** Semantic capability names this Saga requires (issue #262): discovery
+   * only. Absent on older payloads; the server always sends it. */
+  requiredCapabilities?: string[];
   inputSchema?: unknown;
   outputSchema?: unknown;
 }

@@ -401,6 +401,9 @@ export interface SdkSaga {
   readonly category?: string;
   readonly tags?: readonly string[];
   readonly requiredIntegrations: readonly string[];
+  /** Semantic capability names this Saga requires (issue #262): discovery
+   * only. Older payloads without it read as empty. */
+  readonly requiredCapabilities: readonly string[];
   readonly inputSchema?: IoSchema;
   readonly outputSchema?: IoSchema;
 }
@@ -633,7 +636,8 @@ function isSaga(value: unknown): value is SdkSaga {
     typeof value.description === "string" &&
     (value.category === undefined || typeof value.category === "string") &&
     (value.tags === undefined || isStringArray(value.tags)) &&
-    isStringArray(value.requiredIntegrations)
+    isStringArray(value.requiredIntegrations) &&
+    (value.requiredCapabilities === undefined || isStringArray(value.requiredCapabilities))
   );
 }
 
@@ -642,7 +646,10 @@ export function parseSagaCatalog(value: unknown): readonly SdkSaga[] {
   if (!isRecord(value) || !Array.isArray(value.sagas) || !value.sagas.every(isSaga)) {
     throw new SdkError("SDK_CLIENT_MISMATCH", "The Saga catalog has an unexpected shape.");
   }
-  return value.sagas;
+  return value.sagas.map((entry) => ({
+    ...entry,
+    requiredCapabilities: entry.requiredCapabilities ?? [],
+  }));
 }
 
 function isOperation(value: unknown): value is SdkOperation {

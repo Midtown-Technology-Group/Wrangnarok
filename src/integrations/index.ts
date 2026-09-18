@@ -9,12 +9,15 @@
 // non-secret endpoint; decrypted material only ever exists transiently
 // inside server-side execution (see ADR 005, Proposed).
 import {
+  AD_INTEGRATION_ID,
   ANTHROPIC_INTEGRATION_ID,
   CLOUDFLARE_API_BASE,
   CLOUDFLARE_INTEGRATION_ID,
   ECHO_INTEGRATION_ID,
   Fault,
   GOOGLE_INTEGRATION_ID,
+  GOOGLEWORKSPACE_INTEGRATION_ID,
+  GRAPH_INTEGRATION_ID,
   HALO_INTEGRATION_ID,
   NINJA_INTEGRATION_ID,
   object,
@@ -165,8 +168,15 @@ export interface EndpointPolicy {
   readonly allowLoopback: boolean;
   /** Only the https scheme is usable (ninjaone). */
   readonly requireHttps: boolean;
-  /** Allowed hostname suffixes; empty means any public hostname. */
+  /** Allowed hostname suffixes; empty means any public hostname. Suffixes
+   * must be dot-prefixed (".example.com") unless the entry is a complete
+   * registrable host the vendor actually serves — a bare "example.com"
+   * also matches "evilexample.com". */
   readonly allowedSuffixes: readonly string[];
+  /** Exact vendor hostnames usable in addition to the suffix rule, for
+   * single-host vendor APIs where no safe suffix exists
+   * ("graph.microsoft.com" must not admit "evilgraph.microsoft.com"). */
+  readonly exactHosts?: readonly string[];
   /** Only loopback hosts are usable: the Integration serves a local fixture,
    * never a public host (echo). */
   readonly loopbackOnly: boolean;
@@ -227,6 +237,37 @@ function endpointPolicyFor(integrationName: string): EndpointPolicy | null {
       loopbackOnly: false,
     };
   }
+  // Capability-proof identity Integrations (issue #262): fixture HTTPS
+  // origins only in the proof slice. Graph admits its public host plus the
+  // never-routable `.invalid` test seam; Google admits its public API host
+  // plus the seam; the AD directory descriptor admits the seam only (an
+  // on-prem directory has no public vendor host to pin). Vendor HTTP is
+  // intercepted in tests, so seam rows can never reach a real host.
+  if (integrationName === "graph") {
+    return {
+      allowLoopback: false,
+      requireHttps: true,
+      allowedSuffixes: [".invalid"],
+      exactHosts: ["graph.microsoft.com"],
+      loopbackOnly: false,
+    };
+  }
+  if (integrationName === "googleworkspace") {
+    return {
+      allowLoopback: false,
+      requireHttps: true,
+      allowedSuffixes: [".googleapis.com", ".invalid"],
+      loopbackOnly: false,
+    };
+  }
+  if (integrationName === "ad") {
+    return {
+      allowLoopback: false,
+      requireHttps: true,
+      allowedSuffixes: [".invalid"],
+      loopbackOnly: false,
+    };
+  }
   // Unknown Integrations fail closed instead of inheriting another vendor's
   // allowlist (issue #236): a new Integration declares its own endpoint
   // policy here before its Connections can persist.
@@ -281,6 +322,7 @@ function checkEndpointUrl(integrationName: string, raw: string): EndpointFailure
   if (policy.requireHttps && url.protocol !== "https:") {
     return { code: "INVALID_SCHEME", message: `Config field "endpoint" must use https.` };
   }
+  if (policy.exactHosts?.includes(host)) return null;
   if (policy.allowedSuffixes.length > 0 && !policy.allowedSuffixes.some((suffix) => host.endsWith(suffix))) {
     return {
       code: "ENDPOINT_NOT_ALLOWED",
@@ -631,6 +673,74 @@ export const cloudflareIntegrationDef = defineIntegration({
   },
 });
 
+/** Capability-proof identity Integration definitions (issue #262, ADR TBD
+ * §3): every provider reachable through a Capability first exists as an
+ * ordinary Integration with direct-callable Actions. The proof slice carries
+ * no vendor OAuth (fixture HTTPS, mocked in tests); production use needs an
+ * OAuth slice per Integration before it can authenticate. */
+export const graphIntegrationDef = defineIntegration({
+  id: GRAPH_INTEGRATION_ID,
+  name: "graph",
+  description: "Microsoft Entra identity over Graph: users, group assignment, mailbox provisioning.",
+  secretFields: [],
+  configSchema: [
+    {
+      name: "endpoint",
+      type: "string",
+      required: true,
+      maxLength: CONNECTION_CONFIG_MAX_LENGTH,
+      description: "Graph API origin (for example https://graph.microsoft.com).",
+    },
+  ],
+  requiredSecrets: [],
+  secretEnvVars: {},
+  health: {
+    testHint: "Run the connectivity test, then submit the onboarding proof against this directory.",
+    remediation: "Confirm the Graph origin, then re-test before submitting work.",
+  },
+});
+export const googleworkspaceIntegrationDef = defineIntegration({
+  id: GOOGLEWORKSPACE_INTEGRATION_ID,
+  name: "googleworkspace",
+  description: "Google Workspace identity over the Admin SDK: users, group assignment, mailbox provisioning.",
+  secretFields: [],
+  configSchema: [
+    {
+      name: "endpoint",
+      type: "string",
+      required: true,
+      maxLength: CONNECTION_CONFIG_MAX_LENGTH,
+      description: "Google API origin (for example https://admin.googleapis.com).",
+    },
+  ],
+  requiredSecrets: [],
+  secretEnvVars: {},
+  health: {
+    testHint: "Run the connectivity test, then submit the onboarding proof against this directory.",
+    remediation: "Confirm the Google API origin, then re-test before submitting work.",
+  },
+});
+export const adIntegrationDef = defineIntegration({
+  id: AD_INTEGRATION_ID,
+  name: "ad",
+  description: "On-prem Active Directory descriptor: directory identity reached through the NinjaOne Transport.",
+  secretFields: [],
+  configSchema: [
+    {
+      name: "endpoint",
+      type: "string",
+      required: true,
+      maxLength: CONNECTION_CONFIG_MAX_LENGTH,
+      description: "Directory descriptor URL naming the on-prem directory (fixture HTTPS in the proof slice).",
+    },
+  ],
+  requiredSecrets: [],
+  secretEnvVars: {},
+  health: {
+    testHint: "Run the connectivity test, then submit the onboarding proof against this directory.",
+    remediation: "Confirm the directory descriptor and the NinjaOne Transport Connection, then re-test.",
+  },
+});
 /** All Integration definitions, in canonical order. Add new Integrations here. */
 export const INTEGRATION_DEFINITIONS: readonly IntegrationDefinition[] = Object.freeze([
   echoIntegrationDef,
@@ -642,6 +752,9 @@ export const INTEGRATION_DEFINITIONS: readonly IntegrationDefinition[] = Object.
   openrouterIntegrationDef,
   openaiCompatibleIntegrationDef,
   cloudflareIntegrationDef,
+  graphIntegrationDef,
+  googleworkspaceIntegrationDef,
+  adIntegrationDef,
 ]);
 
 export function integrationById(id: string): IntegrationDefinition | undefined {

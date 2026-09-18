@@ -44,6 +44,7 @@ import migration34 from "../migrations/0034_branding_profile.sql?raw";
 import migration35 from "../migrations/0035_embeds.sql?raw";
 import migration36 from "../migrations/0036_anon_app_embeds.sql?raw";
 import migration37 from "../migrations/0037_executions_org_fk_drop.sql?raw";
+import migration38 from "../migrations/0038_capability_resolution.sql?raw";
 
 const bindings = env as unknown as Bindings;
 
@@ -83,6 +84,7 @@ const CHAIN = [
   migration34,
   migration35,
   migration36,
+  migration38,
 ];
 
 // Issue #493: the 0037 repair is applied explicitly per test (after optional
@@ -213,4 +215,78 @@ it("child lineage statements run on the fully migrated schema", async () => {
     .bind("parent-1", "org-1", "user-1")
     .first<{ id: string }>();
   expect(row?.id).toBe("exec-1");
+});
+
+it("0038 lands capability assignments, entity mappings, and frozen resolutions", async () => {
+  // Deleting a Connection cascades its assignments and mappings (ADR TBD
+  // §2); frozen Execution bindings survive as audit.
+  const now = new Date().toISOString();
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "org").run();
+  await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
+    .bind("conn-1", "org-1", "0606e237-137b-4629-8346-85468e1c2df6", "https://ninja-in-test.invalid/api")
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO capability_assignments(org_id,capability,connection_id,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+  )
+    .bind("org-1", "identity.primary", "conn-1", 1, now, now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO external_entity_mappings(id,org_id,connection_id,entity_id,is_primary,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("map-1", "org-1", "conn-1", "vendor-7", 1, "manual", now, now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("exec-1", "saga", "saga", "r1", "org-1", "user-1", "{}", now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO capability_resolutions(execution_id,capability,connection_id,endpoint,integration_id,integration_revision,adapter_id,adapter_revision,transport,operation,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      "exec-1",
+      "identity.primary",
+      "conn-1",
+      "https://ninja-in-test.invalid/api",
+      "0606e237-137b-4629-8346-85468e1c2df6",
+      "ninjaone",
+      "ad-identity-v1",
+      "ad-identity-v1",
+      "ninjaone",
+      "identity-provision-v1",
+      now,
+    )
+    .run();
+  // The child tables cascade off connections in DDL (verified below);
+  // the module additionally deletes explicitly — belt beside the FK
+  // cascade, same posture as connection_secrets/oauth_tokens. This test
+  // deletes through the parent only, so the cascade itself is what the
+  // assertions observe. Frozen Execution bindings survive either way.
+  for (const table of ["capability_assignments", "external_entity_mappings"]) {
+    const ddl = await bindings.DB.prepare("SELECT sql FROM sqlite_master WHERE name=?")
+      .bind(table)
+      .first<{ sql: string }>();
+    expect(ddl?.sql).toMatch(/REFERENCES connections\(id\) ON DELETE CASCADE/);
+  }
+  const identity = await bindings.DB.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='index' AND name='external_entity_mappings_identity'",
+  )
+    .bind()
+    .first<{ sql: string }>();
+  expect(identity?.sql).toMatch(/UNIQUE/);
+  await bindings.DB.prepare("DELETE FROM connections WHERE id=?").bind("conn-1").run();
+  const assignment = await bindings.DB.prepare("SELECT capability FROM capability_assignments WHERE org_id=?")
+    .bind("org-1")
+    .first();
+  expect(assignment).toBeNull();
+  const mapping = await bindings.DB.prepare("SELECT id FROM external_entity_mappings WHERE org_id=?")
+    .bind("org-1")
+    .first();
+  expect(mapping).toBeNull();
+  const frozen = await bindings.DB.prepare(
+    "SELECT adapter_id,transport FROM capability_resolutions WHERE execution_id=?",
+  )
+    .bind("exec-1")
+    .first<{ adapter_id: string; transport: string }>();
+  expect(frozen).toMatchObject({ adapter_id: "ad-identity-v1", transport: "ninjaone" });
 });

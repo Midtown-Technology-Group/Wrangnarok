@@ -1,0 +1,45 @@
+# CON-262 implementation lane scope (issue #262): capability-based Connection
+# resolution per ADR TBD (PR #485). Organization-scoped CapabilityAssignments
+# plus ExternalEntityMappings, lazy-on-first-use central resolver with frozen
+# Execution metadata, thin identity Adapters (Graph direct, Google direct, AD
+# via NinjaOne Transport), one Employee Onboarding proving Saga, operator
+# routes plus readiness reporting. No new Cloudflare primitive (one more
+# Workflow binding on the earned primitive); no authz model change (existing
+# caller/admin posture reused).
+migrations/0038_capability_resolution.sql
+src/domain.ts
+src/capabilities.ts
+src/adapters/identity.ts
+src/integrations/index.ts
+src/integrations/graph.ts
+src/integrations/googleworkspace.ts
+src/integrations/ad.ts
+src/saga.ts
+src/saga-helpers.ts
+src/sagas/onboarding.ts
+src/sagas/definitions.ts
+src/sagas/index.ts
+src/executions.ts
+src/bindings.ts
+src/connections.ts
+src/index.ts
+src/sdk.ts
+src/solutions.ts
+src/solution-export.ts
+wrangler.jsonc
+sagas.manifest.json
+client/src/lib/client-types.ts
+test/capabilities.test.ts
+test/onboarding.test.ts
+test/capability-operation.test.ts
+test/identity-integrations.test.ts
+test/saga-contract.test.ts
+test/saga-helper-conventions.test.ts
+test/integrations.test.ts
+test/connections.test.ts
+test/ai-01-build.test.ts
+test/sdk.test.ts
+test/solution-export.test.ts
+test/migrations-chain.test.ts
+test/helpers/workflow-harness.ts
+scopes/262-conn-resolution.scope

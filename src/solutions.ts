@@ -46,6 +46,7 @@ import {
   helloSaga,
   ninjaSaga,
   object,
+  onboardingSaga,
   smokeSaga,
   UUID,
 } from "./domain";
@@ -69,6 +70,7 @@ const CODE_SAGAS: readonly CatalogSaga[] = [
   helloParentSaga,
   cloudflareVerifySaga,
   cloudflareInventorySaga,
+  onboardingSaga,
 ];
 
 export interface ManifestSagaPin {

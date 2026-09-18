@@ -438,6 +438,17 @@ export async function deleteConnection(db: D1Database, caller: Principal, integr
     await db.prepare("DELETE FROM connection_secrets WHERE connection_id=?").bind(row.id).run();
   }
   await deleteOAuthTokens(db, row.id);
+  // Capability resolution (issue #262): deleting a Connection deletes its
+  // CapabilityAssignments and ExternalEntityMappings with it (ADR TBD §2).
+  // Frozen Execution bindings (capability_resolutions) survive as audit —
+  // running Executions fail closed on their next capability step instead of
+  // silently following a replacement. Table checks keep pre-0038 chains green.
+  try {
+    await db.prepare("DELETE FROM capability_assignments WHERE connection_id=?").bind(row.id).run();
+    await db.prepare("DELETE FROM external_entity_mappings WHERE connection_id=?").bind(row.id).run();
+  } catch {
+    // Pre-0038 stores have neither table: the mapping is already gone.
+  }
   await db
     .prepare("DELETE FROM connections WHERE org_id=? AND integration_id=?")
     .bind(caller.orgId, integrationId)
@@ -609,6 +620,24 @@ export async function testConnection(
         return { ok: false, checkedAt, code: "CONNECTION_TEST_FAILED", detail: def.health.remediation };
       }
       return { ok: true, checkedAt, detail: "The token endpoint answered." };
+    }
+    // Capability-proof identity Integrations (issue #262): origin
+    // reachability probe only, mirroring the AI-provider posture. The proof
+    // slice carries no vendor credential (requiredSecrets is empty, so the
+    // gate above passes through); any non-5xx proves reachability, and no
+    // listing, mutation, or persistence happens here.
+    if (def.name === "graph" || def.name === "googleworkspace" || def.name === "ad") {
+      const response = await fetchImpl(row.endpoint, {
+        method: "HEAD",
+        redirect: "manual",
+        signal: AbortSignal.timeout(5000),
+        headers: { Accept: "application/json" },
+      });
+      await response.body?.cancel();
+      if (response.status >= 500) {
+        return { ok: false, checkedAt, code: "CONNECTION_TEST_FAILED", detail: def.health.remediation };
+      }
+      return { ok: true, checkedAt, detail: "The directory origin answered." };
     }
     // Cloudflare (MIG-02): token-verify probe only, mirroring the NinjaOne
     // posture. No zone listing, no persistence — a sub-500 from the verify
