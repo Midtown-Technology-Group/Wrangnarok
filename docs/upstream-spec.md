@@ -439,14 +439,18 @@ current local surfaces are lookalikes that MUST NOT be adopted as memory:
 
 **Invariants the build must hold:**
 
-- Owner-only memory access with cross-user denial: no caller can read or
-  delete another user's memory, including through agent tools. The
-  memory-through-tools isolation test must mirror §18 caller-scoped
-  resolution + listable-equals-executable (deny-by-default agent grants).
+- Owner-only memory access with cross-user denial: no caller can read,
+  delete, or export another user's memory, including through agent tools.
+  Owner/org identity binds exclusively to the server-derived
+  `Principal{userId, orgId}` — caller-supplied owner or organization
+  identifiers are rejected. The memory-through-tools isolation test must
+  mirror §18 caller-scoped resolution + listable-equals-executable
+  (deny-by-default agent grants).
 - Platform enablement plus per-user opt-out with *effective* disablement:
   a disabled user gets no memory reads/writes surfacing anywhere.
-- Deletion/retention semantics: hard delete and export on request; the
-  retention rule must state what disablement deletes vs keeps.
+- Deletion/retention semantics: hard delete and export on request (export
+  is owner-scoped under the same Principal binding); the retention rule
+  must state what disablement deletes vs keeps.
 - Deterministic composition with exact expected output: global < org <
   memory-section precedence, clearing behavior (later sections clearing
   earlier named ones), every composed section carrying source + revision.
@@ -455,6 +459,13 @@ current local surfaces are lookalikes that MUST NOT be adopted as memory:
   is revalidated on read.
 - Org switching re-scopes memory reads to the *current* org; memory rows
   key `(org_id, user_id)` against the `Principal{userId, orgId}` caller.
+- Required-instruction authorization (exact roles are a build-time ADR
+  decision, not pinned here): management (create/update/clear) is
+  restricted to authorized principals per scope; reads resolve only
+  within the caller's current org (plus the global tier only if the
+  ADR-031 amendment lands it); org switching re-scopes instruction reads
+  to the new org with no carryover from the previous org and no implicit
+  cross-org fallback.
 
 **Wrangnarök implication (AI-06, blocked):** Consent-flag schema, owner-only
 CRUD, cross-user/org denial, deterministic composer unit tests, and
