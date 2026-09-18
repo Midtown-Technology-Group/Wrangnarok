@@ -1,6 +1,6 @@
 # ADR 030: Vectorize as the semantic index for Wrangnarok knowledge
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-18; owner decision recorded on issue #168)
 - **Date:** 2026-09-12
 - **Implements:** AI-05 / AI-06 knowledge-memory direction
 - **Related:** ADR 001 (Execution model), ADR 003 (Integrations/Connections), ADR 022 (OpenAPI Code Mode), ADR 041/AI-02 agent-runtime direction when merged (renumbered from 023 by issue #225)
