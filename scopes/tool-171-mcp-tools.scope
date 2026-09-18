@@ -1,0 +1,23 @@
+# TOOL-02 implementation lane scope (issue #171): connect external MCP
+# servers with org tools and per-user consent (scout slices S1-S4).
+# New modules own the feature; shared touch points are listed explicitly.
+# Migration 0041 is the next free number (steward sign-off requested in
+# the PR); ADR 044 is the next free ADR number. Never touches sibling
+# checkouts or docs/architecture/03x-042 files.
+scopes/tool-171-mcp-tools.scope
+migrations/0041_mcp_external.sql
+src/mcp-servers.ts
+src/mcp-connections.ts
+src/mcp-catalog.ts
+src/mcp-tokens.ts
+src/mcp-auth.ts
+src/mcp-dispatch.ts
+src/mcp-consent.ts
+src/index.ts
+test/mcp-servers.test.ts
+test/mcp-connections.test.ts
+test/mcp-auth-resolution.test.ts
+test/mcp-external-dispatch.test.ts
+test/helpers/workflow-harness.ts
+docs/architecture/044-external-mcp-servers.md
+docs/architecture/adr-index.md

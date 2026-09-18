@@ -98,6 +98,31 @@ import { indexOperations, inspectOperation, searchOperations } from "./openapi";
 import type { CodeModeProvenance } from "./openapi";
 import { toolRegistry } from "./tools";
 import {
+  authorizeMcpUserConsent,
+  completeMcpUserConsent,
+  connectMcpServiceCredential,
+  disconnectMcpUserConsentSelf,
+} from "./mcp-consent";
+import {
+  createMcpConnection,
+  deleteMcpConnection,
+  getMcpConnection,
+  listMcpConnections,
+  putMcpConnectionClientSecret,
+  updateMcpConnection,
+} from "./mcp-connections";
+import { listMcpCatalog, setMcpCatalogToolEnabled } from "./mcp-catalog";
+import { dispatchMcpTool, refreshMcpTools } from "./mcp-dispatch";
+import {
+  createMcpServerTemplate,
+  deleteMcpServerTemplate,
+  getMcpServerTemplate,
+  listMcpServerTemplates,
+  setMcpServerTemplateActive,
+  updateMcpServerTemplate,
+} from "./mcp-servers";
+import { disconnectMcpServiceCredential, readMcpUserConsent } from "./mcp-tokens";
+import {
   boundedJson,
   canTransition,
   classifyTerminateError,
@@ -337,6 +362,7 @@ import {
   deletePreview,
   getOrgSummary,
   inviteMember,
+  isViewer,
   listMembers,
   listOrgs,
   listOrgHistory,
@@ -1713,6 +1739,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // TOOL-01 Code Mode search (issue #170): ?integration= + ?q= through the
     // route's own allowlisted parser below.
     const openapiSearch = request.method === "GET" && url.pathname === "/api/openapi/search";
+    // TOOL-02 outbound MCP (issue #171): ?include_inactive= on the template
+    // reads and ?hard= on template delete ride the routes' own allowlisted
+    // parsers below.
+    const mcpQueryList =
+      (request.method === "GET" && url.pathname === "/api/mcp-servers") ||
+      (request.method === "GET" && /^\/api\/mcp-servers\/[0-9a-f-]{36}$/.test(url.pathname)) ||
+      (request.method === "DELETE" && /^\/api\/mcp-servers\/[0-9a-f-]{36}$/.test(url.pathname));
     // TRG-01 delivery visibility (issue #137): ?window= through the route's
     // own allowlisted parser below.
     const scheduleDeliveriesRead =
@@ -1739,7 +1772,8 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       !isPolicyConsumers &&
       !openapiSearch &&
       !scheduleDeliveriesRead &&
-      !subscriptionDeliveriesRead
+      !subscriptionDeliveriesRead &&
+      !mcpQueryList
     )
       throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
     if (isOrgPath) {
@@ -4553,6 +4587,391 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         const message = error instanceof Fault ? error.message : "The tool execution failed.";
         return json(scrubConnectionPayload(mcpResult(envelope.id, { error: { code, message } }), env));
       }
+    }
+    // TOOL-02 outbound MCP servers (issue #171, ADR 044): portable
+    // templates, per-Organization Connections, verbatim tool catalog,
+    // per-user consent, and single-call dispatch. Reads ride the membership
+    // gate; management writes are admin-only (platform-tier template rows
+    // additionally need an instance admin, enforced in the module);
+    // per-user consent is self-service; dispatch denies viewers through
+    // the AUTH-02 read-only ceiling. Token values never appear in any
+    // response — views carry provisioned flags, never material.
+    const mcpAdmin = (what: string): void => {
+      if (!isAdminCaller(ctx)) throw new Fault(403, "MCP_FORBIDDEN", `Only an admin may ${what}.`);
+    };
+    if (url.pathname === "/api/mcp-servers" && request.method === "GET") {
+      const keys = [...url.searchParams.keys()];
+      if (keys.some((key) => key !== "include_inactive")) {
+        throw new Fault(400, "UNSUPPORTED_QUERY", "Only ?include_inactive= is supported here.");
+      }
+      const servers = await listMcpServerTemplates(env.DB, caller, url.searchParams.get("include_inactive") !== "1");
+      return json(scrubConnectionPayload({ servers }, env));
+    }
+    if (url.pathname === "/api/mcp-servers" && request.method === "POST") {
+      requireJson(request);
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      if (body.orgId === undefined || body.orgId === null) {
+        if (!ctx.isInstanceAdmin)
+          throw new Fault(403, "MCP_ADMIN_ONLY", "Platform-level MCP servers need an instance admin.");
+      } else {
+        mcpAdmin("manage MCP servers");
+      }
+      const server = await createMcpServerTemplate(env.DB, caller, { isInstanceAdmin: ctx.isInstanceAdmin }, body);
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-server.create",
+        { type: "mcp-server", id: server.id },
+        "success",
+        { name: server.name },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ server }, env), 201);
+    }
+    const mcpServerOne = /^\/api\/mcp-servers\/([0-9a-f-]{36})$/.exec(url.pathname);
+    if (mcpServerOne?.[1] && request.method === "GET") {
+      const keys = [...url.searchParams.keys()];
+      if (keys.some((key) => key !== "include_inactive")) {
+        throw new Fault(400, "UNSUPPORTED_QUERY", "Only ?include_inactive= is supported here.");
+      }
+      const server = await getMcpServerTemplate(
+        env.DB,
+        caller,
+        mcpServerOne[1],
+        url.searchParams.get("include_inactive") === "1",
+      );
+      return json(scrubConnectionPayload({ server }, env));
+    }
+    if (mcpServerOne?.[1] && request.method === "POST") {
+      requireJson(request);
+      if (!ctx.isInstanceAdmin) mcpAdmin("manage MCP servers");
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const server = await updateMcpServerTemplate(
+        env.DB,
+        caller,
+        { isInstanceAdmin: ctx.isInstanceAdmin },
+        mcpServerOne[1],
+        body,
+      );
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-server.update",
+        { type: "mcp-server", id: server.id },
+        "success",
+        { name: server.name },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ server }, env));
+    }
+    const mcpServerToggle = /^\/api\/mcp-servers\/([0-9a-f-]{36})\/(disable|enable)$/.exec(url.pathname);
+    if (mcpServerToggle?.[1] && mcpServerToggle[2] && request.method === "POST") {
+      rejectQuery(url);
+      if (!ctx.isInstanceAdmin) mcpAdmin("manage MCP servers");
+      const server = await setMcpServerTemplateActive(
+        env.DB,
+        caller,
+        { isInstanceAdmin: ctx.isInstanceAdmin },
+        mcpServerToggle[1],
+        mcpServerToggle[2] === "enable",
+      );
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-server.toggle",
+        { type: "mcp-server", id: server.id },
+        "success",
+        { active: server.isActive },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ server }, env));
+    }
+    if (mcpServerOne?.[1] && request.method === "DELETE") {
+      const keys = [...url.searchParams.keys()];
+      if (keys.some((key) => key !== "hard")) {
+        throw new Fault(400, "UNSUPPORTED_QUERY", "Only ?hard= is supported here.");
+      }
+      if (!ctx.isInstanceAdmin) mcpAdmin("manage MCP servers");
+      const deleted = await deleteMcpServerTemplate(
+        env.DB,
+        caller,
+        { isInstanceAdmin: ctx.isInstanceAdmin },
+        mcpServerOne[1],
+        url.searchParams.get("hard") === "true",
+      );
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-server.delete",
+        { type: "mcp-server", id: deleted.id },
+        "success",
+        { hard: deleted.hard },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ deleted }, env));
+    }
+    if (url.pathname === "/api/mcp-connections" && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ connections: await listMcpConnections(env.DB, caller) }, env));
+    }
+    if (url.pathname === "/api/mcp-connections" && request.method === "POST") {
+      requireJson(request);
+      mcpAdmin("manage MCP Connections");
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const connection = await createMcpConnection(env.DB, caller, body);
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-connection.create",
+        { type: "mcp-connection", id: connection.id },
+        "success",
+        { serverId: connection.serverId },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ connection }, env), 201);
+    }
+    const mcpConnOne = /^\/api\/mcp-connections\/([0-9a-f-]{36})$/.exec(url.pathname);
+    if (mcpConnOne?.[1] && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ connection: await getMcpConnection(env.DB, caller, mcpConnOne[1]) }, env));
+    }
+    if (mcpConnOne?.[1] && request.method === "POST") {
+      requireJson(request);
+      mcpAdmin("manage MCP Connections");
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const connection = await updateMcpConnection(env.DB, caller, mcpConnOne[1], body);
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-connection.update",
+        { type: "mcp-connection", id: connection.id },
+        "success",
+        { serverId: connection.serverId },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ connection }, env));
+    }
+    if (mcpConnOne?.[1] && request.method === "DELETE") {
+      rejectQuery(url);
+      mcpAdmin("manage MCP Connections");
+      const deleted = await deleteMcpConnection(env.DB, caller, mcpConnOne[1]);
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-connection.delete",
+        { type: "mcp-connection", id: deleted.id },
+        "success",
+        {},
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ deleted }, env));
+    }
+    const mcpConnSecret = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/client-secret$/.exec(url.pathname);
+    if (mcpConnSecret?.[1] && request.method === "PUT") {
+      requireJson(request);
+      mcpAdmin("manage MCP Connections");
+      const body = (await boundedJson(request.body)) as { secret?: unknown };
+      const connection = await putMcpConnectionClientSecret(
+        env.DB,
+        caller,
+        mcpConnSecret[1],
+        body.secret,
+        env.SECRETS_KEK,
+      );
+      return json(scrubConnectionPayload({ connection }, env));
+    }
+    const mcpServiceConnect = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/service-connect$/.exec(url.pathname);
+    if (mcpServiceConnect?.[1] && request.method === "POST") {
+      requireJson(request);
+      mcpAdmin("manage MCP Connections");
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const state = await connectMcpServiceCredential(
+        env.DB,
+        caller,
+        { connectionId: mcpServiceConnect[1], scope: body.scope },
+        env,
+      );
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-service.connect",
+        { type: "mcp-connection", id: mcpServiceConnect[1] },
+        "success",
+        { generation: state.generation },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ service: state }, env));
+    }
+    const mcpServiceDrop = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/service$/.exec(url.pathname);
+    if (mcpServiceDrop?.[1] && request.method === "DELETE") {
+      rejectQuery(url);
+      mcpAdmin("manage MCP Connections");
+      const disconnected = await disconnectMcpServiceCredential(env.DB, caller.orgId, mcpServiceDrop[1]);
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-service.disconnect",
+        { type: "mcp-connection", id: mcpServiceDrop[1] },
+        "success",
+        {},
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload(disconnected, env));
+    }
+    const mcpRefresh = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/refresh-tools$/.exec(url.pathname);
+    if (mcpRefresh?.[1] && request.method === "POST") {
+      rejectQuery(url);
+      mcpAdmin("manage MCP Connections");
+      const summary = await refreshMcpTools(env.DB, caller.orgId, mcpRefresh[1], env.SECRETS_KEK, {
+        ...(env.OAUTH_REFRESH_FENCE === undefined ? {} : { fence: env.OAUTH_REFRESH_FENCE }),
+      });
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-tools.refresh",
+        { type: "mcp-connection", id: mcpRefresh[1] },
+        "success",
+        summary,
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ catalog: summary }, env));
+    }
+    const mcpTools = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/tools$/.exec(url.pathname);
+    if (mcpTools?.[1] && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ tools: await listMcpCatalog(env.DB, caller, mcpTools[1]) }, env));
+    }
+    const mcpToolToggle =
+      /^\/api\/mcp-connections\/([0-9a-f-]{36})\/tools\/([A-Za-z][A-Za-z0-9_.-]{0,127})\/(disable|enable)$/.exec(
+        url.pathname,
+      );
+    if (mcpToolToggle?.[1] && mcpToolToggle[2] && mcpToolToggle[3] && request.method === "POST") {
+      rejectQuery(url);
+      mcpAdmin("manage MCP Connections");
+      const tool = await setMcpCatalogToolEnabled(
+        env.DB,
+        caller,
+        mcpToolToggle[1],
+        mcpToolToggle[2],
+        mcpToolToggle[3] === "enable",
+      );
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-tool.toggle",
+        { type: "mcp-connection", id: mcpToolToggle[1] },
+        "success",
+        { tool: tool.toolName, enabled: tool.enabled },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ tool }, env));
+    }
+    const mcpConsentSelf = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/consent$/.exec(url.pathname);
+    if (mcpConsentSelf?.[1] && request.method === "GET") {
+      rejectQuery(url);
+      return json(
+        scrubConnectionPayload(
+          { consent: await readMcpUserConsent(env.DB, caller.orgId, mcpConsentSelf[1], caller.userId) },
+          env,
+        ),
+      );
+    }
+    if (mcpConsentSelf?.[1] && request.method === "DELETE") {
+      rejectQuery(url);
+      const disconnected = await disconnectMcpUserConsentSelf(env.DB, caller, mcpConsentSelf[1]);
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-consent.disconnect",
+        { type: "mcp-connection", id: mcpConsentSelf[1] },
+        "success",
+        {},
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload(disconnected, env));
+    }
+    const mcpAuthorize = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/consent\/authorize$/.exec(url.pathname);
+    if (mcpAuthorize?.[1] && request.method === "POST") {
+      requireJson(request);
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const authorization = await authorizeMcpUserConsent(env.DB, caller, {
+        connectionId: mcpAuthorize[1],
+        authorizeEndpoint: body.authorizeEndpoint,
+        redirectUri: body.redirectUri,
+        scope: body.scope,
+      });
+      return json(scrubConnectionPayload({ authorization }, env));
+    }
+    const mcpCallback = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/consent\/callback$/.exec(url.pathname);
+    if (mcpCallback?.[1] && request.method === "POST") {
+      requireJson(request);
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      try {
+        const consent = await completeMcpUserConsent(
+          env.DB,
+          caller,
+          {
+            connectionId: mcpCallback[1],
+            code: body.code,
+            state: body.state,
+            expectedState: body.expectedState,
+            error: body.error,
+            errorDescription: body.errorDescription,
+            codeVerifier: body.codeVerifier,
+            redirectUri: body.redirectUri,
+            scope: body.scope,
+          },
+          env,
+        );
+        await recordAudit(
+          env.DB,
+          caller,
+          "mcp-consent.grant",
+          { type: "mcp-connection", id: mcpCallback[1] },
+          "success",
+          { generation: consent.generation },
+          deploymentSecretsFromEnv(env),
+        );
+        return json(scrubConnectionPayload({ consent }, env));
+      } catch (error) {
+        await recordAudit(
+          env.DB,
+          caller,
+          "mcp-consent.grant",
+          { type: "mcp-connection", id: mcpCallback[1] },
+          "failure",
+          { code: error instanceof Fault ? error.code : "INTERNAL_ERROR" },
+          deploymentSecretsFromEnv(env),
+        );
+        throw error;
+      }
+    }
+    const mcpCall = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/tools\/([A-Za-z][A-Za-z0-9_.-]{0,127})\/call$/.exec(
+      url.pathname,
+    );
+    if (mcpCall?.[1] && mcpCall[2] && request.method === "POST") {
+      requireJson(request);
+      // AUTH-02 viewer ceiling composition (ADR 035 addendum): dispatch is
+      // a non-read action, so viewer grants stay inert here the same way
+      // the role evaluator ignores them. AI-02 agent grants attach later
+      // as an additional deny-by-default filter on the same path (P0 D1.3).
+      if (await isViewer(env.DB, caller.orgId, caller.userId)) {
+        throw new Fault(403, "GRANT_REQUIRED", "Dispatching MCP tools requires an operator grant.");
+      }
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const origin = new URL(request.url).origin;
+      const executed = await dispatchMcpTool({
+        db: env.DB,
+        orgId: caller.orgId,
+        caller: { kind: "user", userId: caller.userId },
+        connectionId: mcpCall[1],
+        toolName: mcpCall[2],
+        args: body.arguments,
+        kekMaterial: env.SECRETS_KEK,
+        reauthUrl: `${origin}/api/mcp-connections/${mcpCall[1]}/consent/authorize`,
+        ...(env.OAUTH_REFRESH_FENCE === undefined ? {} : { fence: env.OAUTH_REFRESH_FENCE }),
+      });
+      return json(scrubConnectionPayload({ result: executed.result, provenance: executed.provenance }, env));
     }
     // TRG-02 endpoint management (issue #138, ADR 018): operator-owned
     // inventory over this Organization's scoped endpoints. Create returns
