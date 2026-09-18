@@ -93,6 +93,36 @@ export const cloudflareInventorySaga = Object.freeze({
   description: "Zone Inventory migration: bounded read-only inventory of Cloudflare zones",
 });
 export const CLOUDFLARE_INTEGRATION_ID = "6b0d2a48-1c3e-4d5a-7b9a-4c6e8d0f2a1b";
+// Capability-based Connection resolution (issue #262, ADR TBD): stable
+// Integration identities for the three proving-scenario identity stacks.
+// Never change across source edits. The `ad` Integration holds directory
+// configuration only; execution reaches it through the NinjaOne Transport.
+export const GRAPH_INTEGRATION_ID = "a7c3e5d1-2b4f-4a6c-8e0d-1f3a5b7c9d2e";
+export const GOOGLEWORKSPACE_INTEGRATION_ID = "b8d4f6e2-3c5a-4b7d-9f1e-2a4b6c8d0f3a";
+export const AD_INTEGRATION_ID = "c9e5a7f3-4d6b-4c8e-0a2f-3b5c7d9e1f4b";
+// Employee Onboarding proving Saga (issue #262, ADR TBD §7): one Saga source
+// requests semantic capabilities and runs unmodified across the Entra,
+// AD-via-Ninja, and Google Workspace bindings. Stable identity per ADR 002.
+export const onboardingSaga = Object.freeze({
+  id: "e4b1d2f3-8a5c-4d6e-9f0a-1b2c3d4e5f6a",
+  name: "employee-onboarding",
+  revision: "employee-onboarding-v1",
+  description: "Capability-routed employee onboarding: create identity, assign groups, provision mailbox",
+});
+// Semantic capability names requested by the Onboarding Saga (ADR TBD §1:
+// opaque dotted strings; the name is the whole contract in v1).
+export const IDENTITY_CAPABILITY = "identity.primary";
+export const GROUPS_CAPABILITY = "groups.primary";
+export const MAIL_CAPABILITY = "mail.primary";
+export const ONBOARDING_REQUIRED_CAPABILITIES: readonly string[] = Object.freeze([
+  IDENTITY_CAPABILITY,
+  GROUPS_CAPABILITY,
+  MAIL_CAPABILITY,
+]);
+// Identity-vendor deadline for the capability-routed Actions (same posture
+// as echo/ninjaone: the Integration enforces its own deadline and surfaces
+// a vendor-timeout Fault; failSagaExecution classifies it).
+export const IDENTITY_TIMEOUT_MS = 5000;
 // Disposable smoke Organization (ADR 004): smoke runs here, never against
 // production tenant/Connection data. Seeded in tests; provisioned in dev via
 // the runbook (docs/architecture/004-ci-cd.md).
@@ -513,6 +543,82 @@ export function parseDigestInput(value: unknown): DigestInput {
   }
   return {};
 }
+export interface OnboardingEmployee {
+  readonly givenName: string;
+  readonly familyName: string;
+  readonly userPrincipalName: string;
+}
+export interface OnboardingInput {
+  readonly employee: OnboardingEmployee;
+  readonly groups: readonly string[];
+}
+export interface OnboardingResult {
+  readonly userId: string;
+  readonly userPrincipalName: string;
+  readonly groupsAssigned: readonly string[];
+  readonly mailboxProvisioned: boolean;
+  readonly escapeHatch: { readonly attempted: boolean; readonly applied: boolean };
+}
+const ONBOARDING_NAME_MAX = 128;
+const ONBOARDING_UPN_MAX = 256;
+const ONBOARDING_GROUPS_MAX = 32;
+const ONBOARDING_GROUP_MAX = 128;
+function checkOnboardingName(field: string, value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > ONBOARDING_NAME_MAX) {
+    throw new Fault(400, "INVALID_INPUT", `The onboarding employee ${field} must be 1 to 128 characters.`);
+  }
+  return value;
+}
+/** Parse the Onboarding Saga input: one new-hire identity plus optional
+ * group names. Bounds mirror the hello-name precedent: every accepted value
+ * must fit the D1 result CHECK after JSON escaping, so the parser rejects
+ * rather than truncates. Idempotent over its own output. */
+export function parseOnboardingInput(value: unknown): OnboardingInput {
+  if (!object(value)) {
+    throw new Fault(400, "INVALID_INPUT", "The employee-onboarding Saga takes an employee and optional groups.");
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "employee" && key !== "groups") {
+      throw new Fault(400, "INVALID_INPUT", "The employee-onboarding Saga takes an employee and optional groups.");
+    }
+  }
+  if (!object(record.employee)) {
+    throw new Fault(
+      400,
+      "INVALID_INPUT",
+      "The onboarding employee needs givenName, familyName, and userPrincipalName.",
+    );
+  }
+  const employeeRecord = record.employee as Record<string, unknown>;
+  for (const key of Object.keys(employeeRecord)) {
+    if (key !== "givenName" && key !== "familyName" && key !== "userPrincipalName") {
+      throw new Fault(
+        400,
+        "INVALID_INPUT",
+        "The onboarding employee needs givenName, familyName, and userPrincipalName.",
+      );
+    }
+  }
+  const givenName = checkOnboardingName("givenName", employeeRecord.givenName);
+  const familyName = checkOnboardingName("familyName", employeeRecord.familyName);
+  const upn = employeeRecord.userPrincipalName;
+  if (typeof upn !== "string" || upn.length === 0 || upn.length > ONBOARDING_UPN_MAX || !upn.includes("@")) {
+    throw new Fault(400, "INVALID_INPUT", "The onboarding userPrincipalName must be a 1 to 256 character address.");
+  }
+  const rawGroups = record.groups === undefined ? [] : record.groups;
+  if (!Array.isArray(rawGroups) || rawGroups.length > ONBOARDING_GROUPS_MAX) {
+    throw new Fault(400, "INVALID_INPUT", "The onboarding groups must be at most 32 names.");
+  }
+  const groups: string[] = [];
+  for (const entry of rawGroups) {
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > ONBOARDING_GROUP_MAX) {
+      throw new Fault(400, "INVALID_INPUT", "Each onboarding group must be 1 to 128 characters.");
+    }
+    groups.push(entry);
+  }
+  return { employee: { givenName, familyName, userPrincipalName: upn }, groups };
+}
 // Zone Inventory migration (issues #116 MIG-01, #119 MIG-02): Cloudflare
 // bearer vendor contract. The bundle's Python bounds are preserved verbatim:
 // at most 250 zones, 50 per page, 20s vendor deadline, read-only (no
@@ -670,6 +776,7 @@ const catalog: SagaDef[] = [
   { ...helloParentSaga, parse: parseHelloParentInput },
   { ...cloudflareVerifySaga, parse: parseCloudflareVerifyInput },
   { ...cloudflareInventorySaga, parse: parseCloudflareInventoryInput },
+  { ...onboardingSaga, parse: parseOnboardingInput },
 ];
 export function parseSubmission(value: unknown): { saga: SagaDef; input: unknown } {
   if (

@@ -289,6 +289,16 @@ import {
   updateConnection,
 } from "./connections";
 import {
+  assignCapability,
+  checkReadiness,
+  deleteMapping,
+  listCapabilities,
+  listExecutionBindings,
+  listMappings,
+  removeCapability,
+  upsertMapping,
+} from "./capabilities";
+import {
   createProfile,
   deleteProfile,
   discoverModels,
@@ -427,6 +437,7 @@ export {
   HelloWorkflow,
   NinjaEchoDigestWorkflow,
   NinjaOrgsWorkflow,
+  OnboardingWorkflow,
   SmokeWorkflow,
 } from "./sagas";
 // OAUTH-01 follow-up (issue #149): the cross-instance rotating-refresh fence
@@ -2619,6 +2630,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
               result: op.result_json ? JSON.parse(op.result_json) : null,
               error: op.error_json ? JSON.parse(op.error_json) : null,
             })),
+            // Capability resolution audit (issue #262, ADR TBD §2): the
+            // frozen capability → Connection → Integration revision chain
+            // for this Execution. Empty for Sagas that never route through
+            // a capability, and for stores before migration 0038.
+            capabilityBindings: await listExecutionBindings(env.DB, row.id),
           },
           env,
         ),
@@ -3687,6 +3703,75 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         throw new Fault(403, "CONNECTION_FORBIDDEN", "Only an admin may manage Connections.");
       }
       await deleteConnection(env.DB, caller, connOne[1]);
+      return json({ deleted: true });
+    }
+    // Capability-based Connection resolution (issue #262, ADR TBD slice 6):
+    // administration routes for CapabilityAssignments plus secret-safe
+    // readiness reporting. Same caller/admin posture as the Connection
+    // mapping routes above (org-scoped reads, admin-only writes) — no
+    // authz model change. Views carry ids and names only, never secrets.
+    if (url.pathname === "/api/capabilities" && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ capabilities: await listCapabilities(env.DB, caller) }, env));
+    }
+    if (url.pathname === "/api/capabilities/readiness" && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ capabilities: await checkReadiness(env.DB, caller) }, env));
+    }
+    const capabilityOne = /^\/api\/capabilities\/([A-Za-z0-9.-]{1,128})$/.exec(url.pathname);
+    if (capabilityOne?.[1] && (request.method === "PUT" || request.method === "DELETE")) {
+      // Same admin rule as the Connection mapping writes above (issue #346).
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CAPABILITY_FORBIDDEN", "Only an admin may manage capability bindings.");
+      }
+      if (request.method === "DELETE") {
+        await removeCapability(env.DB, caller, capabilityOne[1]);
+        return json({ deleted: true });
+      }
+      requireJson(request);
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      if (typeof body.integrationId !== "string") {
+        throw new Fault(400, "UNKNOWN_INTEGRATION", "A capability binding needs an integrationId.");
+      }
+      if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+        throw new Fault(400, "INVALID_CAPABILITY", "A capability binding enabled flag must be true or false.");
+      }
+      const bound = await assignCapability(
+        env.DB,
+        caller,
+        capabilityOne[1],
+        body.integrationId,
+        body.enabled === undefined ? true : (body.enabled as boolean),
+      );
+      return json(scrubConnectionPayload({ capability: bound }, env));
+    }
+    // External entity mappings (issue #262): what this Organization is
+    // called inside Vendor X, separate from the Connection and the role
+    // binding. Same caller/admin posture as above.
+    const connMappings = /^\/api\/connections\/([0-9a-f-]{36})\/mappings(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
+    if (connMappings?.[1] && request.method === "GET" && !connMappings[2]) {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ mappings: await listMappings(env.DB, caller, connMappings[1]) }, env));
+    }
+    if (connMappings?.[1] && request.method === "PUT" && !connMappings[2]) {
+      requireJson(request);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CAPABILITY_FORBIDDEN", "Only an admin may manage entity mappings.");
+      }
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const mapped = await upsertMapping(env.DB, caller, connMappings[1], {
+        ...(body.entityId === undefined ? {} : { entityId: body.entityId }),
+        ...(body.displayName === undefined ? {} : { displayName: body.displayName }),
+        ...(body.primary === undefined ? {} : { primary: body.primary }),
+        ...(body.source === undefined ? {} : { source: body.source }),
+      });
+      return json(scrubConnectionPayload({ mapping: mapped }, env));
+    }
+    if (connMappings?.[1] && connMappings[2] && request.method === "DELETE") {
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CAPABILITY_FORBIDDEN", "Only an admin may manage entity mappings.");
+      }
+      await deleteMapping(env.DB, caller, connMappings[2]);
       return json({ deleted: true });
     }
     // Per-Organization secrets (SEC-02, issue #411): the exclusive route

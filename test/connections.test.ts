@@ -102,10 +102,13 @@ describe("Integration discovery (CON-01)", () => {
     const body = await jsonOf(response);
     const integrations = body.integrations as { id: string; name: string; requiredSecrets: string[] }[];
     expect(integrations.map((entry) => entry.name).sort()).toEqual([
+      "ad",
       "anthropic",
       "cloudflare",
       "echo",
       "google",
+      "googleworkspace",
+      "graph",
       "halo",
       "ninjaone",
       "openai",

@@ -10,6 +10,7 @@ import { helloParentSagaDef } from "./hello-parent";
 import { helloSagaDef } from "./hello";
 import { echoSagaDef } from "./echo";
 import { ninjaOrgsSagaDef } from "./ninjaorgs";
+import { onboardingSagaDef } from "./onboarding";
 import { smokeSagaDef } from "./smoke";
 
 /** All Saga definitions, in canonical order. Add new Sagas here; the catalog
@@ -23,4 +24,5 @@ export const SAGA_DEFINITIONS: readonly SagaDefinition<unknown>[] = [
   helloParentSagaDef,
   cloudflareVerifySagaDef,
   cloudflareInventorySagaDef,
+  onboardingSagaDef,
 ];

@@ -9,12 +9,15 @@
 // non-secret endpoint; decrypted material only ever exists transiently
 // inside server-side execution (see ADR 005, Proposed).
 import {
+  AD_INTEGRATION_ID,
   ANTHROPIC_INTEGRATION_ID,
   CLOUDFLARE_API_BASE,
   CLOUDFLARE_INTEGRATION_ID,
   ECHO_INTEGRATION_ID,
   Fault,
   GOOGLE_INTEGRATION_ID,
+  GOOGLEWORKSPACE_INTEGRATION_ID,
+  GRAPH_INTEGRATION_ID,
   HALO_INTEGRATION_ID,
   NINJA_INTEGRATION_ID,
   object,
@@ -224,6 +227,36 @@ function endpointPolicyFor(integrationName: string): EndpointPolicy | null {
       allowLoopback: false,
       requireHttps: true,
       allowedSuffixes: HALO_ALLOWED_SUFFIXES,
+      loopbackOnly: false,
+    };
+  }
+  // Capability-proof identity Integrations (issue #262): fixture HTTPS
+  // origins only in the proof slice. Graph admits its public host plus the
+  // never-routable `.invalid` test seam; Google admits its public API host
+  // plus the seam; the AD directory descriptor admits the seam only (an
+  // on-prem directory has no public vendor host to pin). Vendor HTTP is
+  // intercepted in tests, so seam rows can never reach a real host.
+  if (integrationName === "graph") {
+    return {
+      allowLoopback: false,
+      requireHttps: true,
+      allowedSuffixes: ["graph.microsoft.com", ".invalid"],
+      loopbackOnly: false,
+    };
+  }
+  if (integrationName === "googleworkspace") {
+    return {
+      allowLoopback: false,
+      requireHttps: true,
+      allowedSuffixes: ["googleapis.com", ".invalid"],
+      loopbackOnly: false,
+    };
+  }
+  if (integrationName === "ad") {
+    return {
+      allowLoopback: false,
+      requireHttps: true,
+      allowedSuffixes: [".invalid"],
       loopbackOnly: false,
     };
   }
@@ -631,6 +664,74 @@ export const cloudflareIntegrationDef = defineIntegration({
   },
 });
 
+/** Capability-proof identity Integration definitions (issue #262, ADR TBD
+ * §3): every provider reachable through a Capability first exists as an
+ * ordinary Integration with direct-callable Actions. The proof slice carries
+ * no vendor OAuth (fixture HTTPS, mocked in tests); production use needs an
+ * OAuth slice per Integration before it can authenticate. */
+export const graphIntegrationDef = defineIntegration({
+  id: GRAPH_INTEGRATION_ID,
+  name: "graph",
+  description: "Microsoft Entra identity over Graph: users, group assignment, mailbox provisioning.",
+  secretFields: [],
+  configSchema: [
+    {
+      name: "endpoint",
+      type: "string",
+      required: true,
+      maxLength: CONNECTION_CONFIG_MAX_LENGTH,
+      description: "Graph API origin (for example https://graph.microsoft.com).",
+    },
+  ],
+  requiredSecrets: [],
+  secretEnvVars: {},
+  health: {
+    testHint: "Run the connectivity test, then submit the onboarding proof against this directory.",
+    remediation: "Confirm the Graph origin, then re-test before submitting work.",
+  },
+});
+export const googleworkspaceIntegrationDef = defineIntegration({
+  id: GOOGLEWORKSPACE_INTEGRATION_ID,
+  name: "googleworkspace",
+  description: "Google Workspace identity over the Admin SDK: users, group assignment, mailbox provisioning.",
+  secretFields: [],
+  configSchema: [
+    {
+      name: "endpoint",
+      type: "string",
+      required: true,
+      maxLength: CONNECTION_CONFIG_MAX_LENGTH,
+      description: "Google API origin (for example https://admin.googleapis.com).",
+    },
+  ],
+  requiredSecrets: [],
+  secretEnvVars: {},
+  health: {
+    testHint: "Run the connectivity test, then submit the onboarding proof against this directory.",
+    remediation: "Confirm the Google API origin, then re-test before submitting work.",
+  },
+});
+export const adIntegrationDef = defineIntegration({
+  id: AD_INTEGRATION_ID,
+  name: "ad",
+  description: "On-prem Active Directory descriptor: directory identity reached through the NinjaOne Transport.",
+  secretFields: [],
+  configSchema: [
+    {
+      name: "endpoint",
+      type: "string",
+      required: true,
+      maxLength: CONNECTION_CONFIG_MAX_LENGTH,
+      description: "Directory descriptor URL naming the on-prem directory (fixture HTTPS in the proof slice).",
+    },
+  ],
+  requiredSecrets: [],
+  secretEnvVars: {},
+  health: {
+    testHint: "Run the connectivity test, then submit the onboarding proof against this directory.",
+    remediation: "Confirm the directory descriptor and the NinjaOne Transport Connection, then re-test.",
+  },
+});
 /** All Integration definitions, in canonical order. Add new Integrations here. */
 export const INTEGRATION_DEFINITIONS: readonly IntegrationDefinition[] = Object.freeze([
   echoIntegrationDef,
@@ -642,6 +743,9 @@ export const INTEGRATION_DEFINITIONS: readonly IntegrationDefinition[] = Object.
   openrouterIntegrationDef,
   openaiCompatibleIntegrationDef,
   cloudflareIntegrationDef,
+  graphIntegrationDef,
+  googleworkspaceIntegrationDef,
+  adIntegrationDef,
 ]);
 
 export function integrationById(id: string): IntegrationDefinition | undefined {

@@ -19,6 +19,9 @@ import {
   BODY_LIMIT,
   CLOUDFLARE_INTEGRATION_ID,
   ECHO_INTEGRATION_ID,
+  GROUPS_CAPABILITY,
+  IDENTITY_CAPABILITY,
+  MAIL_CAPABILITY,
   cloudflareInventorySaga,
   cloudflareVerifySaga,
   digestSaga,
@@ -27,6 +30,7 @@ import {
   echoSaga,
   NINJA_INTEGRATION_ID,
   ninjaSaga,
+  onboardingSaga,
   parseCloudflareInventoryInput,
   parseCloudflareVerifyInput,
   parseDigestInput,
@@ -34,6 +38,7 @@ import {
   parseHelloParentInput,
   parseInput,
   parseNinjaOrgsInput,
+  parseOnboardingInput,
   parseSmokeInput,
   smokeSaga,
 } from "../src/domain";
@@ -115,7 +120,7 @@ function helperParameterNames(fn: (...args: never[]) => unknown): string[] {
 
 describe("Saga authoring contract (issue #57)", () => {
   it("keeps all I/O and nondeterminism inside step.do() for every registered Saga", () => {
-    expect(SAGA_DEFINITIONS).toHaveLength(8);
+    expect(SAGA_DEFINITIONS).toHaveLength(9);
     for (const def of SAGA_DEFINITIONS) {
       expect(() => assertDeterministicRun(def.name, def.run)).not.toThrow();
     }
@@ -226,6 +231,19 @@ describe("Saga authoring contract (issue #57)", () => {
           apiCalls: 1,
         },
       },
+      "employee-onboarding": {
+        input: {
+          employee: { givenName: "Ada", familyName: "Lovelace", userPrincipalName: "ada@example.com" },
+          groups: ["engineering"],
+        },
+        output: {
+          userId: "user-1",
+          userPrincipalName: "ada@example.com",
+          groupsAssigned: ["engineering"],
+          mailboxProvisioned: true,
+          escapeHatch: { attempted: false, applied: false },
+        },
+      },
       "cloudflare-inventory-zones": {
         input: { max_zones: 75, account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" } },
         output: {
@@ -317,8 +335,21 @@ describe("Saga authoring contract (issue #57)", () => {
     expect(byName.get("hello-parent")?.requiredIntegrations).toEqual([]);
     expect(byName.get("cloudflare-verify-connection")?.requiredIntegrations).toEqual([CLOUDFLARE_INTEGRATION_ID]);
     expect(byName.get("cloudflare-inventory-zones")?.requiredIntegrations).toEqual([CLOUDFLARE_INTEGRATION_ID]);
+    expect(byName.get("employee-onboarding")?.requiredIntegrations).toEqual([]);
     for (const def of SAGA_DEFINITIONS) {
       expect(Array.isArray(def.requiredIntegrations)).toBe(true);
+    }
+    // Capability declarations (issue #262): the proving Saga routes through
+    // capabilities instead of direct Integrations; every other Saga binds
+    // none, which keeps their resolution path unchanged.
+    expect(byName.get("employee-onboarding")?.requiredCapabilities).toEqual([
+      IDENTITY_CAPABILITY,
+      GROUPS_CAPABILITY,
+      MAIL_CAPABILITY,
+    ]);
+    for (const def of SAGA_DEFINITIONS) {
+      if (def.name === "employee-onboarding") continue;
+      expect(def.requiredCapabilities ?? []).toEqual([]);
     }
     // Knob boundary (ADR 010 section 4): timeouts, retries, schedules, and
     // other runtime policy must never live in Saga source — only the
@@ -352,6 +383,7 @@ describe("Saga authoring contract (issue #57)", () => {
       "cloudflare-inventory-zones",
       "cloudflare-verify-connection",
       "echo",
+      "employee-onboarding",
       "hello",
       "hello-parent",
       "ninjaone-echo-digest",
@@ -367,6 +399,7 @@ describe("Saga authoring contract (issue #57)", () => {
       { stable: helloParentSaga, parse: parseHelloParentInput },
       { stable: cloudflareVerifySaga, parse: parseCloudflareVerifyInput },
       { stable: cloudflareInventorySaga, parse: parseCloudflareInventoryInput },
+      { stable: onboardingSaga, parse: parseOnboardingInput },
     ];
     for (const { stable, parse } of expected) {
       const def = byName.get(stable.name);
@@ -384,6 +417,7 @@ describe("Saga authoring contract (issue #57)", () => {
       expect(entry.description.length).toBeGreaterThan(0);
       expect(entry.tags?.length).toBeGreaterThan(0);
       expect(entry.requiredIntegrations).toEqual(byName.get(entry.name)?.requiredIntegrations);
+      expect(entry.requiredCapabilities).toEqual(byName.get(entry.name)?.requiredCapabilities ?? []);
       expect(entry.inputSchema?.type).toBe("object");
       expect(entry.outputSchema?.type).toBe("object");
       expect(entry).not.toHaveProperty("retries");

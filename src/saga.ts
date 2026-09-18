@@ -190,10 +190,15 @@ export function schemaOf(properties: Readonly<Record<string, string>>, required:
 
 export type SagaRun<TOutput> = (ctx: SagaEventContext, step: SagaStep) => Promise<TOutput>;
 
+/** Opaque capability names a Saga may request (issue #262, ADR TBD §1):
+ * dotted semantic roles such as `identity.primary`. The name is the whole
+ * contract in v1. */
+const CAPABILITY_NAME = /^[A-Za-z0-9][A-Za-z0-9.-]{0,126}[A-Za-z0-9]$/;
 /** Static Saga definition. Identity/discovery metadata only: id, name,
  * revision, description, optional category/tags and IO schemas, the declared
- * Integration requirement list, plus parse and run. Any operational-policy
- * key (timeouts, retries, schedules, endpoints, access rules) is rejected by
+ * Integration requirement list, the declared capability requirement list,
+ * plus parse and run. Any operational-policy key (timeouts, retries,
+ * schedules, endpoints, access rules) is rejected by
  * validateSagaDefinition. */
 export interface SagaDefinition<TOutput = unknown> {
   readonly id: string;
@@ -209,6 +214,12 @@ export interface SagaDefinition<TOutput = unknown> {
    * every Saga states it explicitly, even when empty. Source declaration
    * only — never endpoints, credentials, or policy. */
   readonly requiredIntegrations: readonly string[];
+  /** Semantic capability names this Saga requires in its Organization
+   * context (issue #262, ADR TBD §1). Same declared split as Integrations:
+   * declared-but-unbound fails loud with 424, undeclared capability access
+   * resolves to None. Optional with an empty default so pre-capability
+   * Sagas keep working unchanged (ADR TBD §9 migration note). */
+  readonly requiredCapabilities?: readonly string[];
   readonly inputSchema?: IoSchema;
   readonly outputSchema?: IoSchema;
   readonly parse: (value: unknown) => unknown;
@@ -217,8 +228,9 @@ export interface SagaDefinition<TOutput = unknown> {
 
 /** Discovery metadata served by GET /api/sagas and mirrored into D1
  * Execution rows. Metadata only: D1 never drives Saga behavior. The declared
- * Integration requirement list is discovery (which Connections a Saga needs
- * in its Organization), not policy: no endpoints, credentials, or counts. */
+ * Integration and capability requirement lists are discovery (which
+ * Connections and capability bindings a Saga needs in its Organization),
+ * not policy: no endpoints, credentials, or counts. */
 export interface CatalogEntry {
   readonly id: string;
   readonly name: string;
@@ -227,6 +239,7 @@ export interface CatalogEntry {
   readonly category?: string;
   readonly tags?: readonly string[];
   readonly requiredIntegrations: readonly string[];
+  readonly requiredCapabilities: readonly string[];
   readonly inputSchema?: IoSchema;
   readonly outputSchema?: IoSchema;
 }
@@ -293,6 +306,18 @@ export function validateSagaDefinition(def: SagaDefinition): void {
       `Invalid Saga definition "${def.name}": requiredIntegrations must be an explicit list of stable Integration UUIDs (empty when none).`,
     );
   }
+  if (def.requiredCapabilities !== undefined) {
+    if (
+      !Array.isArray(def.requiredCapabilities) ||
+      def.requiredCapabilities.some(
+        (name) => typeof name !== "string" || name.length > 128 || !name.includes(".") || !CAPABILITY_NAME.test(name),
+      )
+    ) {
+      throw new Error(
+        `Invalid Saga definition "${def.name}": requiredCapabilities must be dotted roles such as identity.primary.`,
+      );
+    }
+  }
   const record = def as unknown as Record<string, unknown>;
   for (const key of OPERATIONAL_POLICY_KEYS) {
     if (key in record) {
@@ -311,6 +336,7 @@ export function defineSaga<TOutput>(def: SagaDefinition<TOutput>): SagaDefinitio
     ...def,
     tags: def.tags === undefined ? undefined : Object.freeze([...def.tags]),
     requiredIntegrations: Object.freeze([...def.requiredIntegrations]),
+    requiredCapabilities: Object.freeze([...(def.requiredCapabilities ?? [])]),
   });
 }
 
@@ -347,6 +373,7 @@ export function buildCatalog(defs: readonly SagaDefinition[]): readonly CatalogE
         ...(def.category === undefined ? {} : { category: def.category }),
         ...(def.tags === undefined ? {} : { tags: def.tags }),
         requiredIntegrations: def.requiredIntegrations,
+        requiredCapabilities: def.requiredCapabilities ?? Object.freeze([]),
         ...(def.inputSchema === undefined ? {} : { inputSchema: def.inputSchema }),
         ...(def.outputSchema === undefined ? {} : { outputSchema: def.outputSchema }),
       }),
