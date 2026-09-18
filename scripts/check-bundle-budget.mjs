@@ -337,6 +337,18 @@ import { fileURLToPath } from "node:url";
 // per the supervision decision accepting the warn-only advisory overrun
 // (issue #177 policy), not silently absorbed.
 // LIMITS-META measuredBytes only; BUDGET_BYTES/MIN_HEADROOM_BYTES untouched.
+// 2026-09-18 (LIMITS-01 sync, issue #177): no budget change. Scout reading
+// 959893 B at 8f96512 plus merges #525/#526/#524/#527 measures 975852 bytes
+// locally against the 730 KiB advisory reference (CI number governs):
+// 228332 bytes over the reference, +175785 over the last 800067 B META
+// record. Metafile attribution: 66 inputs, all src/* (index.ts 182384 B,
+// forms 56091, sdk 45097, orgs 35516, ops 32643); 0 client/dist inputs, so
+// Static Assets still consume 0 Worker script bytes. Client JS 410492 B raw
+// / 112373 B gzip + 12315 B CSS. No new runtime dependencies. Provider hard
+// cap 3 MB holds ~2.07 MB of margin; the binding constraint stays our own
+// soft reference by design. Any reference raise stays a #177 policy decision
+// with shrink-before-raise first.
+// LIMITS-META measuredBytes only; BUDGET_BYTES/MIN_HEADROOM_BYTES untouched.
 const BUDGET_BYTES = 730 * 1024;
 // LIMITS-01 advisory reserve (issue #177, advisory per owner decision): the
 // reference level should exceed the measured bundle by at least this margin.

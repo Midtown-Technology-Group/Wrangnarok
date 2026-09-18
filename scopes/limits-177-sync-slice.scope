@@ -1,0 +1,11 @@
+# LIMITS-01 sync (issue #177, lane/177-sync-slice vs origin/main@9cc00ed).
+# Measured-metadata sync only: LIMITS-META measuredBytes/date plus the stale
+# Worker-bundle/client-JS figures in docs/feasibility-envelope.md, the
+# LIMITS-01 bundle figure in docs/upstream-parity.md, and a comment-only
+# audit-trail note in scripts/check-bundle-budget.mjs.
+# No BUDGET_BYTES / MIN_HEADROOM_BYTES change, no policy, production source,
+# dependency, primitive, acceptance, or deployment change.
+docs/feasibility-envelope.md
+docs/upstream-parity.md
+scripts/check-bundle-budget.mjs
+scopes/limits-177-sync-slice.scope
