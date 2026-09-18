@@ -83,4 +83,6 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-console.log(`ADR ledger valid: ${numbered.length} numbered ADRs, all unique and reserved; ${sentinel} is the control sentinel.`);
+console.log(
+  `ADR ledger valid: ${numbered.length} numbered ADRs, all unique and reserved; ${sentinel} is the control sentinel.`,
+);
