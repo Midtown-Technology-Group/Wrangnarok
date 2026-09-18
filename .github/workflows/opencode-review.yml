@@ -98,6 +98,11 @@ jobs:
           fi
 
       - name: Run OpenCode review
+        # Advisory jobs must never block merges: model outages, region
+        # limits, or billing gaps (e.g. CreditsError) degrade to a missing
+        # comment, not a red build. The failure stays visible as an
+        # annotation on the run.
+        continue-on-error: true
         if: steps.creds.outputs.present == 'true'
         uses: anomalyco/opencode/github@014614d35b397775e5d397a490fc72368c894ec2 # v1.18.31
         env:
@@ -168,6 +173,9 @@ jobs:
           fi
 
       - name: Run OpenCode triage
+        # Same fail-open contract as `review`: outages degrade to a missing
+        # comment, never a red build.
+        continue-on-error: true
         if: steps.creds.outputs.present == 'true'
         uses: anomalyco/opencode/github@014614d35b397775e5d397a490fc72368c894ec2 # v1.18.31
         env:
