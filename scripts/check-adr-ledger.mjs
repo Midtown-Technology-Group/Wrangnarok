@@ -40,7 +40,7 @@ for (const name of numbered) {
 
   const canonicalPath = `docs/architecture/${name}`;
   const escapedPath = canonicalPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const reservation = new RegExp(`^\\| ${number} \\| \\`${escapedPath}\\` \\|$`, "m");
+  const reservation = new RegExp(`^\\| ${number} \\| \`${escapedPath}\` \\|$`, "m");
   if (!reservation.test(ledger)) {
     errors.push(`ADR ${number} (${canonicalPath}) is not reserved exactly once in docs/adr-ledger.md`);
   }
