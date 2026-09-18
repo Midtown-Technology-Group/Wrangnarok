@@ -15,7 +15,7 @@ Machine-checkable ledger of Architecture Decision Record numbers. Enforced by
   earliest-landed keeps the number, later-landed moves to the next free
   numbers in landing order, with a renumber note in each moved file.
 
-Next free ADR number: 043.
+Next free ADR number: 044.
 
 ## Index
 
@@ -63,6 +63,7 @@ Next free ADR number: 043.
 | 040 | 040-artifacts.md | Generated Artifacts — D1 identity plus R2 bytes, attachment bindings, retention |
 | 041 | 041-cloudflare-agents-runtime.md | Cloudflare Agents SDK as the Platform-Agent Runtime |
 | 042 | 042-frontend-split-decision.md | Frontend/static-assets split — keep the single deployment |
+| 043 | 043-child-dispatch-authorization.md | Child dispatch authorization (RUN-02 / AUTH-02) |
 
 ## Renumber history (issue #225)
 

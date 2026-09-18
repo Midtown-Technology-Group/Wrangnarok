@@ -15,9 +15,12 @@
 //
 // Context: the child inherits org_id/user_id from the parent D1 row. invoke
 // takes no org parameter, so a foreign-org child is unconstructable; unknown
-// child refs and non-serializable inputs fail before any write. Every catalog
-// Saga is invokable from its own Organization until AUTH-02 gates
-// visibility; that is documented in ADR 018, not hidden.
+// child refs and non-serializable inputs fail before any write. Dispatch
+// additionally re-resolves the parent principal through AUTH-02
+// (resolveCurrentAuthority) and requires the saga execute grant on the
+// child — the direct-submit posture — so hidden children and revoked
+// callers fail with GRANT_REQUIRED (or the lifecycle code) before any
+// write. Instance/org admins bypass through `can` like every other route.
 //
 // Identity: the child Execution ID is deterministic over
 // (caller, parent, step, child, key), so step retries and duplicate
@@ -40,6 +43,7 @@ import { EXECUTION_ID } from "./domain";
 import type { OrgCtx } from "./saga";
 import { assertJsonSerializable, currentOperationName } from "./saga";
 import { admitExecution, cancelExecution, visibleExecution, workflowForSaga } from "./executions";
+import { resolveCurrentAuthority } from "./roles";
 import { requireActiveInstall } from "./solutions";
 import type { ExecutionRow } from "./executions";
 import type { Bindings } from "./bindings";
@@ -216,6 +220,23 @@ export async function invokeChild(
   // of reserving and dispatching a row the child later rejects. Only
   // serialization failures map to CHILD_INPUT_NOT_SERIALIZABLE.
   const parsedInput = child.parse(input);
+  // AUTH-02 (issue #136): the persisted parent identity is a reference,
+  // never proof of current authority. Re-resolve organization/user/
+  // membership lifecycle at dispatch time and require the saga execute
+  // grant on the child — the direct-submit posture (POST /api/executions)
+  // and the schedule promoteWindow fence, consumed as-is. A hidden child
+  // (no grant) or a revoked caller fails here with GRANT_REQUIRED (or the
+  // lifecycle code) before any row is reserved; instance/org admins bypass
+  // through `can` like every other route. Live state, not the parent
+  // snapshot: revocation fences the next dispatch, matching per-request
+  // evaluation on the direct path.
+  const caller: Principal = { orgId: childEnv.parentOrg.orgId, userId: childEnv.parentOrg.userId };
+  await resolveCurrentAuthority(childEnv.env.DB, childEnv.env, caller, {
+    orgId: caller.orgId,
+    resourceKind: "saga",
+    resourceId: child.id.toLowerCase(),
+    action: "execute",
+  });
   try {
     assertJsonSerializable(parsedInput, "child input");
   } catch {
@@ -232,7 +253,6 @@ export async function invokeChild(
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(stepName)) {
     throw new Fault(400, "CHILD_KEY_INVALID", "The caller step must be 1 to 128 safe characters.");
   }
-  const caller: Principal = { orgId: childEnv.parentOrg.orgId, userId: childEnv.parentOrg.userId };
   // Active-install parity with top-level submit (SOL-01 gate): a child Saga
   // absent from the org's active bundle (or pinned to another revision) is
   // rejected here exactly as a top-level submit would reject it, so the same
