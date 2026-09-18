@@ -1,5 +1,5 @@
 // Migration-chain fidelity (issue #302, Slice C): applies every migration
-// 0001->0037 in order against a scratch database and proves table rebuilds
+// 0001->0036 in order against a scratch database and proves table rebuilds
 // carry all previously added columns. Guards the 0026 regression, which
 // rebuilt executions without policy_json (0012) and parent_execution_id /
 // parent_step (0015), breaking child lineage statements on fully migrated
@@ -83,8 +83,14 @@ const CHAIN = [
   migration34,
   migration35,
   migration36,
-  migration37,
 ];
+
+// Issue #493: the 0037 repair is applied explicitly per test (after optional
+// seeding on the 0001->0036 shape) to model the real upgrade path: a populated
+// database where DROP TABLE executions must preserve child-table rows.
+async function applyRepairMigration() {
+  await bindings.DB.exec(migration37);
+}
 
 beforeEach(async () => {
   for (const migration of CHAIN) {
@@ -108,14 +114,76 @@ it("rebuilds carry every previously added executions column", async () => {
   expect(index?.name).toBe("executions_parent");
 });
 
-it("executions carries no organizations foreign key after the full chain", async () => {
+it("executions carries no organizations foreign key after the 0037 repair", async () => {
+  await applyRepairMigration();
   const ddl = await bindings.DB.prepare("SELECT sql FROM sqlite_master WHERE name='executions'").first<{
     sql: string;
   }>();
   expect(ddl?.sql).not.toMatch(/REFERENCES organizations/);
 });
 
+it("0037 preserves populated child tables across the executions rebuild", async () => {
+  const now = new Date().toISOString();
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "org").run();
+  await bindings.DB.prepare(
+    "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,status,created_at,policy_json,parent_execution_id,parent_step) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind("exec-1", "smoke", "smoke", "r1", "org-1", "user-1", "{}", "Succeeded", now, '{"v":1}', "parent-1", "step")
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO operations(execution_id,name,position,status,started_at,completed_at,result_json) VALUES (?,?,?,?,?,?,?)",
+  )
+    .bind("exec-1", "prepare", 0, "Succeeded", now, now, '{"ok":true}')
+    .run();
+  await bindings.DB.prepare("INSERT INTO usage_blocks(execution_id,usage_json,created_at) VALUES (?,?,?)")
+    .bind("exec-1", '{"tokens":7}', now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO execution_logs(execution_id,org_id,user_id,saga_id,saga_name,level,message,created_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("exec-1", "org-1", "user-1", "smoke", "smoke", "INFO", "hello", now)
+    .run();
+
+  await applyRepairMigration();
+
+  const exec = await bindings.DB.prepare(
+    "SELECT id,status,policy_json,parent_execution_id,parent_step FROM executions WHERE id=?",
+  )
+    .bind("exec-1")
+    .first<{ id: string; status: string; policy_json: string; parent_execution_id: string; parent_step: string }>();
+  expect(exec).toMatchObject({ id: "exec-1", status: "Succeeded", policy_json: '{"v":1}' });
+  expect(exec?.parent_execution_id).toBe("parent-1");
+  expect(exec?.parent_step).toBe("step");
+  const op = await bindings.DB.prepare(
+    "SELECT execution_id,name,position,status,result_json FROM operations WHERE execution_id=? AND name=?",
+  )
+    .bind("exec-1", "prepare")
+    .first<{ execution_id: string; position: number; status: string; result_json: string }>();
+  expect(op).toMatchObject({ execution_id: "exec-1", position: 0, status: "Succeeded", result_json: '{"ok":true}' });
+  const usage = await bindings.DB.prepare("SELECT usage_json FROM usage_blocks WHERE execution_id=?")
+    .bind("exec-1")
+    .first<{ usage_json: string }>();
+  expect(usage?.usage_json).toBe('{"tokens":7}');
+  const log = await bindings.DB.prepare(
+    "SELECT execution_id,org_id,level,message FROM execution_logs WHERE execution_id=?",
+  )
+    .bind("exec-1")
+    .first<{ execution_id: string; org_id: string; level: string; message: string }>();
+  expect(log).toMatchObject({ execution_id: "exec-1", org_id: "org-1", level: "INFO", message: "hello" });
+  const ddl = await bindings.DB.prepare("SELECT sql FROM sqlite_master WHERE name='executions'").first<{
+    sql: string;
+  }>();
+  expect(ddl?.sql).not.toMatch(/REFERENCES organizations/);
+  for (const name of ["executions_history", "executions_parent", "execution_logs_tail", "execution_logs_search"]) {
+    const index = await bindings.DB.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?")
+      .bind(name)
+      .first<{ name: string }>();
+    expect(index?.name).toBe(name);
+  }
+});
+
 it("org delete retains execution history on the fully migrated schema", async () => {
+  await applyRepairMigration();
   await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "org").run();
   await bindings.DB.prepare(
     "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
