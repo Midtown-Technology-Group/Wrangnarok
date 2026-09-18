@@ -58,6 +58,8 @@ name: opencode-review
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  issues:
+    types: [opened, labeled]
 
 permissions:
   contents: read
@@ -133,3 +135,67 @@ jobs:
             Format: one finding per item, each with a file:line reference and
             the violated convention. Do not restate the diff. Do not comment
             on style or formatting covered by the repo's linters.
+
+  triage:
+    # Same advisory posture as `review` (issue #225: no `secrets.*` in
+    # job-level `if:`): the job always evaluates and the credential-needing
+    # step gates on the probe below. Permission note: this job inherits the
+    # workflow-level `issues: write` ONLY so it can post its single triage
+    # comment — verified 2026-09-18 that read-only tokens make the action
+    # fail with 403 when commenting. Suggest-only is enforced by the prompt:
+    # never close, label, assign, or push; contents stays read-only.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      # Credential-presence probe: exposes the secret through env (the
+      # supported pattern) and publishes a non-secret signal for the
+      # step-level conditional below.
+      - name: Check triage credentials
+        id: creds
+        env:
+          REVIEW_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          if [[ -z "$REVIEW_KEY" ]]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No OPENCODE_API_KEY; triage step will skip."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run OpenCode triage
+        if: steps.creds.outputs.present == 'true'
+        uses: anomalyco/opencode/github@014614d35b397775e5d397a490fc72368c894ec2 # v1.18.31
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          model: opencode-go/muse-spark-1.3-contributor
+          use_github_token: true
+          prompt: |
+            Triage this GitHub issue. You are ADVISORY only: post at most ONE
+            comment, and never close, label, assign, milestone, or push —
+            suggest only. Stay silent (post no comment) when the issue is
+            already clear, correctly labeled, or needs nothing from you.
+
+            First read the repo context: AGENTS.md, docs/lexicon.md, and
+            docs/architecture/adr-index.md, so your reading uses the
+            project's own vocabulary (Saga, Execution, Operation,
+            Integration, Connection, Organization) and Cloudflare-native
+            names. Then:
+            - Reproduce or verify the report against the checked-out tree
+              where feasible; say explicitly what you could and could not
+              verify, with file:line refs for anything you cite.
+            - Classify exactly one: parity gap (upstream Bifrost behavior not
+              yet ported — cite docs/upstream-spec.md), bug, chore, or
+              question. If it is a parity gap, name the upstream behavior.
+            - Suggest labels (names only, do not apply them) and, for bugs,
+              the smallest next reproduction step.
+
+            Format: verdict line first (e.g. `Verdict: bug — ...`), then at
+            most three short bullets. Do not restate the issue. Do not
+            comment on style or formatting.
