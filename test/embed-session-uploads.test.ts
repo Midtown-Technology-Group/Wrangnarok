@@ -333,6 +333,20 @@ it("records and reloads session claims against D1", async () => {
   expect(owned.get(sessionUploadKey("uploads", "session-uploads/other"))).toBeUndefined();
   // Claims never cross Organizations.
   expect((await loadSessionUploads(bindings.DB, "0".repeat(64), ORG_B)).size).toBe(0);
+  // Corrupt claim metadata fails loud, never an empty ownership set.
+  await bindings.DB.prepare(
+    "INSERT INTO form_session_uploads(session_hash,org_id,location,path,field,max_bytes,content_types_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("1".repeat(64), ORG, "uploads", "session-uploads/bad", "doc", 8, "not-json", new Date().toISOString())
+    .run();
+  await expect(loadSessionUploads(bindings.DB, "1".repeat(64), ORG)).rejects.toThrow(/invalid content-type/);
+  await bindings.DB.prepare("DELETE FROM form_session_uploads WHERE session_hash=?").bind("1".repeat(64)).run();
+  await bindings.DB.prepare(
+    "INSERT INTO form_session_uploads(session_hash,org_id,location,path,field,max_bytes,content_types_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("1".repeat(64), ORG, "uploads", "session-uploads/bad", "doc", 8, '["ok",7]', new Date().toISOString())
+    .run();
+  await expect(loadSessionUploads(bindings.DB, "1".repeat(64), ORG)).rejects.toThrow(/invalid content-type/);
 });
 
 it("signed embed sessions stage and submit the file they own", async () => {
@@ -687,6 +701,88 @@ it("rejects field type drift at finalize and staged-only refs at submit", async 
   );
   expect(pending.status).toBe(422);
   expect(JSON.stringify(await pending.json())).toContain("FILE_NOT_READY");
+
+  // The byte PUT enforces its own shape: wrong location types answer 415
+  // and empty bodies answer 400 before anything stages.
+  expect((await call("/api/file-locations", "POST", { name: "strict", contentTypes: ["text/plain"] })).status).toBe(
+    201,
+  );
+  await createForm("strictform", [
+    { name: "name", type: "text", required: true },
+    { name: "doc", type: "file", required: false, file: { location: "strict" } },
+  ]);
+  const strictGrant = await createGrant("strictform");
+  const strictStarted = await bootstrapOk(strictGrant);
+  const strictSlot = await issueOk(
+    "embed",
+    strictGrant.id,
+    strictGrant.secret,
+    strictStarted.handle,
+    "strict",
+    25 * 1024 * 1024,
+  );
+  const strictBytes = new TextEncoder().encode("png bytes");
+  expect((await sessionPut(strictSlot.token, strictBytes, "image/png")).status).toBe(415);
+  const strictSlot2 = await issueOk(
+    "embed",
+    strictGrant.id,
+    strictGrant.secret,
+    strictStarted.handle,
+    "strict",
+    25 * 1024 * 1024,
+  );
+  const emptyPut = await worker.fetch(
+    new Request(`https://local.test/api/session-uploads/content?token=${strictSlot2.token}`, {
+      method: "PUT",
+      headers: { "Content-Type": "text/plain", Origin: ORIGIN },
+    }),
+    bindings,
+  );
+  expect(emptyPut.status).toBe(400);
+  expect(await emptyPut.json()).toMatchObject({ error: { code: "EMPTY_UPLOAD" } });
+});
+
+it("fails finalize and issuance closed when the form vanishes mid-flow", async () => {
+  expect((await call("/api/file-locations", "POST", { name: "uploads" })).status).toBe(201);
+  await createForm("resume");
+  const grant = await createGrant("resume");
+  const started = await bootstrapOk(grant);
+  const slot = await issueOk("embed", grant.id, grant.secret, started.handle);
+  await putOk(slot, "orphaned bytes");
+  expect((await call("/api/forms/resume", "DELETE")).status).toBe(200);
+  // Outstanding finalizes die stale (no grant re-bind possible); new
+  // issuance names the dangling grant with 404.
+  const orphaned = await sessionFinalize({
+    handle: started.handle,
+    location: slot.location,
+    path: slot.path,
+    contentType: "text/plain",
+    size: 14,
+    sha256: "3".repeat(64),
+  });
+  expect(orphaned.status).toBe(422);
+  expect(await orphaned.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+
+  await createForm("flyer");
+  const pub = await publish("flyer");
+  const startup = await publicStartup(pub.id);
+  const anonHandle = ((await startup.json()) as { handle: string }).handle;
+  const anonSlot = await issueOk("public", pub.id, null, anonHandle);
+  await putOk(anonSlot, "orphaned public bytes");
+  expect((await call("/api/forms/flyer", "DELETE")).status).toBe(200);
+  const anonOrphaned = await sessionFinalize({
+    handle: anonHandle,
+    location: anonSlot.location,
+    path: anonSlot.path,
+    contentType: "text/plain",
+    size: 21,
+    sha256: "4".repeat(64),
+  });
+  expect(anonOrphaned.status).toBe(422);
+  expect(await anonOrphaned.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+  const anonIssuance = await issuePublicUpload(pub.id, { handle: anonHandle, field: "doc" });
+  expect(anonIssuance.status).toBe(404);
+  expect(await anonIssuance.json()).toMatchObject({ error: { code: "FORM_NOT_PUBLISHED" } });
 });
 
 it("caps issuance per session and never accepts foreign handle classes", async () => {
