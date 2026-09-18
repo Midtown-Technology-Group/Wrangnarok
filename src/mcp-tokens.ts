@@ -86,12 +86,11 @@ interface TokenRow {
 }
 
 function toHealth(row: TokenRow): TokenHealth {
-  const status = row.status;
-  if (status !== "healthy" && status !== "failed" && status !== "revoked") {
-    throw invalid("MCP_TOKEN_UNREADABLE", "A stored MCP credential could not be read.", 500);
-  }
+  // The status domain is guarded by the CHECK constraint on both token
+  // tables, so the read casts instead of re-validating: a row that is
+  // here has already passed the schema gate.
   return Object.freeze({
-    status: status as TokenHealth["status"],
+    status: row.status as TokenHealth["status"],
     checkedAt: row.checked_at,
     consecutiveFailures: row.consecutive_failures,
     lastFailureCode: row.last_failure_code,
@@ -653,12 +652,31 @@ export async function storeInitialMcpUserConsent(
       checkedAt,
     )
     .run();
-  const row = await db
-    .prepare(`SELECT ${CONSENT_COLUMNS} FROM mcp_user_consents WHERE org_id=? AND connection_id=? AND user_id=?`)
-    .bind(input.orgId, input.connectionId, normalizedUser)
-    .first<ConsentRow>();
-  if (!row) throw invalid("MCP_CONSENT_NOT_FOUND", "The MCP consent could not be read after grant.", 500);
-  return toConsentView(row);
+  // The view is built from the just-written values — no re-read: the
+  // INSERT above succeeding is the existence proof.
+  return toConsentView({
+    connection_id: input.connectionId,
+    user_id: normalizedUser,
+    org_id: input.orgId,
+    scope,
+    consent_granted_at: checkedAt,
+    consent_expires_at: input.consentExpiresAt ?? null,
+    access_ciphertext: access.ciphertext,
+    access_nonce: access.nonce,
+    access_wrapped_dek: access.wrappedDek,
+    refresh_ciphertext: refresh?.ciphertext ?? null,
+    refresh_nonce: refresh?.nonce ?? null,
+    refresh_wrapped_dek: refresh?.wrappedDek ?? null,
+    key_version: access.keyVersion,
+    algorithm: ENVELOPE_ALGORITHM,
+    generation: 1,
+    expires_at_ms: input.expiresAtMs ?? null,
+    status: health.status,
+    consecutive_failures: health.consecutiveFailures,
+    last_failure_code: health.lastFailureCode,
+    last_success_at: health.lastSuccessAt,
+    checked_at: health.checkedAt,
+  });
 }
 
 export interface ReplaceMcpUserConsentInput extends StoreMcpUserConsentInput {
@@ -738,12 +756,31 @@ export async function replaceMcpUserConsentToken(
       409,
     );
   }
-  const row = await db
-    .prepare(`SELECT ${CONSENT_COLUMNS} FROM mcp_user_consents WHERE org_id=? AND connection_id=? AND user_id=?`)
-    .bind(input.orgId, input.connectionId, normalizedUser)
-    .first<ConsentRow>();
-  if (!row) throw invalid("MCP_CONSENT_NOT_FOUND", "The MCP consent could not be read after re-consent.", 500);
-  return toConsentView(row);
+  // The view is built from the just-replaced values — no re-read: the
+  // conditional UPDATE above succeeding is the existence proof.
+  return toConsentView({
+    connection_id: input.connectionId,
+    user_id: normalizedUser,
+    org_id: input.orgId,
+    scope,
+    consent_granted_at: checkedAt,
+    consent_expires_at: input.consentExpiresAt ?? null,
+    access_ciphertext: access.ciphertext,
+    access_nonce: access.nonce,
+    access_wrapped_dek: access.wrappedDek,
+    refresh_ciphertext: refresh?.ciphertext ?? null,
+    refresh_nonce: refresh?.nonce ?? null,
+    refresh_wrapped_dek: refresh?.wrappedDek ?? null,
+    key_version: access.keyVersion,
+    algorithm: ENVELOPE_ALGORITHM,
+    generation: input.expectedGeneration + 1,
+    expires_at_ms: input.expiresAtMs ?? null,
+    status: health.status,
+    consecutive_failures: health.consecutiveFailures,
+    last_failure_code: health.lastFailureCode,
+    last_success_at: health.lastSuccessAt,
+    checked_at: health.checkedAt,
+  });
 }
 
 /** Disconnect the service credential: idempotent delete of the token

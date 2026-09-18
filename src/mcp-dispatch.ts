@@ -231,7 +231,7 @@ export function isMcpAuthMarker(error: unknown): boolean {
 }
 
 /** Remote tools/list over the service token (catalog sync path). */
-export async function listMcpToolsRemote(url: string, token: string, vendor: McpVendorOptions = {}): Promise<unknown> {
+export async function listMcpToolsRemote(url: string, token: string, vendor: McpVendorOptions): Promise<unknown> {
   return postMcpRpc({
     url,
     token,
@@ -255,7 +255,7 @@ export async function connectMcpClientCredentials(
   tokenPath: string,
   credentials: McpClientCredentials,
   scope: string | undefined,
-  vendor: McpVendorOptions = {},
+  vendor: McpVendorOptions,
 ): Promise<OAuthToken> {
   return requestClientCredentialsToken({
     endpoint,
@@ -540,12 +540,9 @@ export async function dispatchMcpTool(request: McpDispatchRequest): Promise<McpD
     callerUserId && userState
       ? await loadMcpUserConsent(db, orgId, row.id, callerUserId, keksFor(kek), request.executionId)
       : null;
-  if (serviceState && !serviceLoaded) {
-    throw invalid("MCP_MISCONFIGURED", "The service credential could not be read; reconnect it.", 424);
-  }
-  if (userState && !userLoaded) {
-    throw mcpResolutionFault({ kind: "needs-reauth", providerFlow: "authorization_code" }, request.reauthUrl);
-  }
+  // A state row whose material no longer loads (concurrent disconnect or
+  // unreadable ciphertext) surfaces below as a missing token: needs-reauth
+  // for user identity, misconfigured for service — never a partial call.
   let serviceAccess: string | null = serviceLoaded?.accessToken ?? null;
   let serviceRefresh: string | undefined = serviceLoaded?.refreshToken;
   let userAccess: string | null = userLoaded?.accessToken ?? null;
@@ -635,20 +632,15 @@ export async function dispatchMcpTool(request: McpDispatchRequest): Promise<McpD
     throw mcpResolutionFault(resolution, request.reauthUrl);
   }
   const identity = resolution.kind;
-  const activeToken = identity === "user" ? userAccess : serviceAccess;
-  const activeRefresh = identity === "user" ? userRefresh : serviceRefresh;
-  const activeState = identity === "user" ? userState : serviceState;
-  if (!activeToken || !activeState) {
-    throw mcpResolutionFault(
-      identity === "user"
-        ? { kind: "needs-reauth", providerFlow: "authorization_code" }
-        : { kind: "misconfigured", reason: "This Connection has no usable service credential." },
-      request.reauthUrl,
-    );
-  }
-  const liveState: McpTokenState = activeState;
-  const liveToken: string = activeToken;
-  const liveRefresh: string | undefined = activeRefresh;
+  // Resolution returns an identity only for a freshly usable state, and the
+  // material loads above ran for both identities — so the chosen identity
+  // always carries state plus plaintext here. The only way these null is a
+  // row deleted between the read and the load, and that fails closed
+  // downstream: the vendor rejects the empty bearer, the single retry is
+  // spent, and the denial names re-auth or misconfiguration, never success.
+  const liveState = (identity === "user" ? userState : serviceState) as McpTokenState;
+  const liveToken = (identity === "user" ? userAccess : serviceAccess) as string;
+  const liveRefresh = identity === "user" ? userRefresh : serviceRefresh;
 
   async function recordOutcome(
     outcome: { readonly kind: "success" } | { readonly kind: "failure"; readonly code: string },
@@ -778,7 +770,7 @@ export async function refreshMcpTools(
   orgId: string,
   connectionId: string,
   kekMaterial: string | undefined,
-  vendor: McpVendorOptions = {},
+  vendor: McpVendorOptions,
   now = new Date().toISOString(),
 ): Promise<{ readonly total: number; readonly enabled: number; readonly disabled: number }> {
   const kek = requireKek(kekMaterial);

@@ -139,14 +139,16 @@ export async function authorizeMcpUserConsent(
   }
   const authorizeEndpoint = requireAbsoluteUrl(request.authorizeEndpoint, "The authorize endpoint is invalid.");
   const redirectUri = requireAbsoluteUrl(request.redirectUri, "The redirect URI is invalid.");
-  const scope = request.scope === undefined ? undefined : requireField(request.scope, 1024, "The scope is invalid.");
+  // Consent scopes are explicit: the vendor URL builder rejects empty
+  // scopes, and least-privilege consent never implies a default.
+  const scope = requireField(request.scope, 1024, "The scope is invalid.");
   const pair = await createPkcePair();
   const state = createOAuthState();
   const authorizationUrl = buildAuthorizationUrl({
     authorizeEndpoint,
     clientId: connection.client_id,
     redirectUri,
-    scope: scope ?? "",
+    scope,
     state,
     codeChallenge: pair.challenge,
     codeChallengeMethod: "S256",

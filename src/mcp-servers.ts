@@ -95,8 +95,8 @@ export function parseMcpTemplateName(value: unknown): string {
 
 /** Validate an external MCP server URL: absolute http(s), never
  * credential-bearing. Loopback http serves the local fixture path (same
- * posture as the echo Integration); every other host requires https, and
- * literal internal addresses never serve a template URL. Pure. */
+ * posture as the echo Integration); every other host requires https on a
+ * DNS hostname — literal IPs never serve a template URL. Pure. */
 export function parseMcpServerUrl(value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || value.length > TEMPLATE_URL_MAX) {
     throw invalid("INVALID_MCP_SERVER", "Provide an absolute http(s) server URL of 1-2048 chars.");
@@ -122,8 +122,11 @@ export function parseMcpServerUrl(value: unknown): string {
     if (url.protocol !== "https:") {
       throw invalid("INVALID_MCP_SERVER", "The MCP server URL must use https outside the local fixture.");
     }
+    // DNS names only outside the fixture: literal IPs (v4 or v6) never
+    // serve a template URL, so internal-address classification cannot be
+    // bypassed with an unlisted literal.
     if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":")) {
-      throw invalid("INVALID_MCP_SERVER", "The MCP server URL must not target an internal address.");
+      throw invalid("INVALID_MCP_SERVER", "The MCP server URL must use a DNS hostname outside the local fixture.");
     }
   }
   return value;
@@ -297,9 +300,19 @@ export async function createMcpServerTemplate(
     )
     .bind(id, name, serverUrl, orgId, providerFlow, discoveryMetadata, now, now)
     .run();
-  const row = await rowById(db, id);
-  if (!row) throw invalid("MCP_SERVER_NOT_FOUND", "The MCP server could not be read after create.", 500);
-  return toView(row);
+  // The view is built from the just-written values — no re-read: the
+  // INSERT above succeeding is the existence proof.
+  return toView({
+    id,
+    name,
+    server_url: serverUrl,
+    org_id: orgId,
+    provider_flow: providerFlow,
+    discovery_metadata: discoveryMetadata,
+    is_active: 1,
+    created_at: now,
+    updated_at: now,
+  });
 }
 
 /** Update one visible template: server URL, flow, and discovery metadata are
@@ -336,9 +349,10 @@ export async function updateMcpServerTemplate(
     )
     .bind(serverUrl, providerFlow, discoveryMetadata, now, id)
     .run();
-  const next = await rowById(db, id);
-  if (!next) throw invalid("MCP_SERVER_NOT_FOUND", "The MCP server could not be read after update.", 500);
-  return toView(next);
+  // The view is built from the pre-update row plus the applied values —
+  // no re-read: the UPDATE above succeeding on the visible row is the
+  // existence proof.
+  return toView({ ...row, server_url: serverUrl, provider_flow: providerFlow, discovery_metadata: discoveryMetadata, updated_at: now });
 }
 
 /** Flip the active flag (disable/enable). Disabling hides the template
@@ -356,13 +370,12 @@ export async function setMcpServerTemplateActive(
   const row = await rowById(db, id);
   if (!row || !visibleTo(row, caller)) throw invalid("MCP_SERVER_NOT_FOUND", "Unknown MCP server.", 404);
   requireWriteScope(caller, row.org_id, admin);
+  const now = new Date().toISOString();
   await db
     .prepare("UPDATE mcp_server_templates SET is_active=?,updated_at=? WHERE id=?")
-    .bind(active ? 1 : 0, new Date().toISOString(), id)
+    .bind(active ? 1 : 0, now, id)
     .run();
-  const next = await rowById(db, id);
-  if (!next) throw invalid("MCP_SERVER_NOT_FOUND", "The MCP server could not be read after update.", 500);
-  return toView(next);
+  return toView({ ...row, is_active: active ? 1 : 0, updated_at: now });
 }
 
 /** Soft-delete (default): flip inactive so existing Connection and catalog

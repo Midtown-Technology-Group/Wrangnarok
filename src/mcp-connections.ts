@@ -122,25 +122,7 @@ function parseClientId(value: unknown): string | null {
   return value;
 }
 
-interface TemplateRef {
-  readonly id: string;
-  readonly name: string;
-  readonly server_url: string;
-  readonly provider_flow: string;
-}
-
-async function templateRef(db: D1Database, serverId: string): Promise<TemplateRef | null> {
-  try {
-    return await db
-      .prepare("SELECT id,name,server_url,provider_flow FROM mcp_server_templates WHERE id=?")
-      .bind(serverId)
-      .first<TemplateRef>();
-  } catch (error) {
-    if (isMissingTable(error)) return null;
-    throw error;
-  }
-}
-
+/** A Connection row joined to its bound template. */
 /** Declared secret-field name carrying the per-Organization MCP OAuth
  * client secret. The value persists as an envelope in `mcp_connection_secrets`
  * (the SEC-02 envelope path P0 D3.1 names, in an MCP-owned table so the
@@ -171,18 +153,20 @@ async function clientSecretProvisioned(db: D1Database, connectionId: string): Pr
   }
 }
 
-function toView(row: McpConnectionRow, template: TemplateRef, secretProvisioned: boolean): McpConnectionView {
+type JoinedRow = McpConnectionRow & { server_name: string; server_url: string; provider_flow: string };
+
+function toView(row: JoinedRow, secretProvisioned: boolean): McpConnectionView {
   return Object.freeze({
     id: row.id,
     orgId: row.org_id,
     serverId: row.server_id,
-    serverName: template.name,
-    effectiveServerUrl: row.server_url_override ?? template.server_url,
+    serverName: row.server_name,
+    effectiveServerUrl: row.server_url_override ?? row.server_url,
     serverUrlOverride: row.server_url_override,
     tokenPath: row.token_path,
     clientId: row.client_id,
     clientSecretProvisioned: secretProvisioned,
-    providerFlow: template.provider_flow,
+    providerFlow: row.provider_flow,
     availableInChat: row.available_in_chat === 1,
     availableToAutonomous: row.available_to_autonomous === 1,
     enabled: row.enabled === 1,
@@ -191,24 +175,25 @@ function toView(row: McpConnectionRow, template: TemplateRef, secretProvisioned:
   });
 }
 
-async function rowById(db: D1Database, orgId: string, id: string): Promise<McpConnectionRow | null> {
+/** Read one owned Connection with its template in a single INNER JOIN.
+ * Unknown, foreign, or template-less rows resolve to null — callers
+ * answer 404, never a half-bound view and never a leak. */
+async function rowById(db: D1Database, orgId: string, id: string): Promise<JoinedRow | null> {
   try {
     return await db
       .prepare(
-        "SELECT id,org_id,server_id,server_url_override,token_path,client_id,available_in_chat,available_to_autonomous,enabled,created_at,updated_at FROM mcp_connections WHERE org_id=? AND id=?",
+        "SELECT c.id,c.org_id,c.server_id,c.server_url_override,c.token_path,c.client_id,c.available_in_chat,c.available_to_autonomous,c.enabled,c.created_at,c.updated_at,t.name AS server_name,t.server_url AS server_url,t.provider_flow AS provider_flow FROM mcp_connections c JOIN mcp_server_templates t ON t.id=c.server_id WHERE c.org_id=? AND c.id=?",
       )
       .bind(orgId, id)
-      .first<McpConnectionRow>();
+      .first<JoinedRow>();
   } catch (error) {
     if (isMissingTable(error)) return null;
     throw error;
   }
 }
 
-async function withTemplate(db: D1Database, row: McpConnectionRow): Promise<McpConnectionView> {
-  const template = await templateRef(db, row.server_id);
-  if (!template) throw invalid("MCP_SERVER_NOT_FOUND", "The bound MCP server no longer exists.", 500);
-  return toView(row, template, await clientSecretProvisioned(db, row.id));
+async function withTemplate(db: D1Database, row: JoinedRow): Promise<McpConnectionView> {
+  return toView(row, await clientSecretProvisioned(db, row.id));
 }
 
 /** List this Organization's Connections in server-name order. */
@@ -228,15 +213,7 @@ export async function listMcpConnections(db: D1Database, caller: Principal): Pro
         .all<{ connection_id: string }>();
       for (const entry of secrets.results) provisioned.add(entry.connection_id);
     }
-    return Object.freeze(
-      rows.results.map((row) =>
-        toView(
-          row,
-          { id: row.server_id, name: row.server_name, server_url: row.server_url, provider_flow: row.provider_flow },
-          provisioned.has(row.id),
-        ),
-      ),
-    );
+    return Object.freeze(rows.results.map((row) => toView(row, provisioned.has(row.id))));
   } catch (error) {
     if (isMissingTable(error)) return Object.freeze([]);
     throw error;
@@ -315,9 +292,28 @@ export async function createMcpConnection(
       now,
     )
     .run();
-  const row = await rowById(db, caller.orgId, id);
-  if (!row) throw invalid("MCP_CONNECTION_NOT_FOUND", "The MCP Connection could not be read after create.", 500);
-  return withTemplate(db, row);
+  // The view is built from the just-written values — no re-read: the
+  // INSERT above succeeding is the existence proof, and no secret exists
+  // yet for a fresh binding, so the provisioned flag is false.
+  return toView(
+    {
+      id,
+      org_id: caller.orgId,
+      server_id: template.id,
+      server_url_override: override,
+      token_path: tokenPath,
+      client_id: clientId,
+      available_in_chat: availableInChat ? 1 : 0,
+      available_to_autonomous: availableToAutonomous ? 1 : 0,
+      enabled: enabled ? 1 : 0,
+      created_at: now,
+      updated_at: now,
+      server_name: template.name,
+      server_url: template.server_url,
+      provider_flow: template.provider_flow,
+    },
+    false,
+  );
 }
 
 /** Update one owned Connection: override, token path, flags, and
@@ -361,6 +357,7 @@ export async function updateMcpConnection(
   const availableToAutonomous =
     parseFlag(body.availableToAutonomous, "availableToAutonomous") ?? row.available_to_autonomous === 1;
   const enabled = parseFlag(body.enabled, "enabled") ?? row.enabled === 1;
+  const now = new Date().toISOString();
   await db
     .prepare(
       "UPDATE mcp_connections SET server_url_override=?,token_path=?,client_id=?,available_in_chat=?,available_to_autonomous=?,enabled=?,updated_at=? WHERE org_id=? AND id=?",
@@ -372,14 +369,27 @@ export async function updateMcpConnection(
       availableInChat ? 1 : 0,
       availableToAutonomous ? 1 : 0,
       enabled ? 1 : 0,
-      new Date().toISOString(),
+      now,
       caller.orgId,
       id,
     )
     .run();
-  const next = await rowById(db, caller.orgId, id);
-  if (!next) throw invalid("MCP_CONNECTION_NOT_FOUND", "The MCP Connection could not be read after update.", 500);
-  return withTemplate(db, next);
+  // The view is built from the pre-update row plus the applied values —
+  // no re-read: the UPDATE above succeeding on the owned row is the
+  // existence proof, and the template join is unchanged.
+  return toView(
+    {
+      ...row,
+      server_url_override: override,
+      token_path: tokenPath,
+      client_id: clientId,
+      available_in_chat: availableInChat ? 1 : 0,
+      available_to_autonomous: availableToAutonomous ? 1 : 0,
+      enabled: enabled ? 1 : 0,
+      updated_at: now,
+    },
+    await clientSecretProvisioned(db, row.id),
+  );
 }
 
 /** Delete one owned Connection with its catalog rows and both token

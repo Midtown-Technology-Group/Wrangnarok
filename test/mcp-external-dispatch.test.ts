@@ -362,7 +362,7 @@ describe("TOOL-02 dispatch (S3+S4)", () => {
     return connectionId;
   }
 
-  it("user identity dispatches with the user Bearer [REDACTED] provenance", async () => {
+  it("user identity dispatches under user credentials plus provenance", async () => {
     const connectionId = await readyConnection("authorization_code", "dispatch-user", { availableInChat: true });
     rpcBehavior = (authHeader, body) => {
       expect(authHeader).toBe(`Bearer ${USER_ACCESS}`);
@@ -490,7 +490,7 @@ describe("TOOL-02 dispatch (S3+S4)", () => {
     expect(redirected.status).toBe(502);
     expect(((await jsonOf(redirected)).error as { code: string }).code).toBe("MCP_VENDOR_REDIRECTED");
     // Manual redirect mode: the single POST fails loud instead of
-    // following the redirect with the Bearer [REDACTED]
+    // following the redirect with the credential
     expect(rpcCalls.length).toBe(rpcBefore + 1);
   });
 
