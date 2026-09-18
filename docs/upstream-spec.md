@@ -407,6 +407,63 @@ refresh only (scheduled refresh stays deferred with OAUTH-01). Private
 endpoints, non-HTTP transports, and SSE/stdio are explicit v0 non-support
 with P4 compatibility statements.
 
+### 24. Personal memory and required instructions: consent-controlled, owner-isolated, composed (AI-06, issue #169, Sep 2026)
+
+Lane-0 pin only (docs-only): no memory/instruction tables, routes, flags, or
+composition code exist in Wrangnarök. Scout verdict is **no-build** until AI-05
+storage and the AI-02 agent-tool path land — personal memory without a
+retriever that reads it and without a tool path that enforces its isolation
+would be dead schema. Future AI-05/AI-02 lanes inherit the constraints below.
+
+All pins at upstream `3543c7e` (the parity-audit baseline), from
+`api/src/routers/memory.py`, `api/src/routers/required_instructions.py`,
+`api/src/services/memory.py`, `api/tests/e2e/api/test_memory.py`, and
+`api/tests/unit/services/test_required_instructions.py`. `vendor/upstream/`
+is empty in the local checkout, so these paths rest on the #169 ledger and
+must be re-inspected against upstream sources at build time; no vector
+storage is assumed and no upstream behavior is invented here.
+
+**Distinct-from-shared-knowledge clause.** Personal memory and composed
+required instructions are distinct from shared knowledge. The two closest
+current local surfaces are lookalikes that MUST NOT be adopted as memory:
+
+- `ai_behavior` default system prompt (`migrations/0028_ai_profiles.sql`,
+  `AiBehaviorView` in `src/ai-profiles.ts`, `GET/PUT /api/ai/behavior`) is an
+  org-wide operator config singleton (AI-01) — not consent-controlled
+  personal memory and not required instructions.
+- `src/profile.ts` display/theme/avatar preferences carry no memory
+  semantics, no search, and no composition.
+- Scoped config (ADR 031, CON-02) is org-only with explicitly no global tier
+  in v1, so AI-06 global/org required-instruction precedence is an undecided
+  modeling question that owes its own global-tier ADR — not a reuse.
+
+**Invariants the build must hold:**
+
+- Owner-only memory access with cross-user denial: no caller can read or
+  delete another user's memory, including through agent tools. The
+  memory-through-tools isolation test must mirror §18 caller-scoped
+  resolution + listable-equals-executable (deny-by-default agent grants).
+- Platform enablement plus per-user opt-out with *effective* disablement:
+  a disabled user gets no memory reads/writes surfacing anywhere.
+- Deletion/retention semantics: hard delete and export on request; the
+  retention rule must state what disablement deletes vs keeps.
+- Deterministic composition with exact expected output: global < org <
+  memory-section precedence, clearing behavior (later sections clearing
+  earlier named ones), every composed section carrying source + revision.
+- Memory content is untrusted context, never an authority source:
+  instructions never replace server permission enforcement, and visibility
+  is revalidated on read.
+- Org switching re-scopes memory reads to the *current* org; memory rows
+  key `(org_id, user_id)` against the `Principal{userId, orgId}` caller.
+
+**Wrangnarök implication (AI-06, blocked):** Consent-flag schema, owner-only
+CRUD, cross-user/org denial, deterministic composer unit tests, and
+disablement/deletion tests can proceed against local D1 once AI-05 storage
+predicates exist; semantic memory search waits for the AI-05 cost gate, and
+agent-tool surfacing waits for the AI-02 tool path. Memory opt-in/out rows
+should copy the OAUTH-01/MCP per-user consent provenance shape
+(who/when/scopes, cf. §23) without forking a second consent store.
+
 ## Candidate product invariants
 
 These are stronger than implementation preferences and should guide design reviews:
