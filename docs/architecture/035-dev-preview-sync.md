@@ -1,7 +1,11 @@
-# ADR 016: Local-first preview, sync, and deploy validation (DEV-02)
+# ADR 035: Local-first preview, sync, and deploy validation (DEV-02)
 
 - **Status:** Accepted
 - **Date:** 2026-09-11
+- **Renumber note (2026-09-18, issue #225):** formerly ADR 016. The number
+  collided with ADR 016 (Solution source capture, export, and import, SOL-03);
+  per the steward-delegated later-landed-moves rule the later-landed file
+  moves, and 035 is the next free number above the highest assigned (033).
 - **Issue:** #141 (DEV-02)
 
 ## Context

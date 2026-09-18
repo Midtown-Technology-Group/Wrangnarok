@@ -1,7 +1,13 @@
-# ADR 018: Managed file locations over R2 with D1 metadata, policy-checked proxy access, and finalize-after-upload
+# ADR 036: Managed file locations over R2 with D1 metadata, policy-checked proxy access, and finalize-after-upload
 
 - **Status:** Accepted (2026-09-11; gates FILE-01 per issue #157)
 - **Date:** 2026-09-11
+- **Renumber note (2026-09-18, issue #225):** formerly ADR 018. The number
+  was shared by five ADRs (RUN-01 runtime policy, FILE-01 managed files,
+  TRG-02 endpoint triggers, AUTH-02 resource roles, RUN-02 child invocation);
+  per the steward-delegated later-landed-moves rule the earliest-landed file
+  keeps 018 and the rest move in landing order, and 036 is the next free
+  number above the highest assigned (033).
 - **Extends:** ADR 003 (Integration vs Connection), ADR 010 (Phase 1b design), ADR 014 (Access auth)
 - **Upstream compatibility:** shaped from upstream `gobifrost/bifrost` file machinery at baseline `3543c7ebee0e1bd9a2cab6dfba080a30621b1c5f` (`api/src/routers/files.py`, `api/bifrost/files.py`; tests `api/tests/e2e/api/test_files_signed_url_roundtrip.py`, `test_file_uploads.py`, `test_file_transitions.py`, `test_files_403_vs_404.py`). Ideology preserved; divergences below are explicit and Cloudflare-driven.
 

@@ -8,8 +8,8 @@
 - **Extends:** the slice-1 ADR (`TBD-form-embed-capabilities.md`), ADR 005
   (secret storage, v0 digests-only posture), ADR 015 (form binding — see
   #225 for the number collision; this reference means
-  `015-form-binding.md`), ADR 018 endpoint-triggers
-  (`018-endpoint-triggers.md`, same #225 caveat), ADR 017 (authored apps),
+  `015-form-binding.md`), ADR 037 endpoint-triggers
+  (`037-endpoint-triggers.md`, renumbered from 018 by issue #225), ADR 017 (authored apps),
   ADR 019 (app runtime SDK), `docs/upstream-spec.md` §17
 - **Numbering note:** this document carries no ADR number until the steward
   reserves one. Per the #225 convention, unreserved decisions stay at

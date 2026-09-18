@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-11
-- **Extends:** ADR 002 (Saga identity), ADR 003 (Integrations and Connections), ADR 005 (secret storage), ADR 016 (dev/preview sync), ADR 019 (artifacts), ADR 031 (scoped configuration)
+- **Extends:** ADR 002 (Saga identity), ADR 003 (Integrations and Connections), ADR 005 (secret storage), ADR 035 (dev/preview sync, renumbered from 016 by issue #225), ADR 040 (artifacts, renumbered from 019 by issue #225), ADR 031 (scoped configuration)
 - **Implements:** issue #264
 - **Related:** issues #262 and #263
 

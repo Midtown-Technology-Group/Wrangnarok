@@ -1,7 +1,12 @@
-# ADR 018: Endpoint and webhook Triggers
+# ADR 037: Endpoint and webhook Triggers
 
 **Status:** Accepted for issue #138 (TRG-02). Implements the webhook half of
 the ADR 012 investigation; schedule Triggers stay deferred to TRG-01.
+
+**Renumber note (2026-09-18, issue #225):** formerly ADR 018. The number was
+shared by five ADRs; per the steward-delegated later-landed-moves rule the
+earliest-landed file keeps 018 and the rest move in landing order, and 037 is
+the next free number above the highest assigned (033).
 
 ## Context
 

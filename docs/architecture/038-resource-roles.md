@@ -1,13 +1,17 @@
-# ADR 018: Resource Roles, Claims, and Delegated Authorization (AUTH-02)
+# ADR 038: Resource Roles, Claims, and Delegated Authorization (AUTH-02)
 
 - **Status:** Accepted
 - **Date:** 2026-09-11
-- **Extends:** ADR 015 (Organization membership), ADR 014 (Access identity), `docs/upstream-spec.md` auth rows, `docs/upstream-parity.md` AUTH-02
+- **Renumber note (2026-09-18, issue #225):** formerly ADR 018. The number was
+  shared by five ADRs; per the steward-delegated later-landed-moves rule the
+  earliest-landed file keeps 018 and the rest move in landing order, and 038
+  is the next free number above the highest assigned (033).
+- **Extends:** ADR 034 (Organization membership), ADR 014 (Access identity), `docs/upstream-spec.md` auth rows, `docs/upstream-parity.md` AUTH-02
 - **Steward review requested** on the implementing PR (security-adjacent; Phase 3 gate).
 
 ## Context
 
-ADR 015 ships the two-role membership model (`member`/`admin` per Organization,
+ADR 034 ships the two-role membership model (`member`/`admin` per Organization,
 plus instance admins) and gates every `/api/*` request on live membership rows.
 That answers "may this caller reach this Organization" but not "may this caller
 use this resource": any active member can execute any Saga, read and submit any
@@ -70,14 +74,14 @@ granular control plane for exactly this (`api/src/routers/roles.py`,
 
 ### Evaluation (`can`, re-resolved per request)
 
-For caller `ctx` (ADR 015 `CallerCtx`) and check
+For caller `ctx` (ADR 034 `CallerCtx`) and check
 `(orgId, resourceKind, resourceId, action)`:
 
 1. Instance admin (`ADMIN_USER_IDS` env, the provider-admin matrix row) —
    allow everywhere, including globals management.
 2. Organization admin (active `admin` membership in the target Organization) —
    allow everything in that Organization. External-kind callers can never be
-   admins (ADR 015), so the external matrix row always falls through.
+   admins (ADR 034), so the external matrix row always falls through.
 3. Direct rule: an Organization rule for this `orgId`, or any global rule,
    whose subject matches (`all`, this user, or this membership kind) —
    allow. No implicit cross-org fallback: org A's rule never authorizes org B.
@@ -93,7 +97,7 @@ membership — they only narrow what a live member may do. Every request
 re-resolves assignments and rules from D1, so policy changes and revocations
 apply to the next request with no redeploy and no sessions to expire. Running
 Workflow instances are unaffected once dispatched (same in-flight posture as
-ADR 015 membership revocation): the Execution row keeps its stored
+ADR 034 membership revocation): the Execution row keeps its stored
 `org_id`/`user_id`, and the org admin history surface keeps it visible.
 
 ### Non-request dispatch (S3, issue #143)
@@ -112,7 +116,7 @@ membership is never activated outside a verified request: unattended
 dispatch only serves already-active authority. Cron schedule promotion
 (`src/schedules.ts` `promoteWindow`) consumes the resolver for run-as
 revalidation; its schedule-local duplicate is deleted. Request-driven
-`resolveCaller` (ADR 015) is unchanged and stays the request adapter —
+`resolveCaller` (ADR 034) is unchanged and stays the request adapter —
 this slice does not refactor it, add `table`/`file` kinds, or decide the
 S4 spine composition.
 
@@ -152,7 +156,7 @@ Organization scope and answers 404 before grant evaluation runs.
 - No explicit deny rules: absence denies, so there is nothing to order or
   override. If a future need earns deny-override semantics, it gets its own ADR.
 - No bulk user create/update/delete endpoints (same standing decision as
-  ADR 015): bulk revocation of assignments is the only bulk op, because
+  ADR 034): bulk revocation of assignments is the only bulk op, because
   incident response ("remove this user everywhere in this org now") is the
   demonstrated operator need.
 - No new Cloudflare primitive: Worker + D1 only (migration

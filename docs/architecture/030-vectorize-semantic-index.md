@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-09-12
 - **Implements:** AI-05 / AI-06 knowledge-memory direction
-- **Related:** ADR 001 (Execution model), ADR 003 (Integrations/Connections), ADR 022 (OpenAPI Code Mode), ADR 023/AI-02 agent-runtime direction when merged
+- **Related:** ADR 001 (Execution model), ADR 003 (Integrations/Connections), ADR 022 (OpenAPI Code Mode), ADR 041/AI-02 agent-runtime direction when merged (renumbered from 023 by issue #225)
 
 ## Context
 
