@@ -41,10 +41,12 @@ permissions:
 
 jobs:
   review:
-    # Skip gracefully until the owner stores OPENCODE_API_KEY (avoids a red
-    # run on every PR before setup), and skip drafts — they are reviewed on
-    # ready_for_review.
-    if: ${{ secrets.OPENCODE_API_KEY != '' && github.event.pull_request.draft == false }}
+    # NOTE (issue #225, same as preview.yml): GitHub rejects `secrets.*` in
+    # job-level `if:` (zero-job failed runs on every push), so the job always
+    # evaluates: drafts skip here, and the credential-needing step gates on
+    # the probe below. Without the owner-stored secret the run completes as
+    # a normal skip.
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -53,7 +55,23 @@ jobs:
         with:
           persist-credentials: false
 
+      # Credential-presence probe: exposes the secret through env (the
+      # supported pattern) and publishes a non-secret signal for the
+      # step-level conditional below.
+      - name: Check review credentials
+        id: creds
+        env:
+          REVIEW_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          if [[ -z "$REVIEW_KEY" ]]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No OPENCODE_API_KEY; review step will skip."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run OpenCode review
+        if: steps.creds.outputs.present == 'true'
         uses: anomalyco/opencode/github@014614d35b397775e5d397a490fc72368c894ec2 # v1.18.31
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
