@@ -1,6 +1,9 @@
 # Lane scope: opencode project customization.
 # Adds Wrangnarok project subagents and untracks the opencode-generated
 # .opencode/package.json so every worktree stays clean.
+# Also stops the mailbox test from asserting that untracked manifest,
+# which otherwise breaks typecheck on fresh checkouts.
 scopes/
 .gitignore
 .opencode/
+test/mailbox.test.ts
