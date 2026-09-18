@@ -149,3 +149,65 @@ Organization scope and answers 404 before grant evaluation runs.
   point of this ADR).
 - Free-tier fit: four small D1 tables plus per-request point reads inside the
   existing request budget; no new billable primitive.
+
+## Addendum (Proposed 2026-09-18): narrow org-role profile and delegation scope
+
+- **Status of this section only:** Proposed; steward review requested. The
+  Accepted text above is unchanged. Issue #143; steward decision 2026-09-17
+  (narrow ADR + org roles first, full claims engine deferred).
+
+### Fixed org roles with closed ceilings
+
+- `admin` — the Organization-admin bypass in Evaluation above plus the org
+  admin surfaces, unchanged.
+- `operator` — may hold action grants (`execute`, `submit`, `write`, `serve`,
+  table `insert`/`update`/`delete`, file `write`/`delete`) via assignment or
+  direct rule. May never manage roles, grants, rules, or membership.
+- `viewer` — read-only ceiling. Only `read`-class grants are evaluable for a
+  viewer (Saga discovery, `form:read`, `app:read`, table `read`, file `read`).
+  An action-grant row naming a viewer is inert: the evaluator ignores it and
+  the admin surface rejects it.
+- External-kind members may be `operator` or `viewer`, never `admin`
+  (standing ADR 015 rule, restated so the set is closed).
+
+### Delegation scope shape
+
+Every delegation names
+`{ kind, resourceId | '*', action, subject, via, issuedBy, expiresAt }` with
+`via` one of `form-handle`, `app-serve`, `schedule-run-as`, `endpoint-key`,
+`app-grant`. The five existing carriers satisfy this shape with no new table:
+the Form startup handle (org + user + form bound, 30-minute TTL), the App
+serve grant, schedule run-as (Saga `execute` `RoleCheck` at tick via
+`resolveCurrentAuthority`), endpoint delivery keys, and `app_grants` rows. A
+new carrier must state its `via` and expiry or it does not ship. Delegation
+narrows, never widens.
+
+### Composition with the tables/files legs (refines the non-goal above)
+
+The "no `table`/`file` enforcement" non-goal predates the TABLE-01/FILE-01
+stores and is refined, not removed: `table`/`file` kinds stay out of `can()`;
+`table_grants` (`src/tables.ts`) and `file_policies` (`src/files.ts`) are
+retained as the resource-policy layer composed **under** this hierarchy, and
+may narrow org-role authority but never widen it:
+
+```text
+live membership -> org role ceiling -> resource grant / delegation
+  -> resource-specific policy (table_grants / file_policies)
+  -> delegated runtime capability (handles, tokens, app_grants)
+```
+
+| Action surface                   | Authoritative layer(s)                           |
+| -------------------------------- | ------------------------------------------------ |
+| Saga `execute` (both ingresses)  | grant layer (`can`)                              |
+| Form `read` / `write`            | grant layer (`can`)                              |
+| Form `submit` dispatch           | delegation layer (live handle + `submit` grant)  |
+| App `read` / `write`             | grant layer (`can`)                              |
+| App `serve`                      | delegation layer (serve grant, no Saga grant)    |
+| Table row actions                | role ceiling, then `table_grants`                |
+| File location actions            | role ceiling, then `file_policies`               |
+| Byte delivery                    | capability token plus policy re-check at use     |
+
+The full reusable claims/policy engine (arbitrary claim types, deny-override
+rules, cross-org roles, global role bundles, `table`/`file` kinds in `can()`)
+stays deferred to its own ADR and number. The `policy_rules` subject
+vocabulary (`user:` / `kind:` / `all`) is frozen as the narrow set.
