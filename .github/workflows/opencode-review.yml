@@ -9,11 +9,20 @@
 # convention (release v1.18.31, `github/action.yml` verified present at
 # this SHA via the GitHub API).
 #
-# NOTE on auth/model (Zen): the GitHub doc only shows provider keys, but the
-# action passes `env` through to the OpenCode run, so Zen auth is
-# `OPENCODE_API_KEY` (owner-stored secret; only referenced here, never a
-# value). Per the Zen doc, Zen "works like any other provider" and the model
-# selector is `opencode/<model-id>` (documented example: `opencode/gpt-5.5`).
+# NOTE on auth/model (OpenCode Go subscription, NOT Zen metered): the GitHub
+# doc only shows provider keys, but the action passes `env` through to the
+# OpenCode run. Verified against upstream (2026-09-18):
+# - Model selector MUST be `opencode-go/<model-id>` (Go doc, `go.mdx`:
+#   "for Kimi K3, you would use `opencode-go/kimi-k3`"). The `opencode/`
+#   prefix is the separate Zen pay-as-you-go catalog, and bare
+#   `provider/model` strings (e.g. `anthropic/...`) route to that provider
+#   and would bill a separate provider key — never use them here.
+# - Env stays `OPENCODE_API_KEY` (owner-stored secret; only referenced here,
+#   never a value): the models.dev registry — the same source opencode core
+#   reads for provider auth (`provider.env` in `provider.ts`) — declares
+#   `env = ["OPENCODE_API_KEY"]` for BOTH `opencode` and `opencode-go`.
+#   The subscription routing comes from the `opencode-go/` model prefix
+#   (base URL `https://opencode.ai/zen/go/v1`), not from a separate env var.
 #
 # Advisory-only by construction: `use_github_token: true` (no GitHub App
 # install, no OIDC exchange, so no `id-token: write`) plus read-only
@@ -50,7 +59,7 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          model: opencode/gpt-5.5
+          model: opencode-go/kimi-k3
           use_github_token: true
           prompt: |
             Review this pull request. Your findings are ADVISORY comments only;

@@ -1,0 +1,6 @@
+# OpenCode Go-model correction lane scope (owner directive on PR #536): switch
+# the auto-review workflow to an OpenCode Go subscription model slug
+# (`opencode-go/<model-id>`) with the verified auth note. CI-config only: the
+# one workflow file plus this scope file. No src/, no product code.
+.github/workflows/opencode-review.yml
+scopes/lane-opencode-review-go-model.scope
