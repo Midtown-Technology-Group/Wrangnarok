@@ -12,20 +12,21 @@
 // the policy check — there are no file_policies rows to revoke.
 //
 // Upload limits adopt the upstream pins recorded in docs/upstream-spec.md
-// §16: logos 5 MiB (upstream routers/branding.py:28). The raster allowlist
-// (PNG, JPEG, GIF, WebP with magic-byte verification) is a deliberate
-// adaptation: SVG logos stay out of slice 1 because inline SVG needs a
-// sanitizer this slice does not ship; served bytes are images only.
+// §16: logos 5 MiB (upstream routers/branding.py:28, whose allowlist also
+// admits SVG). Raster types verify by magic bytes; SVG verifies by the
+// shared inert-markup guard (src/svg-image.ts, UX-01 slice 3) and serves
+// under the API default-src-'none' CSP, so stored SVG can never run script.
 import { Fault, object } from "./domain";
 import type { Principal } from "./domain";
 import { sha256Hex } from "./files";
+import { SVG_CONTENT_TYPE, validateSvgImage } from "./svg-image";
 
 /** Upstream pin: logos 5 MiB (routers/branding.py:28). */
 export const BRANDING_LOGO_MAX_BYTES = 5 * 1024 * 1024;
 export const BRANDING_NAME_MAX = 80;
 
-/** Slice-1 raster allowlist. SVG is a documented follow-up (see above). */
-export const BRANDING_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+/** Image allowlist: raster types plus sanitized inline SVG (slice 3). */
+export const BRANDING_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", SVG_CONTENT_TYPE] as const;
 export type BrandingImageType = (typeof BRANDING_IMAGE_TYPES)[number];
 
 /** Static defaults: the shipped Wrangnarok brand (assets/brand/tokens.css).
@@ -191,19 +192,28 @@ export async function resetBranding(store: BrandingStore, orgId: string): Promis
   return toView(orgId, null);
 }
 
-/** Declared Content-Type allowlist check: exact image/* member, no
- * parameters, no sniffing fallback. */
+/** Declared Content-Type allowlist check: exact member, no parameters,
+ * no sniffing fallback. */
 export function parseLogoContentType(value: string | null): BrandingImageType {
   const type = (value ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
   if (!(BRANDING_IMAGE_TYPES as readonly string[]).includes(type)) {
-    throw fail(415, "UNSUPPORTED_LOGO", "Logos must be PNG, JPEG, GIF, or WebP images.");
+    throw fail(415, "UNSUPPORTED_LOGO", "Logos must be PNG, JPEG, GIF, WebP, or SVG images.");
   }
   return type as BrandingImageType;
 }
 
-/** Magic-byte verification: the declared type must match the actual bytes.
- * A renamed executable or SVG-with-PNG-type answers 415, never storage. */
+/** Byte verification: the declared type must match the actual bytes. Raster
+ * types verify by magic bytes; SVG verifies by the inert-markup guard. A
+ * renamed executable or SVG-with-PNG-type answers 415, never storage. */
 export function verifyLogoBytes(contentType: BrandingImageType, bytes: Uint8Array): void {
+  if (contentType === SVG_CONTENT_TYPE) {
+    try {
+      validateSvgImage(bytes);
+    } catch (error) {
+      throw fail(415, "UNSUPPORTED_LOGO", error instanceof Error ? error.message : "Logo SVG is not allowed.");
+    }
+    return;
+  }
   const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
   const startsWith = (magic: number[]): boolean =>
     bytes.byteLength >= magic.length && magic.every((byte, index) => bytes[index] === byte);
