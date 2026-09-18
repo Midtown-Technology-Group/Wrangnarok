@@ -296,9 +296,10 @@ explicitly adds no second secret store:
   write stamps only (never restores stale diagnostics), and a failure
   that loses the compare-and-swap merges its consecutive count plus
   vendor code onto the committed row without moving its status, then
-  returns the authoritative reread. Both orders end revoked with the
-  failure evidence attached, both stay fail-closed, and no new outcome
-  code is introduced. Cross-generation staleness still answers
+  returns the authoritative reread. Unfenced direct failure writes
+  likewise record diagnostics without moving a committed revoked status.
+  Both orders end revoked with the failure evidence attached, both stay
+  fail-closed, and no new outcome code is introduced. Cross-generation staleness still answers
   OAUTH_TOKEN_GENERATION_STALE. The `OAuthRefreshFence` object
   serializes refresh-vs-refresh per generation only; refresh-vs-revoke
   ordering is owned by these D1 conditional writes, so there is still

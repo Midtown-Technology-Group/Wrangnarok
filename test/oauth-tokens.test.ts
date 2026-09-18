@@ -1230,6 +1230,24 @@ describe("same-generation health-write ordering (issue #451)", () => {
     expect(isTokenUsable(revoked)).toBe(false);
   });
 
+  it("a direct failure write on a revoked row records diagnostics without moving status", async () => {
+    const connectionId = await seedHealthy();
+    await recordOAuthTokenRevoked(bindings.DB, ORG, connectionId, LATER);
+    // Unfenced direct write (no vendor HTTP in between): revoked is
+    // terminal, so the failure count and code land while revoked stands.
+    const health = await recordOAuthTokenFailure(bindings.DB, ORG, connectionId, "TEST_AUTH_FAILED", LATER);
+    expect(health).toMatchObject({
+      status: "revoked",
+      consecutiveFailures: 1,
+      lastFailureCode: "TEST_AUTH_FAILED",
+    });
+    expect(await readOAuthTokenState(bindings.DB, ORG, connectionId)).toMatchObject({
+      generation: 1,
+      health: { status: "revoked", consecutiveFailures: 1, lastFailureCode: "TEST_AUTH_FAILED" },
+    });
+    expect(isTokenUsable(health)).toBe(false);
+  });
+
   it("concurrent same-generation failures accumulate instead of dropping", async () => {
     const connectionId = await seedHealthy();
     const observed = (await readOAuthTokenState(bindings.DB, ORG, connectionId))?.health;

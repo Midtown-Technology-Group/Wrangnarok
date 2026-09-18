@@ -504,9 +504,13 @@ export async function recordOAuthTokenFailure(
   if (!state) throw invalid("OAUTH_TOKEN_NOT_FOUND", "No OAuth token is stored for this Connection.", 404);
   const next = recordTokenFailure(state.health, code, checkedAt);
   if (expectedGeneration === undefined) {
+    // Direct operator write with no vendor HTTP in between. A committed
+    // revocation is terminal (issue #451): the failure diagnostics are
+    // still recorded, but the status never moves off revoked. The
+    // committed row is reread so callers observe authoritative state.
     await db
       .prepare(
-        "UPDATE oauth_tokens SET status=?,consecutive_failures=?,last_failure_code=?,last_success_at=?,checked_at=?,updated_at=? WHERE org_id=? AND connection_id=?",
+        "UPDATE oauth_tokens SET status=CASE WHEN status='revoked' THEN status ELSE ? END,consecutive_failures=?,last_failure_code=?,last_success_at=?,checked_at=?,updated_at=? WHERE org_id=? AND connection_id=?",
       )
       .bind(
         next.status,
@@ -519,7 +523,9 @@ export async function recordOAuthTokenFailure(
         connectionId,
       )
       .run();
-    return next;
+    const committed = await readOAuthTokenState(db, orgId, connectionId);
+    if (!committed) throw invalid("OAUTH_TOKEN_NOT_FOUND", "No OAuth token is stored for this Connection.", 404);
+    return committed.health;
   }
   const observed = expectedHealth ?? state.health;
   const applied = await db
@@ -718,8 +724,9 @@ export interface RefreshedPersistedToken {
  *   call, so a failure that lands after a newer generation replaced the row
  *   observes OAUTH_TOKEN_GENERATION_STALE instead — the fencing authority
  *   wins over the stale vendor outcome and the newer row stands untouched.
- *   A failure that lands after a same-generation revocation drops its stale
- *   transition and keeps the committed health (authoritative reread).
+ *   A failure that lands after a same-generation revocation merges its
+ *   count and code onto the committed revoked row without moving its
+ *   status, and the authoritative reread is returned (issue #451).
  * - A superseded racer (its generation already replaced) observes
  *   OAUTH_TOKEN_GENERATION_STALE from the conditional write; the newer row
  *   stands untouched. */
