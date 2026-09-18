@@ -19,8 +19,17 @@
 #   `providers/opencode-go/models/muse-spark-1.3-contributor.toml`: Meta
 #   "muse" family, reasoning + tool_call capable, served from
 #   `https://opencode.ai/zen/go/v1`). So `opencode-go/muse-spark-1.3-contributor`
-#   bills through the Go subscription under OPENCODE_API_KEY. Caveat from the
-#   Go doc: Muse models have limited regions
+#   bills through the Go subscription under OPENCODE_API_KEY. Pin proof,
+#   re-verified 2026-09-18 against the LIVE serving catalogs (public,
+#   no auth): `https://opencode.ai/zen/go/v1/models` (37 models) lists
+#   `muse-spark-1.3-contributor`, while `https://opencode.ai/zen/v1/models`
+#   (70 models) lists only `muse-spark-1.3` and
+#   `muse-spark-1.3-contributor-free` — i.e. `opencode/muse-spark-1.3-contributor`
+#   does NOT exist, so the Zen-prefixed form must never be substituted.
+#   Key-tier proof: run 35400194654 (PR #538) executed
+#   `MODEL: opencode-go/muse-spark-1.3-contributor` with
+#   `run_opencode outcome=success` under the owner-stored key.
+#   Caveat from the Go doc: Muse models have limited regions
 #   (https://ai.developer.meta.com/legal/geographic-use-policy) — if reviews
 #   start failing with region errors, that page is the first place to look.
 #   The `opencode/` prefix is the separate Zen pay-as-you-go catalog, and bare
