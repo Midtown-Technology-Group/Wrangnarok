@@ -12,6 +12,7 @@ test/resource-roles-unit.test.ts
 test/org-lifecycle.test.ts
 test/sdk.test.ts
 docs/architecture/018-resource-roles.md
+docs/architecture/034-org-roles-scoped-delegation.md
 docs/upstream-parity.md
 scripts/check-bundle-budget.mjs
 scopes/auth-02.scope
