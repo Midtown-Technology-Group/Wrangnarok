@@ -908,10 +908,9 @@ async function finalizeSessionUpload(
   body: unknown,
 ): Promise<{ finalized: true; location: string; path: string }> {
   const claim = parseFinalizeBody(body);
-  const presented =
-    body !== null && typeof body === "object" && !Array.isArray(body)
-      ? ((body as Record<string, unknown>).handle ?? null)
-      : null;
+  // parseFinalizeBody already proved the body is an object, so the handle
+  // read has no shape fallback: a missing handle is simply unbound.
+  const presented = (body as Record<string, unknown>).handle ?? null;
   const stale = () => new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
   const bound = await peekStartupIdentity(env.DB, presented);
   if (!bound) throw stale();

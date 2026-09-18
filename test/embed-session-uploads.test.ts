@@ -18,7 +18,7 @@ import { env } from "cloudflare:workers";
 import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
-import { helloSaga } from "../src/domain";
+import { hash, helloSaga } from "../src/domain";
 import { useWorkflowHarness } from "./helpers/workflow-harness";
 import {
   assertSessionOwnedFileRefs,
@@ -313,6 +313,13 @@ it("parses session-upload fields and keys without touching D1", () => {
   }
   assertSessionOwnedFileRefs([{ name: "doc", type: "file" }], { doc: null }, new Map());
   assertSessionOwnedFileRefs([{ name: "doc", type: "file" }], { doc: "garbage" }, new Map());
+  // Non-object value maps never reach the field loop; a file field with
+  // no policy is not uploadable even when named.
+  assertSessionOwnedFileRefs([{ name: "doc", type: "file" }], null, new Map());
+  assertSessionOwnedFileRefs([{ name: "doc", type: "file" }], [{ doc: 1 }], new Map());
+  expect(() => parseSessionUploadField([{ name: "doc", type: "file" } as FormField], "doc")).toThrow(
+    /declares no file policy/,
+  );
 });
 
 it("records and reloads session claims against D1", async () => {
@@ -528,6 +535,8 @@ it("fails issuance closed on capability drift until the admin rotates", async ()
   await createForm("resume");
   const grant = await createGrant("resume");
   const started = await bootstrapOk(grant);
+  const slot = await issueOk("embed", grant.id, grant.secret, started.handle);
+  await putOk(slot, "pre-drift bytes");
 
   const edited = await call("/api/forms/resume", "PUT", {
     sagaId: helloSaga.id,
@@ -537,6 +546,17 @@ it("fails issuance closed on capability drift until the admin rotates", async ()
   const drifted = await issueEmbedUpload(grant.id, grant.secret, ORIGIN, { handle: started.handle, field: "doc" });
   expect(drifted.status).toBe(409);
   expect(await drifted.json()).toMatchObject({ error: { code: "EMBED_CAPABILITY_CHANGED" } });
+  // Outstanding finalizes die stale on drift exactly like submits.
+  const driftedFinalize = await sessionFinalize({
+    handle: started.handle,
+    location: slot.location,
+    path: slot.path,
+    contentType: "text/plain",
+    size: 15,
+    sha256: "5".repeat(64),
+  });
+  expect(driftedFinalize.status).toBe(422);
+  expect(await driftedFinalize.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
 
   const rotated = await call(`/api/forms/resume/embeds/${grant.id}/rotate`, "POST", {});
   expect(rotated.status).toBe(200);
@@ -553,6 +573,13 @@ it("fails anonymous issuance closed on drift, disable, and unknown links", async
   const { handle } = (await startup.json()) as { handle: string };
 
   expect((await issuePublicUpload("00000000-0000-4000-8000-00000000ffff", { handle, field: "doc" })).status).toBe(404);
+  const pubPreflight = await worker.fetch(
+    new Request(`https://local.test/api/public/${pub.id}/uploads`, { method: "OPTIONS" }),
+    bindings,
+  );
+  expect(pubPreflight.status).toBe(204);
+  const slot = await issueOk("public", pub.id, null, handle);
+  await putOk(slot, "pre-drift public bytes");
   const edited = await call("/api/forms/flyer", "PUT", {
     sagaId: helloSaga.id,
     fields: [...FILE_FIELDS, { name: "nick", type: "text", required: false }],
@@ -561,19 +588,41 @@ it("fails anonymous issuance closed on drift, disable, and unknown links", async
   const drifted = await issuePublicUpload(pub.id, { handle, field: "doc" });
   expect(drifted.status).toBe(409);
   expect(await drifted.json()).toMatchObject({ error: { code: "PUBLICATION_STALE" } });
+  const driftedFinalize = await sessionFinalize({
+    handle,
+    location: slot.location,
+    path: slot.path,
+    contentType: "text/plain",
+    size: 22,
+    sha256: "6".repeat(64),
+  });
+  expect(driftedFinalize.status).toBe(422);
+  expect(await driftedFinalize.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
 
   const reviewed = await call("/api/forms/flyer/publication/review", "POST", { approve: true });
   expect(reviewed.status).toBe(200);
   const healed = await publicStartup(pub.id);
   expect(healed.status).toBe(201);
   const healedHandle = ((await healed.json()) as { handle: string }).handle;
-  expect((await issuePublicUpload(pub.id, { handle: healedHandle, field: "doc" })).status).toBe(201);
+  const stagedSlot = await issueOk("public", pub.id, null, healedHandle);
+  await putOk(stagedSlot, "staged before disable");
 
   const disabled = await call("/api/forms/flyer/publication", "DELETE");
   expect(disabled.status).toBe(200);
   const blocked = await issuePublicUpload(pub.id, { handle: healedHandle, field: "doc" });
   expect(blocked.status).toBe(404);
   expect(await blocked.json()).toMatchObject({ error: { code: "FORM_NOT_PUBLISHED" } });
+  // Outstanding finalizes die stale on disable exactly like submits.
+  const disabledFinalize = await sessionFinalize({
+    handle: healedHandle,
+    location: stagedSlot.location,
+    path: stagedSlot.path,
+    contentType: "text/plain",
+    size: 21,
+    sha256: "8".repeat(64),
+  });
+  expect(disabledFinalize.status).toBe(422);
+  expect(await disabledFinalize.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
 });
 
 it("revocation kills issuance and finalize with no grace", async () => {
@@ -860,6 +909,103 @@ it("caps issuance per session and never accepts foreign handle classes", async (
   expect(anonFinalizeOfSigned.status).toBe(422);
 });
 
+/** Craft a form_startups row directly for sessions the API cannot mint:
+ * dangling grants/publications and operator subjects on session routes. */
+async function craftStartupRow(row: {
+  handle: string;
+  orgId: string;
+  userId: string;
+  formName: string;
+}): Promise<void> {
+  const now = new Date();
+  await bindings.DB.prepare(
+    "INSERT INTO form_startups(handle_hash,org_id,user_id,form_id,form_name,prefill_json,options_json,expires_at,used_at,created_at) VALUES (?,?,?,?,?,?,?,?,NULL,?)",
+  )
+    .bind(
+      await hash(row.handle),
+      row.orgId,
+      row.userId,
+      "form-id-placeholder",
+      row.formName,
+      "{}",
+      "{}",
+      new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
+      now.toISOString(),
+    )
+    .run();
+}
+
+it("rejects dangling and operator sessions on finalize", async () => {
+  expect((await call("/api/file-locations", "POST", { name: "uploads" })).status).toBe(201);
+  await createForm("resume");
+  // A real bootstrap first: form_startups is created lazily on first use.
+  const seed = await createGrant("resume");
+  await bootstrapOk(seed);
+  const danglingGrant = "00000000-0000-4000-8000-00000000aa01";
+  const danglingPub = "00000000-0000-4000-8000-00000000aa02";
+  const grantHandle = "d".repeat(64);
+  const pubHandle = "e".repeat(64);
+  await craftStartupRow({ handle: grantHandle, orgId: ORG, userId: `embed:${danglingGrant}`, formName: "resume" });
+  await craftStartupRow({ handle: pubHandle, orgId: ORG, userId: `anon:${danglingPub}`, formName: "resume" });
+  // A live grant bound to another form name is equally foreign.
+  const mismatchedHandle = "f".repeat(64);
+  await craftStartupRow({ handle: mismatchedHandle, orgId: ORG, userId: `embed:${seed.id}`, formName: "other" });
+  const claimFor = (handle: string) => ({
+    handle,
+    location: "uploads",
+    path: "session-uploads/nowhere",
+    contentType: "text/plain",
+    size: 1,
+    sha256: "7".repeat(64),
+  });
+  // Unknown grant / publication IDs answer stale, never a leak about
+  // which half of the binding is missing.
+  const danglingGrantFinalize = await sessionFinalize(claimFor(grantHandle));
+  expect(danglingGrantFinalize.status).toBe(422);
+  expect(await danglingGrantFinalize.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+  const danglingPubFinalize = await sessionFinalize(claimFor(pubHandle));
+  expect(danglingPubFinalize.status).toBe(422);
+  expect(await danglingPubFinalize.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+  const mismatchedFinalize = await sessionFinalize(claimFor(mismatchedHandle));
+  expect(mismatchedFinalize.status).toBe(422);
+  expect(await mismatchedFinalize.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+
+  // Operator sessions never belong on session routes: the classes reject
+  // each other's handles in both directions.
+  const operator = await call("/api/forms/resume/startup", "POST", {});
+  expect(operator.status).toBe(201);
+  const operatorHandle = ((await operator.json()) as { handle: string }).handle;
+  const operatorFinalize = await sessionFinalize(claimFor(operatorHandle));
+  expect(operatorFinalize.status).toBe(422);
+  expect(await operatorFinalize.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+
+  // A capability outliving its location answers 404: the byte PUT resolves
+  // the declared location after consuming, never trusting the token row.
+  const ghostToken = "b".repeat(64);
+  const stamp = new Date().toISOString();
+  await bindings.DB.prepare("INSERT INTO file_policies(org_id,location,action,created_at) VALUES (?,?,?,?)")
+    .bind(ORG, "ghost", "write", stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO file_capabilities(id,org_id,source_org_id,location,path,action,staging_key,token_hash,expires_at,used_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,NULL,?)",
+  )
+    .bind(
+      "ghost-cap",
+      ORG,
+      ORG,
+      "ghost",
+      "ghost.txt",
+      "upload",
+      "__staging__/ghost-cap",
+      await hash(ghostToken),
+      new Date(Date.now() + 600000).toISOString(),
+      stamp,
+    )
+    .run();
+  const ghostPut = await sessionPut(ghostToken, new TextEncoder().encode("x"), "text/plain");
+  expect(ghostPut.status).toBe(404);
+});
+
 it("answers issuance preflights and stops slots when policy revokes", async () => {
   expect((await call("/api/file-locations", "POST", { name: "uploads" })).status).toBe(201);
   await createForm("resume");
@@ -876,6 +1022,25 @@ it("answers issuance preflights and stops slots when policy revokes", async () =
     bindings,
   );
   expect(putPreflight.status).toBe(204);
+  const finalizePreflight = await worker.fetch(
+    new Request("https://local.test/api/session-uploads/finalize", { method: "OPTIONS" }),
+    bindings,
+  );
+  expect(finalizePreflight.status).toBe(204);
+
+  // A PUT without a content type stages untyped: the location allows
+  // everything, so the empty type rides through to the file row.
+  const untypedSlot = await issueOk("embed", grant.id, grant.secret, started.handle);
+  const untypedBytes = new TextEncoder().encode("untyped");
+  const untypedPut = await worker.fetch(
+    new Request(`https://local.test/api/session-uploads/content?token=${untypedSlot.token}`, {
+      method: "PUT",
+      headers: { Origin: ORIGIN },
+      body: untypedBytes as Uint8Array<ArrayBuffer>,
+    }),
+    bindings,
+  );
+  expect(untypedPut.status).toBe(200);
 
   // Revoking the location's write policy stops new issuance (403, the
   // FILE-01 verdict) and outstanding byte PUTs: revocation deletes the
