@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0
-// Resource roles, claims, and delegated authorization (ADR 018, AUTH-02).
+// Resource roles, claims, and delegated authorization (ADR 018, AUTH-02;
+// narrow org-role profile per the ADR 035 addendum: fixed admin/operator/
+// viewer ceilings, viewer inert-grant rule, delegation via vocabulary).
 //
 // Membership (ADR 015) answers "may this caller reach this Organization".
 // This module answers "may this caller use this resource": named
@@ -12,7 +14,7 @@
 // There is deliberately no separate claims table — a third store for the
 // same allow tuple would be clever wrapping over boring typed rows.
 import { Fault, UUID, type Principal } from "./domain";
-import { instanceAdmins, type AdminEnv, type CallerCtx } from "./orgs";
+import { instanceAdmins, normalizeOrgRole, type AdminEnv, type CallerCtx } from "./orgs";
 
 export type ResourceKind = "saga" | "form" | "app";
 export type ResourceAction = "execute" | "read" | "submit" | "write" | "serve";
@@ -77,6 +79,36 @@ export interface RoleCheck {
   readonly resourceId: string;
   readonly action: ResourceAction;
 }
+
+/**
+ * Delegation carriers (ADR 035 addendum `via` vocabulary, AUTH-02 narrow
+ * profile). Every delegation names its carrier and its bound; a new
+ * carrier must state both or it does not ship. Delegation narrows, never
+ * widens: the Form/App author chose the target, and the submitter needs
+ * only the delegation grant, never a direct grant on the bound resource.
+ *
+ * - form-handle: Form startup handle (forms.ts), org+user+form bound,
+ *   FORM_STARTUP_TTL_MS expiry enforced at peek, single-use consume fence.
+ * - app-serve: App `serve` grant (index.ts requireAppVisible), evaluated
+ *   per request through `can` — revocation applies to the next request.
+ * - schedule-run-as: schedule run-as identity (schedules.ts
+ *   promoteWindow), re-resolved at every tick through
+ *   resolveCurrentAuthority with the scheduled Saga's `execute` RoleCheck.
+ * - endpoint-key: endpoint delivery key (endpoints.ts), SHA-256 stored,
+ *   key_expires_at enforced at verify, rotation and admin revoke.
+ * - app-grant: app_grants rows (app-runtime.ts), revoked flag re-checked
+ *   at every use — revocation stops already-issued capability at use
+ *   time, not at a TTL.
+ */
+export type DelegationVia = "form-handle" | "app-serve" | "schedule-run-as" | "endpoint-key" | "app-grant";
+
+export const DELEGATION_VIA: readonly DelegationVia[] = [
+  "form-handle",
+  "app-serve",
+  "schedule-run-as",
+  "endpoint-key",
+  "app-grant",
+];
 
 interface RoleRow {
   id: string;
@@ -275,9 +307,10 @@ async function getRole(db: D1Database, orgId: string, roleId: string): Promise<R
 /**
  * Authorization check for one (org, kind, resource, action). Re-resolved per
  * request from D1, so policy changes and revocations apply to the next
- * request. Order: instance admin, org admin, direct rule (org or global),
- * role path. Anything else denies by absence. Membership stays the outer
- * gate: callers pass the ADR-015 CallerCtx, and strangers never reach here.
+ * request. Order: instance admin, org admin, viewer ceiling (deny), direct
+ * rule (org or global), role path. Anything else denies by absence.
+ * Membership stays the outer gate: callers pass the ADR-015 CallerCtx, and
+ * strangers never reach here.
  */
 export async function can(db: D1Database, ctx: CallerCtx, check: RoleCheck): Promise<boolean> {
   if (ctx.isInstanceAdmin) return true;
@@ -286,14 +319,25 @@ export async function can(db: D1Database, ctx: CallerCtx, check: RoleCheck): Pro
   // rights across the boundary. Mirrors canManageOrg (orgs.ts).
   try {
     if (ctx.isOrgAdmin && ctx.principal.orgId === check.orgId) return true;
-    const target =
-      ctx.principal.orgId === check.orgId
-        ? null
-        : await db
-            .prepare("SELECT role,status FROM org_memberships WHERE org_id=? AND user_id=?")
-            .bind(check.orgId, ctx.principal.userId)
-            .first<{ role: string; status: string }>();
-    if (target !== null && target.status === "active" && target.role === "admin") return true;
+    // Resolve the caller's membership role in the TARGET org once: it
+    // drives the cross-org admin bypass below and the viewer ceiling after
+    // it. Same-org callers reuse the request context (resolveCaller only
+    // returns live memberships); every other shape reads the row directly.
+    // Legacy `member` rows normalize to operator.
+    let targetRole = ctx.principal.orgId === check.orgId ? ctx.role : null;
+    if (targetRole === null) {
+      const target = await db
+        .prepare("SELECT role,status FROM org_memberships WHERE org_id=? AND user_id=?")
+        .bind(check.orgId, ctx.principal.userId)
+        .first<{ role: string; status: string }>();
+      if (target !== null && target.status === "active" && target.role === "admin") return true;
+      targetRole = target === null ? null : normalizeOrgRole(target.role);
+    }
+    // Viewer read-only ceiling (ADR 035 addendum): an action-grant row
+    // naming a viewer is inert — the evaluator ignores it whatever its
+    // source (direct rule or role path). Only read-class actions evaluate
+    // for viewers; everything else denies here by absence.
+    if (targetRole === "viewer" && check.action !== "read") return false;
     const userId = ctx.principal.userId;
     // Membership kind for kind-subject rules: live row in the target org.
     // External-kind callers match kind:external; ordinary match kind:ordinary.
@@ -402,6 +446,25 @@ export async function deleteRole(
   }
 }
 
+/**
+ * Viewer read-only ceiling for the admin surface (ADR 035 addendum): an
+ * action-grant row naming a viewer is inert, so the admin surface rejects
+ * it instead of persisting a grant that can never authorize. The evaluator
+ * (`can`) ignores such rows whatever their source; these guards fail fast
+ * with 400 VIEWER_CEILING on the direct paths an admin can check
+ * (role assignees, user subjects). Wider subjects (`kind:`, `all`) and
+ * global rules stay creatable for operators and are narrowed by the
+ * evaluator instead — rejecting them would break legitimate operator
+ * grants that happen to cover viewers as a class.
+ */
+function viewerRejection(what: string): Fault {
+  return new Fault(
+    400,
+    "VIEWER_CEILING",
+    `${what} Viewers hold read-only grants: action grants naming a viewer stay inert.`,
+  );
+}
+
 export async function addGrant(
   db: D1Database,
   orgId: string,
@@ -414,6 +477,19 @@ export async function addGrant(
   const triple = parseGrantTriple(kind, resourceId, action);
   const role = await getRole(db, orgId, id);
   if (!role) throw new Fault(404, "ROLE_NOT_FOUND", "Role not found.");
+  if (triple.action !== "read") {
+    try {
+      const viewer = await db
+        .prepare(
+          "SELECT a.user_id FROM role_assignments a JOIN org_memberships m ON m.org_id=a.org_id AND m.user_id=a.user_id WHERE a.role_id=? AND a.org_id=? AND a.status='active' AND m.role='viewer' AND m.status='active' LIMIT 1",
+        )
+        .bind(id, orgId)
+        .first<{ user_id: string }>();
+      if (viewer) throw viewerRejection("This role has active viewer assignees.");
+    } catch (error) {
+      storeError(error);
+    }
+  }
   const grantId = crypto.randomUUID().toLowerCase();
   const stamp = now();
   try {
@@ -487,10 +563,17 @@ export async function assignRole(
     // lookup would let an admin probe foreign-tenant identities and would
     // create dormant authority effective the moment the user joins this org.
     const member = await db
-      .prepare("SELECT user_id FROM org_memberships WHERE org_id=? AND user_id=?")
+      .prepare("SELECT user_id,role FROM org_memberships WHERE org_id=? AND user_id=?")
       .bind(orgId, user)
-      .first<{ user_id: string }>();
+      .first<{ user_id: string; role: string }>();
     if (!member) throw new Fault(404, "USER_NOT_FOUND", "Invite this user as a member first.");
+    if (member.role === "viewer") {
+      const actionGrant = await db
+        .prepare("SELECT id FROM role_grants WHERE role_id=? AND action!='read' LIMIT 1")
+        .bind(rid)
+        .first<{ id: string }>();
+      if (actionGrant) throw viewerRejection("This role holds action grants and the assignee is a viewer.");
+    }
     const stamp = now();
     const existing = await db
       .prepare("SELECT status FROM role_assignments WHERE role_id=? AND org_id=? AND user_id=?")
@@ -638,6 +721,17 @@ export async function createPolicyRule(
 ): Promise<PolicyRule> {
   const triple = parseGrantTriple(kind, resourceId, action);
   const subject = parseSubject(subjectType, subjectRef);
+  if (triple.action !== "read" && subject.subjectType === "user" && scopeOrgId !== null) {
+    try {
+      const viewer = await db
+        .prepare("SELECT user_id FROM org_memberships WHERE org_id=? AND user_id=? AND role='viewer' LIMIT 1")
+        .bind(scopeOrgId, subject.subjectRef)
+        .first<{ user_id: string }>();
+      if (viewer) throw viewerRejection("This policy rule names a viewer.");
+    } catch (error) {
+      storeError(error);
+    }
+  }
   const id = crypto.randomUUID().toLowerCase();
   const stamp = now();
   try {
@@ -831,7 +925,7 @@ export async function canPrincipal(db: D1Database, caller: Principal, check: Rol
     if (!membership || membership.status !== "active") return false;
     const ctx: CallerCtx = {
       principal: { userId: caller.userId, orgId: check.orgId },
-      role: (membership.role === "admin" ? "admin" : "member") as CallerCtx["role"],
+      role: normalizeOrgRole(membership.role),
       kind: null,
       isInstanceAdmin: false,
       isOrgAdmin: membership.role === "admin",
@@ -931,7 +1025,7 @@ export async function resolveCurrentAuthority(
   if (membership.status !== "active") throw new Fault(403, "MEMBERSHIP_SUSPENDED", "Membership is not active.");
   const ctx: CallerCtx = {
     principal: { orgId: principal.orgId, userId: principal.userId },
-    role: (membership.role === "admin" ? "admin" : "member") as CallerCtx["role"],
+    role: normalizeOrgRole(membership.role ?? ""),
     kind: (membership.kind === "external" ? "external" : "ordinary") as CallerCtx["kind"],
     isInstanceAdmin: false,
     isOrgAdmin: membership.role === "admin",

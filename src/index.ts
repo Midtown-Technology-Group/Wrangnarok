@@ -4750,10 +4750,10 @@ function parseMemberBody(value: unknown): { userId: string; role: OrgRole; kind:
   if (!object(value) || typeof value.userId !== "string") {
     throw new Fault(400, "INVALID_USER_ID", "Provide a userId string to invite.");
   }
-  const role: OrgRole = value.role === undefined ? "member" : (value.role as OrgRole);
+  const role: OrgRole = value.role === undefined ? "operator" : (value.role as OrgRole);
   const kind: MembershipKind = value.kind === undefined ? "ordinary" : (value.kind as MembershipKind);
-  if (role !== "member" && role !== "admin") {
-    throw new Fault(400, "INVALID_MEMBERSHIP", "Role must be member or admin.");
+  if (role !== "admin" && role !== "operator" && role !== "viewer") {
+    throw new Fault(400, "INVALID_MEMBERSHIP", "Role must be admin, operator, or viewer.");
   }
   if (kind !== "ordinary" && kind !== "external") {
     throw new Fault(400, "INVALID_MEMBERSHIP", "Kind must be ordinary or external.");
@@ -4769,8 +4769,8 @@ function parseMemberUpdate(value: unknown): MemberUpdate {
   }
   const update: { role?: OrgRole; status?: MembershipStatus; kind?: MembershipKind } = {};
   if (value.role !== undefined) {
-    if (value.role !== "member" && value.role !== "admin") {
-      throw new Fault(400, "INVALID_MEMBERSHIP", "Role must be member or admin.");
+    if (value.role !== "admin" && value.role !== "operator" && value.role !== "viewer") {
+      throw new Fault(400, "INVALID_MEMBERSHIP", "Role must be admin, operator, or viewer.");
     }
     update.role = value.role;
   }

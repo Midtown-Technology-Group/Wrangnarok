@@ -73,6 +73,7 @@
 // own ADR before it is built.
 import { Fault, object, UUID } from "./domain";
 import type { Principal } from "./domain";
+import { isViewer } from "./orgs";
 
 export const TABLE_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const DOC_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
@@ -446,14 +447,20 @@ export async function loadTable(db: D1Database, orgId: string, name: string): Pr
   return { id: row.id, orgId: row.org_id, name: row.name, ownerUserId: row.owner_user_id, createdAt: row.created_at };
 }
 
-/** Per-action policy check: the owning user holds every action implicitly;
- * any other caller needs an explicit grant row. Deny-by-absence everywhere. */
+/** Per-action policy check, composed under the org-role ceiling (AUTH-02
+ * narrow profile: role ceiling, then resource policy). Viewers are
+ * read-only: non-read actions deny before the owner/grant layer is even
+ * consulted, so a grant row naming a viewer stays inert here exactly as it
+ * does in the grant evaluator. The owning user holds every action
+ * implicitly (unless the ceiling denies); any other caller needs an
+ * explicit grant row. Deny-by-absence everywhere. */
 export async function canAct(
   db: D1Database,
   table: TableDefinition,
   caller: Principal,
   action: TableAction,
 ): Promise<boolean> {
+  if (action !== "read" && (await isViewer(db, table.orgId, caller.userId))) return false;
   if (caller.userId === table.ownerUserId) return true;
   const grant = await db
     .prepare("SELECT id FROM table_grants WHERE table_id=? AND action=? AND grantee_user_id=?")

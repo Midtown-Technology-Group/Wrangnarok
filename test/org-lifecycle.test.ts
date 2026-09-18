@@ -323,7 +323,9 @@ it("deactivates users, orgs, and memberships with immediate effect and no redepl
 it("guards the last admin and refuses to strand a tenant", async () => {
   const orgB = await seedSecondOrg();
   // Only the fixture caller is admin of org B: demotion is refused…
-  expect(await call(`/api/orgs/${orgB}/members/${USER_ADMIN}`, "PATCH", USER_ADMIN, { role: "member" })).toMatchObject({
+  expect(
+    await call(`/api/orgs/${orgB}/members/${USER_ADMIN}`, "PATCH", USER_ADMIN, { role: "operator" }),
+  ).toMatchObject({
     status: 409,
     body: { error: { code: "LAST_ADMIN" } },
   });
@@ -343,10 +345,10 @@ it("guards the last admin and refuses to strand a tenant", async () => {
     body: { role: "admin" },
   });
   expect(
-    await call(`/api/orgs/${orgB}/members/${USER_ADMIN}`, "PATCH", USER_ORDINARY, { role: "member" }),
+    await call(`/api/orgs/${orgB}/members/${USER_ADMIN}`, "PATCH", USER_ORDINARY, { role: "operator" }),
   ).toMatchObject({
     status: 200,
-    body: { role: "member" },
+    body: { role: "operator" },
   });
 });
 
@@ -1843,7 +1845,7 @@ it("pins admin validation, error, and filter branches", async () => {
   // re-invited membership activates on this verified read first.
   expect(await call("/api/sagas", "GET", USER_ORDINARY, undefined, orgB)).toMatchObject({ status: 200 });
   expect(
-    await call(`/api/orgs/${orgB}/members/${USER_ORDINARY}`, "PATCH", USER_ADMIN, { role: "member" }),
+    await call(`/api/orgs/${orgB}/members/${USER_ORDINARY}`, "PATCH", USER_ADMIN, { role: "operator" }),
   ).toMatchObject({
     status: 200,
   });
@@ -1865,7 +1867,7 @@ it("pins admin validation, error, and filter branches", async () => {
     body: { error: { code: "INVALID_MEMBERSHIP" } },
   });
   expect(
-    await call(`/api/orgs/${orgB}/members/nobody@example.com`, "PATCH", USER_ADMIN, { role: "member" }),
+    await call(`/api/orgs/${orgB}/members/nobody@example.com`, "PATCH", USER_ADMIN, { role: "operator" }),
   ).toMatchObject({ status: 404, body: { error: { code: "USER_NOT_FOUND" } } });
   // An admin cannot be made external while holding admin, and suspending the
   // last admin is refused like revocation.
@@ -1946,7 +1948,7 @@ it("pins admin validation, error, and filter branches", async () => {
   expect(listed.status).toBe(200);
   expect(listed.body).toMatchObject({
     members: expect.arrayContaining([
-      expect.objectContaining({ userId: "odd@example.com", role: "member", kind: "ordinary" }),
+      expect.objectContaining({ userId: "odd@example.com", role: "operator", kind: "ordinary" }),
     ]),
   });
   // Bundle install records block deletion with their own message.
@@ -2034,11 +2036,11 @@ it("pins admin validation, error, and filter branches", async () => {
   await expect(inviteMember(db, orgB, "direct@example.com", "superuser" as OrgRole)).rejects.toMatchObject({
     status: 400,
   });
-  await expect(inviteMember(db, orgB, "direct@example.com", "member", "robot" as MembershipKind)).rejects.toMatchObject(
-    {
-      status: 400,
-    },
-  );
+  await expect(
+    inviteMember(db, orgB, "direct@example.com", "operator", "robot" as MembershipKind),
+  ).rejects.toMatchObject({
+    status: 400,
+  });
   await expect(updateMember(db, orgB, USER_ORDINARY, { role: "superuser" as OrgRole })).rejects.toMatchObject({
     status: 400,
   });
