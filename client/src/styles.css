@@ -746,6 +746,17 @@ select:focus-visible {
   width: 6rem;
 }
 
+/* Warn-only contrast list (UX-01 slice 2): plain list type, the failing
+   ratio carries the weight. Never a blocking red — the colors still save. */
+.contrast-list {
+  margin: 0 0 0.75rem 1.25rem;
+  padding: 0;
+}
+
+.contrast-warning {
+  font-weight: 700;
+}
+
 /* ---- Dark theme (UX-01 profile preference) ----
    Explicit [data-theme="dark"], plus OS-driven system/unset under
    prefers-color-scheme. Dark mode is a pure token flip: every themed rule
