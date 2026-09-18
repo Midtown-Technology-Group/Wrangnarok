@@ -164,7 +164,17 @@ import {
   verifyAppEmbedSecret,
 } from "./app-embeds";
 import {
-  assertNoEmbedFileRefs,
+  assertSessionOwnedFileRefs,
+  countSessionUploads,
+  loadSessionUploads,
+  mintSessionUploadPath,
+  parseSessionUploadField,
+  recordSessionUpload,
+  sessionUploadKey,
+  SESSION_UPLOADS_MAX,
+  SESSION_UPLOAD_TTL_SECONDS,
+} from "./session-uploads";
+import {
   checkEmbedBinding,
   checkEmbedOrigin,
   createEmbedGrant,
@@ -261,6 +271,7 @@ import {
   grantPolicy,
   issueDownloadBatch,
   issueUploadBatch,
+  issueUploadSlot,
   listFiles,
   listLocations,
   listPolicies,
@@ -842,38 +853,153 @@ async function scheduleFormExecution(
   };
 }
 
+/** Issue one session-owned upload slot for an external form session
+ * (EMBED-01 slice 3, issue #156). The caller already authenticated the
+ * session class (grant secret + origin, or publication liveness) and the
+ * live declaration; everything below is shared: peek the live session
+ * bound to this form (unknown, expired, foreign, or definition-drifted
+ * handles answer STALE and stage nothing), resolve the named file field
+ * against the declaration (unknown or non-file names answer 400), cap
+ * issuance per session, then mint a server-chosen path plus a single-use
+ * FILE-01 upload token and record the ownership claim the submit check
+ * enforces. The org-wide FILE-01 write policy still gates issuance, so
+ * deleting the location or revoking its policy stops new slots. */
+async function issueSessionUpload(
+  db: D1Database,
+  principal: Principal,
+  def: FormDefinition,
+  body: unknown,
+): Promise<{ location: string; path: string; token: string; expiresAt: string; maxBytes: number }> {
+  const record =
+    body !== null && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : ({} as Record<string, unknown>);
+  const session = await peekStartupHandle(db, principal, def.name, record.handle as string, def.id);
+  const field = parseSessionUploadField(def.fields, record.field);
+  if ((await countSessionUploads(db, session.handleHash)) >= SESSION_UPLOADS_MAX) {
+    throw new Fault(429, "SESSION_UPLOAD_LIMIT", "This form session reached its upload limit.");
+  }
+  const path = mintSessionUploadPath();
+  const slot = await issueUploadSlot(db, principal, field.location, path, SESSION_UPLOAD_TTL_SECONDS);
+  await recordSessionUpload(db, {
+    sessionHash: session.handleHash,
+    orgId: principal.orgId,
+    field: field.field,
+    location: field.location,
+    path,
+    maxBytes: field.maxBytes,
+    contentTypes: field.contentTypes,
+  });
+  return { location: field.location, path, token: slot.token, expiresAt: slot.expiresAt, maxBytes: field.maxBytes };
+}
+
+/** Finalize one session-owned upload (EMBED-01 slice 3, issue #156). The
+ * presented handle re-binds the pre-gate request to its session exactly
+ * like the submit routes: signed sessions re-resolve the live grant
+ * (revocation, expiry, origin, and capability drift kill outstanding
+ * finalizes with STALE, no grace), anonymous sessions re-resolve the live
+ * publication, and every other handle class answers STALE. The claimed
+ * triple must name a path this session issued; the asserted size and type
+ * must fit the issuing field's bounds; then the standard
+ * finalize-after-upload verification measures the staged bytes itself. */
+async function finalizeSessionUpload(
+  env: Bindings,
+  request: Request,
+  body: unknown,
+): Promise<{ finalized: true; location: string; path: string }> {
+  const claim = parseFinalizeBody(body);
+  const presented =
+    body !== null && typeof body === "object" && !Array.isArray(body)
+      ? ((body as Record<string, unknown>).handle ?? null)
+      : null;
+  const stale = () => new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+  const bound = await peekStartupIdentity(env.DB, presented);
+  if (!bound) throw stale();
+  let principal: Principal;
+  let def: FormDefinition;
+  const grantId = embedGrantIdFromUser(bound.userId);
+  const pubId = grantId ? null : anonPubIdFromUser(bound.userId);
+  if (grantId) {
+    const grant = await loadEmbedGrant(env.DB, grantId).catch(() => null);
+    if (!grant || grant.org_id !== bound.orgId || grant.form_name !== bound.formName) throw stale();
+    if (grant.enabled !== 1 || (grant.expires_at !== null && Date.parse(grant.expires_at) <= Date.now())) {
+      throw stale();
+    }
+    checkEmbedOrigin(grant, request.headers.get("Origin"));
+    const live = await loadForm(env.DB, grant.org_id, grant.form_name);
+    if (!live) throw stale();
+    if (grant.form_id !== live.id || grant.capability_fingerprint !== (await fingerprintFormDef(live))) {
+      throw stale();
+    }
+    principal = { orgId: grant.org_id, userId: `embed:${grant.id}` };
+    def = live;
+  } else if (pubId) {
+    const pub = await loadPublication(env.DB, pubId).catch(() => null);
+    if (!pub || pub.org_id !== bound.orgId || pub.form_name !== bound.formName) throw stale();
+    if (pub.enabled !== 1) throw stale();
+    const live = await loadForm(env.DB, pub.org_id, pub.form_name);
+    if (!live) throw stale();
+    if (pub.form_id !== live.id || pub.capability_fingerprint !== (await fingerprintFormDef(live))) {
+      throw stale();
+    }
+    principal = anonPrincipal(pub.org_id, pub.id);
+    def = live;
+  } else {
+    throw stale();
+  }
+  const session = await peekStartupHandle(env.DB, principal, def.name, presented as string, def.id);
+  const owned = await loadSessionUploads(env.DB, session.handleHash, principal.orgId);
+  const issued = owned.get(sessionUploadKey(claim.location, claim.path));
+  if (!issued) {
+    throw new Fault(422, "FORM_VALIDATION_FAILED", "The form submission did not pass validation.", [
+      { field: "", code: "FILE_NOT_SESSION_OWNED", message: "This path was not uploaded by this form session." },
+    ]);
+  }
+  if (claim.size > issued.maxBytes) {
+    throw new Fault(413, "FILE_TOO_LARGE", "The referenced file exceeds the field bound.");
+  }
+  if (issued.contentTypes.length > 0 && !issued.contentTypes.includes(claim.contentType)) {
+    throw new Fault(415, "CONTENT_TYPE_REJECTED", "The referenced file type is not accepted.");
+  }
+  await finalizeUpload(env.DB, env.FILES, principal, claim);
+  return { finalized: true, location: claim.location, path: claim.path };
+}
+
 /** Shared FORM-02 submit core: one authoritative path from a live startup
  * handle to dispatch, entered by the operator submit route (caller holds
- * the form submit grant) and the signed-embed submit route (caller holds
- * the grant secret plus an allowed origin and a fresh fingerprint).
- * Authorization happens in the routes; everything below is identical: peek
- * the session without consuming, re-resolve provider options, run the
- * declaration gate (422 + per-field details, handle left live for a
- * corrected retry), apply the file posture, run the Saga parse gate, then
- * schedule or dispatch down the standard Execution path and consume the
- * handle only after durable admission (consume-after-admission keeps 503
- * DISPATCH_UNCONFIRMED retries on the idempotent recovery path).
+ * the form submit grant), the signed-embed submit route (caller holds
+ * the grant secret plus an allowed origin and a fresh fingerprint), and
+ * the anonymous public submit route (live publication, confirmation-only
+ * disclosure). Authorization happens in the routes; everything below is
+ * identical: peek the session without consuming, re-resolve provider
+ * options, run the declaration gate (422 + per-field details, handle left
+ * live for a corrected retry), apply the file posture, run the Saga parse
+ * gate, then schedule or dispatch down the standard Execution path and
+ * consume the handle only after durable admission
+ * (consume-after-admission keeps 503 DISPATCH_UNCONFIRMED retries on the
+ * idempotent recovery path).
  *
  * File posture is the single deliberate fork: operator submissions
  * re-validate merged file references against the live FILE-01 rows, while
- * embed submissions first refuse any caller-supplied file reference
- * (slice 1 ships no embed upload path, so no reference can prove session
- * ownership) and then re-validate the merged remainder the same way — a
- * merged file ref past the refusal can only come from an author-declared
- * default, and stale defaults fail identically on both paths. `extraHeaders`
- * rides both receipts as-is (the embed route passes its CORS headers; the
- * operator route passes nothing). `disclosure` selects the receipt shape:
- * anonymous public submissions dispatch identically but answer
- * confirmation-only (`{ form, received: true }`, no execution ID, no
- * status URL, no Location header), so the receipt never discloses
- * execution/history. */
+ * external sessions (signed embeds and anonymous publication) first
+ * require every presented file reference to name a (location, path) the
+ * submitting session itself staged through the session-upload routes
+ * (EMBED-01 slice 3) and then re-validate the merged remainder the same
+ * way — a merged file ref past the ownership check can only come from an
+ * author-declared default, and stale defaults fail identically on every
+ * path. `extraHeaders` rides both receipts as-is (the external routes
+ * pass their CORS headers; the operator route passes nothing).
+ * `disclosure` selects the receipt shape: anonymous public submissions
+ * dispatch identically but answer confirmation-only (`{ form, received:
+ * true }`, no execution ID, no status URL, no Location header), so the
+ * receipt never discloses execution/history. */
 async function runFormSubmit(
   env: Bindings,
   caller: Principal,
   key: string,
   def: FormDefinition,
   body: unknown,
-  files: "check" | "refuse",
+  files: "check" | "session",
   extraHeaders: Record<string, string> = {},
   disclosure: "standard" | "confirmation-only" = "standard",
 ): Promise<Response> {
@@ -908,7 +1034,10 @@ async function runFormSubmit(
   // pointer answers 422 even when the declaration drifts from its Saga
   // schema (which answers the Saga 400 instead).
   const merged = validateAndMerge(def, values, { allowedOptions: fresh.options, values: session.snapshot });
-  if (files === "refuse") assertNoEmbedFileRefs(def.fields, values);
+  if (files === "session") {
+    const owned = await loadSessionUploads(env.DB, session.handleHash, caller.orgId);
+    assertSessionOwnedFileRefs(def.fields, values, owned);
+  }
   await checkFormFiles(env.DB, caller, def, merged);
   const { saga, input } = parseSubmission({ sagaId: def.sagaId, input: merged });
   // FORM-02 recovery (#155): consume AFTER durable admission, not
@@ -1201,7 +1330,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           key,
           def,
           body,
-          "refuse",
+          "session",
           cors,
         );
       } catch (error) {
@@ -1369,10 +1498,135 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           key,
           def,
           body,
-          "refuse",
+          "session",
           cors,
           "confirmation-only",
         );
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // EMBED-01 slice 3 (issue #156): session-owned uploads for external
+    // form sessions. Issuance rides the existing session authentication —
+    // grant secret plus exact-match origin for signed embeds, publication
+    // liveness for anonymous links — and mints a server-chosen path plus
+    // a single-use FILE-01 upload token bound to the startup session. The
+    // byte PUT and the finalize re-verify against that claim; submit
+    // requires every presented file reference to name a claimed triple
+    // for the submitting session. Unknown grants/publications answer 404;
+    // revoked or expired grants deny issuance with 410/401 and kill
+    // outstanding finalizes with STALE; foreign origins answer 403; a
+    // form changed since issue/rotate/publish answers 409 at issuance.
+    const embedUploadIssue = /^\/api\/embeds\/([0-9a-fA-F-]{36})\/uploads$/.exec(url.pathname);
+    if (embedUploadIssue?.[1] && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin, X-Embed-Secret");
+    }
+    if (embedUploadIssue?.[1] && request.method === "POST") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read issuance receipts and errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        requireJson(request);
+        const grantId = parseEmbedGrantId(embedUploadIssue[1]);
+        const grant = await loadEmbedGrant(env.DB, grantId).catch(() => null);
+        if (!grant) throw new Fault(404, "NOT_FOUND", "Not found.");
+        const principal = await verifyEmbedSecret(grant, request.headers.get("X-Embed-Secret"));
+        checkEmbedOrigin(grant, request.headers.get("Origin"));
+        const def = await loadForm(env.DB, grant.org_id, grant.form_name);
+        if (!def) throw new Fault(404, "FORM_NOT_FOUND", "Form not found.");
+        checkEmbedBinding(grant, { formId: def.id, fingerprint: await fingerprintFormDef(def) });
+        const issued = await issueSessionUpload(env.DB, principal, def, await boundedJson(request.body));
+        await touchEmbedGrantUse(env.DB, grant.id);
+        return json(issued, 201, cors);
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    const publicUploadIssue = /^\/api\/public\/([0-9a-fA-F-]{36})\/uploads$/.exec(url.pathname);
+    if (publicUploadIssue?.[1] && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin");
+    }
+    if (publicUploadIssue?.[1] && request.method === "POST") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read issuance receipts and errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        requireJson(request);
+        const pubId = parsePublicationId(publicUploadIssue[1]);
+        const pub = await loadPublication(env.DB, pubId).catch(() => null);
+        if (!pub) throw new Fault(404, "NOT_FOUND", "Not found.");
+        if (pub.enabled !== 1) throw new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
+        const def = await loadForm(env.DB, pub.org_id, pub.form_name);
+        if (!def) throw new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
+        checkPublicationBinding(pub, { formId: def.id, fingerprint: await fingerprintFormDef(def) });
+        const issued = await issueSessionUpload(
+          env.DB,
+          anonPrincipal(pub.org_id, pub.id),
+          def,
+          await boundedJson(request.body),
+        );
+        await touchPublicationUse(env.DB, pub.id);
+        return json(issued, 201, cors);
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // Session byte PUT: the single-use upload token is the credential
+    // (FILE-01 shape — hashed storage, expiry, policy re-checked at
+    // consume), so this route is pre-gate like the other session routes.
+    // Staging authorizes nothing beyond the minted path: submit still
+    // requires the session ownership claim.
+    if (url.pathname === "/api/session-uploads/content" && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin");
+    }
+    if (url.pathname === "/api/session-uploads/content" && request.method === "PUT") {
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        const token = url.searchParams.get("token");
+        const extra = [...url.searchParams.keys()].filter((key) => key !== "token");
+        if (token === null || extra.length > 0)
+          throw new Fault(400, "UNSUPPORTED_QUERY", "Uploads need exactly ?token= from an issued slot.");
+        const consumed = await consumeUploadToken(env.DB, token);
+        const declared = await loadLocation(env.DB, consumed.orgId, consumed.location);
+        if (!declared) throw new Fault(404, "NOT_FOUND", "Not found.");
+        if (!request.body) throw new Fault(400, "EMPTY_UPLOAD", "The upload body must not be empty.");
+        const contentType = request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() || "";
+        if (declared.contentTypes.length > 0 && !declared.contentTypes.includes(contentType)) {
+          throw new Fault(
+            415,
+            "CONTENT_TYPE_REJECTED",
+            `Content type "${contentType}" is not allowed in this location.`,
+          );
+        }
+        const bytes = await readBoundedBytes(request.body, declared.maxBytes + 1);
+        await env.FILES.put(consumed.staging, bytes, { httpMetadata: { contentType: contentType || undefined } });
+        return json({ staged: true, size: bytes.byteLength }, 200, cors);
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // Session finalize: binds the staged bytes to the session claim after
+    // verifying the live grant/publication, the live session, the issued
+    // triple, and the field's size/type bounds — then delegates to the
+    // standard finalize-after-upload verification (server-measured size
+    // and digest, never trusted assertions).
+    if (url.pathname === "/api/session-uploads/finalize" && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin");
+    }
+    if (url.pathname === "/api/session-uploads/finalize" && request.method === "POST") {
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        requireJson(request);
+        const body: unknown = await boundedJson(request.body);
+        const finalized = await finalizeSessionUpload(env, request, body);
+        return json(finalized, 200, cors);
       } catch (error) {
         return faultResponse(error, env, url, cors);
       }

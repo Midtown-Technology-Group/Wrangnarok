@@ -30,11 +30,11 @@
 // honeypot + nonce + confirmation-only (no oracle) close the cheap abuse
 // shapes. That deferral is recorded in the slice-2 ADR.
 //
-// Upload ownership: anonymous submissions carry no caller-supplied file
-// references. There is no anonymous upload path in this slice, so no
-// reference can prove session ownership — the same fail-closed posture as
-// slice-1 embeds (FILE_NOT_SESSION_OWNED), enforced on the raw submitted
-// values before the shared core runs.
+// Upload ownership: anonymous submissions carry only session-owned file
+// references — triples the submitting session itself staged through the
+// session-upload routes (EMBED-01 slice 3, src/session-uploads.ts). The
+// same fail-closed posture as slice-1 embeds (FILE_NOT_SESSION_OWNED),
+// enforced on the raw submitted values before the shared core runs.
 //
 // Republish review: the publication records the declaration fingerprint at
 // publish/review time (SHA-256 over the bound Saga id plus the canonical
