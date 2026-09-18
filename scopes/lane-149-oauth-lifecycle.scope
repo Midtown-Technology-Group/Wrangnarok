@@ -1,0 +1,8 @@
+# lane/149-oauth-lifecycle (issue #149): scheduled-path decision for OAUTH-01.
+# On-demand recovery of an expired persisted token (no Cron Trigger, no
+# second refresh path) pinned by test, plus the parity-row decision record.
+# Out of scope: scheduled refresh implementation, new primitives/bindings/
+# tables, ADR files, consent/storage redesign, UI/CLI/SDK.
+test/oauth-tokens.test.ts
+docs/upstream-parity.md
+scopes/lane-149-oauth-lifecycle.scope
