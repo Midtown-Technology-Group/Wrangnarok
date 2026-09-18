@@ -1,0 +1,7 @@
+# Issue #493: repair migration dropping the executions org FK that 0026
+# reintroduced (0008 had dropped it), plus full-chain retention test.
+# Worker+D1 only, no new primitive, no contract change.
+scopes/493-executions-fk-repair.scope
+migrations/0037_executions_org_fk_drop.sql
+test/migrations-chain.test.ts
+docs/migration-ledger.md
