@@ -398,7 +398,9 @@ describe("RUN-01 Slice B long-wait lifetime + timeout=0 (issue #135)", () => {
   // mid-flight operator edits. Real workerd Workflows + D1; only vendor HTTP
   // is mocked.
   it("treats timeout=0 as the Integration default, not no-timeout", async () => {
-    await worker.fetch(policyPut(echoSaga.id, { timeout: { vendorTimeoutMs: 0 } }), bindings);
+    expect((await worker.fetch(policyPut(echoSaga.id, { timeout: { vendorTimeoutMs: 0 } }), bindings)).status).toBe(
+      200,
+    );
     const key = "run01-sliceb-zero-0001";
     const id = await executionId(principal, key);
     const { inner: instance } = await trackWorkflowInstance(bindings.ECHO_WORKFLOW, id);
@@ -433,11 +435,15 @@ describe("RUN-01 Slice B long-wait lifetime + timeout=0 (issue #135)", () => {
       await new Promise((resolve) => setTimeout(resolve, 1200));
       return Response.json({ message: "hello" });
     });
+    const started = Date.now();
     expect((await worker.fetch(submitRequest(key), bindings)).status).toBe(202);
     const edited = await worker.fetch(policyPut(echoSaga.id, { timeout: { vendorTimeoutMs: 50 } }), bindings);
     expect(edited.status).toBe(200);
     await instance.waitForStatus("complete");
     await waitForExecutionStatus(id, "Succeeded");
+    // The ~1200ms vendor wait plus the 1s native settle-wait run sequentially,
+    // so reaching terminal in under ~2s would mean the sleep was skipped.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(2000);
     const detail = (await (await worker.fetch(detailRequest(id), bindings)).json()) as {
       status: string;
       policy: { policy: { timeout: { vendorTimeoutMs: number } }; version: number };
