@@ -216,6 +216,65 @@ describe("capabilityOperation", () => {
     if (mapped.ok) throw new Error("unreachable");
     expect(mapped.error).toEqual({ code: "MAPPED", message: "mapped" });
   });
+  it("fails closed on endpoint edits but tolerates disable toggles", async () => {
+    await seedConnection(GRAPH_INTEGRATION_ID, GRAPH);
+    await assignCapability(bindings.DB, { orgId: ORG, userId: USER }, "identity.primary", GRAPH_INTEGRATION_ID);
+    await seedExecution("exec-generation-1");
+    mockGraphUsers();
+    const base = { op: "identity-provision-v1", position: 1, capability: "identity.primary" } as const;
+    const first = await capabilityOperation(
+      ctxFor("exec-generation-1"),
+      onboardingSagaDef,
+      preparedFor("exec-generation-1"),
+      {
+        ...base,
+        adapterFor: identityAdapterFor,
+        vendorDefaultMs: IDENTITY_TIMEOUT_MS,
+        failureCode: "X",
+        failureMessage: "x",
+        call: (binding) => identityCall(binding),
+      },
+    );
+    expect(first.ok).toBe(true);
+    // Disabling the Connection is lifecycle, not config: the frozen run
+    // keeps serving the recorded binding (ADR disabled rule).
+    await bindings.DB.prepare("UPDATE connections SET enabled=0 WHERE org_id=?").bind(ORG).run();
+    const disabled = await capabilityOperation(
+      ctxFor("exec-generation-1"),
+      onboardingSagaDef,
+      preparedFor("exec-generation-1"),
+      {
+        ...base,
+        adapterFor: identityAdapterFor,
+        vendorDefaultMs: IDENTITY_TIMEOUT_MS,
+        failureCode: "X",
+        failureMessage: "x",
+        call: (binding) => identityCall(binding),
+      },
+    );
+    expect(disabled.ok).toBe(true);
+    // Editing the endpoint starts a new config generation: the frozen run
+    // fails closed instead of executing against un-audited config.
+    await bindings.DB.prepare("UPDATE connections SET endpoint=?,enabled=1 WHERE org_id=?")
+      .bind("https://graph-moved.invalid", ORG)
+      .run();
+    const moved = await capabilityOperation(
+      ctxFor("exec-generation-1"),
+      onboardingSagaDef,
+      preparedFor("exec-generation-1"),
+      {
+        ...base,
+        adapterFor: identityAdapterFor,
+        vendorDefaultMs: IDENTITY_TIMEOUT_MS,
+        failureCode: "X",
+        failureMessage: "x",
+        call: (binding) => identityCall(binding),
+      },
+    );
+    expect(moved.ok).toBe(false);
+    if (moved.ok) throw new Error("unreachable");
+    expect(moved.error.code).toBe("CAPABILITY_BINDING_CHANGED");
+  });
   it("fails closed when the frozen Connection row is gone", async () => {
     await seedConnection(GRAPH_INTEGRATION_ID, GRAPH);
     await assignCapability(bindings.DB, { orgId: ORG, userId: USER }, "identity.primary", GRAPH_INTEGRATION_ID);
@@ -420,6 +479,76 @@ describe("optionalIntegrationOperation", () => {
       },
     );
     expect(hit).toMatchObject({ ok: true, result: GRAPH });
+  });
+  it("gates the direct call on the frozen capability binding", async () => {
+    await seedConnection(GRAPH_INTEGRATION_ID, GRAPH);
+    await assignCapability(bindings.DB, { orgId: ORG, userId: USER }, "identity.primary", GRAPH_INTEGRATION_ID);
+    await seedExecution("exec-gate-1");
+    mockGraphUsers();
+    // Freeze identity.primary to Graph first.
+    const frozen = await capabilityOperation(ctxFor("exec-gate-1"), onboardingSagaDef, preparedFor("exec-gate-1"), {
+      op: "identity-provision-v1",
+      position: 1,
+      capability: "identity.primary",
+      adapterFor: identityAdapterFor,
+      vendorDefaultMs: IDENTITY_TIMEOUT_MS,
+      failureCode: "X",
+      failureMessage: "x",
+      call: (binding) => identityCall(binding),
+    });
+    expect(frozen.ok).toBe(true);
+    // A gate naming another stack skips without touching the vendor.
+    const mismatched = await optionalIntegrationOperation(
+      ctxFor("exec-gate-1"),
+      onboardingSagaDef,
+      preparedFor("exec-gate-1"),
+      {
+        op: "entra-license-v1",
+        position: 4,
+        integrationId: GRAPH_INTEGRATION_ID,
+        onlyWhen: { capability: "identity.primary", integrationId: "00000000-0000-4000-8000-000000000099" },
+        vendorDefaultMs: IDENTITY_TIMEOUT_MS,
+        failureCode: "X",
+        failureMessage: "x",
+        call: async () => true,
+      },
+    );
+    expect(mismatched).toEqual({ skipped: true });
+    // The matching gate proceeds to the vendor.
+    const matched = await optionalIntegrationOperation(
+      ctxFor("exec-gate-1"),
+      onboardingSagaDef,
+      preparedFor("exec-gate-1"),
+      {
+        op: "entra-license-v1",
+        position: 4,
+        integrationId: GRAPH_INTEGRATION_ID,
+        onlyWhen: { capability: "identity.primary", integrationId: GRAPH_INTEGRATION_ID },
+        vendorDefaultMs: IDENTITY_TIMEOUT_MS,
+        failureCode: "X",
+        failureMessage: "x",
+        call: async (connection) => connection.endpoint,
+      },
+    );
+    expect(matched).toMatchObject({ ok: true, result: GRAPH });
+    // No frozen binding at all also skips.
+    await seedExecution("exec-gate-2");
+    const unfrozen = await optionalIntegrationOperation(
+      ctxFor("exec-gate-2"),
+      onboardingSagaDef,
+      preparedFor("exec-gate-2"),
+      {
+        op: "entra-license-v1",
+        position: 4,
+        integrationId: GRAPH_INTEGRATION_ID,
+        onlyWhen: { capability: "identity.primary", integrationId: GRAPH_INTEGRATION_ID },
+        vendorDefaultMs: IDENTITY_TIMEOUT_MS,
+        failureCode: "X",
+        failureMessage: "x",
+        call: async () => true,
+      },
+    );
+    expect(unfrozen).toEqual({ skipped: true });
   });
   it("maps Faults and raw errors from the direct call", async () => {
     await seedConnection(GRAPH_INTEGRATION_ID, GRAPH);

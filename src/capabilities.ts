@@ -252,6 +252,11 @@ export async function previewCapability(
 export interface FrozenCapabilityBinding {
   readonly capability: string;
   readonly connectionId: string;
+  /** The directory endpoint value bound at first use: the running Execution
+   * executes against exactly this value. A later endpoint edit fails the
+   * run closed instead of executing against un-audited config, while
+   * lifecycle toggles (enabled) and secret rotation leave it untouched. */
+  readonly endpoint: string;
   readonly integrationId: string;
   readonly connectionUpdatedAt: string | null;
   readonly integrationRevision: string;
@@ -266,6 +271,7 @@ export interface FrozenCapabilityBinding {
 interface FrozenRow {
   readonly capability: string;
   readonly connection_id: string;
+  readonly endpoint: string;
   readonly integration_id: string;
   readonly connection_updated_at: string | null;
   readonly integration_revision: string;
@@ -281,6 +287,7 @@ function toFrozen(row: FrozenRow): FrozenCapabilityBinding {
   return {
     capability: row.capability,
     connectionId: row.connection_id,
+    endpoint: row.endpoint,
     integrationId: row.integration_id,
     connectionUpdatedAt: row.connection_updated_at,
     integrationRevision: row.integration_revision,
@@ -305,7 +312,7 @@ export async function loadFrozenBinding(
   try {
     const row = await db
       .prepare(
-        "SELECT capability,connection_id,integration_id,connection_updated_at,integration_revision,adapter_id,adapter_revision,transport,mapping_id,mapping_version,operation,resolved_at FROM capability_resolutions WHERE execution_id=? AND capability=?",
+        "SELECT capability,connection_id,endpoint,integration_id,connection_updated_at,integration_revision,adapter_id,adapter_revision,transport,mapping_id,mapping_version,operation,resolved_at FROM capability_resolutions WHERE execution_id=? AND capability=?",
       )
       .bind(executionId, capability)
       .first<FrozenRow>();
@@ -327,12 +334,13 @@ export async function freezeBinding(
   const now = new Date().toISOString();
   await db
     .prepare(
-      "INSERT INTO capability_resolutions(execution_id,capability,connection_id,integration_id,connection_updated_at,integration_revision,adapter_id,adapter_revision,transport,mapping_id,mapping_version,operation,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(execution_id,capability) DO NOTHING",
+      "INSERT INTO capability_resolutions(execution_id,capability,connection_id,endpoint,integration_id,connection_updated_at,integration_revision,adapter_id,adapter_revision,transport,mapping_id,mapping_version,operation,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(execution_id,capability) DO NOTHING",
     )
     .bind(
       executionId,
       preview.capability,
       preview.connection.id,
+      preview.connection.endpoint,
       preview.connection.integrationId,
       preview.connectionUpdatedAt,
       preview.integrationRevision,
@@ -359,7 +367,7 @@ export async function listExecutionBindings(
   try {
     const found = await db
       .prepare(
-        "SELECT capability,connection_id,integration_id,connection_updated_at,integration_revision,adapter_id,adapter_revision,transport,mapping_id,mapping_version,operation,resolved_at FROM capability_resolutions WHERE execution_id=? ORDER BY capability",
+        "SELECT capability,connection_id,endpoint,integration_id,connection_updated_at,integration_revision,adapter_id,adapter_revision,transport,mapping_id,mapping_version,operation,resolved_at FROM capability_resolutions WHERE execution_id=? ORDER BY capability",
       )
       .bind(executionId)
       .all<FrozenRow>();

@@ -241,12 +241,13 @@ it("0038 lands capability assignments, entity mappings, and frozen resolutions",
     .bind("exec-1", "saga", "saga", "r1", "org-1", "user-1", "{}", now)
     .run();
   await bindings.DB.prepare(
-    "INSERT INTO capability_resolutions(execution_id,capability,connection_id,integration_id,integration_revision,adapter_id,adapter_revision,transport,operation,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    "INSERT INTO capability_resolutions(execution_id,capability,connection_id,endpoint,integration_id,integration_revision,adapter_id,adapter_revision,transport,operation,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
   )
     .bind(
       "exec-1",
       "identity.primary",
       "conn-1",
+      "https://ninja-in-test.invalid/api",
       "0606e237-137b-4629-8346-85468e1c2df6",
       "ninjaone",
       "ad-identity-v1",
@@ -256,18 +257,23 @@ it("0038 lands capability assignments, entity mappings, and frozen resolutions",
       now,
     )
     .run();
-  // The child tables cascade off connections in DDL; the module also
-  // deletes explicitly (belt beside the FK cascade, which D1 may not
-  // enforce — same posture as connection_secrets/oauth_tokens). Frozen
-  // Execution bindings survive either way, as audit.
+  // The child tables cascade off connections in DDL (verified below);
+  // the module additionally deletes explicitly — belt beside the FK
+  // cascade, same posture as connection_secrets/oauth_tokens. This test
+  // deletes through the parent only, so the cascade itself is what the
+  // assertions observe. Frozen Execution bindings survive either way.
   for (const table of ["capability_assignments", "external_entity_mappings"]) {
     const ddl = await bindings.DB.prepare("SELECT sql FROM sqlite_master WHERE name=?")
       .bind(table)
       .first<{ sql: string }>();
     expect(ddl?.sql).toMatch(/REFERENCES connections\(id\) ON DELETE CASCADE/);
   }
-  await bindings.DB.prepare("DELETE FROM capability_assignments WHERE connection_id=?").bind("conn-1").run();
-  await bindings.DB.prepare("DELETE FROM external_entity_mappings WHERE connection_id=?").bind("conn-1").run();
+  const identity = await bindings.DB.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='index' AND name='external_entity_mappings_identity'",
+  )
+    .bind()
+    .first<{ sql: string }>();
+  expect(identity?.sql).toMatch(/UNIQUE/);
   await bindings.DB.prepare("DELETE FROM connections WHERE id=?").bind("conn-1").run();
   const assignment = await bindings.DB.prepare("SELECT capability FROM capability_assignments WHERE org_id=?")
     .bind("org-1")

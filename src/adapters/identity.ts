@@ -37,6 +37,11 @@ export interface AdapterPorts {
     readonly connection: { readonly endpoint: string };
     readonly secrets: AdTransportSecrets;
   }>;
+  /** The Execution performing the call, when the caller runs inside one:
+   * forwarded to Integration Actions so secret material (Transport tokens)
+   * registers with the execution-scoped registry before any
+   * execution-scoped write (SEC-02). Absent outside executions. */
+  readonly executionId?: string;
 }
 export interface IdentityAdapter {
   readonly id: string;
@@ -128,7 +133,7 @@ const adIdentityAdapter: IdentityAdapter = {
       { endpoint: ports.directory.endpoint },
       { ...subject, displayName: displayNameOf(subject) },
       operationId,
-      undefined,
+      ports.executionId,
       deadline,
     );
     return { userId: created.id, userPrincipalName: created.userPrincipalName };
@@ -143,7 +148,7 @@ const adIdentityAdapter: IdentityAdapter = {
         userId,
         groups,
         operationId,
-        undefined,
+        ports.executionId,
         deadline,
       )
     ).assigned;
@@ -157,7 +162,7 @@ const adIdentityAdapter: IdentityAdapter = {
         { endpoint: ports.directory.endpoint },
         userId,
         operationId,
-        undefined,
+        ports.executionId,
         deadline,
       )
     ).mailbox;

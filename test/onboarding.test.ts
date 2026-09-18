@@ -84,6 +84,8 @@ async function bindOrg(orgId: string, userId: string, integrationId: string, ent
 /** When set, vendor paths containing the marker answer 500: drives the
  * Saga's persist-before-throw branches without touching the shared path. */
 let vendorFailure: string | null = null;
+/** When set, the license escape-hatch vendor answers `assigned: false`. */
+let licenseDeclined = false;
 function mockVendors() {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = input instanceof Request ? input.url : String(input);
@@ -121,7 +123,7 @@ function mockVendors() {
       return Response.json({ mailbox: `${body.userId}@example.com` });
     }
     if (url === `${GRAPH_ENDPOINT}/v1.0/licenses:assign`) {
-      return Response.json({ assigned: true });
+      return Response.json({ assigned: !licenseDeclined });
     }
     if (url === `${GOOGLE_ENDPOINT}/admin/directory/v1/users`) {
       return Response.json({ id: "google-user-1", userPrincipalName: body.userPrincipalName });
@@ -160,6 +162,7 @@ useWorkflowHarness(bindings.DB, {
     await seedOrg(ORG_C, "Google org");
     await seedOrg(ORG_Q, "Unbound org");
     vendorFailure = null;
+    licenseDeclined = false;
     mockVendors();
   },
 });
@@ -298,6 +301,14 @@ describe("onboarding proof across three identity stacks", () => {
     expect(detail.status).toBe("Failed");
     expect(detail.error?.code).toBe(code);
   });
+  it("reports the hatch declined when the vendor refuses the license", async () => {
+    await seedConnection(ORG_A, GRAPH_INTEGRATION_ID, GRAPH_ENDPOINT);
+    await bindOrg(ORG_A, USER_A, GRAPH_INTEGRATION_ID, "entra-tenant-a");
+    licenseDeclined = true;
+    const { detail } = await runOnboarding(ORG_A, USER_A, "onboarding-proof-a-005");
+    expect(detail.status).toBe("Succeeded");
+    expect(detail.result.escapeHatch).toEqual({ attempted: true, applied: false });
+  });
   it("fails loud with 424 when no capability is bound (no cross-org fallback)", async () => {
     // Only ORG_B binds anything: the unbound org must not see it.
     await seedConnection(ORG_B, AD_INTEGRATION_ID, AD_ENDPOINT);
@@ -357,10 +368,13 @@ describe("onboarding source proof (ADR TBD §7.1)", () => {
     const source = Function.prototype.toString.call(onboardingSagaDef.run);
     const blocks = source.split("escape-hatch-begin");
     expect(blocks).toHaveLength(2);
-    const [shared, hatched] = blocks as [string, string];
-    expect(hatched).toContain("escape-hatch-end");
-    const hatch = (hatched as string).split("escape-hatch-end")[1];
-    expect(hatch).not.toContain("escape-hatch-begin");
+    const [beforeHatch, hatchAndAfter] = blocks as [string, string];
+    const endBlocks = (hatchAndAfter as string).split("escape-hatch-end");
+    expect(endBlocks).toHaveLength(2);
+    const [, afterHatch] = endBlocks as [string, string];
+    // Provider-selection logic on EITHER side of the marked block fails the
+    // proof — the shared path is everything outside the hatch.
+    const shared = `${beforeHatch}\n${afterHatch}`;
     for (const token of ["graph", "entra", "google", "ninja", "microsoft", "gws"]) {
       expect(shared?.toLowerCase()).not.toContain(token);
     }

@@ -129,6 +129,7 @@ export interface CapabilityCall {
     readonly connection: { readonly endpoint: string };
     readonly secrets: SagaSecrets;
   }>;
+  readonly executionId: string;
   readonly frozen: FrozenCapabilityBinding;
 }
 export interface CapabilityOperationOptions<T> {
@@ -216,6 +217,7 @@ export async function capabilityOperation<T>(
     const binding: CapabilityCall = {
       adapter,
       directory: { endpoint: directoryEndpoint },
+      executionId: id,
       loadTransport: async () => {
         if (transport) return transport;
         const transportIntegrationId = adapter.transportIntegrationId;
@@ -247,10 +249,15 @@ export async function capabilityOperation<T>(
   }
 }
 
-/** Re-read the frozen binding's directory endpoint from the Connection row
- * it froze from. The org comes from the immutable Execution row (never from
- * the frozen record, never from caller input); the row lookup is predicated
- * on both id and org so a cross-org row can never satisfy it. */
+/** Verify the frozen binding against the Connection row it froze from and
+ * return the bound endpoint value. The org comes from the immutable
+ * Execution row (never from the frozen record, never from caller input);
+ * the lookup is predicated on both id and org so a cross-org row can never
+ * satisfy it. The live endpoint must still equal the frozen value: an
+ * endpoint edit fails the run closed instead of executing against
+ * un-audited config. Lifecycle toggles (enabled) and secret rotation write
+ * other rows/columns, so the ADR disabled rule holds — already-frozen
+ * Operations keep serving the recorded binding. */
 async function readFrozenEndpoint(
   db: D1Database,
   executionId: string,
@@ -266,7 +273,8 @@ async function readFrozenEndpoint(
       .prepare("SELECT endpoint FROM connections WHERE id=? AND org_id=?")
       .bind(snap.connectionId, execution.org_id)
       .first<{ endpoint: string }>();
-    return row?.endpoint ?? null;
+    if (!row || row.endpoint !== snap.endpoint) return null;
+    return row.endpoint;
   } catch {
     return null;
   }
@@ -288,6 +296,12 @@ export interface OptionalIntegrationOperationOptions<T> {
   readonly position: number;
   /** Stable Integration UUID called directly (the escape-hatch stack). */
   readonly integrationId: string;
+  /** Frozen-binding gate: run only when this capability already froze to
+   * this Integration in this Execution, else record a skip. Keeps a
+   * provider-direct escape hatch from firing against another stack's
+   * identifiers (e.g. licensing an AD-created userId at Graph) in
+   * heterogeneous orgs. Pure data — no provider semantics in the helper. */
+  readonly onlyWhen?: { readonly capability: string; readonly integrationId: string };
   /** Integration default deadline; the effective deadline still resolves
    * inside the helper from Integration default + Execution policy snapshot. */
   readonly vendorDefaultMs: number;
@@ -316,6 +330,13 @@ export async function optionalIntegrationOperation<T>(
   await beginOperation(ctx.db, id, op, position);
   const deadline = vendorDeadlineMs(await loadExecutionPolicy(ctx.db, id), vendorDefaultMs);
   const stepOrg = withOperation(prepared.orgCtx, op);
+  if (options.onlyWhen) {
+    const gate = await loadFrozenBinding(ctx.db, id, options.onlyWhen.capability);
+    if (!gate || gate.integrationId !== options.onlyWhen.integrationId) {
+      await finishOperation(ctx.db, id, op, { skipped: true });
+      return { skipped: true as const };
+    }
+  }
   const resolved = await resolveConnection(ctx.db, stepOrg, integrationId, def.requiredIntegrations);
   if (!resolved.found && !resolved.declared) {
     await finishOperation(ctx.db, id, op, { skipped: true });

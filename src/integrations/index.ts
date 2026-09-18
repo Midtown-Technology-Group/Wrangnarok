@@ -168,8 +168,15 @@ export interface EndpointPolicy {
   readonly allowLoopback: boolean;
   /** Only the https scheme is usable (ninjaone). */
   readonly requireHttps: boolean;
-  /** Allowed hostname suffixes; empty means any public hostname. */
+  /** Allowed hostname suffixes; empty means any public hostname. Suffixes
+   * must be dot-prefixed (".example.com") unless the entry is a complete
+   * registrable host the vendor actually serves — a bare "example.com"
+   * also matches "evilexample.com". */
   readonly allowedSuffixes: readonly string[];
+  /** Exact vendor hostnames usable in addition to the suffix rule, for
+   * single-host vendor APIs where no safe suffix exists
+   * ("graph.microsoft.com" must not admit "evilgraph.microsoft.com"). */
+  readonly exactHosts?: readonly string[];
   /** Only loopback hosts are usable: the Integration serves a local fixture,
    * never a public host (echo). */
   readonly loopbackOnly: boolean;
@@ -240,7 +247,8 @@ function endpointPolicyFor(integrationName: string): EndpointPolicy | null {
     return {
       allowLoopback: false,
       requireHttps: true,
-      allowedSuffixes: ["graph.microsoft.com", ".invalid"],
+      allowedSuffixes: [".invalid"],
+      exactHosts: ["graph.microsoft.com"],
       loopbackOnly: false,
     };
   }
@@ -248,7 +256,7 @@ function endpointPolicyFor(integrationName: string): EndpointPolicy | null {
     return {
       allowLoopback: false,
       requireHttps: true,
-      allowedSuffixes: ["googleapis.com", ".invalid"],
+      allowedSuffixes: [".googleapis.com", ".invalid"],
       loopbackOnly: false,
     };
   }
@@ -314,6 +322,7 @@ function checkEndpointUrl(integrationName: string, raw: string): EndpointFailure
   if (policy.requireHttps && url.protocol !== "https:") {
     return { code: "INVALID_SCHEME", message: `Config field "endpoint" must use https.` };
   }
+  if (policy.exactHosts?.includes(host)) return null;
   if (policy.allowedSuffixes.length > 0 && !policy.allowedSuffixes.some((suffix) => host.endsWith(suffix))) {
     return {
       code: "ENDPOINT_NOT_ALLOWED",

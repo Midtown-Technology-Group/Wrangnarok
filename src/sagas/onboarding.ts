@@ -84,7 +84,11 @@ export const onboardingSagaDef = defineSaga<OnboardingResult>({
           failureMessage: "Employee onboarding could not create the identity.",
           call: (binding, _secrets, deadline, operationId) =>
             binding.adapter.createIdentity(
-              { directory: binding.directory, loadTransport: binding.loadTransport },
+              {
+                directory: binding.directory,
+                loadTransport: binding.loadTransport,
+                executionId: binding.executionId,
+              },
               subject,
               operationId,
               deadline,
@@ -107,7 +111,11 @@ export const onboardingSagaDef = defineSaga<OnboardingResult>({
           failureMessage: "Employee onboarding could not assign groups.",
           call: (binding, _secrets, deadline, operationId) =>
             binding.adapter.assignToGroups(
-              { directory: binding.directory, loadTransport: binding.loadTransport },
+              {
+                directory: binding.directory,
+                loadTransport: binding.loadTransport,
+                executionId: binding.executionId,
+              },
               created.result.userId,
               prepared.input.groups,
               operationId,
@@ -131,7 +139,11 @@ export const onboardingSagaDef = defineSaga<OnboardingResult>({
           failureMessage: "Employee onboarding could not provision the mailbox.",
           call: (binding, _secrets, deadline, operationId) =>
             binding.adapter.provisionMailbox(
-              { directory: binding.directory, loadTransport: binding.loadTransport },
+              {
+                directory: binding.directory,
+                loadTransport: binding.loadTransport,
+                executionId: binding.executionId,
+              },
               created.result.userId,
               operationId,
               deadline,
@@ -145,12 +157,16 @@ export const onboardingSagaDef = defineSaga<OnboardingResult>({
       }
       // escape-hatch-begin: Entra-only licensing stays provider-direct
       // (ADR TBD §1). Optional access: orgs without a Graph Connection
-      // resolve None and skip, so the shared path above never branches.
+      // resolve None and skip, so the shared path above never branches. The
+      // frozen-binding gate keeps the hatch from firing against another
+      // stack's identifiers in heterogeneous orgs: it runs only when this
+      // Execution's identity binding froze to Graph.
       const licensed = await step.do("entra-license-v1", () =>
         optionalIntegrationOperation(ctx, onboardingSagaDef, prepared, {
           op: "entra-license-v1",
           position: 4,
           integrationId: GRAPH_INTEGRATION_ID,
+          onlyWhen: { capability: IDENTITY_CAPABILITY, integrationId: GRAPH_INTEGRATION_ID },
           vendorDefaultMs: IDENTITY_TIMEOUT_MS,
           failureCode: "ONBOARDING_LICENSE_FAILED",
           failureMessage: "Employee onboarding could not assign the license.",
@@ -178,7 +194,7 @@ export const onboardingSagaDef = defineSaga<OnboardingResult>({
         mailboxProvisioned: mailed.result.length > 0,
         escapeHatch: {
           attempted: !("skipped" in licensed),
-          applied: "ok" in licensed && licensed.ok === true,
+          applied: "ok" in licensed && licensed.ok === true && licensed.result === true,
         },
       };
       // Native wait primitive, same posture as echo: infrastructure checkpoint,

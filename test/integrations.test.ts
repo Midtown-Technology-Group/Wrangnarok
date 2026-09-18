@@ -452,8 +452,25 @@ describe("Connection config validation (CON-01)", () => {
       endpoint: "https://graph.microsoft.com",
     });
     expect(
+      validateConnectionConfig(googleworkspaceIntegrationDef, { endpoint: "https://admin.googleapis.com" }),
+    ).toEqual({ endpoint: "https://admin.googleapis.com" });
+    expect(
       validateConnectionConfig(googleworkspaceIntegrationDef, { endpoint: "https://google-in-test.invalid" }),
     ).toEqual({ endpoint: "https://google-in-test.invalid" });
+    // Bare-host suffixes admit lookalike hosts; the proof policies pin
+    // exact or dot-prefixed matches instead.
+    for (const evil of [
+      "https://evilgraph.microsoft.com",
+      "https://graph.microsoft.com.evil.example.com",
+      "https://evilgoogleapis.com",
+      "https://googleapis.com.evil.example.com",
+    ]) {
+      const def = evil.includes("graph") ? graphIntegrationDef : googleworkspaceIntegrationDef;
+      expect(detailsOf(() => validateConnectionConfig(def, { endpoint: evil }))?.[0]).toMatchObject({
+        field: "endpoint",
+        code: "ENDPOINT_NOT_ALLOWED",
+      });
+    }
     expect(validateConnectionConfig(adIntegrationDef, { endpoint: "https://ad-in-test.invalid/directory" })).toEqual({
       endpoint: "https://ad-in-test.invalid/directory",
     });

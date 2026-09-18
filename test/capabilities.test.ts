@@ -243,6 +243,15 @@ describe("external entity mappings", () => {
       primary: true,
     });
     expect(promoted.primary).toBe(true);
+    // Repeat upserts converge on one row per vendor entity (the unique
+    // identity index enforces what the write path assumes).
+    await upsertMapping(bindings.DB, caller, AD_INTEGRATION_ID, { entityId: "ad-site-b2", primary: true });
+    const counted = await bindings.DB.prepare(
+      "SELECT COUNT(*) AS n FROM external_entity_mappings WHERE org_id=? AND entity_id=?",
+    )
+      .bind(ORG_B, "ad-site-b2")
+      .first<{ n: number }>();
+    expect(counted?.n).toBe(1);
     const listed = await listMappings(bindings.DB, caller, AD_INTEGRATION_ID);
     expect(listed.filter((entry) => entry.primary)).toHaveLength(1);
     expect(listed.find((entry) => entry.entityId === "ad-site-b2")?.primary).toBe(true);
@@ -300,6 +309,8 @@ describe("readiness reporting", () => {
     expect(report[0]).toMatchObject({ bound: false, enabled: false });
     expect(report[0]?.blockers).toContain("binding-disabled");
     // Provisioned per-Organization secrets never leak into readiness output.
+    // The report is recomputed AFTER the secret-bearing state exists, so the
+    // assertion inspects output produced from that state — not a stale copy.
     await seedConnection(ORG_A, NINJA_INTEGRATION_ID, "https://ninja-in-test.invalid/api");
     await assignCapability(bindings.DB, caller, "mail.primary", NINJA_INTEGRATION_ID);
     await putConnectionSecrets(
@@ -309,6 +320,8 @@ describe("readiness reporting", () => {
       { clientSecret: SECRET_SENTINEL },
       "test-secrets-kek-sentinel-fixture-only",
     );
+    report = await checkReadiness(bindings.DB, caller);
+    expect(report.find((entry) => entry.capability === "mail.primary")).toMatchObject({ bound: false });
     const dumped = JSON.stringify([
       report,
       await listCapabilities(bindings.DB, caller),

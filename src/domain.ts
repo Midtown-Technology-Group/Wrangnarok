@@ -562,7 +562,12 @@ export interface OnboardingResult {
 const ONBOARDING_NAME_MAX = 128;
 const ONBOARDING_UPN_MAX = 256;
 const ONBOARDING_GROUPS_MAX = 32;
-const ONBOARDING_GROUP_MAX = 128;
+// Group names echo back into groupsAssigned inside executions.result_json
+// (CHECK capped at 4096 chars): 32 names of 64 chars serialize to ~2145
+// chars, leaving room for the remaining result fields plus any
+// vendor-shaped userId. Bounds reject rather than truncate, per the
+// hello-name precedent.
+const ONBOARDING_GROUP_MAX = 64;
 function checkOnboardingName(field: string, value: unknown): string {
   if (typeof value !== "string" || value.length === 0 || value.length > ONBOARDING_NAME_MAX) {
     throw new Fault(400, "INVALID_INPUT", `The onboarding employee ${field} must be 1 to 128 characters.`);

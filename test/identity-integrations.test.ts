@@ -218,6 +218,28 @@ describe("ad Actions through the NinjaOne Transport", () => {
       "AD_TRANSPORT_BAD_RESPONSE",
     );
   });
+  it("keeps credentials out of the complete Fault shape", async () => {
+    async function fullFault(run: () => Promise<unknown>): Promise<Fault> {
+      try {
+        await run();
+        expect.unreachable("vendor faults must throw");
+        throw new Error("unreachable");
+      } catch (error) {
+        expect(error).toBeInstanceOf(Fault);
+        return error as Fault;
+      }
+    }
+    tokenMock({}, 401);
+    for (const fault of [
+      await fullFault(() => createAdUser(NINJA, SECRETS, { endpoint: AD }, SUBJECT, "op", "exec-1", 1000)),
+      await fullFault(() => addAdUserToGroups(NINJA, SECRETS, { endpoint: AD }, "u", ["g"], "op", "exec-1", 1000)),
+    ]) {
+      expect(fault.code).toMatch(/^AD_TRANSPORT_/);
+      const dumped = JSON.stringify({ code: fault.code, message: fault.message });
+      expect(dumped).not.toContain(SECRETS.clientId);
+      expect(dumped).not.toContain(SECRETS.clientSecret);
+    }
+  });
   it("maps Transport execution faults and misshapen bodies", async () => {
     const directory = { endpoint: AD };
     for (const [suffix, code] of [
