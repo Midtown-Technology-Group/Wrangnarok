@@ -100,9 +100,9 @@ export const NAV_ENTRIES: NavEntry[] = [
   },
   {
     label: "Tables",
-    enabled: false,
-    issue: `${REPO}/issues/154`,
-    phase: "Phase 4",
+    to: "/tables",
+    enabled: true,
+    phase: "Phase 4 (#556)",
   },
   {
     label: "AI profiles",
