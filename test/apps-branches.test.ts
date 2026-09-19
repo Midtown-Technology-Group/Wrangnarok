@@ -252,3 +252,54 @@ it("serves nothing once the active deployment row is gone", async () => {
   expect(asset.status).toBe(404);
   expect(await asset.json()).toMatchObject({ error: { code: "APP_NOT_LIVE" } });
 });
+
+it("denies secrets, build, VCS, and vendor paths from retained source (#484 A1)", async () => {
+  // Unit-level: each excluded shape fails validation with EXCLUDED_PATH.
+  const excluded = [
+    "config/.env",
+    "config/.env.local",
+    "node_modules/evil.js",
+    "lib/node_modules/nested.js",
+    "vendor/lib.js",
+    "build/bundle.js",
+    "dist/bundle.js",
+    "assets/build/logo.js",
+    ".git/objects/x",
+    "a/.svn/entries",
+    "a/.hg/store",
+  ];
+  for (const path of excluded) {
+    let code = "";
+    let failureCode = "";
+    try {
+      validateAppSource([{ path, content: "x" }], []);
+    } catch (error) {
+      code = (error as { code?: string }).code ?? "";
+      const details = (error as { details?: { code?: string }[] }).details ?? [];
+      failureCode = details[0]?.code ?? "";
+    }
+    expect(code).toBe("APP_VALIDATION_FAILED");
+    expect(failureCode).toBe("EXCLUDED_PATH");
+  }
+  // Similarly named but legitimate paths still pass shape validation.
+  expect(() =>
+    validateAppSource(
+      [
+        { path: "build.html", content: "x" },
+        { path: "vendor-notes/index.html", content: "x" },
+        { path: "env/index.html", content: "x" },
+      ],
+      [],
+    ),
+  ).not.toThrow();
+  // HTTP-level: the edit-source route surfaces the exclusion fail-closed.
+  const id = await createApp("sanitized", "sanitized");
+  const denied = await call(`/api/apps/${id}/source`, "PUT", {
+    files: [{ path: "node_modules/evil.js", content: "x" }],
+    dependencies: [],
+  });
+  expect(denied.status).toBe(422);
+  const body = (await denied.json()) as { error: { code: string; details: { code: string }[] } };
+  expect(body.error.code).toBe("APP_VALIDATION_FAILED");
+  expect(body.error.details.some((failure) => failure.code === "EXCLUDED_PATH")).toBe(true);
+});
