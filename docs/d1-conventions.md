@@ -110,6 +110,25 @@ DELETE FROM <table> WHERE <predicate> AND id NOT IN (SELECT id FROM <table> WHER
 - Never wrap a backfill around remote API calls: saga/workflow durability
   belongs in Workflows/Queues/DOs, not in a D1 emulation.
 
+## Fixed write groups (Pocketflare lesson, issue #256)
+
+D1 `batch()` is a fixed group of statements, not an interactive
+transaction: reads run direct against D1 with no snapshot isolation, and
+a read after a queued write fails deterministically (Pocketflare
+surfaces this as `d1pocketflare: cannot query after queued writes` /
+HTTP 400 `batch_request_failed` for `/api/batch`, with zero records
+persisted — verified against `jmonster/pocketflare` at `38df593`,
+issue #256).
+
+- Never design an Operation that needs read-your-writes inside one D1
+  transaction (read-then-decide-then-write expecting isolation).
+- Structure writes as **pre-read → `batch()` → post-commit refresh**: do
+  all reads first, submit the fixed write group, then re-read after
+  commit when the write result must be observed.
+- Migrations run statement-by-statement with any outer transaction
+  stripped (interleaved write/read migration steps cannot replay inside
+  one D1 transaction).
+
 ## Finding the most expensive operations (Slice F)
 
 - Primary source: Cloudflare's D1 dashboard / GraphQL Analytics API
