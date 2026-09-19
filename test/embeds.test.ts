@@ -588,6 +588,52 @@ it("fails bootstrap closed when the form changes until rotation re-binds it", as
   expect(await gone.json()).toMatchObject({ error: { code: "FORM_NOT_FOUND" } });
 });
 
+it("rotation never revives a pre-change startup handle", async () => {
+  await createForm("contact");
+  const grant = await createGrant("contact");
+  const started = await bootstrapOk(grant);
+
+  // A field edit changes the fingerprint: the pre-change handle answers
+  // STALE at submit while the grant still names the old declaration.
+  expect(
+    (
+      await call("/api/forms/contact", "PUT", {
+        sagaId: helloSaga.id,
+        title: "Hello",
+        fields: [...HELLO_FIELDS, { name: "nick", type: "text", required: false }],
+      })
+    ).status,
+  ).toBe(200);
+  const stale = await embedSubmit({ handle: started.handle, values: { name: "Ada" } }, ORIGIN, keyFor("revive-before"));
+  expect(stale.status).toBe(422);
+  expect(await stale.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+
+  // Rotation heals the grant for new startups ...
+  const rotated = await call(`/api/forms/contact/embeds/${grant.id}/rotate`, "POST", {});
+  expect(rotated.status).toBe(200);
+  const secret = ((await rotated.json()) as { secret: string }).secret;
+
+  // ... but the same pre-change handle stays stale instead of being
+  // revived by the re-bind (EMBED-01 hardening, issue #156).
+  const revived = await embedSubmit(
+    { handle: started.handle, values: { name: "Ada" } },
+    ORIGIN,
+    keyFor("revive-after"),
+  );
+  expect(revived.status).toBe(422);
+  expect(await revived.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+
+  // A fresh bootstrap with the rotated secret submits the new declaration.
+  const fresh = await bootstrap(grant.id, secret, ORIGIN);
+  expect(fresh.status).toBe(201);
+  const submitted = await embedSubmit(
+    { handle: ((await fresh.json()) as BootstrapReceipt).handle, values: { name: "Ada" } },
+    ORIGIN,
+    keyFor("revive-fresh"),
+  );
+  expect(submitted.status).toBe(202);
+});
+
 it("submits through the shared core: receipt, replay, conflict, schedule", async () => {
   await createForm();
   const grant = await createGrant("contact");

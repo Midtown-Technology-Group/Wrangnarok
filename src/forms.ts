@@ -1958,6 +1958,20 @@ export async function consumeAfterAdmission(
   }
 }
 
+/** Invalidate every outstanding startup session for one external principal
+ * (EMBED-01 hardening, issue #156). Grant rotation and publication
+ * review/re-publish re-bind the capability to the live declaration, and
+ * sessions minted before that change must stay stale afterwards — never be
+ * revived by the re-bind. Deleting the rows makes pre-change handles
+ * unknown, so every submit/finalize/issuance peek answers STALE_FORM_HANDLE;
+ * sessions minted after the re-bind do not exist yet and are unaffected.
+ * D1 faults propagate: a rotation/review that cannot invalidate fails
+ * rather than healing the grant while leaving old handles live. */
+export async function invalidateFormSessions(db: D1Database, userId: string): Promise<void> {
+  await ensureStartupTable(db);
+  await db.prepare("DELETE FROM form_startups WHERE user_id=?").bind(userId).run();
+}
+
 /** Parse a file-field reference against its declared policy (shape only;
  * readiness/size/type are re-validated against the live FILE-01 row by
  * the submit route's checkFormFiles step). */
