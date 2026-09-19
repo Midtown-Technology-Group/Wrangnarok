@@ -351,6 +351,12 @@ describe("posture classifier and parser arms", () => {
       expect(probe).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
     }
   });
+  it("accepts the checked-in file envelope verbatim", async () => {
+    const file = (await import("../docs/posture/baseline.json")).default;
+    const parsed = parsePostureBaseline(file);
+    expect(parsed.recordedAt).toBeNull();
+    expect(parsed.zoneExpectations.ssl).toEqual(["strict"]);
+  });
   it("accepts snake_case zones and dedupes settings", () => {
     expect(parseCloudflarePostureInput({ max_zones: 5 })).toMatchObject({ maxZones: 5 });
     expect(parseCloudflarePostureInput({ settings: ["ssl", "ssl"] })).toMatchObject({ settings: ["ssl"] });

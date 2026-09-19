@@ -15,6 +15,18 @@ the repo has no `.tf` files and no IaC-authoritative resource set, so there
 is nothing to plan against. Reopen S4 only when Cloudflare resources become
 Terraform-managed.
 
+## Acceptance mapping (issue #252 criteria)
+
+| Criterion | Status |
+| --- | --- |
+| Read-only posture check runs against the account/zone | Met — S1/S2/S3 submit on-demand or scheduled |
+| Security Insights findings included | Met — S2 |
+| At least one Audit Logs-based check/report | Met — S1 |
+| Custom benchmark evaluates Wrangnarok-specific controls | Met — S3 (typed checks, not Steampipe) |
+| Terraform drift reported for IaC-authoritative resources | Deferred, not applicable yet — no IaC-authoritative set exists, so there is nothing to drift-check. Reopen trigger: first `.tf` managing a Cloudflare resource. |
+| Distinguishes insecurity from drift | Met in kind — S3 reports configuration insecurity vs the baseline; drift-vs-intended stays a documented concept until S4 has an IaC set to compare against (see Scope above). |
+| Credentials, cadence, severity, suppression documented | Met — this file |
+
 ## Sagas
 
 All three are read-only Actions on the existing `cloudflare` Integration

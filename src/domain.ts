@@ -1211,7 +1211,12 @@ export function parsePostureBaseline(value: unknown): PostureBaseline {
     );
   const record = value as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (!["recordedAt", "acknowledgedCriticalIds", "suppressions", "zoneExpectations"].includes(key)) {
+    // The checked-in file carries a `version`/`note` envelope for reviewers;
+    // it travels verbatim as Saga input, so the envelope is ignored here.
+    // Anything else unknown still fails closed.
+    if (
+      !["recordedAt", "acknowledgedCriticalIds", "suppressions", "zoneExpectations", "version", "note"].includes(key)
+    ) {
       throw postureFault(`Unknown baseline field "${key}".`);
     }
   }
