@@ -31,4 +31,5 @@ sagas.manifest.json
 test/saga-init-order.test.ts
 test/ninja-lookup.test.ts
 test/saga-contract.test.ts
+test/saga-helper-conventions.test.ts
 docs/migration-pilot.md
