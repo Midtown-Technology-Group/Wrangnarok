@@ -62,6 +62,7 @@
 import { Fault, UUID } from "./domain";
 import { assertNoEmbedFileRefs, fingerprintFormDef } from "./embeds";
 import type { FormDefinition } from "./forms";
+import { invalidateFormSessions } from "./forms";
 
 /** Default honeypot field: an unlikely-declared name bots still fill. */
 export const PUBLIC_HONEYPOT_DEFAULT = "wrangnarok_hp";
@@ -204,6 +205,13 @@ export async function publishForm(
     )
     .bind(def.id, honeypot, fingerprint, now, existing.id)
     .run();
+  // Re-publishing heals the link for new startups without reviving
+  // already-stale handles: when the re-bind advances the capability,
+  // outstanding sessions minted under the old capability are invalidated
+  // (EMBED-01 hardening, issue #156).
+  if (fingerprint !== existing.capability_fingerprint || def.id !== existing.form_id) {
+    await invalidateFormSessions(db, `anon:${existing.id}`);
+  }
   return {
     ...existing,
     form_id: def.id,
@@ -231,7 +239,10 @@ export async function disablePublication(
 /** Review a capability change: re-fingerprint against the live declaration
  * so anonymous bootstrap/submit admit again. The body must carry
  * { approve: true } — the route enforces the deliberate bit; this
- * function binds the live declaration. */
+ * function binds the live declaration. Review heals the publication for
+ * new startups without reviving already-stale handles: when the re-bind
+ * advances the capability, outstanding sessions minted under the old
+ * capability are invalidated (EMBED-01 hardening, issue #156). */
 export async function reviewPublication(db: D1Database, def: FormDefinition): Promise<PublicationRow | null> {
   const existing = await loadScopedPublication(db, def.orgId, def.name);
   if (!existing) return null;
@@ -241,6 +252,9 @@ export async function reviewPublication(db: D1Database, def: FormDefinition): Pr
     .prepare("UPDATE form_publications SET form_id=?,capability_fingerprint=?,reviewed_at=? WHERE id=?")
     .bind(def.id, fingerprint, now, existing.id)
     .run();
+  if (fingerprint !== existing.capability_fingerprint || def.id !== existing.form_id) {
+    await invalidateFormSessions(db, `anon:${existing.id}`);
+  }
   return { ...existing, form_id: def.id, capability_fingerprint: fingerprint, reviewed_at: now };
 }
 

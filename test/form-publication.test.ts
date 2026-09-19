@@ -425,6 +425,43 @@ it("fails closed on capability drift until the admin reviews, and blocks on disa
   expect(reviewMissing.status).toBe(404);
 });
 
+it("review never revives a pre-change startup handle", async () => {
+  await createForm("contact");
+  const pub = await publish("contact");
+  const started = await startupOk(pub.id);
+
+  // A field edit changes the fingerprint: the pre-change handle answers
+  // STALE at submit while the publication still names the old declaration.
+  expect(
+    (
+      await call("/api/forms/contact", "PUT", {
+        sagaId: helloSaga.id,
+        title: "Hello",
+        fields: [...HELLO_FIELDS, { name: "nick", type: "text", required: false }],
+      })
+    ).status,
+  ).toBe(200);
+  const stale = await publicSubmit({ handle: started.handle, values: { name: "Ada" } }, keyFor("revive-before"));
+  expect(stale.status).toBe(422);
+  expect(await stale.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+
+  // Review heals the publication for new startups ...
+  expect((await call("/api/forms/contact/publication/review", "POST", { approve: true })).status).toBe(200);
+
+  // ... but the same pre-change handle stays stale instead of being
+  // revived by the re-bind (EMBED-01 hardening, issue #156).
+  const revived = await publicSubmit({ handle: started.handle, values: { name: "Ada" } }, keyFor("revive-after"));
+  expect(revived.status).toBe(422);
+  expect(await revived.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+
+  // A fresh bootstrap after review submits the new declaration with the
+  // confirmation-only receipt (no execution disclosure).
+  const fresh = await startupOk(pub.id);
+  const submitted = await publicSubmit({ handle: fresh.handle, values: { name: "Ada" } }, keyFor("revive-fresh"));
+  expect(submitted.status).toBe(202);
+  expect(await submitted.json()).toEqual({ form: "contact", received: true });
+});
+
 it("kills outstanding sessions when the publication or form dies after startup", async () => {
   await createForm("volatile");
   const pub = await publish("volatile");

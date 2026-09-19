@@ -60,7 +60,7 @@
 // enters the standard submit protocol with the Execution row first).
 import { Fault, hash, UUID } from "./domain";
 import type { Principal } from "./domain";
-import { serializeFormDeclaration } from "./forms";
+import { invalidateFormSessions, serializeFormDeclaration } from "./forms";
 import type { FormDefinition } from "./forms";
 
 /** At most 10 exact-match origins per grant: an allowlist, not a pattern. */
@@ -345,7 +345,13 @@ export function checkEmbedBinding(grant: EmbedGrantRow, live: { formId: string; 
  * re-fingerprint against the live declaration. Unknown or foreign grants
  * answer 404; revoked grants answer 410 (revoke is terminal — create a new
  * grant instead). The route loads the form first, so a dangling grant
- * answers 404 there. */
+ * answers 404 there. Rotation heals the grant for new startups without
+ * reviving already-stale handles: when the re-bind advances the capability
+ * (fingerprint or form identity changed since issue/last rotation),
+ * outstanding sessions minted under the old capability are invalidated, so
+ * a pre-change handle stays STALE after rotation (EMBED-01 hardening, issue
+ * #156). A pure secret rotation (capability unchanged) leaves outstanding
+ * sessions live — rotation kills secrets, revocation owns session death. */
 export async function rotateEmbedGrant(
   db: D1Database,
   def: FormDefinition,
@@ -364,6 +370,9 @@ export async function rotateEmbedGrant(
     .prepare("UPDATE form_embeds SET secret_hash=?,capability_fingerprint=?,form_id=?,rotated_at=? WHERE id=?")
     .bind(digest, fingerprint, def.id, rotatedAt, grantId)
     .run();
+  if (fingerprint !== grant.capability_fingerprint || def.id !== grant.form_id) {
+    await invalidateFormSessions(db, `embed:${grantId}`);
+  }
   return {
     row: {
       ...grant,

@@ -198,13 +198,11 @@ import {
 } from "./app-embeds";
 import {
   assertSessionOwnedFileRefs,
-  countSessionUploads,
+  claimSessionUpload,
   loadSessionUploads,
   mintSessionUploadPath,
   parseSessionUploadField,
-  recordSessionUpload,
   sessionUploadKey,
-  SESSION_UPLOADS_MAX,
   SESSION_UPLOAD_TTL_SECONDS,
 } from "./session-uploads";
 import {
@@ -894,16 +892,19 @@ async function scheduleFormExecution(
 }
 
 /** Issue one session-owned upload slot for an external form session
- * (EMBED-01 slice 3, issue #156). The caller already authenticated the
- * session class (grant secret + origin, or publication liveness) and the
- * live declaration; everything below is shared: peek the live session
- * bound to this form (unknown, expired, foreign, or definition-drifted
- * handles answer STALE and stage nothing), resolve the named file field
- * against the declaration (unknown or non-file names answer 400), cap
- * issuance per session, then mint a server-chosen path plus a single-use
- * FILE-01 upload token and record the ownership claim the submit check
- * enforces. The org-wide FILE-01 write policy still gates issuance, so
- * deleting the location or revoking its policy stops new slots. */
+ * (EMBED-01 slice 3, hardened on issue #156). The caller already
+ * authenticated the session class (grant secret + origin, or publication
+ * liveness) and the live declaration; everything below is shared: peek the
+ * live session bound to this form (unknown, expired, foreign, or
+ * definition-drifted handles answer STALE and stage nothing), resolve the
+ * named file field against the declaration (unknown or non-file names
+ * answer 400), admit the claim atomically under the per-session cap, then
+ * mint a single-use FILE-01 upload token for the server-chosen path. The
+ * atomic claim (count check plus insert in one D1 statement) keeps
+ * concurrent issuers from jointly exceeding the cap, and any D1 fault
+ * fails closed before a slot exists. The org-wide FILE-01 write policy
+ * still gates issuance, so deleting the location or revoking its policy
+ * stops new slots. */
 async function issueSessionUpload(
   db: D1Database,
   principal: Principal,
@@ -916,12 +917,8 @@ async function issueSessionUpload(
       : ({} as Record<string, unknown>);
   const session = await peekStartupHandle(db, principal, def.name, record.handle as string, def.id);
   const field = parseSessionUploadField(def.fields, record.field);
-  if ((await countSessionUploads(db, session.handleHash)) >= SESSION_UPLOADS_MAX) {
-    throw new Fault(429, "SESSION_UPLOAD_LIMIT", "This form session reached its upload limit.");
-  }
   const path = mintSessionUploadPath();
-  const slot = await issueUploadSlot(db, principal, field.location, path, SESSION_UPLOAD_TTL_SECONDS);
-  await recordSessionUpload(db, {
+  await claimSessionUpload(db, {
     sessionHash: session.handleHash,
     orgId: principal.orgId,
     field: field.field,
@@ -930,6 +927,21 @@ async function issueSessionUpload(
     maxBytes: field.maxBytes,
     contentTypes: field.contentTypes,
   });
+  let slot;
+  try {
+    slot = await issueUploadSlot(db, principal, field.location, path, SESSION_UPLOAD_TTL_SECONDS);
+  } catch (error) {
+    // The slot never minted, so release the claim rather than burning one
+    // of the session's admissions on a failed issuance. Best-effort: the
+    // original failure still propagates, and the session TTL bounds a
+    // leaked claim regardless.
+    await db
+      .prepare("DELETE FROM form_session_uploads WHERE session_hash=? AND location=? AND path=?")
+      .bind(session.handleHash, field.location, path)
+      .run()
+      .catch(() => undefined);
+    throw error;
+  }
   return { location: field.location, path, token: slot.token, expiresAt: slot.expiresAt, maxBytes: field.maxBytes };
 }
 

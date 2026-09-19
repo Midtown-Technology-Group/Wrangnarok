@@ -909,6 +909,68 @@ it("caps issuance per session and never accepts foreign handle classes", async (
   expect(anonFinalizeOfSigned.status).toBe(422);
 });
 
+it("caps concurrent issuance at 10 claims from 9", async () => {
+  expect((await call("/api/file-locations", "POST", { name: "uploads" })).status).toBe(201);
+  await createForm("resume");
+  const grant = await createGrant("resume");
+  const started = await bootstrapOk(grant);
+  for (let attempt = 0; attempt < SESSION_UPLOADS_MAX - 1; attempt++) {
+    await issueOk("embed", grant.id, grant.secret, started.handle);
+  }
+  // Two concurrent issuances from 9 claims admit at most one more: the
+  // atomic claim insert serializes the count check with the insert, so the
+  // loser observes 10 and answers 429 (EMBED-01 hardening, issue #156).
+  const [first, second] = await Promise.all([
+    issueEmbedUpload(grant.id, grant.secret, ORIGIN, { handle: started.handle, field: "doc" }),
+    issueEmbedUpload(grant.id, grant.secret, ORIGIN, { handle: started.handle, field: "doc" }),
+  ]);
+  expect([first.status, second.status].sort()).toEqual([201, 429]);
+  const denied = first.status === 429 ? first : second;
+  expect(await denied.json()).toMatchObject({ error: { code: "SESSION_UPLOAD_LIMIT" } });
+  // The persisted claim count never exceeds the cap.
+  expect(await countSessionUploads(bindings.DB, await hash(started.handle))).toBe(SESSION_UPLOADS_MAX);
+});
+
+it("fails issuance closed on a count/admission D1 fault without minting a slot or claim", async () => {
+  expect((await call("/api/file-locations", "POST", { name: "uploads" })).status).toBe(201);
+  await createForm("resume");
+  const grant = await createGrant("resume");
+  const started = await bootstrapOk(grant);
+  // A non-missing-table D1 fault on the session-upload rows: admission
+  // must fail closed, never as an observed zero (EMBED-01 hardening,
+  // issue #156).
+  const faulty = new Proxy(bindings.DB, {
+    get(target, prop, receiver) {
+      if (prop === "prepare") {
+        return (sql: string) => {
+          if (sql.includes("form_session_uploads")) throw new Error("injected session-upload D1 fault");
+          return target.prepare(sql);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const capsBefore = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM file_capabilities").first<{ n: number }>();
+  const response = await worker.fetch(
+    new Request(`https://local.test/api/embeds/${grant.id}/uploads`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Embed-Secret": grant.secret, Origin: ORIGIN },
+      body: JSON.stringify({ handle: started.handle, field: "doc" }),
+    }),
+    { ...bindings, DB: faulty },
+  );
+  expect(response.status).toBe(500);
+  expect(await response.json()).toMatchObject({ error: { code: "INTERNAL_ERROR" } });
+  // No claim row and no FILE-01 slot survived the fault.
+  const claims = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM form_session_uploads").first<{ n: number }>();
+  expect(claims?.n).toBe(0);
+  const capsAfter = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM file_capabilities").first<{ n: number }>();
+  expect(capsAfter?.n).toBe(capsBefore?.n);
+  // The counter itself fails closed instead of reporting zero.
+  await expect(countSessionUploads(faulty, "0".repeat(64))).rejects.toThrow(/injected session-upload D1 fault/);
+});
+
 /** Craft a form_startups row directly for sessions the API cannot mint:
  * dangling grants/publications and operator subjects on session routes. */
 async function craftStartupRow(row: {

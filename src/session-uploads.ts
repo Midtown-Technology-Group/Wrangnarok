@@ -155,14 +155,58 @@ export async function recordSessionUpload(
   };
 }
 
-/** Count live claims for one session (per-session issuance cap). */
+/** Count live claims for one session (per-session issuance cap).
+ * D1 faults propagate: admission fails closed, never as zero (EMBED-01
+ * hardening, issue #156). */
 export async function countSessionUploads(db: D1Database, sessionHash: string): Promise<number> {
   const row = await db
     .prepare("SELECT COUNT(*) AS total FROM form_session_uploads WHERE session_hash=?")
     .bind(sessionHash)
-    .first<{ total: number }>()
-    .catch(() => null);
+    .first<{ total: number }>();
   return row?.total ?? 0;
+}
+
+/** Atomically admit one session upload claim under the per-session cap
+ * (EMBED-01 hardening, issue #156). The count check and the insert run in
+ * one D1 statement, so two concurrent issuances from 9 claims admit at most
+ * one more: the loser inserts zero rows and answers 429
+ * SESSION_UPLOAD_LIMIT. Any D1 fault propagates — admission fails closed
+ * before any FILE-01 slot exists, never as an observed zero. */
+export async function claimSessionUpload(
+  db: D1Database,
+  claim: { sessionHash: string; orgId: string } & SessionUploadField & { path: string },
+): Promise<SessionUploadClaim> {
+  const createdAt = new Date().toISOString();
+  const admitted = await db
+    .prepare(
+      "INSERT INTO form_session_uploads(session_hash,org_id,location,path,field,max_bytes,content_types_json,created_at) SELECT ?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM form_session_uploads WHERE session_hash=?) < ?",
+    )
+    .bind(
+      claim.sessionHash,
+      claim.orgId,
+      claim.location,
+      claim.path,
+      claim.field,
+      claim.maxBytes,
+      JSON.stringify(claim.contentTypes),
+      createdAt,
+      claim.sessionHash,
+      SESSION_UPLOADS_MAX,
+    )
+    .run();
+  if (admitted.meta.changes === 0) {
+    throw new Fault(429, "SESSION_UPLOAD_LIMIT", "This form session reached its upload limit.");
+  }
+  return {
+    sessionHash: claim.sessionHash,
+    orgId: claim.orgId,
+    location: claim.location,
+    path: claim.path,
+    field: claim.field,
+    maxBytes: claim.maxBytes,
+    contentTypes: claim.contentTypes,
+    createdAt,
+  };
 }
 
 /** Ownership-map key for one (location, path) triple. Locations exclude
