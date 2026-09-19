@@ -569,6 +569,28 @@ it("accepts inert SVG logos and avatars, rejects active SVG abuse", async () => 
       `<svg xmlns="http://www.w3.org/2000/svg"><a href="javascript:alert(1)"><rect width="1" height="1"/></a></svg>`,
     ],
     ["foreign-object", `<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><p>x</p></foreignObject></svg>`],
+    ["link-fragment", `<svg xmlns="http://www.w3.org/2000/svg"><a href="#g"><rect width="1" height="1"/></a></svg>`],
+    ["link-relative", `<svg xmlns="http://www.w3.org/2000/svg"><a href="/phish"><text x="1" y="1">x</text></a></svg>`],
+    [
+      "protocol-relative-image",
+      `<svg xmlns="http://www.w3.org/2000/svg"><image href="//evil.test/x.png" width="1" height="1"/></svg>`,
+    ],
+    [
+      "encoded-scheme-image",
+      `<svg xmlns="http://www.w3.org/2000/svg"><image href="&#104;ttps://evil.test/x.png" width="1" height="1"/></svg>`,
+    ],
+    [
+      "namespaced-script",
+      `<svg xmlns="http://www.w3.org/2000/svg" xmlns:svg="http://www.w3.org/2000/svg"><svg:script>alert(1)</svg:script></svg>`,
+    ],
+    [
+      "namespaced-foreign",
+      `<svg xmlns="http://www.w3.org/2000/svg" xmlns:f="http://www.w3.org/2000/svg"><f:foreignObject><p>x</p></f:foreignObject></svg>`,
+    ],
+    [
+      "css-protocol-import",
+      `<svg xmlns="http://www.w3.org/2000/svg"><style>@import '//evil.test/x.css';</style><rect width="1" height="1"/></svg>`,
+    ],
     ["iframe", `<svg xmlns="http://www.w3.org/2000/svg"><iframe src="https://evil.test/"/></svg>`],
     [
       "remote-image",
@@ -593,13 +615,21 @@ it("accepts inert SVG logos and avatars, rejects active SVG abuse", async () => 
     expect([name, avatarRejected.status]).toEqual([name, 415]);
     expect(await avatarRejected.json()).toMatchObject({ error: { code: "UNSUPPORTED_AVATAR" } });
   }
+  // Namespaced *attributes* stay allowed: xlink fragment refs are ordinary
+  // exported-SVG shape, while namespaced *elements* above are rejected.
+  const xlink =
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 16 16">` +
+    `<defs><rect id="r" width="16" height="16" fill="#F45D0B"/></defs><use xlink:href="#r"/></svg>`;
+  const xlinkBytes = svgBytes(xlink);
+  expect((await putBytes("/api/branding/logo", xlinkBytes, "image/svg+xml")).status).toBe(200);
+  expect((await putBytes("/api/profile/avatar", xlinkBytes, "image/svg+xml")).status).toBe(200);
   // Type/bytes cross-mismatch still fenced both directions.
   expect((await putBytes("/api/branding/logo", cleanBytes, "image/png")).status).toBe(415);
   expect((await putBytes("/api/profile/avatar", imageBytes("image/png"), "image/svg+xml")).status).toBe(415);
-  // Rejected uploads store nothing: the last accepted logo is still the prolog SVG.
+  // Rejected uploads store nothing: the last accepted logo is still the xlink SVG.
   const kept = await call("/api/branding/logo");
   expect(kept.status).toBe(200);
-  expect(new Uint8Array(await kept.arrayBuffer())).toEqual(prologBytes);
+  expect(new Uint8Array(await kept.arrayBuffer())).toEqual(xlinkBytes);
   // SVG rides the same byte caps and empty-body fence as raster.
   const oversized = svgBytes(clean.repeat(Math.ceil((BRANDING_LOGO_MAX_BYTES + 1) / clean.length)));
   const logoHuge = await putBytes("/api/branding/logo", oversized, "image/svg+xml");
