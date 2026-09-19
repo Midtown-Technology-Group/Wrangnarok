@@ -96,6 +96,23 @@ export const APP_DEP_ALLOWLIST: Readonly<Record<string, readonly string[]>> = Ob
   "wrangnarok-charts": Object.freeze(["0.9.0", "1.0.0"]),
 });
 
+/** Retained-source exclusion (issue #484 A1): validation-time deny-list so
+ * deployed source never retains secrets, build output, version-control, or
+ * vendor directories. Segment-based, so nesting (for example
+ * `lib/node_modules/x`) is denied exactly like a top-level prefix. Runs
+ * before the path-shape check so the whole class reports one stable
+ * EXCLUDED_PATH code instead of an incidental BAD_PATH. Validation-time
+ * only: existing stored rows are grandfathered, never swept. */
+function excludedAppPathReason(path: string): string | null {
+  for (const segment of path.toLowerCase().split("/")) {
+    if (segment.startsWith(".env")) return "secrets";
+    if (segment === "node_modules" || segment === "vendor") return "vendor";
+    if (segment === "build" || segment === "dist") return "build output";
+    if (segment === ".git" || segment === ".svn" || segment === ".hg") return "version control";
+  }
+  return null;
+}
+
 function invalid(code: string, message: string, status = 400, details?: unknown): Fault {
   return new Fault(status, code, message, details);
 }
@@ -142,8 +159,9 @@ export function parseAppId(value: string): string {
   return value.toLowerCase();
 }
 
-/** Shape-only source validation (ADR 017 section 6): path allowlists, byte
- * bounds, dependency-pin allowlist. Never imports or executes the source. */
+/** Shape-only source validation (ADR 017 section 6): sanitized retained
+ * source (issue #484 A1 deny-list), path allowlists, byte bounds,
+ * dependency-pin allowlist. Never imports or executes the source. */
 export function validateAppSource(files: unknown, deps: unknown): { files: AppFile[]; deps: AppDependency[] } {
   const failures: FieldFailure[] = [];
   const parsedFiles: AppFile[] = [];
@@ -154,6 +172,15 @@ export function validateAppSource(files: unknown, deps: unknown): { files: AppFi
   for (const entry of files) {
     if (!object(entry) || typeof entry.path !== "string" || typeof entry.content !== "string") {
       failures.push({ field: "files", code: "BAD_FILE", message: "Each file needs a path and string content." });
+      continue;
+    }
+    const excluded = excludedAppPathReason(entry.path);
+    if (excluded) {
+      failures.push({
+        field: entry.path,
+        code: "EXCLUDED_PATH",
+        message: `Retained app source excludes ${excluded} paths.`,
+      });
       continue;
     }
     if (!APP_FILE_PATH.test(entry.path)) {
