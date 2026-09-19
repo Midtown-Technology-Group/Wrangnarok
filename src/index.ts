@@ -4680,6 +4680,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const mcpServerToggle = /^\/api\/mcp-servers\/([0-9a-f-]{36})\/(disable|enable)$/.exec(url.pathname);
     if (mcpServerToggle?.[1] && mcpServerToggle[2] && request.method === "POST") {
       rejectQuery(url);
+      requireJson(request);
       if (!ctx.isInstanceAdmin) mcpAdmin("manage MCP servers");
       const server = await setMcpServerTemplateActive(
         env.DB,
@@ -4834,6 +4835,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     const mcpRefresh = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/refresh-tools$/.exec(url.pathname);
     if (mcpRefresh?.[1] && request.method === "POST") {
       rejectQuery(url);
+      requireJson(request);
       mcpAdmin("manage MCP Connections");
       const summary = await refreshMcpTools(env.DB, caller.orgId, mcpRefresh[1], env.SECRETS_KEK, {
         ...(env.OAUTH_REFRESH_FENCE === undefined ? {} : { fence: env.OAUTH_REFRESH_FENCE }),
@@ -4860,6 +4862,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       );
     if (mcpToolToggle?.[1] && mcpToolToggle[2] && mcpToolToggle[3] && request.method === "POST") {
       rejectQuery(url);
+      requireJson(request);
       mcpAdmin("manage MCP Connections");
       const tool = await setMcpCatalogToolEnabled(
         env.DB,

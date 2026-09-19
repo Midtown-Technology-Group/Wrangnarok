@@ -2230,3 +2230,40 @@ describe("MCP consent exchange default arms", () => {
     expect(replaced).toMatchObject({ generation: 2, scope: "" });
   });
 });
+
+describe("MCP review-thread pins", () => {
+  const FOREIGN = "00000000-0000-4000-8000-00000000ffff";
+  const bareAuth = { Authorization: `Bearer ${TOKEN}` };
+  function bareCall(path: string) {
+    return new Request(`https://local.test${path}`, { method: "POST", headers: { ...bareAuth } });
+  }
+
+  it("both-keys vendor schemas prefer inputSchema, legacy key is fallback only", async () => {
+    const [both] = parseDiscoveredTools({
+      tools: [{ name: "both", inputSchema: { a: 1 }, input_schema: { b: 2 } }],
+    });
+    expect(both?.inputSchema).toEqual({ a: 1 });
+    const [legacy] = parseDiscoveredTools({ tools: [{ name: "legacy", input_schema: { b: 2 } }] });
+    expect(legacy?.inputSchema).toEqual({ b: 2 });
+    const [neither] = parseDiscoveredTools({ tools: [{ name: "neither" }] });
+    expect(neither && "inputSchema" in neither).toBe(false);
+  });
+
+  it("auth markers match only the flagged unauthorized fault", async () => {
+    expect(isMcpAuthMarker(new Fault(401, "MCP_VENDOR_UNAUTHORIZED", "x", { marker: true }))).toBe(true);
+  });
+
+  it("bodyless MCP POSTs require JSON content-type (CSRF guard)", async () => {
+    for (const path of [
+      `/api/mcp-servers/${FOREIGN}/disable`,
+      `/api/mcp-connections/${FOREIGN}/refresh-tools`,
+      `/api/mcp-connections/${FOREIGN}/tools/search/disable`,
+    ]) {
+      const denied = await worker.fetch(bareCall(path), bindings);
+      expect(denied.status).toBe(415);
+      expect((await denied.json()) as Record<string, unknown>).toMatchObject({
+        error: { code: "JSON_REQUIRED" },
+      });
+    }
+  });
+});

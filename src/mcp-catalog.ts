@@ -119,13 +119,14 @@ function parseVendorTool(tool: unknown): DiscoveredMcpTool {
   if (typeof record.name !== "string" || !VENDOR_TOOL_NAME.test(record.name)) {
     throw invalid("MCP_CATALOG_INVALID", "Discovered tool names must be 1-128 chars: letter first.");
   }
+  // `inputSchema` wins when a vendor sends both keys, matching
+  // `normalizeMcpInputSchema` — the legacy key is fallback only.
+  const legacy = (record as { input_schema?: unknown }).input_schema;
+  const schema = record.inputSchema !== undefined ? record.inputSchema : legacy;
   return Object.freeze({
     name: record.name,
     ...(record.description === undefined ? {} : { description: record.description }),
-    ...(record.inputSchema === undefined ? {} : { inputSchema: record.inputSchema }),
-    ...((record as { input_schema?: unknown }).input_schema === undefined
-      ? {}
-      : { inputSchema: (record as { input_schema?: unknown }).input_schema }),
+    ...(schema === undefined ? {} : { inputSchema: schema }),
   });
 }
 
