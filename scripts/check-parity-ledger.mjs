@@ -78,6 +78,9 @@ function parseDetails(text) {
     let status = null;
     let issue = null;
     for (let j = i + 1; j < lines.length && !lines[j].startsWith("## "); j++) {
+      // Anchor to the Phase metadata line: a **Status** token in free prose
+      // must never satisfy the section (CodeRabbit review on PR #549).
+      if (!/^\s*Phase\b/.test(lines[j])) continue;
       if (status === null) {
         const sm = lines[j].match(/\*\*(Implemented|Complete|Partial|Missing|Gated)\b[^*]*\*\*/);
         if (sm) status = sm[1];
@@ -249,6 +252,19 @@ if (process.argv.includes("--selftest")) {
         ],
       ),
     ).some((e) => e.includes("stale section")),
+  );
+  check(
+    "prose status token cannot satisfy a malformed heading",
+    checkTree(
+      ledger(
+        goodHeadline,
+        [row("RUN-01", "Implemented", "#135"), row("RUN-02", "Partial", "#136")],
+        [
+          detail("RUN-01", "Implemented", "#135"),
+          "## RUN-02: Title RUN-02\n\nPhase 2; Partial; existing issue: #136\n\nLocal **Partial** prose.",
+        ],
+      ),
+    ).some((e) => e.includes("no `Phase")),
   );
   check(
     "table/detail parenthetical agreement passes",
