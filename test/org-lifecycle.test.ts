@@ -1126,7 +1126,8 @@ it("cascades runtime policies and tool enrollments with the org (issue #226)", a
 it("pins the artifact/R2 cascade: every version object goes with the org (issue #226)", async () => {
   // #226 decision: live artifacts cascade (rows plus every R2 version
   // object), they do not block. Multi-version coverage: artifact A keeps
-  // v1+v2 objects, artifact B a single v1.
+  // v1+v2 objects, artifact B a single v1; both carry a binding row and the
+  // org carries a retention row, and the delete must leave no D1 residue.
   const stamp = new Date().toISOString();
   const created = await call("/api/orgs", "POST", USER_ADMIN, { name: "artifact-cascade" });
   expect(created.status).toBe(201);
@@ -1189,12 +1190,44 @@ it("pins the artifact/R2 cascade: every version object goes with the org (issue 
     .bind("00000000-0000-4000-8000-000000000336", "00000000-0000-4000-8000-000000000335", 1, "text/plain", 3, stamp)
     .run();
   await bindings.ARTIFACTS!.put("artifacts/00000000-0000-4000-8000-000000000335/v1", new TextEncoder().encode("v1"));
+  await bindings.DB.prepare(
+    "INSERT INTO artifact_bindings(id,artifact_id,org_id,scope,ref_id,created_at) VALUES (?,?,?,?,?,?)",
+  )
+    .bind(
+      "00000000-0000-4000-8000-000000000338",
+      "00000000-0000-4000-8000-000000000330",
+      orgR,
+      "workspace",
+      "desk-a",
+      stamp,
+    )
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO artifact_bindings(id,artifact_id,org_id,scope,ref_id,created_at) VALUES (?,?,?,?,?,?)",
+  )
+    .bind(
+      "00000000-0000-4000-8000-000000000339",
+      "00000000-0000-4000-8000-000000000335",
+      orgR,
+      "workspace",
+      "desk-b",
+      stamp,
+    )
+    .run();
+  await bindings.DB.prepare("INSERT INTO artifact_retention(org_id,max_age_days,updated_at) VALUES (?,?,?)")
+    .bind(orgR, 90, stamp)
+    .run();
   const preview = await call(`/api/orgs/${orgR}/delete-preview`, "GET", USER_ADMIN);
   expect(preview.status).toBe(200);
   expect(preview.body).toMatchObject({ canDelete: true, artifacts: 2 });
   const deleted = await call(`/api/orgs/${orgR}`, "DELETE", USER_ADMIN);
   expect(deleted.status).toBe(200);
-  expect(deleted.body).toMatchObject({ orgId: orgR, deletedArtifacts: 2, deletedArtifactObjects: 3 });
+  expect(deleted.body).toMatchObject({
+    orgId: orgR,
+    deletedArtifacts: 2,
+    deletedArtifactBindings: 2,
+    deletedArtifactObjects: 3,
+  });
   expect(await bindings.ARTIFACTS!.get("artifacts/00000000-0000-4000-8000-000000000330/v1")).toBeNull();
   expect(await bindings.ARTIFACTS!.get("artifacts/00000000-0000-4000-8000-000000000330/v2")).toBeNull();
   expect(await bindings.ARTIFACTS!.get("artifacts/00000000-0000-4000-8000-000000000335/v1")).toBeNull();
@@ -1202,6 +1235,19 @@ it("pins the artifact/R2 cascade: every version object goes with the org (issue 
     .bind("00000000-0000-4000-8000-000000000330", "00000000-0000-4000-8000-000000000335")
     .first<{ n: number }>();
   expect(versions?.n).toBe(0);
+  // No D1 residue: parent artifact rows, bindings (both the direct org FK
+  // and the artifact FK), and the retention row all go with the org.
+  for (const [table, column] of [
+    ["artifacts", "org_id"],
+    ["artifact_bindings", "org_id"],
+    ["artifact_retention", "org_id"],
+  ] as const) {
+    const left = await bindings.DB.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${column}=?`)
+      .bind(orgR)
+      .first<{ n: number }>();
+    expect(left?.n).toBe(0);
+  }
+  expect(await bindings.DB.prepare("SELECT id FROM organizations WHERE id=?").bind(orgR).first()).toBeNull();
   // Missing ARTIFACTS binding fails closed like the FILES case: bytes must
   // not be silently abandoned.
   const created2 = await call("/api/orgs", "POST", USER_ADMIN, { name: "no-artifact-bucket" });
