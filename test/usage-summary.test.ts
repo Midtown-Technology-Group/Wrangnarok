@@ -47,6 +47,8 @@ async function summary(path = "/api/usage/summary", orgId = ORG, userId?: string
       bySaga: { saga: string; executions: number; d1Reads: number; d1Writes: number }[];
       byStatus: Record<string, number>;
       cancelledExecutions: number;
+      matchedExecutions: number;
+      truncated: boolean;
       gaps: Record<string, unknown>;
       note: string;
     };
@@ -154,6 +156,21 @@ it("summarizes own-org blocks per Saga with honest gaps and no money", async () 
   expect(usage.note).toMatch(/not Cloudflare metering/i);
 });
 
+it("reports the truncation contract instead of a silent prefix", async () => {
+  await seedExecution({ usageCreatedAt: "2026-09-01T00:00:00.000Z" });
+  await seedExecution({ usageCreatedAt: "2026-09-02T00:00:00.000Z" });
+  await seedExecution({ usageCreatedAt: "2026-09-03T00:00:00.000Z" });
+  const query = { saga: null, startAt: null, endAt: null };
+  const full = await getUsageSummary(bindings.DB, ORG, query);
+  expect(full).toMatchObject({ matchedExecutions: 3, truncated: false });
+  // Oldest rows win the cap, and the response says it is a prefix.
+  const capped = await getUsageSummary(bindings.DB, ORG, query, 2);
+  expect(capped).toMatchObject({ matchedExecutions: 3, truncated: true });
+  expect(capped.totals.executions).toBe(2);
+  const overHttp = await summary();
+  expect(overHttp.usage).toMatchObject({ matchedExecutions: 3, truncated: false });
+});
+
 it("counts a duplicate persist once per execution_id", async () => {
   const id = await seedExecution({});
   const again = buildUsage({
@@ -186,11 +203,23 @@ it("is cancellation-aware", async () => {
 it("filters by inclusive time window and saga, failing closed on bad queries", async () => {
   await seedExecution({ saga: "system.smoke", usageCreatedAt: "2026-09-01T00:00:00.000Z" });
   await seedExecution({ saga: "other.saga", usageCreatedAt: "2026-09-10T00:00:00.000Z" });
+  // A date-only endDate covers its whole calendar day: a late record on the
+  // end day is inside the inclusive window, the next day is outside it.
+  await seedExecution({ saga: "other.saga", usageCreatedAt: "2026-09-15T18:30:00.000Z" });
+  await seedExecution({ saga: "other.saga", usageCreatedAt: "2026-09-16T00:00:01.000Z" });
   const windowed = await summary("/api/usage/summary?startDate=2026-09-05&endDate=2026-09-15");
-  expect(windowed.usage.totals.executions).toBe(1);
-  expect(windowed.usage.window).toMatchObject({ start: "2026-09-05T00:00:00.000Z", end: "2026-09-15T00:00:00.000Z" });
+  expect(windowed.usage.totals.executions).toBe(2);
+  expect(windowed.usage.window).toMatchObject({
+    start: "2026-09-05T00:00:00.000Z",
+    end: "2026-09-15T23:59:59.999Z",
+  });
+  // A full-instant endDate keeps its exact bound (no day rounding).
+  const exact = await summary("/api/usage/summary?startDate=2026-09-05&endDate=2026-09-15T18:30:00.000Z");
+  expect(exact.usage.totals.executions).toBe(2);
+  const before = await summary("/api/usage/summary?startDate=2026-09-05&endDate=2026-09-15T18:29:59.999Z");
+  expect(before.usage.totals.executions).toBe(1);
   const bySaga = await summary("/api/usage/summary?saga=other.saga");
-  expect(bySaga.usage.totals.executions).toBe(1);
+  expect(bySaga.usage.totals.executions).toBe(3);
   expect(bySaga.usage.bySaga).toHaveLength(1);
   expect((await call("/api/usage/summary?startDate=2026-09-15&endDate=2026-09-05")).status).toBe(400);
   expect(await (await call("/api/usage/summary?startDate=nope")).json()).toMatchObject({

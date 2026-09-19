@@ -48,9 +48,20 @@ export interface UsageSummary {
   readonly bySaga: readonly UsageSagaTotals[];
   readonly byStatus: Readonly<Record<string, number>>;
   readonly cancelledExecutions: number;
+  /** Truncation contract: rows are the oldest matches up to the row limit.
+   * matchedExecutions counts every match; truncated is true when totals
+   * cover only a prefix, so a capped summary can never read as complete. */
+  readonly matchedExecutions: number;
+  readonly truncated: boolean;
   readonly gaps: UsageGaps;
   readonly note: string;
 }
+
+/** Maximum usage_blocks rows aggregated per summary read. Worker + D1 only:
+ * the cap keeps one read inside Free-tier time/row budgets; the response
+ * says when it applied (truncated/matchedExecutions) instead of silently
+ * reporting a prefix as the total. */
+export const USAGE_SUMMARY_ROW_LIMIT = 5000;
 
 const SUMMARY_NOTE =
   "Application-observed statements/rows/steps in local or dev runtime; not Cloudflare metering. " +
@@ -60,7 +71,9 @@ const SUMMARY_NOTE =
 /** Pure parser for GET /api/usage/summary. Only saga, startDate, and endDate
  * are supported; anything else answers UNSUPPORTED_QUERY. The window is
  * inclusive [startDate, endDate], mirroring the upstream usage-report
- * posture. An inverted window answers INVALID_WINDOW. */
+ * posture: a date-only endDate covers its whole calendar day (through
+ * 23:59:59.999Z), so records created later on the end day are included.
+ * An inverted window answers INVALID_WINDOW. */
 export function parseUsageSummaryQuery(params: URLSearchParams): UsageSummaryQuery {
   for (const key of params.keys()) {
     if (!["saga", "startDate", "endDate"].includes(key)) {
@@ -80,7 +93,12 @@ export function parseUsageSummaryQuery(params: URLSearchParams): UsageSummaryQue
   if (rawStart !== null) startAt = parseDateBound(rawStart, "INVALID_START_DATE");
   let endAt: string | null = null;
   const rawEnd = params.get("endDate");
-  if (rawEnd !== null) endAt = parseDateBound(rawEnd, "INVALID_END_DATE");
+  if (rawEnd !== null) {
+    endAt = parseDateBound(rawEnd, "INVALID_END_DATE");
+    if (/^\d{4}-\d{2}-\d{2}$/.test(rawEnd)) {
+      endAt = new Date(Date.parse(endAt) + 86_400_000 - 1).toISOString();
+    }
+  }
   if (startAt !== null && endAt !== null && startAt > endAt) {
     throw new Fault(400, "INVALID_WINDOW", "startDate must not be after endDate.");
   }
@@ -148,7 +166,12 @@ function emptyTotals(): MutableTotals {
  * spoofed payload cannot move counts across the boundary. Status and Saga
  * likewise come from the executions row: cancellation-aware
  * (Cancelled/Cancelling keep their own buckets) and rename-proof. */
-export async function getUsageSummary(db: D1Database, orgId: string, query: UsageSummaryQuery): Promise<UsageSummary> {
+export async function getUsageSummary(
+  db: D1Database,
+  orgId: string,
+  query: UsageSummaryQuery,
+  rowLimit = USAGE_SUMMARY_ROW_LIMIT,
+): Promise<UsageSummary> {
   const conditions = ["e.org_id=?"];
   const binds: unknown[] = [orgId];
   if (query.saga !== null) {
@@ -163,35 +186,45 @@ export async function getUsageSummary(db: D1Database, orgId: string, query: Usag
     conditions.push("u.created_at<=?");
     binds.push(query.endAt);
   }
+  const where = conditions.join(" AND ");
+  const degraded: UsageSummary = {
+    orgId,
+    window: { start: query.startAt, end: query.endAt },
+    totals: emptyTotals(),
+    bySaga: [],
+    byStatus: {},
+    cancelledExecutions: 0,
+    matchedExecutions: 0,
+    truncated: false,
+    gaps: {
+      modelTokenCosts: "unpriced",
+      providerBilling: "unavailable",
+      estimates: "none",
+      currency: null,
+      unreadableBlocks: 0,
+    },
+    note: SUMMARY_NOTE,
+  };
   let rows: UsageJoinRow[];
+  let matchedExecutions: number;
   try {
+    const counted = await db
+      .prepare(`SELECT COUNT(*) AS n FROM usage_blocks u JOIN executions e ON e.id=u.execution_id WHERE ${where}`)
+      .bind(...binds)
+      .first<{ n: number }>();
+    matchedExecutions = counted?.n ?? 0;
     const result = await db
       .prepare(
         `SELECT u.execution_id,u.usage_json,u.created_at,e.saga_name,e.status FROM usage_blocks u ` +
-          `JOIN executions e ON e.id=u.execution_id WHERE ${conditions.join(" AND ")} ` +
-          `ORDER BY u.created_at ASC,u.execution_id ASC LIMIT 5000`,
+          `JOIN executions e ON e.id=u.execution_id WHERE ${where} ` +
+          `ORDER BY u.created_at ASC,u.execution_id ASC LIMIT ?`,
       )
-      .bind(...binds)
+      .bind(...binds, Math.max(1, Math.floor(rowLimit)))
       .all<UsageJoinRow>();
     rows = result.results;
   } catch (error) {
     if (error instanceof Error && /no such table/i.test(error.message)) {
-      return {
-        orgId,
-        window: { start: query.startAt, end: query.endAt },
-        totals: emptyTotals(),
-        bySaga: [],
-        byStatus: {},
-        cancelledExecutions: 0,
-        gaps: {
-          modelTokenCosts: "unpriced",
-          providerBilling: "unavailable",
-          estimates: "none",
-          currency: null,
-          unreadableBlocks: 0,
-        },
-        note: SUMMARY_NOTE,
-      };
+      return degraded;
     }
     throw error;
   }
@@ -234,6 +267,8 @@ export async function getUsageSummary(db: D1Database, orgId: string, query: Usag
     bySaga,
     byStatus,
     cancelledExecutions,
+    matchedExecutions,
+    truncated: totals.executions + unreadableBlocks < matchedExecutions,
     gaps: {
       modelTokenCosts: "unpriced",
       providerBilling: "unavailable",
