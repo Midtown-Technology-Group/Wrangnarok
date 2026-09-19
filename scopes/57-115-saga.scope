@@ -1,0 +1,34 @@
+# Saga-tree slices (issues #57 + #115): break the SAGA_DEFINITIONS value
+# cycle via a leaf registry (shared.ts no longer value-imports a module
+# that transitively imports its importers; canonical order preserved) with
+# a leaf-first regression test, plus the second migration pilot
+# (ninjaone-org-lookup: one live NinjaOne read, form-bound query, history).
+# New Saga module + tests + manifest/catalog/registration pins only. No
+# catalog semantics, identity, D1, solutions/tables/forms contract, or new
+# primitive changes. Worker + Workflows + D1 only.
+scopes/57-115-saga.scope
+src/sagas/registry.ts
+src/sagas/definitions.ts
+src/sagas/shared.ts
+src/sagas/index.ts
+src/sagas/echo.ts
+src/sagas/ninjaorgs.ts
+src/sagas/ninja-lookup.ts
+src/sagas/digest.ts
+src/sagas/smoke.ts
+src/sagas/hello.ts
+src/sagas/hello-parent.ts
+src/sagas/cloudflare.ts
+src/sagas/onboarding.ts
+src/domain.ts
+src/index.ts
+src/executions.ts
+src/bindings.ts
+src/solutions.ts
+src/solution-export.ts
+wrangler.jsonc
+sagas.manifest.json
+test/saga-init-order.test.ts
+test/ninja-lookup.test.ts
+test/saga-contract.test.ts
+docs/migration-pilot.md

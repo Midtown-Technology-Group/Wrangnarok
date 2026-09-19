@@ -101,6 +101,11 @@
       "class_name": "NinjaOrgsWorkflow",
     },
     {
+      "binding": "NINJA_LOOKUP_WORKFLOW",
+      "name": "wrangnarok-ninjaone-org-lookup-v1",
+      "class_name": "NinjaLookupWorkflow",
+    },
+    {
       "binding": "DIGEST_WORKFLOW",
       "name": "wrangnarok-ninjaone-echo-digest-v1",
       "class_name": "NinjaEchoDigestWorkflow",
@@ -209,6 +214,11 @@
           "binding": "NINJA_WORKFLOW",
           "name": "wrangnarok-ninjaone-orgs-v1-dev",
           "class_name": "NinjaOrgsWorkflow",
+        },
+        {
+          "binding": "NINJA_LOOKUP_WORKFLOW",
+          "name": "wrangnarok-ninjaone-org-lookup-v1-dev",
+          "class_name": "NinjaLookupWorkflow",
         },
         {
           "binding": "DIGEST_WORKFLOW",
@@ -325,6 +335,11 @@
           "binding": "NINJA_WORKFLOW",
           "name": "wrangnarok-ninjaone-orgs-v1-preview",
           "class_name": "NinjaOrgsWorkflow",
+        },
+        {
+          "binding": "NINJA_LOOKUP_WORKFLOW",
+          "name": "wrangnarok-ninjaone-org-lookup-v1-preview",
+          "class_name": "NinjaLookupWorkflow",
         },
         {
           "binding": "DIGEST_WORKFLOW",

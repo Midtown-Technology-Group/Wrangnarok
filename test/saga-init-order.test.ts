@@ -22,6 +22,7 @@ import {
   echoSaga,
   helloParentSaga,
   helloSaga,
+  ninjaLookupSaga,
   ninjaSaga,
   onboardingSaga,
   smokeSaga,
@@ -43,6 +44,7 @@ const CANONICAL_NAMES = [
   "cloudflare-verify-connection",
   "cloudflare-inventory-zones",
   "employee-onboarding",
+  "ninjaone-org-lookup",
 ];
 const STABLE = [
   echoSaga,
@@ -54,6 +56,7 @@ const STABLE = [
   cloudflareVerifySaga,
   cloudflareInventorySaga,
   onboardingSaga,
+  ninjaLookupSaga,
 ];
 
 describe("saga module init order (issue #57)", () => {
@@ -97,15 +100,11 @@ describe("saga module init order (issue #57)", () => {
       expect(entry.name).toBe(def?.name);
       expect(entry.revision).toBe(def?.revision);
     }
-    expect(manifest.sagas.map((snap) => snap.id).sort()).toEqual(
-      [...byId.keys()].sort(),
-    );
+    expect(manifest.sagas.map((snap) => snap.id).sort()).toEqual([...byId.keys()].sort());
     const response = await worker.fetch(new Request("https://local.test/api/sagas", { headers: auth }), bindings);
     expect(response.status).toBe(200);
     const body = (await response.json()) as { sagas: { id: string; name: string; revision: string }[] };
     expect(body.sagas.map((saga) => saga.id).sort()).toEqual([...byId.keys()].sort());
-    expect(body.sagas.map((saga) => saga.name).sort()).toEqual(
-      SAGA_DEFINITIONS.map((def) => def.name).sort(),
-    );
+    expect(body.sagas.map((saga) => saga.name).sort()).toEqual(SAGA_DEFINITIONS.map((def) => def.name).sort());
   });
 });

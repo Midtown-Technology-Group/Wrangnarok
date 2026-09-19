@@ -11,6 +11,7 @@ import {
   executionId,
   helloParentSaga,
   helloSaga,
+  ninjaLookupSaga,
   ninjaSaga,
   onboardingSaga,
   parseSagaPolicy,
@@ -243,6 +244,7 @@ export async function visibleExecution(db: D1Database, id: string, caller: Princ
 /** One native Workflow binding per Saga. Never inferred from the request. */
 export function workflowForSaga(env: Bindings, sagaId: string): Workflow<{ executionId: string }> {
   if (sagaId === ninjaSaga.id) return env.NINJA_WORKFLOW;
+  if (sagaId === ninjaLookupSaga.id) return env.NINJA_LOOKUP_WORKFLOW;
   if (sagaId === digestSaga.id) return env.DIGEST_WORKFLOW;
   if (sagaId === smokeSaga.id) return env.SMOKE_WORKFLOW;
   if (sagaId === helloSaga.id) return env.HELLO_WORKFLOW;

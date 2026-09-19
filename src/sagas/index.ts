@@ -4,7 +4,8 @@
 // Each Saga is a static Git-owned definition: stable UUID identity, discovery
 // metadata, and a run(ctx, step) body whose every durable effect flows
 // through step.do(...). Per-saga definitions and thin Workflow adapters live
-// in ./echo, ./ninjaorgs, ./digest, ./smoke, ./hello, and ./hello-parent;
+// in ./echo, ./ninjaorgs, ./ninja-lookup, ./digest, ./smoke, ./hello,
+// ./hello-parent, ./cloudflare, and ./onboarding;
 // shared platform glue lives in ./shared; the definitions list lives in
 // ./definitions (which assembles the registered leaf list; shared.ts reads
 // the same leaf registry instead of this module, so no evaluation cycle
@@ -34,6 +35,7 @@ import { helloParentSagaDef, HelloParentWorkflow } from "./hello-parent";
 import { helloSagaDef, HelloWorkflow } from "./hello";
 import { echoSagaDef, EchoWorkflow } from "./echo";
 import { ninjaOrgsSagaDef, NinjaOrgsWorkflow } from "./ninjaorgs";
+import { ninjaLookupSagaDef, NinjaLookupWorkflow } from "./ninja-lookup";
 import { onboardingSagaDef, OnboardingWorkflow } from "./onboarding";
 import { smokeSagaDef, SmokeWorkflow } from "./smoke";
 
@@ -43,6 +45,7 @@ export { digestSagaDef, NinjaEchoDigestWorkflow };
 export { helloParentSagaDef, HelloParentWorkflow };
 export { helloSagaDef, HelloWorkflow };
 export { echoSagaDef, EchoWorkflow };
+export { ninjaLookupSagaDef, NinjaLookupWorkflow };
 export { ninjaOrgsSagaDef, NinjaOrgsWorkflow };
 export { onboardingSagaDef, OnboardingWorkflow };
 export { smokeSagaDef, SmokeWorkflow };

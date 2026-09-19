@@ -59,6 +59,60 @@ explicitly (never derived):
 - Manifest bridge (M1, #116): the pilot is hand-pinned, not converted.
 - Second pilot with a real Integration call (read-only NinjaOne workflow) once M1 lands.
 
+## Second pilot: NinjaOne organization lookup (issue #115)
+
+Re-authors the vendor-read half of workspace
+`features/ninjaone/workflows/sync_organizations.py` (private
+bifrost-workspace; unreachable from this lane, so the mapping is
+operator-declared, never derived) as `ninjaone-org-lookup`
+(`ninjaone-org-lookup-v1`).
+
+### Registered-ID mapping
+
+- Workspace source `features/ninjaone/workflows/sync_organizations.py`
+  (decorator metadata only, no stable UUID) → registered Saga UUID
+  `aeab823e-c162-437d-835f-b19a05f078b6` (`ninjaone-org-lookup`,
+  `ninjaone-org-lookup-v1`).
+- The UUID lives in `src/domain.ts` (`ninjaLookupSaga`), the Saga definition
+  in `src/sagas/ninja-lookup.ts` (`ninjaLookupSagaDef`), the catalog entry
+  via `src/sagas/definitions.ts` (`SAGA_DEFINITIONS`), and the churn
+  snapshot in `sagas.manifest.json`. `test/saga-contract.test.ts` fails
+  closed on any drift between the four.
+
+### Construct mapping
+
+| Workspace (`sync_organizations.py`, read half) | Wrangnarok (`src/sagas/ninja-lookup.ts`) |
+| --- | --- |
+| Typed signature (name filter) | `NinjaLookupInput` (`query`, 1–128 chars) + `parseNinjaLookupInput` (400 `INVALID_INPUT` on violation) + JSON `inputSchema`; submittable through a Form declaration via `bindFormInput` (field names bind to Saga inputs) |
+| Single vendor read (list organizations) | One `listOrganizations` call through `integrationOperation` (declared `requiredIntegrations: [NINJA_INTEGRATION_ID]`, 424 on missing Connection), existing Connection resolution untouched |
+| Local match over the census | Pure `matchNinjaOrgs` (`src/domain.ts`): case-insensitive substring, `matchCount` total, `matches` bounded to `NINJA_ORGS_MAX` for persistence |
+| Bifrost durable execution | Cloudflare Workflow (`NinjaLookupWorkflow`, `NINJA_LOOKUP_WORKFLOW` binding) + D1 `executions`/`operations` rows |
+| Logging | `prepare-input-v1` / `ninja-list-orgs-v1` / `ninja-match-orgs-v1` Operation history (no log scraping) |
+
+### Deliberate divergences
+
+- Mapping writes are not ported: the workspace sync writes organization
+  mappings downstream; this Saga is read-only by construction (one vendor
+  GET plus a pure local match). The write half stays an explicit follow-up.
+- Match is a substring filter, not an exact-key lookup: the census carries
+  no stable external key in v0, so the Saga returns every case-insensitive
+  substring match instead of guessing identity.
+
+### Acceptance proof (local API + history)
+
+- `test/ninja-lookup.test.ts` runs the pilot end to end on the real local
+  runtime: `bindFormInput` binds `{ query: "acme" }` (and 422s on `{}`);
+  `POST /api/executions` accepts the bound input with 202 plus a `Location`
+  receipt; the `NinjaLookupWorkflow` instance completes with exactly two
+  vendor calls (token plus the single list read); `GET
+  /api/executions/<id>` reports `Succeeded` with `{ query: "acme",
+  organizationCount: 3, matchCount: 2, matches: [...] }` and Operations
+  `prepare-input-v1` + `ninja-list-orgs-v1` + `ninja-match-orgs-v1` all
+  `Succeeded`.
+- Empty matches succeed (`matchCount: 0`); missing/empty/oversize queries
+  answer 400 `INVALID_INPUT`; no secret material persists (sentinel audit
+  over executions/operations/connections/usage rows).
+
 
 ## Second migration: Cloudflare Zone Inventory (issues #116, #119)
 

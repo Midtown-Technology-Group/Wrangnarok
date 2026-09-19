@@ -59,6 +59,7 @@ export interface Bindings
   OAUTH_REFRESH_FENCE?: DurableObjectNamespace;
   ECHO_WORKFLOW: Workflow<ExecutionParams>;
   NINJA_WORKFLOW: Workflow<ExecutionParams>;
+  NINJA_LOOKUP_WORKFLOW: Workflow<ExecutionParams>;
   DIGEST_WORKFLOW: Workflow<ExecutionParams>;
   SMOKE_WORKFLOW: Workflow<ExecutionParams>;
   HELLO_WORKFLOW: Workflow<ExecutionParams>;

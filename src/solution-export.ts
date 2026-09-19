@@ -46,6 +46,7 @@ import {
   hash,
   helloSaga,
   helloParentSaga,
+  ninjaLookupSaga,
   ninjaSaga,
   NINJA_INTEGRATION_ID,
   object,
@@ -150,6 +151,7 @@ const CODE_SAGAS: readonly CodeSagaPin[] = Object.freeze([
   { ...cloudflareVerifySaga, requiredIntegrations: Object.freeze([CLOUDFLARE_INTEGRATION_ID]) },
   { ...cloudflareInventorySaga, requiredIntegrations: Object.freeze([CLOUDFLARE_INTEGRATION_ID]) },
   { ...onboardingSaga, requiredIntegrations: Object.freeze([]) },
+  { ...ninjaLookupSaga, requiredIntegrations: Object.freeze([NINJA_INTEGRATION_ID]) },
 ]);
 
 /** Node-safe static catalogs: no Workflows runtime import, so plain-node

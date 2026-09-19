@@ -17,6 +17,7 @@ import "./hello";
 import "./hello-parent";
 import "./cloudflare";
 import "./onboarding";
+import "./ninja-lookup";
 
 /** Canonical registration order. Add new Sagas here (and side-effect-import
  * their module above); the catalog below validates them at Worker startup. */
@@ -30,6 +31,7 @@ const CANONICAL_ORDER: readonly string[] = [
   "cloudflare-verify-connection",
   "cloudflare-inventory-zones",
   "employee-onboarding",
+  "ninjaone-org-lookup",
 ];
 
 /** All Saga definitions, in canonical order, regardless of which module
