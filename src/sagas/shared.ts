@@ -17,7 +17,13 @@ import { bindSagaConfig } from "../config";
 import { clearExecutionSecrets, registerExecutionSecrets, scrubExecutionText, scrubExecutionValue } from "../secrets";
 import { echo } from "../integrations/echo";
 import { listOrganizations } from "../integrations/ninjaone";
-import { inventoryZones, verifyConnection } from "../integrations/cloudflare";
+import {
+  inventoryZones,
+  listAuditLogs,
+  listSecurityInsights,
+  readZoneSettings,
+  verifyConnection,
+} from "../integrations/cloudflare";
 import { loadExecutionPolicy, resolveConnection } from "../executions";
 import { resolveConnectionSecrets } from "../connections";
 import { ENVELOPE_KEY_VERSION } from "../envelope";
@@ -191,7 +197,7 @@ export async function executeSaga<TOutput>(
       integrations: {
         echo: { echo },
         ninjaone: { listOrganizations },
-        cloudflare: { verifyConnection, inventoryZones },
+        cloudflare: { verifyConnection, inventoryZones, listAuditLogs, listSecurityInsights, readZoneSettings },
       },
       db: env.DB,
       secrets: {

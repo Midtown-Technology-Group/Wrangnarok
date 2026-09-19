@@ -48,6 +48,14 @@ export { echoSagaDef, EchoWorkflow };
 export { ninjaLookupSagaDef, NinjaLookupWorkflow };
 export { ninjaOrgsSagaDef, NinjaOrgsWorkflow };
 export { onboardingSagaDef, OnboardingWorkflow };
+export {
+  cloudflareAuditSagaDef,
+  CloudflareAuditWorkflow,
+  cloudflareInsightsSagaDef,
+  CloudflareInsightsWorkflow,
+  cloudflarePostureSagaDef,
+  CloudflarePostureWorkflow,
+} from "./posture";
 export { smokeSagaDef, SmokeWorkflow };
 
 /** Static Git-owned Catalog (ADR 002): duplicate stable IDs or names throw at

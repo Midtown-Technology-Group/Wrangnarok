@@ -16,7 +16,10 @@ import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { resolveChildSaga } from "../src/children";
 import {
+  cloudflareAuditSaga,
+  cloudflareInsightsSaga,
   cloudflareInventorySaga,
+  cloudflarePostureSaga,
   cloudflareVerifySaga,
   digestSaga,
   echoSaga,
@@ -43,6 +46,9 @@ const CANONICAL_NAMES = [
   "hello-parent",
   "cloudflare-verify-connection",
   "cloudflare-inventory-zones",
+  "cloudflare-audit-logs",
+  "cloudflare-security-insights",
+  "cloudflare-posture-benchmark",
   "employee-onboarding",
   "ninjaone-org-lookup",
 ];
@@ -55,6 +61,9 @@ const STABLE = [
   helloParentSaga,
   cloudflareVerifySaga,
   cloudflareInventorySaga,
+  cloudflareAuditSaga,
+  cloudflareInsightsSaga,
+  cloudflarePostureSaga,
   onboardingSaga,
   ninjaLookupSaga,
 ];

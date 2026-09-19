@@ -51,6 +51,21 @@
       "id": "aeab823e-c162-437d-835f-b19a05f078b6",
       "name": "ninjaone-org-lookup",
       "revision": "ninjaone-org-lookup-v1"
+    },
+    {
+      "id": "5b0448bb-ab43-4ed1-8315-81b96ad7b57f",
+      "name": "cloudflare-audit-logs",
+      "revision": "cloudflare-audit-logs-v1"
+    },
+    {
+      "id": "ade72191-699d-4f95-aec5-f786fef6fc67",
+      "name": "cloudflare-security-insights",
+      "revision": "cloudflare-security-insights-v1"
+    },
+    {
+      "id": "92baddec-e920-4f42-bf8c-772fac55e427",
+      "name": "cloudflare-posture-benchmark",
+      "revision": "cloudflare-posture-benchmark-v1"
     }
   ]
 }

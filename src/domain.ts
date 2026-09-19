@@ -105,6 +105,28 @@ export const cloudflareInventorySaga = Object.freeze({
   revision: "cloudflare-inventory-zones-v1",
   description: "Zone Inventory migration: bounded read-only inventory of Cloudflare zones",
 });
+// Account posture slice (issue #252): three read-only Sagas on the existing
+// Cloudflare Integration. New Wrangnarok-native surface, no upstream
+// counterpart (Bifrost has no Cloudflare-account concept). Stable identity
+// per ADR 002 (UUID + revision); never change across source edits.
+export const cloudflareAuditSaga = Object.freeze({
+  id: "5b0448bb-ab43-4ed1-8315-81b96ad7b57f",
+  name: "cloudflare-audit-logs",
+  revision: "cloudflare-audit-logs-v1",
+  description: "Account posture: bounded read-only summary of Cloudflare Audit Logs v2 with filter classes",
+});
+export const cloudflareInsightsSaga = Object.freeze({
+  id: "ade72191-699d-4f95-aec5-f786fef6fc67",
+  name: "cloudflare-security-insights",
+  revision: "cloudflare-security-insights-v1",
+  description: "Account posture: advisory-first Security Insights list with unresolved-Critical tracking",
+});
+export const cloudflarePostureSaga = Object.freeze({
+  id: "92baddec-e920-4f42-bf8c-772fac55e427",
+  name: "cloudflare-posture-benchmark",
+  revision: "cloudflare-posture-benchmark-v1",
+  description: "Account posture: typed benchmark checks over already-called Cloudflare APIs plus manual controls",
+});
 export const CLOUDFLARE_INTEGRATION_ID = "6b0d2a48-1c3e-4d5a-7b9a-4c6e8d0f2a1b";
 // Capability-based Connection resolution (issue #262, ADR TBD): stable
 // Integration identities for the three proving-scenario identity stacks.
@@ -807,6 +829,837 @@ export interface CloudflareInventoryResult {
   readonly summary: CloudflareInventorySummary;
   readonly zones: readonly CloudflareZoneSummary[];
 }
+// Account posture slice (issue #252): read-only posture validation of the
+// Cloudflare account/zone configuration itself. New Wrangnarok-native
+// surface, no upstream counterpart. All vendor reads reuse the existing
+// Cloudflare Integration discipline (exact-base endpoint, Bearer token as a
+// transient secret handle, bounded JSON, shaped safe fields, scrubbed
+// errors); findings persist only as bounded shaped summaries on the standard
+// submit/ExecutionHistory path — no new D1 tables, no new primitive, no new
+// secrets path (single provider-global CLOUDFLARE_API_TOKEN per ADR 005).
+export const CLOUDFLARE_AUDIT_LOGS_SUFFIX = "/logs/audit";
+export const CLOUDFLARE_INSIGHTS_SUFFIX = "/security-center/insights";
+export const CLOUDFLARE_ZONE_SETTINGS_SUFFIX = "/settings";
+/** Per-run posture bounds (D1 retention posture: findings live only in
+ * ExecutionHistory, so every shaped summary stays small and truncated). */
+export const CLOUDFLARE_POSTURE_MAX_ENTRIES = 100;
+export const CLOUDFLARE_POSTURE_PAGE_SIZE = 50;
+export const CLOUDFLARE_POSTURE_MAX_PAGES = 2;
+/** Zone settings the benchmark may read (verified Free-available zone
+ * settings endpoints, 2026-09-19). Anything else rejects locally with
+ * INVALID_INPUT and is never sent to the vendor. */
+export const CLOUDFLARE_ZONE_SETTING_ALLOWLIST: readonly string[] = Object.freeze([
+  "ssl",
+  "min_tls_version",
+  "always_use_https",
+  "automatic_https_rewrites",
+  "security_header",
+]);
+/** Zone-settings fan-out bound for the benchmark (checked zones x settings
+ * stays small and the exact vendor call count is reported). */
+export const CLOUDFLARE_BENCHMARK_DEFAULT_CHECKED_ZONES = 10;
+export const CLOUDFLARE_BENCHMARK_MAX_CHECKED_ZONES = 25;
+/** Shaped-string bound: vendor prose never persists unbounded. */
+export const CLOUDFLARE_POSTURE_MAX_TEXT = 300;
+
+export type AuditEventClass = "token" | "membership" | "zone-config" | "other";
+export type AuditActorKind = "human" | "service" | "unknown";
+export type InsightSeverity = "critical" | "high" | "medium" | "low" | "info" | "unknown";
+export type PostureVerdict = "advisory" | "failing";
+export type PostureCheckStatus = "pass" | "fail" | "manual" | "deferred" | "unknown";
+
+export interface CloudflareAuditInput {
+  readonly account?: CloudflareAccountBinding;
+  /** RFC3339/UTC-date lower bound; defaults to the trailing 24h at execution. */
+  readonly since?: string;
+  readonly limit?: number;
+  readonly classes?: readonly AuditEventClass[];
+}
+export interface CloudflareAuditEntry {
+  readonly id: string;
+  readonly actionType: string;
+  readonly actionDescription: string | null;
+  readonly actionResult: string | null;
+  readonly occurredAt: string | null;
+  readonly actorKind: AuditActorKind;
+  readonly actorContext: string | null;
+  readonly actorEmail: string | null;
+  readonly actorTokenName: string | null;
+  readonly resourceType: string | null;
+  readonly resourceScope: string | null;
+  readonly zoneId: string | null;
+  readonly zoneName: string | null;
+  readonly eventClass: AuditEventClass;
+}
+export interface CloudflareAuditResult {
+  readonly status: "completed";
+  readonly readOnly: true;
+  readonly integration: "Cloudflare";
+  readonly account: CloudflareAccountRef;
+  readonly entryCount: number;
+  readonly totalAvailable: number | null;
+  readonly truncated: boolean;
+  readonly apiCalls: number;
+  readonly classCounts: Readonly<Record<string, number>>;
+  readonly actorKindCounts: Readonly<Record<string, number>>;
+  readonly entries: readonly CloudflareAuditEntry[];
+}
+export interface CloudflareInsightsInput {
+  readonly account?: CloudflareAccountBinding;
+  readonly limit?: number;
+  readonly includeDismissed?: boolean;
+  readonly baseline?: PostureBaseline;
+}
+export interface CloudflareInsightIssue {
+  readonly id: string;
+  readonly name: string | null;
+  readonly issueClass: string | null;
+  readonly issueType: string | null;
+  readonly severity: InsightSeverity;
+  readonly status: string | null;
+  readonly dismissed: boolean;
+  readonly zoneId: string | null;
+  readonly zoneName: string | null;
+}
+export interface CloudflareInsightsResult {
+  readonly status: "completed";
+  readonly readOnly: true;
+  readonly integration: "Cloudflare";
+  readonly account: CloudflareAccountRef;
+  readonly issueCount: number;
+  readonly totalAvailable: number | null;
+  readonly truncated: boolean;
+  readonly apiCalls: number;
+  readonly severityCounts: Readonly<Record<string, number>>;
+  readonly unresolvedCriticalIds: readonly string[];
+  /** Advisory-first: "failing" only when a recorded baseline exists AND a
+   * new (unacknowledged) unresolved Critical remains. */
+  readonly verdict: PostureVerdict;
+  readonly baselineRecordedAt: string | null;
+  readonly issues: readonly CloudflareInsightIssue[];
+}
+/** Recorded baseline + suppressions (canonical file:
+ * docs/posture/baseline.json; travels as Saga input so scheduled rows carry
+ * the reviewed baseline as input_json). Reviewers: steward + security PR
+ * review. Expired suppressions are ignored, never applied. */
+export interface PostureSuppression {
+  readonly checkId: string;
+  readonly reason: string;
+  readonly reviewer: string;
+  readonly expiresAt: string;
+}
+export interface PostureZoneExpectations {
+  readonly ssl: readonly string[];
+  readonly minTlsVersionMin: string;
+  readonly alwaysUseHttps: string;
+  readonly automaticHttpsRewrites: string;
+  readonly securityHeaderEnabled: boolean;
+}
+export interface PostureBaseline {
+  readonly recordedAt: string | null;
+  readonly acknowledgedCriticalIds: readonly string[];
+  readonly suppressions: readonly PostureSuppression[];
+  readonly zoneExpectations: PostureZoneExpectations;
+}
+export interface CloudflarePostureInput {
+  readonly account?: CloudflareAccountBinding;
+  readonly maxZones?: number;
+  readonly maxCheckedZones?: number;
+  readonly settings?: readonly string[];
+  readonly baseline?: PostureBaseline;
+}
+export interface PostureCheck {
+  readonly id: string;
+  readonly title: string;
+  readonly status: PostureCheckStatus;
+  readonly detail: string;
+  readonly suppressed: boolean;
+}
+export interface CloudflarePostureResult {
+  readonly status: "completed";
+  readonly readOnly: true;
+  readonly integration: "Cloudflare";
+  readonly account: CloudflareAccountRef;
+  readonly verdict: PostureVerdict;
+  readonly apiCalls: number;
+  readonly checks: readonly PostureCheck[];
+  readonly manual: readonly PostureCheck[];
+  readonly deferred: readonly PostureCheck[];
+}
+/** Stable benchmark check IDs (suppression keys; never rename). */
+export const POSTURE_CHECK_IDS: readonly string[] = Object.freeze([
+  "token-active",
+  "zone-hygiene",
+  "zone-setting-ssl",
+  "zone-setting-min_tls_version",
+  "zone-setting-always_use_https",
+  "zone-setting-automatic_https_rewrites",
+  "zone-setting-security_header",
+  "insights-no-unresolved-critical",
+  "audit-visibility",
+]);
+/** Honestly-manual controls (no read-only API reports them; never faked). */
+export const POSTURE_MANUAL_IDS: readonly string[] = Object.freeze([
+  "global-api-key-non-use",
+  "token-least-privilege",
+  "env-binding-separation",
+  "membership-staleness-review",
+  "dns-origin-exposure-review",
+]);
+export const POSTURE_DEFAULT_ZONE_EXPECTATIONS: PostureZoneExpectations = Object.freeze({
+  ssl: Object.freeze(["strict"]),
+  minTlsVersionMin: "1.2",
+  alwaysUseHttps: "on",
+  automaticHttpsRewrites: "on",
+  securityHeaderEnabled: true,
+});
+
+function postureFault(message: string): Fault {
+  return new Fault(400, "INVALID_INPUT", message);
+}
+const POSTURE_ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+export function postureBoundedText(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return value.length > CLOUDFLARE_POSTURE_MAX_TEXT ? value.slice(0, CLOUDFLARE_POSTURE_MAX_TEXT) : value;
+}
+function parsePostureLimit(raw: unknown, name: string): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1 || raw > CLOUDFLARE_POSTURE_MAX_ENTRIES) {
+    throw postureFault(`${name} must be an integer between 1 and ${CLOUDFLARE_POSTURE_MAX_ENTRIES}.`);
+  }
+  return raw;
+}
+function parsePostureSince(raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 64) {
+    throw postureFault("since must be a non-empty date string (RFC3339 or UTC date).");
+  }
+  return raw;
+}
+const AUDIT_EVENT_CLASSES: readonly AuditEventClass[] = Object.freeze(["token", "membership", "zone-config", "other"]);
+function parseAuditClasses(raw: unknown): readonly AuditEventClass[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > AUDIT_EVENT_CLASSES.length) {
+    throw postureFault("classes must be a non-empty list of token, membership, zone-config, other.");
+  }
+  const out: AuditEventClass[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string" || !(AUDIT_EVENT_CLASSES as readonly string[]).includes(entry)) {
+      throw postureFault("classes must be a non-empty list of token, membership, zone-config, other.");
+    }
+    if (!out.includes(entry as AuditEventClass)) out.push(entry as AuditEventClass);
+  }
+  return Object.freeze(out);
+}
+/** Pure classifier: map one audit entry onto the issue's filter classes from
+ * the vendor action/resource text (Audit Logs v2: action.{type,description},
+ * resource.{type,scope,product}). First match wins: token > membership >
+ * zone-config > other. Unknown shapes are "other", never dropped. */
+export function classifyAuditEvent(parts: {
+  readonly actionType?: unknown;
+  readonly actionDescription?: unknown;
+  readonly resourceType?: unknown;
+  readonly resourceScope?: unknown;
+  readonly resourceProduct?: unknown;
+}): AuditEventClass {
+  const haystack = [
+    parts.actionType,
+    parts.actionDescription,
+    parts.resourceType,
+    parts.resourceScope,
+    parts.resourceProduct,
+  ]
+    .filter((part): part is string => typeof part === "string")
+    .join(" ")
+    .toLowerCase();
+  if (
+    haystack.includes("token") ||
+    haystack.includes("api key") ||
+    haystack.includes("apikey") ||
+    haystack.includes("api_key") ||
+    haystack.includes("secret")
+  ) {
+    return "token";
+  }
+  if (
+    haystack.includes("member") ||
+    haystack.includes("invit") ||
+    haystack.includes("role") ||
+    haystack.includes("permission")
+  ) {
+    return "membership";
+  }
+  if (
+    haystack.includes("zone") ||
+    haystack.includes("dns") ||
+    haystack.includes("ssl") ||
+    haystack.includes("tls") ||
+    haystack.includes("firewall") ||
+    haystack.includes("waf") ||
+    haystack.includes("rule") ||
+    haystack.includes("setting") ||
+    haystack.includes("certificate")
+  ) {
+    return "zone-config";
+  }
+  return "other";
+}
+/** Pure attribution: deployment/service credentials must stay
+ * distinguishable from human actions (Audit Logs v2 actor.{type,email,
+ * token_id,token_name}). token_id/token_name presence decides first; the
+ * actor type string decides second; anything else is "unknown", never
+ * guessed human. */
+export function attributeAuditActor(actor: {
+  readonly type?: unknown;
+  readonly email?: unknown;
+  readonly tokenId?: unknown;
+  readonly tokenName?: unknown;
+  readonly context?: unknown;
+}): AuditActorKind {
+  if (
+    (typeof actor.tokenId === "string" && actor.tokenId.length > 0) ||
+    (typeof actor.tokenName === "string" && actor.tokenName.length > 0)
+  ) {
+    return "service";
+  }
+  // Audit Logs v2 `actor.context` is the authoritative credential signal
+  // (api_key | api_token | dash | oauth | origin_ca_key, plus bare `api`
+  // when the credential type was not recorded). It decides before the actor
+  // type: a user row with an api_token context is a service credential, and
+  // a bare-`api` row stays unknown even with an email attached.
+  const context = typeof actor.context === "string" ? actor.context.toLowerCase() : "";
+  if (context === "api_token" || context === "oauth" || context === "api_key" || context === "origin_ca_key") {
+    return "service";
+  }
+  if (context === "dash") return "human";
+  if (context === "api") return "unknown";
+  // Actor type enum (verified 2026-09-19): account = account API token,
+  // system = Cloudflare-side automation, cloudflare_admin = vendor staff,
+  // user = individual. Substring fallbacks cover future values; anything
+  // unrecognized stays unknown, never guessed human.
+  const type = typeof actor.type === "string" ? actor.type.toLowerCase() : "";
+  if (
+    type === "account" ||
+    type === "system" ||
+    type.includes("token") ||
+    type.includes("oauth") ||
+    type.includes("service") ||
+    type.includes("api_key") ||
+    type.includes("apikey")
+  ) {
+    return "service";
+  }
+  if (type === "user" || type.includes("user") || (typeof actor.email === "string" && actor.email.length > 0)) {
+    return "human";
+  }
+  return "unknown";
+}
+/** Pure severity normalizer: unrecognized vendor severities are "unknown"
+ * (advisory-only downstream), never coerced into a known bucket. */
+export function normalizeInsightSeverity(value: unknown): InsightSeverity {
+  // Vendor values (verified 2026-09-19) are Low | Moderate | Critical.
+  // Moderate maps to medium; high/info are accepted aliases for shapes that
+  // report them. Anything else is unknown (advisory-only downstream).
+  const normalized = typeof value === "string" ? value.toLowerCase() : "";
+  if (normalized === "critical") return "critical";
+  if (normalized === "high") return "high";
+  if (normalized === "moderate" || normalized === "medium") return "medium";
+  if (normalized === "low") return "low";
+  if (normalized === "info") return "info";
+  return "unknown";
+}
+/** Pure verdict: Critical promotes to CI-failing ONLY after a recorded
+ * baseline exists (else every new account fails day one). Without
+ * recordedAt, even unacknowledged Criticals stay advisory. */
+export function evaluateInsightsVerdict(
+  unresolvedCriticalIds: readonly string[],
+  baseline: PostureBaseline | undefined,
+): { readonly verdict: PostureVerdict; readonly newCriticalIds: readonly string[] } {
+  if (baseline?.recordedAt == null) {
+    return { verdict: "advisory", newCriticalIds: Object.freeze([...unresolvedCriticalIds]) };
+  }
+  const acknowledged = new Set(baseline.acknowledgedCriticalIds);
+  const fresh = unresolvedCriticalIds.filter((id) => !acknowledged.has(id));
+  return { verdict: fresh.length > 0 ? "failing" : "advisory", newCriticalIds: Object.freeze(fresh) };
+}
+/** Pure suppression check: active only when unexpired (ISO lexicographic
+ * compare); unknown check IDs and expired rows never suppress. */
+export function suppressionActive(
+  suppressions: readonly PostureSuppression[],
+  checkId: string,
+  nowIso: string,
+): PostureSuppression | null {
+  for (const suppression of suppressions) {
+    if (suppression.checkId === checkId && suppression.expiresAt > nowIso) return suppression;
+  }
+  return null;
+}
+function parseIsoString(raw: unknown, field: string): string {
+  // Strict UTC instants only: suppression expiry compares lexicographically
+  // against `new Date().toISOString()`, so offset timestamps would compare
+  // incorrectly and flip checks wrongly. A suppression flips a failing check
+  // to pass, so the format must be exact.
+  if (typeof raw !== "string" || !POSTURE_ISO_UTC.test(raw) || Number.isNaN(Date.parse(raw))) {
+    throw postureFault(`${field} must be an ISO-8601 UTC timestamp ending in "Z".`);
+  }
+  return raw;
+}
+function parseNonEmptyString(raw: unknown, field: string, bound: number): string {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > bound) {
+    throw postureFault(`${field} must be a non-empty string up to ${bound} characters.`);
+  }
+  return raw;
+}
+function parseStringList(raw: unknown, field: string, bound: number, itemBound: number): readonly string[] {
+  if (!Array.isArray(raw)) throw postureFault(`${field} must be a list of strings.`);
+  if (raw.length > bound) throw postureFault(`${field} must hold at most ${bound} entries.`);
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > itemBound) {
+      throw postureFault(`${field} must hold non-empty strings up to ${itemBound} characters each.`);
+    }
+    if (!out.includes(entry)) out.push(entry);
+  }
+  return Object.freeze(out);
+}
+/** Pure parser for the recorded baseline (docs/posture/baseline.json shape,
+ * also accepted inline as Saga input). Suppression check IDs must name a
+ * known automated ("zone-setting-*" has one entry per allowlisted setting)
+ * or manual check; typos fail closed instead of silently doing nothing. */
+export function parsePostureBaseline(value: unknown): PostureBaseline {
+  if (!object(value))
+    throw postureFault(
+      "baseline must be an object with recordedAt, acknowledgedCriticalIds, suppressions, zoneExpectations.",
+    );
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    // The checked-in file carries a `version`/`note` envelope for reviewers;
+    // it travels verbatim as Saga input, so the envelope is ignored here.
+    // Anything else unknown still fails closed.
+    if (
+      !["recordedAt", "acknowledgedCriticalIds", "suppressions", "zoneExpectations", "version", "note"].includes(key)
+    ) {
+      throw postureFault(`Unknown baseline field "${key}".`);
+    }
+  }
+  const recordedAtRaw = record.recordedAt ?? null;
+  const recordedAt = recordedAtRaw === null ? null : parseIsoString(recordedAtRaw, "baseline.recordedAt");
+  const acknowledgedCriticalIds = parseStringList(
+    record.acknowledgedCriticalIds ?? [],
+    "baseline.acknowledgedCriticalIds",
+    200,
+    128,
+  );
+  const suppressionsRaw = record.suppressions ?? [];
+  if (!Array.isArray(suppressionsRaw) || suppressionsRaw.length > 100) {
+    throw postureFault("baseline.suppressions must hold at most 100 entries.");
+  }
+  const knownIds = new Set<string>([...POSTURE_CHECK_IDS, ...POSTURE_MANUAL_IDS]);
+  const suppressions: PostureSuppression[] = [];
+  for (const entry of suppressionsRaw) {
+    if (!object(entry)) throw postureFault("baseline.suppressions entries must be objects.");
+    const row = entry as Record<string, unknown>;
+    for (const key of Object.keys(row)) {
+      if (!["checkId", "reason", "reviewer", "expiresAt"].includes(key)) {
+        throw postureFault(`Unknown suppression field "${key}".`);
+      }
+    }
+    const checkId = parseNonEmptyString(row.checkId, "suppression.checkId", 64);
+    if (!knownIds.has(checkId)) throw postureFault(`Unknown suppression checkId "${checkId}".`);
+    suppressions.push(
+      Object.freeze({
+        checkId,
+        reason: parseNonEmptyString(row.reason, "suppression.reason", 300),
+        reviewer: parseNonEmptyString(row.reviewer, "suppression.reviewer", 128),
+        expiresAt: parseIsoString(row.expiresAt, "suppression.expiresAt"),
+      }),
+    );
+  }
+  const expectationsRaw = record.zoneExpectations ?? {};
+  if (!object(expectationsRaw)) throw postureFault("baseline.zoneExpectations must be an object.");
+  const expectationsRecord = expectationsRaw as Record<string, unknown>;
+  for (const key of Object.keys(expectationsRecord)) {
+    if (
+      !["ssl", "minTlsVersionMin", "alwaysUseHttps", "automaticHttpsRewrites", "securityHeaderEnabled"].includes(key)
+    ) {
+      throw postureFault(`Unknown zoneExpectations field "${key}".`);
+    }
+  }
+  const defaults = POSTURE_DEFAULT_ZONE_EXPECTATIONS;
+  const sslRaw = expectationsRecord.ssl;
+  if (sslRaw !== undefined && (!Array.isArray(sslRaw) || sslRaw.length === 0)) {
+    throw postureFault("zoneExpectations.ssl must be a non-empty list when present.");
+  }
+  const ssl = sslRaw === undefined ? defaults.ssl : parseStringList(sslRaw, "zoneExpectations.ssl", 8, 32);
+  const zoneExpectations: PostureZoneExpectations = Object.freeze({
+    ssl,
+    minTlsVersionMin:
+      expectationsRecord.minTlsVersionMin === undefined
+        ? defaults.minTlsVersionMin
+        : parseNonEmptyString(expectationsRecord.minTlsVersionMin, "zoneExpectations.minTlsVersionMin", 16),
+    alwaysUseHttps:
+      expectationsRecord.alwaysUseHttps === undefined
+        ? defaults.alwaysUseHttps
+        : parseNonEmptyString(expectationsRecord.alwaysUseHttps, "zoneExpectations.alwaysUseHttps", 16),
+    automaticHttpsRewrites:
+      expectationsRecord.automaticHttpsRewrites === undefined
+        ? defaults.automaticHttpsRewrites
+        : parseNonEmptyString(expectationsRecord.automaticHttpsRewrites, "zoneExpectations.automaticHttpsRewrites", 16),
+    securityHeaderEnabled:
+      expectationsRecord.securityHeaderEnabled === undefined
+        ? defaults.securityHeaderEnabled
+        : (() => {
+            if (typeof expectationsRecord.securityHeaderEnabled !== "boolean") {
+              throw postureFault("zoneExpectations.securityHeaderEnabled must be a boolean.");
+            }
+            return expectationsRecord.securityHeaderEnabled;
+          })(),
+  });
+  return { recordedAt, acknowledgedCriticalIds, suppressions: Object.freeze(suppressions), zoneExpectations };
+}
+export interface PostureSettingEvidence {
+  readonly setting: string;
+  readonly zoneId: string;
+  readonly ok: boolean;
+  readonly valueJson: string | null;
+  readonly valueText: string | null;
+}
+/** Numeric TLS-version floor compare ("1.2" <= "1.3", "1.10" handled
+ * numerically, not lexicographically). Unparseable values return false. */
+export function tlsVersionAtLeast(value: string, minimum: string): boolean {
+  const parts = (text: string): number[] | null => {
+    const segments = text.trim().toLowerCase().replace(/^v/, "").split(".");
+    if (segments.length === 0) return null;
+    const numbers: number[] = [];
+    for (const segment of segments) {
+      if (!/^\d+$/.test(segment)) return null;
+      numbers.push(Number(segment));
+    }
+    return numbers;
+  };
+  const actual = parts(value);
+  const floor = parts(minimum);
+  if (actual === null || floor === null) return false;
+  const width = Math.max(actual.length, floor.length);
+  for (let index = 0; index < width; index += 1) {
+    const left = actual[index] ?? 0;
+    const right = floor[index] ?? 0;
+    if (left !== right) return left > right;
+  }
+  return true;
+}
+function settingCompliant(
+  setting: string,
+  evidence: PostureSettingEvidence,
+  expectations: PostureZoneExpectations,
+): boolean | null {
+  // True/false per zone; null when the value cannot be compared.
+  if (!evidence.ok) return null;
+  if (setting === "ssl" || setting === "always_use_https" || setting === "automatic_https_rewrites") {
+    if (evidence.valueText === null) return false;
+    if (setting === "ssl") return expectations.ssl.includes(evidence.valueText);
+    if (setting === "always_use_https") return evidence.valueText === expectations.alwaysUseHttps;
+    return evidence.valueText === expectations.automaticHttpsRewrites;
+  }
+  if (setting === "min_tls_version") {
+    if (evidence.valueText === null) return false;
+    return tlsVersionAtLeast(evidence.valueText, expectations.minTlsVersionMin);
+  }
+  if (setting === "security_header") {
+    const raw = evidence.valueJson;
+    if (raw === null) return false;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+    if (!object(parsed)) return false;
+    const enabled = (parsed as Record<string, unknown>).enabled;
+    if (typeof enabled !== "boolean") {
+      // Some accounts surface HSTS as max_age presence; without an enabled
+      // flag the value is uncomparable, not compliant.
+      return null;
+    }
+    return enabled === expectations.securityHeaderEnabled;
+  }
+  return null;
+}
+const POSTURE_CHECK_TITLES: Readonly<Record<string, string>> = Object.freeze({
+  "token-active": "API token is active",
+  "zone-hygiene": "No zones left in development mode",
+  "zone-setting-ssl": "Zone SSL mode matches baseline",
+  "zone-setting-min_tls_version": "Zone minimum TLS version matches baseline",
+  "zone-setting-always_use_https": "Zone Always Use HTTPS matches baseline",
+  "zone-setting-automatic_https_rewrites": "Zone Automatic HTTPS Rewrites matches baseline",
+  "zone-setting-security_header": "Zone HSTS header matches baseline",
+  "insights-no-unresolved-critical": "Security Insights has no unresolved Critical findings",
+  "audit-visibility": "Audit-log visibility exists for security-sensitive changes",
+});
+const POSTURE_MANUAL_TITLES: Readonly<Record<string, string>> = Object.freeze({
+  "global-api-key-non-use": "Global API Key is not used by automation (procedural)",
+  "token-least-privilege": "tokens are least privilege and scoped (dashboard review)",
+  "env-binding-separation": "Test/dev/prod do not share sensitive bindings",
+  "membership-staleness-review": "Account membership and service credentials reviewed",
+  "dns-origin-exposure-review": "DNS records reviewed for origin exposure",
+});
+/** Pure benchmark evaluation: typed checks over already-called APIs plus
+ * honestly-manual and deferred items. Automated checks fail closed on
+ * concrete misconfiguration; manual/deferred items never fail. An active
+ * (unexpired) suppression flips a failing check to pass and is recorded on
+ * the check; expired rows are ignored. */
+export function evaluatePostureChecks(args: {
+  readonly verifyStatus: "healthy" | "unhealthy";
+  readonly zoneCount: number;
+  readonly pausedZones: number;
+  readonly developmentModeActive: number;
+  readonly checkedZoneIds: readonly string[];
+  readonly settingEvidence: readonly PostureSettingEvidence[];
+  readonly checkedSettings: readonly string[];
+  readonly baseline: PostureBaseline | undefined;
+  readonly nowIso: string;
+}): { readonly verdict: PostureVerdict; readonly checks: readonly PostureCheck[] } {
+  const suppressions = args.baseline?.suppressions ?? [];
+  const expectations = args.baseline?.zoneExpectations ?? POSTURE_DEFAULT_ZONE_EXPECTATIONS;
+  const applySuppression = (id: string, status: PostureCheckStatus, detail: string): PostureCheck => {
+    if (status !== "fail") return { id, title: POSTURE_CHECK_TITLES[id] ?? id, status, detail, suppressed: false };
+    const suppression = suppressionActive(suppressions, id, args.nowIso);
+    if (suppression === null) return { id, title: POSTURE_CHECK_TITLES[id] ?? id, status, detail, suppressed: false };
+    return {
+      id,
+      title: POSTURE_CHECK_TITLES[id] ?? id,
+      status: "pass",
+      detail: `${detail} Suppressed by ${suppression.reviewer}: ${suppression.reason} (expires ${suppression.expiresAt}).`,
+      suppressed: true,
+    };
+  };
+  const checks: PostureCheck[] = [];
+  checks.push(
+    applySuppression(
+      "token-active",
+      args.verifyStatus === "healthy" ? "pass" : "fail",
+      args.verifyStatus === "healthy"
+        ? "Token verification reports healthy."
+        : "Token verification reports unhealthy; automation calls will fail.",
+    ),
+  );
+  checks.push(
+    applySuppression(
+      "zone-hygiene",
+      args.developmentModeActive > 0 ? "fail" : "pass",
+      `${args.zoneCount} zone(s) inventoried, ${args.pausedZones} paused, ${args.developmentModeActive} in development mode.`,
+    ),
+  );
+  for (const setting of args.checkedSettings) {
+    const id = `zone-setting-${setting}`;
+    const evidence = args.settingEvidence.filter((row) => row.setting === setting);
+    const readable = evidence.filter((row) => row.ok);
+    if (args.checkedZoneIds.length === 0) {
+      checks.push({
+        id,
+        title: POSTURE_CHECK_TITLES[id] ?? id,
+        status: "unknown",
+        detail: "No zones inventoried; nothing to compare.",
+        suppressed: false,
+      });
+      continue;
+    }
+    if (readable.length === 0) {
+      checks.push({
+        id,
+        title: POSTURE_CHECK_TITLES[id] ?? id,
+        status: "unknown",
+        detail: `${evidence.length} read(s) attempted, none readable (see error codes in Execution input history).`,
+        suppressed: false,
+      });
+      continue;
+    }
+    const bad: string[] = [];
+    // Every attempted read counts: an errored zone (!ok) is unreadable
+    // evidence and fails the check — missing evidence never passes. Only a
+    // fully-unreadable setting (no ok reads at all) degrades to unknown.
+    for (const row of evidence) {
+      const compliant = settingCompliant(setting, row, expectations);
+      if (compliant !== true) bad.push(compliant === null ? `${row.zoneId} (unreadable)` : row.zoneId);
+    }
+    if (bad.length === 0) {
+      checks.push({
+        id,
+        title: POSTURE_CHECK_TITLES[id] ?? id,
+        status: "pass",
+        detail: `${readable.length} zone(s) match baseline.`,
+        suppressed: false,
+      });
+    } else {
+      checks.push(
+        applySuppression(
+          id,
+          "fail",
+          `${bad.length} zone(s) drift from baseline: ${bad.slice(0, 10).join(", ")}${bad.length > 10 ? ", …" : ""}.`,
+        ),
+      );
+    }
+  }
+  const deferred = (id: string, detail: string): PostureCheck => ({
+    id,
+    title: POSTURE_CHECK_TITLES[id] ?? id,
+    status: "deferred",
+    detail,
+    suppressed: false,
+  });
+  checks.push(
+    deferred(
+      "insights-no-unresolved-critical",
+      `Covered by the ${cloudflareInsightsSaga.name} Saga (${cloudflareInsightsSaga.id}); this benchmark does not re-call Insights.`,
+    ),
+  );
+  checks.push(
+    deferred(
+      "audit-visibility",
+      `Covered by the ${cloudflareAuditSaga.name} Saga (${cloudflareAuditSaga.id}); this benchmark does not re-read audit logs.`,
+    ),
+  );
+  const verdict: PostureVerdict = checks.some((check) => check.status === "fail") ? "failing" : "advisory";
+  return { verdict, checks: Object.freeze(checks) };
+}
+/** Pure manual-control list: procedural items no read-only API reports.
+ * An active suppression records the accepted exception on the item. */
+export function postureManualControls(baseline: PostureBaseline | undefined, nowIso: string): readonly PostureCheck[] {
+  const suppressions = baseline?.suppressions ?? [];
+  return Object.freeze(
+    POSTURE_MANUAL_IDS.map((id): PostureCheck => {
+      const suppression = suppressionActive(suppressions, id, nowIso);
+      if (suppression === null) {
+        return {
+          id,
+          title: POSTURE_MANUAL_TITLES[id] ?? id,
+          status: "manual",
+          detail: "Manual review required; see docs/posture.md.",
+          suppressed: false,
+        };
+      }
+      return {
+        id,
+        title: POSTURE_MANUAL_TITLES[id] ?? id,
+        status: "manual",
+        detail: `Accepted exception by ${suppression.reviewer}: ${suppression.reason} (expires ${suppression.expiresAt}).`,
+        suppressed: true,
+      };
+    }),
+  );
+}
+export function parseCloudflareAuditInput(value: unknown): CloudflareAuditInput {
+  if (!object(value))
+    throw postureFault("The cloudflare-audit-logs Saga takes an object with optional account, since, limit, classes.");
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!["account", "since", "limit", "classes"].includes(key)) {
+      throw postureFault(
+        "The cloudflare-audit-logs Saga takes an object with optional account, since, limit, classes.",
+      );
+    }
+  }
+  const account = parseCloudflareAccountBinding(record.account);
+  const since = parsePostureSince(record.since);
+  const limit = parsePostureLimit(record.limit, "limit");
+  const classes = parseAuditClasses(record.classes);
+  const out: Record<string, unknown> = {};
+  if (account !== undefined) out.account = account;
+  if (since !== undefined) out.since = since;
+  if (limit !== undefined) out.limit = limit;
+  if (classes !== undefined) out.classes = classes;
+  return out as CloudflareAuditInput;
+}
+export function parseCloudflareInsightsInput(value: unknown): CloudflareInsightsInput {
+  if (!object(value))
+    throw postureFault(
+      "The cloudflare-security-insights Saga takes an object with optional account, limit, includeDismissed, baseline.",
+    );
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!["account", "limit", "includeDismissed", "baseline"].includes(key)) {
+      throw postureFault(
+        "The cloudflare-security-insights Saga takes an object with optional account, limit, includeDismissed, baseline.",
+      );
+    }
+  }
+  const account = parseCloudflareAccountBinding(record.account);
+  const limit = parsePostureLimit(record.limit, "limit");
+  let includeDismissed: boolean | undefined;
+  if (record.includeDismissed !== undefined) {
+    if (typeof record.includeDismissed !== "boolean") {
+      throw postureFault("includeDismissed must be a boolean.");
+    }
+    includeDismissed = record.includeDismissed;
+  }
+  const out: Record<string, unknown> = {};
+  if (account !== undefined) out.account = account;
+  if (limit !== undefined) out.limit = limit;
+  if (includeDismissed !== undefined) out.includeDismissed = includeDismissed;
+  if (record.baseline !== undefined) out.baseline = parsePostureBaseline(record.baseline);
+  return out as CloudflareInsightsInput;
+}
+export function parseCloudflarePostureInput(value: unknown): CloudflarePostureInput {
+  if (!object(value))
+    throw postureFault(
+      "The cloudflare-posture-benchmark Saga takes an object with optional account, maxZones, maxCheckedZones, settings, baseline.",
+    );
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!["account", "maxZones", "max_zones", "maxCheckedZones", "settings", "baseline"].includes(key)) {
+      throw postureFault(
+        "The cloudflare-posture-benchmark Saga takes an object with optional account, maxZones, maxCheckedZones, settings, baseline.",
+      );
+    }
+  }
+  const account = parseCloudflareAccountBinding(record.account);
+  const maxZonesRaw = record.maxZones ?? record.max_zones;
+  let maxZones: number | undefined;
+  if (maxZonesRaw !== undefined) {
+    if (
+      typeof maxZonesRaw !== "number" ||
+      !Number.isInteger(maxZonesRaw) ||
+      maxZonesRaw < 1 ||
+      maxZonesRaw > CLOUDFLARE_MAX_ZONES
+    ) {
+      throw postureFault(`maxZones must be an integer between 1 and ${CLOUDFLARE_MAX_ZONES}.`);
+    }
+    maxZones = maxZonesRaw;
+  }
+  let maxCheckedZones: number | undefined;
+  if (record.maxCheckedZones !== undefined) {
+    if (
+      typeof record.maxCheckedZones !== "number" ||
+      !Number.isInteger(record.maxCheckedZones) ||
+      record.maxCheckedZones < 1 ||
+      record.maxCheckedZones > CLOUDFLARE_BENCHMARK_MAX_CHECKED_ZONES
+    ) {
+      throw postureFault(`maxCheckedZones must be an integer between 1 and ${CLOUDFLARE_BENCHMARK_MAX_CHECKED_ZONES}.`);
+    }
+    maxCheckedZones = record.maxCheckedZones;
+  }
+  let settings: readonly string[] | undefined;
+  if (record.settings !== undefined) {
+    if (!Array.isArray(record.settings) || record.settings.length === 0) {
+      throw postureFault("settings must be a non-empty list of allowlisted zone setting names.");
+    }
+    const out: string[] = [];
+    for (const entry of record.settings) {
+      if (typeof entry !== "string" || !(CLOUDFLARE_ZONE_SETTING_ALLOWLIST as readonly string[]).includes(entry)) {
+        throw postureFault(`Unknown zone setting "${String(entry)}".`);
+      }
+      if (!out.includes(entry)) out.push(entry);
+    }
+    settings = Object.freeze(out);
+  }
+  const out: Record<string, unknown> = {};
+  if (account !== undefined) out.account = account;
+  if (maxZones !== undefined) out.maxZones = maxZones;
+  if (maxCheckedZones !== undefined) out.maxCheckedZones = maxCheckedZones;
+  if (settings !== undefined) out.settings = settings;
+  if (record.baseline !== undefined) out.baseline = parsePostureBaseline(record.baseline);
+  return out as CloudflarePostureInput;
+}
 // Digest census names shown in the echoed summary. The persisted echo output
 // stays under the echo input bound (1024 UTF-8 bytes) via truncation below,
 // so the digest never inherits an unbounded vendor list.
@@ -839,6 +1692,9 @@ const catalog: SagaDef[] = [
   { ...helloParentSaga, parse: parseHelloParentInput },
   { ...cloudflareVerifySaga, parse: parseCloudflareVerifyInput },
   { ...cloudflareInventorySaga, parse: parseCloudflareInventoryInput },
+  { ...cloudflareAuditSaga, parse: parseCloudflareAuditInput },
+  { ...cloudflareInsightsSaga, parse: parseCloudflareInsightsInput },
+  { ...cloudflarePostureSaga, parse: parseCloudflarePostureInput },
   { ...onboardingSaga, parse: parseOnboardingInput },
   { ...ninjaLookupSaga, parse: parseNinjaLookupInput },
 ];

@@ -16,6 +16,7 @@ import "./smoke";
 import "./hello";
 import "./hello-parent";
 import "./cloudflare";
+import "./posture";
 import "./onboarding";
 import "./ninja-lookup";
 
@@ -30,6 +31,9 @@ const CANONICAL_ORDER: readonly string[] = [
   "hello-parent",
   "cloudflare-verify-connection",
   "cloudflare-inventory-zones",
+  "cloudflare-audit-logs",
+  "cloudflare-security-insights",
+  "cloudflare-posture-benchmark",
   "employee-onboarding",
   "ninjaone-org-lookup",
 ];

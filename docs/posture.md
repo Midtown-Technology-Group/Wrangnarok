@@ -1,0 +1,151 @@
+# Cloudflare account posture (issue #252)
+
+Wrangnarok can be secure at the code level while being deployed into an
+unsafe Cloudflare account or zone configuration. This slice answers:
+**"Is the Cloudflare account/zone hosting Wrangnarok configured securely
+and according to our intended baseline?"**
+
+Divergence line: this is a **new Wrangnarok-native surface, no upstream
+counterpart** — Bifrost is self-hosted Python with no Cloudflare-account
+concept, so no upstream invariant applies.
+
+Scope: Worker + Workflows + D1 only. No new primitive, no new D1 tables,
+no new secrets path. S4 (Terraform drift) is a deliberate **no-build**:
+the repo has no `.tf` files and no IaC-authoritative resource set, so there
+is nothing to plan against. Reopen S4 only when Cloudflare resources become
+Terraform-managed.
+
+## Acceptance mapping (issue #252 criteria)
+
+| Criterion | Status |
+| --- | --- |
+| Read-only posture check runs against the account/zone | Met — S1/S2/S3 submit on-demand or scheduled |
+| Security Insights findings included | Met — S2 |
+| At least one Audit Logs-based check/report | Met — S1 |
+| Custom benchmark evaluates Wrangnarok-specific controls | Met — S3 (typed checks, not Steampipe) |
+| Terraform drift reported for IaC-authoritative resources | Deferred, not applicable yet — no IaC-authoritative set exists, so there is nothing to drift-check. Reopen trigger: first `.tf` managing a Cloudflare resource. |
+| Distinguishes insecurity from drift | Met in kind — S3 reports configuration insecurity vs the baseline; drift-vs-intended stays a documented concept until S4 has an IaC set to compare against (see Scope above). |
+| Credentials, cadence, severity, suppression documented | Met — this file |
+
+## Sagas
+
+All three are read-only Actions on the existing `cloudflare` Integration
+(same `getJson` discipline as `verifyConnection`/`inventoryZones`: exact-base
+endpoint, Bearer token as a transient secret handle, bounded JSON, shaped
+safe fields, scrubbed errors) plus Sagas that persist shaped summaries via
+the standard submit/ExecutionHistory path.
+
+| Saga | Name | Purpose |
+| --- | --- | --- |
+| S1 | `cloudflare-audit-logs` | Bounded Audit Logs v2 summary with filter classes (`token`, `membership`, `zone-config`, `other`) and actor-vs-service attribution. Scheduled + on-demand; scheduled rows omit `since` and read the trailing 24h at execution. |
+| S2 | `cloudflare-security-insights` | Insights list + severity counts + unresolved-Critical tracking. Advisory-first: Critical promotes to CI-failing ONLY after a recorded baseline exists. |
+| S3 | `cloudflare-posture-benchmark` | Typed checks over already-called APIs (token-verify, zone inventory, zone settings vs the baseline file) plus honestly-manual and deferred items. NOT Steampipe: Steampipe/Powerpipe is a new external binary outside the local-Cloudflare-tooling direction. |
+
+Vendor shapes (verified against the Cloudflare API reference 2026-09-19):
+
+- Audit Logs v2: `GET /accounts/{id}/logs/audit` with `since`/`before` plus
+  filters, paginated newest-first with cursor+`limit` (`direction=desc`,
+  opaque `result_info.cursor`; no `page`/`per_page` on this endpoint).
+  Entry shape `id`, `account{id,name}`,
+  `action{description,result,time,type}`,
+  `actor{id,context,email,ip_address,token_id,token_name,type}`,
+  `raw{cf_ray_id,method,status_code,uri,user_agent}`,
+  `resource{id,product,request,response,scope,type}`, `zone{id,name}`.
+  `actor.context` is the authoritative credential signal (`api_key` |
+  `api_token` | `dash` | `oauth` | `origin_ca_key`, plus bare `api` when
+  the credential type was not recorded); `actor.type` is `account` |
+  `cloudflare_admin` | `system` | `user` (`account` means an account API
+  token). Available on all plan types including API access
+  (Free-compatible). Token needs Account Settings Read (audit list
+  requires Account Settings Read or Write).
+- Security Insights: `GET /accounts/{id}/security-center/insights` with
+  `dismissed`, `issue_class`, `issue_type`, `severity` filters and
+  page-based pagination; the envelope is
+  `result{count,issues[],page,per_page}` with issues carrying
+  `id/dismissed/issue_class/issue_type/severity(Low|Moderate|Critical)/
+  status(active|resolved)/subject/since/timestamp/payload{zone_tag}/
+  resolve_text`. Moderate maps to `medium`; `resolved` findings are
+  remediated and never count as unresolved. No plan-gating statement was
+  found in the API reference at build time, so unknown classes/severities
+  are shaped generically into advisory-only `unknown` — paid-gated classes
+  stay out of scope until a live-account verification run rather than
+  failing closed on them.
+- Zone settings: `GET /zones/{id}/settings/{setting}` for the allowlisted
+  Free-available settings `ssl`, `min_tls_version`, `always_use_https`,
+  `automatic_https_rewrites`, `security_header`. Anything else rejects
+  locally and is never sent to the vendor. An HTTP 401 fails the run
+  (failed authentication, never plan-gating); other per-setting vendor
+  rejections degrade to evidence with their error code.
+
+## Credentials (one shared token, one ADR 005 discipline)
+
+The posture slice reuses the single provider-global `CLOUDFLARE_API_TOKEN`
+deployment secret (stdin-provisioned, never in D1/logs/source). Operators
+MAY provision a least-privilege read-only-scoped token value with zero code
+change — every posture Action is a GET. A per-Organization posture token
+would be the ADR 005 tripwire firing condition and is NOT added silently.
+
+Suggested least-privilege scopes for a dedicated posture value: Account
+Settings Read (audit logs), Zone Read + SSL/TLS read equivalents (zone
+settings), Security Center read. Confirm the exact Security Center
+permission name on the first live run; the doctena-style per-endpoint
+permission mapping is the technique to copy.
+
+## Cadence
+
+- On-demand: submit any of the three Sagas (see `docs/demo.md` conventions
+  for the executions API) with the reviewed baseline as input where
+  applicable.
+- Scheduled: create a recurring Schedule row (TRG-01/ADR 012, no new
+  primitive) binding the Saga UUID with the baseline as `input_json`.
+- Recurring CI: `.github/workflows/posture.yml` runs weekly and validates
+  the checked-in baseline plus the posture unit tests — credential-free.
+  Live vendor runs stay operator-triggered (no production token in CI).
+
+## Severity handling
+
+- S2 verdict is `advisory` until `baseline.recordedAt` is set; then
+  `failing` iff an unacknowledged unresolved Critical remains.
+- S3 verdict is `failing` iff an unsuppressed automated check fails
+  (unhealthy token, development mode left on, zone-settings drift).
+  `manual` and `deferred` entries never fail.
+- Unknown vendor shapes (severities, insight classes) degrade to
+  `unknown`/advisory, never to failure. Zone-settings reads are stricter:
+  a zone whose read errored counts as unreadable evidence and fails that
+  setting check (missing evidence never passes); only a fully-unreadable
+  setting degrades to `unknown`.
+
+## Baseline and suppressions
+
+Canonical file: `docs/posture/baseline.json` (validated by
+`scripts/validate-posture-baseline.mjs`, also run as `npm run
+posture:baseline`). It travels as Saga input, so scheduled rows carry the
+reviewed baseline as `input_json`.
+
+- `recordedAt: null` (the starting state) means "no baseline recorded":
+  everything stays advisory.
+- `acknowledgedCriticalIds` names known unresolved Critical insight IDs.
+- `suppressions` name a check ID plus `reason`, `reviewer`, and `expiresAt`.
+  Unknown check IDs fail closed at submit; expired rows are ignored, never
+  applied.
+- `zoneExpectations` pins the TLS baseline (defaults: `ssl: ["strict"]`,
+  `min_tls_version >= 1.2`, `always_use_https: on`,
+  `automatic_https_rewrites: on`, HSTS enabled).
+
+Reviewers: the steward plus security PR review (the repo has no CODEOWNERS
+file; baseline changes land as reviewed PRs like code).
+
+## Honestly-manual controls (never faked)
+
+Global API Key non-use is procedural — no API reports it. Likewise token
+least-privilege scoping, env binding separation, membership staleness, and
+DNS origin-exposure review are `manual` entries with dashboard pointers.
+The benchmark reports them; it never invents a passing signal.
+
+## Retention
+
+Findings persist only as bounded shaped summaries on ExecutionHistory
+(max 100 audit entries, 100 insights, 25 checked zones x 5 settings per
+run; vendor prose truncated; `truncated` flags set) under the existing
+Execution lifecycle. No posture D1 tables exist, so no new retention story
+was added — the 10 GB D1 bound is unaffected.

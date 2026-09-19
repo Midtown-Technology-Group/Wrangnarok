@@ -23,8 +23,15 @@ import { checkpointRetryLimit, stepRetryLimit, UUID, vendorRetryLimit } from "./
 import type { EchoInput, NinjaOrgsResult, SagaRuntimePolicy } from "./domain";
 import type { EchoConnection } from "./integrations/echo";
 import type { NinjaConnection, NinjaSecrets } from "./integrations/ninjaone";
-import type { CloudflareConnection, CloudflareSecrets } from "./integrations/cloudflare";
-import type { CloudflareInventoryInput, CloudflareInventoryResult, CloudflareVerifyResult } from "./domain";
+import type { CloudflareConnection, CloudflareSecrets, CloudflareZoneSettingsResult } from "./integrations/cloudflare";
+import type {
+  AuditEventClass,
+  CloudflareAuditResult,
+  CloudflareInsightsResult,
+  CloudflareInventoryInput,
+  CloudflareInventoryResult,
+  CloudflareVerifyResult,
+} from "./domain";
 import type { SagaChildren } from "./children";
 
 /** Durable Operation API surfaced to Saga authors. Deliberately smaller than
@@ -66,6 +73,30 @@ export interface CloudflareIntegrationHandle {
     executionId?: string,
     timeoutMs?: number,
   ): Promise<CloudflareInventoryResult>;
+  listAuditLogs(
+    connection: CloudflareConnection,
+    secrets: CloudflareSecrets,
+    account: { readonly id: unknown; readonly name: unknown },
+    input: { readonly since?: string; readonly limit?: number; readonly classes?: readonly AuditEventClass[] },
+    executionId?: string,
+    timeoutMs?: number,
+  ): Promise<CloudflareAuditResult>;
+  listSecurityInsights(
+    connection: CloudflareConnection,
+    secrets: CloudflareSecrets,
+    account: { readonly id: unknown; readonly name: unknown },
+    input: { readonly limit?: number; readonly includeDismissed?: boolean },
+    executionId?: string,
+    timeoutMs?: number,
+  ): Promise<CloudflareInsightsResult>;
+  readZoneSettings(
+    connection: CloudflareConnection,
+    secrets: CloudflareSecrets,
+    account: { readonly id: unknown; readonly name: unknown },
+    input: { readonly zoneIds: readonly string[]; readonly settings: readonly string[] },
+    executionId?: string,
+    timeoutMs?: number,
+  ): Promise<CloudflareZoneSettingsResult>;
 }
 export interface SagaIntegrations {
   readonly echo: EchoIntegrationHandle;

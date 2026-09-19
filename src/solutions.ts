@@ -36,7 +36,10 @@
 // definitions are built from; test/solutions-install.test.ts asserts they
 // stay in agreement with the static code Catalog.
 import {
+  cloudflareAuditSaga,
+  cloudflareInsightsSaga,
   cloudflareInventorySaga,
+  cloudflarePostureSaga,
   cloudflareVerifySaga,
   digestSaga,
   echoSaga,
@@ -71,6 +74,9 @@ const CODE_SAGAS: readonly CatalogSaga[] = [
   helloParentSaga,
   cloudflareVerifySaga,
   cloudflareInventorySaga,
+  cloudflareAuditSaga,
+  cloudflareInsightsSaga,
+  cloudflarePostureSaga,
   onboardingSaga,
   ninjaLookupSaga,
 ];

@@ -3,7 +3,10 @@ import { NonRetryableError } from "cloudflare:workflows";
 import {
   DEFAULT_SAGA_POLICY,
   EXECUTION_ID,
+  cloudflareAuditSaga,
+  cloudflareInsightsSaga,
   cloudflareInventorySaga,
+  cloudflarePostureSaga,
   cloudflareVerifySaga,
   digestSaga,
   encodeHistoryCursor,
@@ -251,6 +254,9 @@ export function workflowForSaga(env: Bindings, sagaId: string): Workflow<{ execu
   if (sagaId === helloParentSaga.id) return env.HELLO_PARENT_WORKFLOW;
   if (sagaId === cloudflareVerifySaga.id) return env.CLOUDFLARE_VERIFY_WORKFLOW;
   if (sagaId === cloudflareInventorySaga.id) return env.CLOUDFLARE_INVENTORY_WORKFLOW;
+  if (sagaId === cloudflareAuditSaga.id) return env.CLOUDFLARE_AUDIT_WORKFLOW;
+  if (sagaId === cloudflareInsightsSaga.id) return env.CLOUDFLARE_INSIGHTS_WORKFLOW;
+  if (sagaId === cloudflarePostureSaga.id) return env.CLOUDFLARE_POSTURE_WORKFLOW;
   if (sagaId === onboardingSaga.id) return env.ONBOARDING_WORKFLOW;
   return env.ECHO_WORKFLOW;
 }
