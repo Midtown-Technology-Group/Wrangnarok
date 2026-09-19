@@ -13,6 +13,19 @@ export const ninjaSaga = Object.freeze({
   description: "Rung 1: list NinjaOne organizations read-only over client-credentials OAuth",
 });
 export const NINJA_INTEGRATION_ID = "0606e237-137b-4629-8346-85468e1c2df6";
+// Second migration pilot (issue #115): read-only NinjaOne organization
+// lookup by name, re-authored from workspace
+// `features/ninjaone/workflows/sync_organizations.py` (private
+// bifrost-workspace; unreachable from this lane, mapping operator-declared).
+// Only the vendor-read half is ported: list the census, match locally, and
+// persist the bounded match. Mapping writes stay a follow-up, not this Saga.
+// Stable identity per ADR 002 (UUID + revision).
+export const ninjaLookupSaga = Object.freeze({
+  id: "aeab823e-c162-437d-835f-b19a05f078b6",
+  name: "ninjaone-org-lookup",
+  revision: "ninjaone-org-lookup-v1",
+  description: "Pilot: find NinjaOne organizations by name over a read-only census",
+});
 // TOOL-01 HaloPSA Code Mode provider (issue #170, ADR 022): stable identity
 // for the OpenAPI proof Integration. Never changes across source edits.
 export const HALO_INTEGRATION_ID = "a1b2c3d4-0000-4111-8111-000000000001";
@@ -382,6 +395,30 @@ export interface NinjaOrgsResult {
   organizationCount: number;
   organizations: NinjaOrgSummary[];
 }
+export interface NinjaLookupInput {
+  query: string;
+}
+export interface NinjaLookupResult {
+  query: string;
+  organizationCount: number;
+  matchCount: number;
+  matches: NinjaOrgSummary[];
+}
+/** Pure transform: case-insensitive substring match over a read-only census.
+ * matchCount totals the matches within the given census; matches are bounded
+ * for persistence like the census itself. The lookup inherits the census
+ * bound (first NINJA_ORGS_MAX): organizations beyond it are out of lookup
+ * scope until paginated reads exist. */
+export function matchNinjaOrgs(
+  organizations: readonly NinjaOrgSummary[],
+  query: string,
+): { matchCount: number; matches: NinjaOrgSummary[] } {
+  const needle = query.toLowerCase();
+  const all = organizations
+    .filter((org) => org.name.toLowerCase().includes(needle))
+    .map((org) => ({ id: org.id, name: org.name }));
+  return { matchCount: all.length, matches: all.slice(0, NINJA_ORGS_MAX) };
+}
 export const NINJA_ORGS_MAX = 25;
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- input-less Saga: no parameters by design
 export interface DigestInput {
@@ -483,6 +520,27 @@ export function parseNinjaOrgsInput(value: unknown): NinjaOrgsInput {
     throw new Fault(400, "INVALID_INPUT", "The ninjaone-orgs Saga takes an empty input object.");
   }
   return {};
+}
+/** Lookup query bound (issue #115): one name fragment, non-empty and short
+ * enough to persist verbatim in the result row. Rejects with INVALID_INPUT;
+ * never truncates caller input. */
+export const NINJA_LOOKUP_QUERY_MAX_CHARS = 128;
+export const NINJA_LOOKUP_QUERY_MAX_BYTES = 256;
+export function parseNinjaLookupInput(value: unknown): NinjaLookupInput {
+  const message = "The ninjaone-org-lookup Saga takes one query of 1 to 128 characters.";
+  if (!object(value) || Object.keys(value).some((key) => key !== "query")) {
+    throw new Fault(400, "INVALID_INPUT", message);
+  }
+  const query = (value as Record<string, unknown>).query;
+  if (
+    typeof query !== "string" ||
+    query.length === 0 ||
+    query.length > NINJA_LOOKUP_QUERY_MAX_CHARS ||
+    new TextEncoder().encode(query).length > NINJA_LOOKUP_QUERY_MAX_BYTES
+  ) {
+    throw new Fault(400, "INVALID_INPUT", message);
+  }
+  return { query };
 }
 export function parseSmokeInput(value: unknown): SmokeInput {
   if (!object(value) || Object.keys(value).length !== 0) {
@@ -782,6 +840,7 @@ const catalog: SagaDef[] = [
   { ...cloudflareVerifySaga, parse: parseCloudflareVerifyInput },
   { ...cloudflareInventorySaga, parse: parseCloudflareInventoryInput },
   { ...onboardingSaga, parse: parseOnboardingInput },
+  { ...ninjaLookupSaga, parse: parseNinjaLookupInput },
 ];
 export function parseSubmission(value: unknown): { saga: SagaDef; input: unknown } {
   if (

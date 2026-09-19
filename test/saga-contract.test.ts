@@ -29,6 +29,7 @@ import {
   helloSaga,
   echoSaga,
   NINJA_INTEGRATION_ID,
+  ninjaLookupSaga,
   ninjaSaga,
   onboardingSaga,
   parseCloudflareInventoryInput,
@@ -37,6 +38,7 @@ import {
   parseHelloInput,
   parseHelloParentInput,
   parseInput,
+  parseNinjaLookupInput,
   parseNinjaOrgsInput,
   parseOnboardingInput,
   parseSmokeInput,
@@ -120,7 +122,7 @@ function helperParameterNames(fn: (...args: never[]) => unknown): string[] {
 
 describe("Saga authoring contract (issue #57)", () => {
   it("keeps all I/O and nondeterminism inside step.do() for every registered Saga", () => {
-    expect(SAGA_DEFINITIONS).toHaveLength(9);
+    expect(SAGA_DEFINITIONS).toHaveLength(10);
     for (const def of SAGA_DEFINITIONS) {
       expect(() => assertDeterministicRun(def.name, def.run)).not.toThrow();
     }
@@ -202,6 +204,10 @@ describe("Saga authoring contract (issue #57)", () => {
       "ninjaone-orgs": {
         input: {},
         output: { organizationCount: 1, organizations: [{ id: 7, name: "Acme" }] },
+      },
+      "ninjaone-org-lookup": {
+        input: { query: "Acme" },
+        output: { query: "Acme", organizationCount: 2, matchCount: 1, matches: [{ id: 7, name: "Acme" }] },
       },
       "ninjaone-echo-digest": {
         input: {},
@@ -326,6 +332,7 @@ describe("Saga authoring contract (issue #57)", () => {
     const byName = new Map(SAGA_DEFINITIONS.map((def) => [def.name, def]));
     expect(byName.get("echo")?.requiredIntegrations).toEqual([ECHO_INTEGRATION_ID]);
     expect(byName.get("ninjaone-orgs")?.requiredIntegrations).toEqual([NINJA_INTEGRATION_ID]);
+    expect(byName.get("ninjaone-org-lookup")?.requiredIntegrations).toEqual([NINJA_INTEGRATION_ID]);
     expect(byName.get("ninjaone-echo-digest")?.requiredIntegrations).toEqual([
       NINJA_INTEGRATION_ID,
       ECHO_INTEGRATION_ID,
@@ -387,12 +394,14 @@ describe("Saga authoring contract (issue #57)", () => {
       "hello",
       "hello-parent",
       "ninjaone-echo-digest",
+      "ninjaone-org-lookup",
       "ninjaone-orgs",
       "system.smoke",
     ]);
     const expected = [
       { stable: echoSaga, parse: parseInput },
       { stable: ninjaSaga, parse: parseNinjaOrgsInput },
+      { stable: ninjaLookupSaga, parse: parseNinjaLookupInput },
       { stable: digestSaga, parse: parseDigestInput },
       { stable: smokeSaga, parse: parseSmokeInput },
       { stable: helloSaga, parse: parseHelloInput },

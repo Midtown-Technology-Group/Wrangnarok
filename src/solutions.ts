@@ -44,6 +44,7 @@ import {
   hash,
   helloParentSaga,
   helloSaga,
+  ninjaLookupSaga,
   ninjaSaga,
   object,
   onboardingSaga,
@@ -71,6 +72,7 @@ const CODE_SAGAS: readonly CatalogSaga[] = [
   cloudflareVerifySaga,
   cloudflareInventorySaga,
   onboardingSaga,
+  ninjaLookupSaga,
 ];
 
 export interface ManifestSagaPin {

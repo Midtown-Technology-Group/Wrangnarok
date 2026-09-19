@@ -12,6 +12,7 @@ import { defineSaga, schemaOf } from "../saga";
 import { integrationOperation, prepareInput } from "../saga-helpers";
 import { assertRunExecutionId, completeExecution, failSagaExecution } from "../executions";
 import { makeSagaWorkflow } from "./shared";
+import { registerSagaDef } from "./registry";
 
 /** Stable ninjaone-orgs Saga: read-only census of NinjaOne organizations. */
 export const ninjaOrgsSagaDef = defineSaga<NinjaOrgsResult>({
@@ -72,4 +73,5 @@ export const ninjaOrgsSagaDef = defineSaga<NinjaOrgsResult>({
   },
 });
 
+registerSagaDef(ninjaOrgsSagaDef);
 export class NinjaOrgsWorkflow extends makeSagaWorkflow(ninjaOrgsSagaDef) {}

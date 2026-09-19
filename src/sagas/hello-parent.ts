@@ -19,6 +19,7 @@ import {
 } from "../executions";
 import { prepareInput } from "../saga-helpers";
 import { makeSagaWorkflow } from "./shared";
+import { registerSagaDef } from "./registry";
 
 /** Map a dispatch/await failure to a persistable SafeError. Faults keep
  * their actionable code/message; anything else keeps the generic marker so
@@ -118,4 +119,5 @@ export const helloParentSagaDef = defineSaga<HelloParentResult>({
   },
 });
 
+registerSagaDef(helloParentSagaDef);
 export class HelloParentWorkflow extends makeSagaWorkflow(helloParentSagaDef) {}

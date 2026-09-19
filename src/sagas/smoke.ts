@@ -20,6 +20,7 @@ import {
 import { prepareInput } from "../saga-helpers";
 import { buildUsage, logUsage, persistUsage } from "../usage";
 import { makeSagaWorkflow } from "./shared";
+import { registerSagaDef } from "./registry";
 
 /** Stable system.smoke Saga: loopback-free platform smoke. D1 checkpoint steps only may use retries up to
  * the operator ceiling 2; expected failures throw NonRetryableError. */
@@ -146,4 +147,5 @@ export const smokeSagaDef = defineSaga<SmokeResult>({
   },
 });
 
+registerSagaDef(smokeSagaDef);
 export class SmokeWorkflow extends makeSagaWorkflow(smokeSagaDef) {}

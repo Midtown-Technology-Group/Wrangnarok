@@ -34,6 +34,7 @@ import {
   prepareExecution,
 } from "../executions";
 import { executeSaga } from "./shared";
+import { registerSagaDef } from "./registry";
 
 const accountSchema = Object.freeze({
   type: "object" as const,
@@ -164,6 +165,7 @@ export const cloudflareVerifySagaDef = defineSaga<CloudflareVerifyResult>({
   },
 });
 
+registerSagaDef(cloudflareVerifySagaDef);
 /** Stable inventory Saga: bounded read-only zone census, paginated vendor GETs. */
 export const cloudflareInventorySagaDef = defineSaga<CloudflareInventoryResult>({
   id: cloudflareInventorySaga.id,
@@ -224,6 +226,7 @@ export const cloudflareInventorySagaDef = defineSaga<CloudflareInventoryResult>(
   },
 });
 
+registerSagaDef(cloudflareInventorySagaDef);
 export class CloudflareVerifyWorkflow extends WorkflowEntrypoint<Bindings, ExecutionParams> {
   async run(event: WorkflowEvent<ExecutionParams>, step: WorkflowStep): Promise<CloudflareVerifyResult> {
     return executeSaga(this.env, event, step, cloudflareVerifySagaDef);

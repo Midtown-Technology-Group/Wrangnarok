@@ -19,6 +19,7 @@ import {
 } from "../executions";
 import { prepareInput } from "../saga-helpers";
 import { makeSagaWorkflow } from "./shared";
+import { registerSagaDef } from "./registry";
 
 /** Stable hello Saga: prepare input plus a pure greeting transform. */
 export const helloSagaDef = defineSaga<HelloResult>({
@@ -84,4 +85,5 @@ export const helloSagaDef = defineSaga<HelloResult>({
   },
 });
 
+registerSagaDef(helloSagaDef);
 export class HelloWorkflow extends makeSagaWorkflow(helloSagaDef) {}

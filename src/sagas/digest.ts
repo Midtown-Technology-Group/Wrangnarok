@@ -21,6 +21,7 @@ import { defineSaga, schemaOf } from "../saga";
 import { integrationOperation, prepareInput } from "../saga-helpers";
 import { assertRunExecutionId, completeExecution, failSagaExecution } from "../executions";
 import { makeSagaWorkflow } from "./shared";
+import { registerSagaDef } from "./registry";
 
 /** Stable ninjaone-echo-digest Saga (Phase 2): read-only NinjaOne census
  * shaped into a bounded digest and echoed through the echo Integration. Both
@@ -104,4 +105,5 @@ export const digestSagaDef = defineSaga<DigestResult>({
   },
 });
 
+registerSagaDef(digestSagaDef);
 export class NinjaEchoDigestWorkflow extends makeSagaWorkflow(digestSagaDef) {}

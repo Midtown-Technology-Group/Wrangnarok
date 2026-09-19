@@ -360,9 +360,10 @@ describe("Saga helper conventions (issue #415 Slice A)", () => {
   });
 
   it("pins no per-call required list at integrationOperation call sites", () => {
-    // Anchor: echo 1, ninjaone-orgs 1, digest 2, cloudflare-verify 1,
-    // cloudflare-inventory 1 — every Integration leg goes through
-    // integrationOperation with one Action convention (Slice B, #415).
+    // Anchor: echo 1, ninjaone-orgs 1, ninjaone-org-lookup 1, digest 2,
+    // cloudflare-verify 1, cloudflare-inventory 1 — every Integration leg
+    // goes through integrationOperation with one Action convention
+    // (Slice B, #415).
     let legCount = 0;
     for (const def of SAGA_DEFINITIONS) {
       const source = Function.prototype.toString.call(def.run);
@@ -375,7 +376,7 @@ describe("Saga helper conventions (issue #415 Slice A)", () => {
         }
       }
     }
-    expect(legCount).toBe(6);
+    expect(legCount).toBe(7);
     // Positive control: the canonical-def exemplar passes the checker.
     const exemplar = "integrationOperation(ctx, echoSagaDef, prepared, { op, position: 1 })";
     for (const args of callArgumentLists(exemplar, "integrationOperation")) {
