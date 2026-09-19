@@ -105,7 +105,12 @@ function checkTree(dir, ledgerText) {
 function ownershipMatches(baseReserved, headLanded) {
   const haystack = `${headLanded.owner} ${headLanded.content}`;
   const issueTokens = baseReserved.issue.match(/#\d+/g) ?? [];
-  if (issueTokens.length > 0) return issueTokens.some((t) => haystack.includes(t));
+  // Compare exact issue tokens, not substrings: "#90" must not match a
+  // Landed row citing "#902" (issue #528 mismatched-owner rejection).
+  if (issueTokens.length > 0) {
+    const landedTokens = new Set(haystack.match(/#\d+/g) ?? []);
+    return issueTokens.some((t) => landedTokens.has(t));
+  }
   const lane = baseReserved.lane.trim();
   return lane.length > 0 && haystack.toLowerCase().includes(lane.toLowerCase());
 }
@@ -246,6 +251,14 @@ if (process.argv.includes("--selftest")) {
   check(
     "owner mismatch fails",
     checkProvenance(["migrations/0044_sprockets.sql"], baseLedger, thiefHead).some((e) => e.includes("owner mismatch")),
+  );
+  const prefixBase = ledger(landed, [...reserved, ["0044", "WID-01", "#90", "sprocket table"]]);
+  const prefixHead = ledger([...landed, ["0044", "0044_sprockets.sql", "WID-01", "sprockets (issue #902)"]], reserved);
+  check(
+    "issue-prefix mismatch fails (#90 reservation vs #902 landing)",
+    checkProvenance(["migrations/0044_sprockets.sql"], prefixBase, prefixHead).some((e) =>
+      e.includes("owner mismatch"),
+    ),
   );
   const noMoveHead = ledger(landed, [...reserved, ["0044", "WID-01", "#902", "sprocket table"]]);
   check(
