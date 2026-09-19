@@ -92,3 +92,30 @@ Explicit limits carried from the issue acceptance:
   above); beyond that Cloudflare bills per seat, so large external-user
   populations are a cost decision, not a code change. No paid tier is
   purchased or required by this slice.
+
+## Phase 3 authorization requirements (issue #257, Ottabase review)
+
+The Phase 3 membership work that replaces the `ACCESS_ALLOWED_EMAILS`
+allowlist (Decision above) must carry these invariants, adopted from the
+Ottabase architecture review (`thinkdj/ottabase` at `79d31e09`,
+reviewed 2026-09-16; issue #257):
+
+- **Scope-checked grants, never role names.** Control-plane power derives
+  from system-scoped grants only (a `platform:admin`-style system-scoped
+  grant vs an org-scoped `org:admin`): a tenant-created role *named*
+  `owner`/`admin` must never confer control-plane power, and a stale
+  org-scoped wildcard must not bypass tenancy.
+- **Double membership validation.** The organization claim on a request
+  is untrusted input: the context builder validates it against the
+  D1-authoritative active-membership list (non-member org nulled, empty
+  membership list fails closed), and the query layer re-enforces the
+  same check independently. Both layers default-deny.
+- **Test contract: forbid mocking the context builder in
+  tenant-isolation tests.** Isolation tests must exercise the real
+  context + query-scoping path with allowed/denied non-owner callers
+  through public APIs (cf. `test/org-lifecycle.test.ts`, which runs the
+  multi-org allowed/denied matrix through `call(...)`). Stubbing the
+  org-context builder assumes the seam under test. Stubbing the D1 seam
+  below the real authorization path (cf. `test/config-unit.test.ts`,
+  which stubs the DB while passing `caller.orgId` through the real
+  function) remains acceptable.
