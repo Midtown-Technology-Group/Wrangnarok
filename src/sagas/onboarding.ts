@@ -25,6 +25,7 @@ import { defineSaga } from "../saga";
 import { capabilityOperation, optionalIntegrationOperation, prepareInput } from "../saga-helpers";
 import { assertRunExecutionId, completeExecution, failSagaExecution } from "../executions";
 import { makeSagaWorkflow } from "./shared";
+import { registerSagaDef } from "./registry";
 /** Stable employee-onboarding Saga: capability-routed identity, groups, and
  * mailbox provisioning with an Entra-only licensing escape hatch. */
 export const onboardingSagaDef = defineSaga<OnboardingResult>({
@@ -213,4 +214,5 @@ export const onboardingSagaDef = defineSaga<OnboardingResult>({
     }
   },
 });
+registerSagaDef(onboardingSagaDef);
 export class OnboardingWorkflow extends makeSagaWorkflow(onboardingSagaDef) {}

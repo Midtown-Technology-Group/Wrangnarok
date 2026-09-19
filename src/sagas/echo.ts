@@ -12,6 +12,7 @@ import { defineSaga, schemaOf } from "../saga";
 import { integrationOperation, prepareInput } from "../saga-helpers";
 import { assertRunExecutionId, completeExecution, failSagaExecution } from "../executions";
 import { makeSagaWorkflow } from "./shared";
+import { registerSagaDef } from "./registry";
 
 /** Stable echo Saga: prepare input and call the local HTTP echo Integration. */
 export const echoSagaDef = defineSaga<EchoInput>({
@@ -71,4 +72,5 @@ export const echoSagaDef = defineSaga<EchoInput>({
   },
 });
 
+registerSagaDef(echoSagaDef);
 export class EchoWorkflow extends makeSagaWorkflow(echoSagaDef) {}

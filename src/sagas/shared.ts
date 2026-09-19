@@ -12,7 +12,7 @@ import { assertJsonSerializable, bindSagaStep } from "../saga";
 import type { SagaDefinition, SagaEventContext } from "../saga";
 import { bindSagaChildren } from "../children";
 import type { ChildCatalog } from "../children";
-import { SAGA_DEFINITIONS } from "./definitions";
+import { registeredSagaDefs } from "./registry";
 import { bindSagaConfig } from "../config";
 import { clearExecutionSecrets, registerExecutionSecrets, scrubExecutionText, scrubExecutionValue } from "../secrets";
 import { echo } from "../integrations/echo";
@@ -116,7 +116,11 @@ export async function executeSaga<TOutput>(
   const orgSecrets = await resolveExecutionOrgSecrets(env.DB, id, def, env.SECRETS_KEK);
   try {
     const sagaStep = bindSagaStep(step);
-    const catalog: ChildCatalog = { sagas: SAGA_DEFINITIONS };
+    // Post-initialization snapshot from the leaf registry (./registry), not
+    // the assembled list: this module must never value-import a module that
+    // transitively imports its importers (issue #57). By Execution time
+    // every leaf has evaluated, so the snapshot carries the full catalog.
+    const catalog: ChildCatalog = { sagas: registeredSagaDefs() };
     // The child handle resolves the parent OrgCtx lazily from the immutable
     // parent D1 row (never from caller input) on first invoke/await, so
     // constructing the context never touches D1: prepareExecution inside

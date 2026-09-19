@@ -6,8 +6,10 @@
 // through step.do(...). Per-saga definitions and thin Workflow adapters live
 // in ./echo, ./ninjaorgs, ./digest, ./smoke, ./hello, and ./hello-parent;
 // shared platform glue lives in ./shared; the definitions list lives in
-// ./definitions (imported by shared.ts without a module cycle). This module
-// only builds the Catalog and re-exports the Workflow entrypoints.
+// ./definitions (which assembles the registered leaf list; shared.ts reads
+// the same leaf registry instead of this module, so no evaluation cycle
+// remains). This module only builds the Catalog and re-exports the Workflow
+// entrypoints.
 //
 // Retry gate (ADR 001, upstream finding 14): every step.do retry limit is
 // resolved by the adapter through stepRetryLimit — vendor steps 0, idempotent
