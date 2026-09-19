@@ -1,0 +1,5 @@
+# Lane scope for lane/528-migration-guard (issue #528): exact-token owner
+# matching hardening in the migration-number guard plus its selftest.
+# Scripts only: no DDL, no renumbering, no ledger content changes.
+scripts/check-migration-numbers.mjs
+scopes/528-migration-guard.scope
