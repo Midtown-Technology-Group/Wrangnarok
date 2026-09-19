@@ -44,24 +44,38 @@ the standard submit/ExecutionHistory path.
 Vendor shapes (verified against the Cloudflare API reference 2026-09-19):
 
 - Audit Logs v2: `GET /accounts/{id}/logs/audit` with `since`/`before` plus
-  filters; entry shape `id`, `account{id,name}`,
+  filters, paginated newest-first with cursor+`limit` (`direction=desc`,
+  opaque `result_info.cursor`; no `page`/`per_page` on this endpoint).
+  Entry shape `id`, `account{id,name}`,
   `action{description,result,time,type}`,
-  `actor{id,email,ip_address,token_id,token_name,type,context}`,
+  `actor{id,context,email,ip_address,token_id,token_name,type}`,
   `raw{cf_ray_id,method,status_code,uri,user_agent}`,
   `resource{id,product,request,response,scope,type}`, `zone{id,name}`.
-  Available on all plan types including API access (Free-compatible).
-  Token needs Account Settings Read (audit list requires Account Settings
-  Read or Write).
+  `actor.context` is the authoritative credential signal (`api_key` |
+  `api_token` | `dash` | `oauth` | `origin_ca_key`, plus bare `api` when
+  the credential type was not recorded); `actor.type` is `account` |
+  `cloudflare_admin` | `system` | `user` (`account` means an account API
+  token). Available on all plan types including API access
+  (Free-compatible). Token needs Account Settings Read (audit list
+  requires Account Settings Read or Write).
 - Security Insights: `GET /accounts/{id}/security-center/insights` with
-  `dismissed`, `issue_class`, `issue_type` filters and pagination. No
-  plan-gating statement was found in the API reference at build time, so
-  unknown insight classes are shaped generically and unknown severities land
-  in `unknown` (advisory-only) — paid-gated classes stay out of scope until
-  a live-account verification run rather than failing closed on them.
+  `dismissed`, `issue_class`, `issue_type`, `severity` filters and
+  page-based pagination; the envelope is
+  `result{count,issues[],page,per_page}` with issues carrying
+  `id/dismissed/issue_class/issue_type/severity(Low|Moderate|Critical)/
+  status(active|resolved)/subject/since/timestamp/payload{zone_tag}/
+  resolve_text`. Moderate maps to `medium`; `resolved` findings are
+  remediated and never count as unresolved. No plan-gating statement was
+  found in the API reference at build time, so unknown classes/severities
+  are shaped generically into advisory-only `unknown` — paid-gated classes
+  stay out of scope until a live-account verification run rather than
+  failing closed on them.
 - Zone settings: `GET /zones/{id}/settings/{setting}` for the allowlisted
   Free-available settings `ssl`, `min_tls_version`, `always_use_https`,
   `automatic_https_rewrites`, `security_header`. Anything else rejects
-  locally and is never sent to the vendor.
+  locally and is never sent to the vendor. An HTTP 401 fails the run
+  (failed authentication, never plan-gating); other per-setting vendor
+  rejections degrade to evidence with their error code.
 
 ## Credentials (one shared token, one ADR 005 discipline)
 

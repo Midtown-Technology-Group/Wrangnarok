@@ -417,6 +417,7 @@ function shapeAuditEntry(raw: unknown): CloudflareAuditEntry | null {
     email: actor.email,
     tokenId: actor.token_id,
     tokenName: actor.token_name,
+    context: actor.context,
   });
   const resource = object(record.resource) ? (record.resource as Record<string, unknown>) : {};
   const resourceType = typeof resource.type === "string" ? resource.type : null;
@@ -436,6 +437,7 @@ function shapeAuditEntry(raw: unknown): CloudflareAuditEntry | null {
     actionResult,
     occurredAt,
     actorKind,
+    actorContext: typeof actor.context === "string" ? actor.context : null,
     actorEmail: typeof actor.email === "string" ? actor.email : null,
     actorTokenName: typeof actor.token_name === "string" ? actor.token_name : null,
     resourceType,
@@ -472,41 +474,41 @@ export async function listAuditLogs(
   let totalAvailable: number | null = null;
   let apiCalls = 0;
   let cursor: string | null = null;
-  let page = 1;
+  let pendingCursor: string | null = null;
   const started = Date.now();
+  // Audit Logs v2 paginates newest-first with cursor+limit (verified
+  // 2026-09-19: `limit` 1-1000 default 100, `direction` desc/asc, opaque
+  // `result_info.cursor`). Pagination stops on an empty vendor page or a
+  // missing cursor — never on a filtered page with no matching classes.
   for (let fetched = 0; fetched < CLOUDFLARE_POSTURE_MAX_PAGES && entries.length < limit; fetched += 1) {
     const params: Record<string, string | number> = {
       since,
-      per_page: Math.min(limit - entries.length, CLOUDFLARE_POSTURE_PAGE_SIZE),
+      direction: "desc",
+      limit: Math.min(limit - entries.length, CLOUDFLARE_POSTURE_PAGE_SIZE),
     };
     if (cursor !== null) params.cursor = cursor;
-    else params.page = page;
     const payload = await getJson(connection.endpoint, token, path, params, deadline, registered, started);
     apiCalls += 1;
     const raw = Array.isArray(payload.result) ? payload.result : [];
-    let shaped = 0;
     for (const entry of raw) {
       const entry_ = shapeAuditEntry(entry);
       if (entry_ === null) continue;
       if (input.classes !== undefined && !input.classes.includes(entry_.eventClass)) continue;
       entries.push(entry_);
-      shaped += 1;
       if (entries.length >= limit) break;
     }
     if (totalAvailable === null) totalAvailable = totalCountOf(payload);
-    if (shaped === 0) break;
+    if (raw.length === 0) {
+      pendingCursor = null;
+      break;
+    }
     const next = nextAuditCursor(payload);
-    if (next !== null) {
-      cursor = next;
-      continue;
+    if (next === null) {
+      pendingCursor = null;
+      break;
     }
-    const info = object(payload.result_info) ? (payload.result_info as Record<string, unknown>) : {};
-    const totalPages = info.total_pages;
-    if (typeof totalPages === "number" && page < totalPages) {
-      page += 1;
-      continue;
-    }
-    break;
+    cursor = next;
+    pendingCursor = next;
   }
   const capped = entries.slice(0, limit);
   const classCounts: Record<string, number> = {};
@@ -522,7 +524,8 @@ export async function listAuditLogs(
     account: { id: accountId, name: accountName },
     entryCount: capped.length,
     totalAvailable,
-    truncated: totalAvailable !== null && capped.length < totalAvailable,
+    truncated:
+      (totalAvailable !== null && capped.length < totalAvailable) || (capped.length >= limit && pendingCursor !== null),
     apiCalls,
     classCounts: sortedCounts(classCounts),
     actorKindCounts: sortedCounts(actorKindCounts),
@@ -541,12 +544,15 @@ function shapeInsight(raw: unknown): CloudflareInsightIssue | null {
         : null;
   if (id === null) return null;
   const severity: InsightSeverity = normalizeInsightSeverity(record.severity);
-  const dismissed =
-    record.dismissed === true || (typeof record.status === "string" && record.status.toLowerCase() === "dismissed");
+  const status = typeof record.status === "string" ? record.status : null;
+  const dismissed = record.dismissed === true || (status !== null && status.toLowerCase() === "dismissed");
   const zone = object(record.zone) ? (record.zone as Record<string, unknown>) : {};
+  const payload = object(record.payload) ? (record.payload as Record<string, unknown>) : {};
+  const zoneTag = typeof payload.zone_tag === "string" ? payload.zone_tag : null;
+  const subject = typeof record.subject === "string" ? record.subject : null;
   return {
     id,
-    name: postureBoundedText(record.name ?? record.title),
+    name: postureBoundedText(record.resolve_text ?? record.name ?? record.title ?? subject),
     issueClass:
       typeof record.class === "string"
         ? record.class
@@ -556,11 +562,27 @@ function shapeInsight(raw: unknown): CloudflareInsightIssue | null {
     issueType:
       typeof record.type === "string" ? record.type : typeof record.issue_type === "string" ? record.issue_type : null,
     severity,
+    status,
     dismissed,
-    zoneId: typeof record.zone_id === "string" ? record.zone_id : typeof zone.id === "string" ? zone.id : null,
+    zoneId: typeof record.zone_id === "string" ? record.zone_id : typeof zone.id === "string" ? zone.id : zoneTag,
     zoneName:
-      typeof record.zone_name === "string" ? record.zone_name : typeof zone.name === "string" ? zone.name : null,
+      typeof record.zone_name === "string" ? record.zone_name : typeof zone.name === "string" ? zone.name : subject,
   };
+}
+
+/** The insights list envelope is `{count, issues[]}` (verified 2026-09-19);
+ * a bare array stays accepted defensively. */
+function insightRows(payload: Record<string, unknown>): unknown[] {
+  if (Array.isArray(payload.result)) return payload.result;
+  const result = object(payload.result) ? (payload.result as Record<string, unknown>) : {};
+  return Array.isArray(result.issues) ? result.issues : [];
+}
+
+function insightTotal(payload: Record<string, unknown>): number | null {
+  const direct = totalCountOf(payload);
+  if (direct !== null) return direct;
+  const result = object(payload.result) ? (payload.result as Record<string, unknown>) : {};
+  return typeof result.count === "number" && Number.isInteger(result.count) && result.count >= 0 ? result.count : null;
 }
 
 /** Read-only Action: bounded Security Insights list. Severity counts are
@@ -598,19 +620,26 @@ export async function listSecurityInsights(
     if (input.includeDismissed !== true) params.dismissed = "false";
     const payload = await getJson(connection.endpoint, token, path, params, deadline, registered, started);
     apiCalls += 1;
-    const raw = Array.isArray(payload.result) ? payload.result : [];
-    let shaped = 0;
+    const raw = insightRows(payload);
     for (const entry of raw) {
       const issue = shapeInsight(entry);
       if (issue === null) continue;
       issues.push(issue);
-      shaped += 1;
       if (issues.length >= limit) break;
     }
-    if (totalAvailable === null) totalAvailable = totalCountOf(payload);
+    if (totalAvailable === null) totalAvailable = insightTotal(payload);
+    // Completion follows the envelope: the verified shape carries
+    // result{count, page, per_page}, so page*per_page>=count ends the walk.
+    // total_pages and the empty-page break stay as fallbacks.
+    const envelope = object(payload.result) ? (payload.result as Record<string, unknown>) : {};
+    const atEnd =
+      typeof envelope.page === "number" &&
+      typeof envelope.per_page === "number" &&
+      typeof envelope.count === "number" &&
+      envelope.page * envelope.per_page >= envelope.count;
     const info = object(payload.result_info) ? (payload.result_info as Record<string, unknown>) : {};
     const totalPages = info.total_pages;
-    if (shaped === 0 || (typeof totalPages === "number" && page >= totalPages)) break;
+    if (raw.length === 0 || atEnd || (typeof totalPages === "number" && page >= totalPages)) break;
     page += 1;
   }
   const capped = issues.slice(0, limit);
@@ -618,7 +647,11 @@ export async function listSecurityInsights(
   const unresolvedCriticalIds: string[] = [];
   for (const issue of capped) {
     severityCounts[issue.severity] = (severityCounts[issue.severity] ?? 0) + 1;
-    if (issue.severity === "critical" && !issue.dismissed) unresolvedCriticalIds.push(issue.id);
+    // Resolved findings are remediated, hence not outstanding — only an
+    // active, non-dismissed Critical tracks as unresolved.
+    if (issue.severity === "critical" && !issue.dismissed && issue.status !== "resolved") {
+      unresolvedCriticalIds.push(issue.id);
+    }
   }
   return {
     status: "completed",
@@ -721,11 +754,16 @@ export async function readZoneSettings(
       try {
         payload = await getJson(connection.endpoint, token, path, undefined, deadline, registered, started);
       } catch (error) {
-        // Plan-gated or unknown-to-the-account settings degrade to evidence;
-        // anything else (timeout, transport, auth) fails the run.
+        // An HTTP 401 is failed authentication — never plan-gating — so it
+        // fails the run like timeouts and transport faults. Other vendor
+        // rejections (forbidden/gated/unknown settings, malformed bodies)
+        // degrade to per-setting evidence. The status rides our own fixed
+        // Fault text (`Cloudflare returned HTTP ${status}: ...`), matched
+        // here and pinned by test.
         if (
           error instanceof Fault &&
-          (error.code === "CLOUDFLARE_REQUEST_FAILED" || error.code === "CLOUDFLARE_BAD_RESPONSE")
+          (error.code === "CLOUDFLARE_REQUEST_FAILED" || error.code === "CLOUDFLARE_BAD_RESPONSE") &&
+          !/HTTP 401\b/.test(error.message)
         ) {
           reads.push({ setting, zoneId, ok: false, valueJson: null, valueText: null, errorCode: error.code });
           continue;

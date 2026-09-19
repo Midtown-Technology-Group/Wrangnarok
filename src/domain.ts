@@ -882,6 +882,7 @@ export interface CloudflareAuditEntry {
   readonly actionResult: string | null;
   readonly occurredAt: string | null;
   readonly actorKind: AuditActorKind;
+  readonly actorContext: string | null;
   readonly actorEmail: string | null;
   readonly actorTokenName: string | null;
   readonly resourceType: string | null;
@@ -915,6 +916,7 @@ export interface CloudflareInsightIssue {
   readonly issueClass: string | null;
   readonly issueType: string | null;
   readonly severity: InsightSeverity;
+  readonly status: string | null;
   readonly dismissed: boolean;
   readonly zoneId: string | null;
   readonly zoneName: string | null;
@@ -1015,6 +1017,7 @@ export const POSTURE_DEFAULT_ZONE_EXPECTATIONS: PostureZoneExpectations = Object
 function postureFault(message: string): Fault {
   return new Fault(400, "INVALID_INPUT", message);
 }
+const POSTURE_ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 export function postureBoundedText(value: unknown): string | null {
   if (typeof value !== "string" || value.length === 0) return null;
   return value.length > CLOUDFLARE_POSTURE_MAX_TEXT ? value.slice(0, CLOUDFLARE_POSTURE_MAX_TEXT) : value;
@@ -1111,6 +1114,7 @@ export function attributeAuditActor(actor: {
   readonly email?: unknown;
   readonly tokenId?: unknown;
   readonly tokenName?: unknown;
+  readonly context?: unknown;
 }): AuditActorKind {
   if (
     (typeof actor.tokenId === "string" && actor.tokenId.length > 0) ||
@@ -1118,15 +1122,30 @@ export function attributeAuditActor(actor: {
   ) {
     return "service";
   }
+  // Audit Logs v2 `actor.context` is the authoritative credential signal
+  // (api_key | api_token | dash | oauth | origin_ca_key, plus bare `api`
+  // when the credential type was not recorded). It decides before the actor
+  // type: a user row with an api_token context is a service credential, and
+  // a bare-`api` row stays unknown even with an email attached.
+  const context = typeof actor.context === "string" ? actor.context.toLowerCase() : "";
+  if (context === "api_token" || context === "oauth" || context === "api_key" || context === "origin_ca_key") {
+    return "service";
+  }
+  if (context === "dash") return "human";
+  if (context === "api") return "unknown";
+  // Actor type enum (verified 2026-09-19): account = account API token,
+  // system = Cloudflare-side automation, cloudflare_admin = vendor staff,
+  // user = individual. Substring fallbacks cover future values; anything
+  // unrecognized stays unknown, never guessed human.
   const type = typeof actor.type === "string" ? actor.type.toLowerCase() : "";
   if (
+    type === "account" ||
+    type === "system" ||
     type.includes("token") ||
-    type.includes("api") ||
-    type.includes("key") ||
     type.includes("oauth") ||
     type.includes("service") ||
-    type.includes("system") ||
-    type.includes("bot")
+    type.includes("api_key") ||
+    type.includes("apikey")
   ) {
     return "service";
   }
@@ -1138,16 +1157,15 @@ export function attributeAuditActor(actor: {
 /** Pure severity normalizer: unrecognized vendor severities are "unknown"
  * (advisory-only downstream), never coerced into a known bucket. */
 export function normalizeInsightSeverity(value: unknown): InsightSeverity {
+  // Vendor values (verified 2026-09-19) are Low | Moderate | Critical.
+  // Moderate maps to medium; high/info are accepted aliases for shapes that
+  // report them. Anything else is unknown (advisory-only downstream).
   const normalized = typeof value === "string" ? value.toLowerCase() : "";
-  if (
-    normalized === "critical" ||
-    normalized === "high" ||
-    normalized === "medium" ||
-    normalized === "low" ||
-    normalized === "info"
-  ) {
-    return normalized;
-  }
+  if (normalized === "critical") return "critical";
+  if (normalized === "high") return "high";
+  if (normalized === "moderate" || normalized === "medium") return "medium";
+  if (normalized === "low") return "low";
+  if (normalized === "info") return "info";
   return "unknown";
 }
 /** Pure verdict: Critical promotes to CI-failing ONLY after a recorded
@@ -1177,8 +1195,12 @@ export function suppressionActive(
   return null;
 }
 function parseIsoString(raw: unknown, field: string): string {
-  if (typeof raw !== "string" || raw.length === 0 || raw.length > 64) {
-    throw postureFault(`${field} must be a non-empty ISO date string.`);
+  // Strict UTC instants only: suppression expiry compares lexicographically
+  // against `new Date().toISOString()`, so offset timestamps would compare
+  // incorrectly and flip checks wrongly. A suppression flips a failing check
+  // to pass, so the format must be exact.
+  if (typeof raw !== "string" || !POSTURE_ISO_UTC.test(raw) || Number.isNaN(Date.parse(raw))) {
+    throw postureFault(`${field} must be an ISO-8601 UTC timestamp ending in "Z".`);
   }
   return raw;
 }

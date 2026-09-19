@@ -69,16 +69,32 @@ describe("attributeAuditActor", () => {
     expect(attributeAuditActor({ type: "user", tokenName: "deploy-token" })).toBe("service");
     expect(attributeAuditActor({ type: "api_token", tokenId: "abc" })).toBe("service");
     expect(attributeAuditActor({ type: "system" })).toBe("service");
+    expect(attributeAuditActor({ type: "account" })).toBe("service");
+  });
+  it("lets the verified actor context decide first", () => {
+    // A user row with a token context is a service credential, not a human.
+    expect(attributeAuditActor({ type: "user", email: "op@example.com", context: "api_token" })).toBe("service");
+    expect(attributeAuditActor({ type: "user", context: "oauth" })).toBe("service");
+    expect(attributeAuditActor({ type: "user", context: "api_key" })).toBe("service");
+    expect(attributeAuditActor({ type: "user", context: "origin_ca_key" })).toBe("service");
+    expect(attributeAuditActor({ type: "user", email: "op@example.com", context: "dash" })).toBe("human");
+    // Bare `api` means the credential type was not recorded: unknown even
+    // with an email attached.
+    expect(attributeAuditActor({ type: "user", email: "op@example.com", context: "api" })).toBe("unknown");
   });
   it("answers unknown instead of guessing human", () => {
     expect(attributeAuditActor({})).toBe("unknown");
     expect(attributeAuditActor({ type: "mystery" })).toBe("unknown");
+    expect(attributeAuditActor({ type: "bot" })).toBe("unknown");
+    expect(attributeAuditActor({ type: "cloudflare_admin" })).toBe("unknown");
   });
 });
 
 describe("insights verdict", () => {
   it("keeps unknown severities out of every known bucket", () => {
     expect(normalizeInsightSeverity("CRITICAL")).toBe("critical");
+    expect(normalizeInsightSeverity("Moderate")).toBe("medium");
+    expect(normalizeInsightSeverity("Low")).toBe("low");
     expect(normalizeInsightSeverity("paid-only-future")).toBe("unknown");
     expect(normalizeInsightSeverity(null)).toBe("unknown");
   });
@@ -261,8 +277,6 @@ describe("posture classifier and parser arms", () => {
     expect(classifyAuditEvent({ actionType: "settings.edit" })).toBe("zone-config");
     expect(classifyAuditEvent({ resourceType: "certificate" })).toBe("zone-config");
     expect(attributeAuditActor({ type: "oauth-client" })).toBe("service");
-    expect(attributeAuditActor({ type: "api-key" })).toBe("service");
-    expect(attributeAuditActor({ type: "bot" })).toBe("service");
     expect(attributeAuditActor({ type: "superuser" })).toBe("human");
     expect(normalizeInsightSeverity("high")).toBe("high");
     expect(normalizeInsightSeverity("medium")).toBe("medium");
@@ -536,7 +550,7 @@ describe("listAuditLogs", () => {
   const entry = (overrides: Record<string, unknown> = {}) => ({
     id: "audit-1",
     action: { type: "tokens.create", result: true, time: "2026-09-18T00:00:00Z", description: "API token created" },
-    actor: { id: "user-1", email: "op@example.com", type: "user" },
+    actor: { id: "user-1", email: "op@example.com", type: "user", context: "api_token" },
     resource: { id: "tok-1", type: "api_token", scope: "account", product: "tokens" },
     zone: { id: "zone-1", name: "example.com" },
     ...overrides,
@@ -558,8 +572,13 @@ describe("listAuditLogs", () => {
     const out = await listAuditLogs(CONNECTION, SECRETS, ACCOUNT, { since: "2026-09-18", limit: 10 });
     expect(out.entryCount).toBe(2);
     expect(out.classCounts).toMatchObject({ token: 1, membership: 1 });
-    expect(out.actorKindCounts).toMatchObject({ human: 2 });
-    expect(out.entries[0]).toMatchObject({ eventClass: "token", actorKind: "human", zoneName: "example.com" });
+    expect(out.actorKindCounts).toMatchObject({ service: 1, human: 1 });
+    expect(out.entries[0]).toMatchObject({
+      eventClass: "token",
+      actorKind: "service",
+      actorContext: "api_token",
+      zoneName: "example.com",
+    });
     expect(out.apiCalls).toBe(1);
     expect(JSON.stringify(out)).not.toContain(TOKEN_SENTINEL);
   });
@@ -582,16 +601,16 @@ describe("listAuditLogs", () => {
     expect(err).toMatchObject({ code: "CLOUDFLARE_REQUEST_FAILED" });
     expect(String((err as { message: string }).message)).not.toContain(TOKEN_SENTINEL);
   });
-  it("follows the second page and shapes sparse entries", async () => {
-    let calls = 0;
+  it("follows the vendor cursor and shapes sparse entries", async () => {
+    const seen: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      calls += 1;
       const url = input instanceof Request ? input.url : String(input);
-      if (url.includes("page=1")) {
+      seen.push(url);
+      if (!url.includes("cursor=")) {
         return Response.json({
           success: true,
           result: [{ id: "a1", action: "login", actor: {}, resource: {}, zone: {} }],
-          result_info: { total_count: 2, total_pages: 2 },
+          result_info: { count: 1, cursor: "k1" },
         });
       }
       return Response.json({
@@ -601,12 +620,16 @@ describe("listAuditLogs", () => {
           { nope: true },
           "junk",
         ],
-        result_info: { total_count: 2, total_pages: 2 },
+        result_info: { count: 1 },
       });
     });
     const out = await listAuditLogs(CONNECTION, SECRETS, ACCOUNT, { limit: 10 });
-    expect(calls).toBe(2);
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toContain("limit=10");
+    expect(seen[0]).toContain("direction=desc");
+    expect(seen[1]).toContain("cursor=k1");
     expect(out.entryCount).toBe(2);
+    expect(out.truncated).toBe(false);
     expect(out.entries[0]).toMatchObject({ actionType: "login", actorKind: "unknown", eventClass: "other" });
     expect(out.entries[1]).toMatchObject({
       actionType: "dns.edit",
@@ -614,6 +637,26 @@ describe("listAuditLogs", () => {
       actorKind: "unknown",
       eventClass: "zone-config",
     });
+  });
+  it("keeps paginating past a filtered page with no matches", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (!url.includes("cursor=")) {
+        return Response.json({
+          success: true,
+          result: [{ id: "m1", action: { type: "members.add" }, actor: {}, resource: {}, zone: {} }],
+          result_info: { count: 1, cursor: "k9" },
+        });
+      }
+      return Response.json({
+        success: true,
+        result: [{ id: "t1", action: { type: "tokens.create" }, actor: {}, resource: {}, zone: {} }],
+        result_info: { count: 1 },
+      });
+    });
+    const out = await listAuditLogs(CONNECTION, SECRETS, ACCOUNT, { limit: 10, classes: ["token"] });
+    expect(out.entryCount).toBe(1);
+    expect(out.entries[0]?.id).toBe("t1");
   });
   it("prefers the opaque cursor when the vendor sends one", async () => {
     const seen: string[] = [];
@@ -624,7 +667,7 @@ describe("listAuditLogs", () => {
         return Response.json({
           success: true,
           result: [{ id: "c1", action: { type: "x" }, actor: {}, resource: {}, zone: {} }],
-          result_info: { cursor: "opaque-1", total_count: 2 },
+          result_info: { result_info: { cursor: "opaque-1" }, total_count: 2 },
         });
       }
       return Response.json({
@@ -650,24 +693,42 @@ describe("listAuditLogs", () => {
 describe("listSecurityInsights", () => {
   const issue = (overrides: Record<string, unknown> = {}) => ({
     id: "insight-1",
-    name: "Dangling DNS record",
-    class: "exposed_infrastructure",
-    type: "insecure_configuration",
-    severity: "critical",
+    issue_class: "exposed_infrastructure",
+    issue_type: "insecure_configuration",
+    severity: "Critical",
+    status: "active",
     dismissed: false,
-    zone_id: "zone-1",
-    zone_name: "example.com",
+    subject: "example.com",
+    payload: { zone_tag: "zone-1", detection_method: "probe" },
+    resolve_text: "Remove the dangling record",
     ...overrides,
   });
   it("counts severities and tracks unresolved Criticals", async () => {
     mockJson({
       success: true,
-      result: [issue(), issue({ id: "insight-2", severity: "high" }), issue({ id: "insight-3", severity: "weird" })],
-      result_info: { total_count: 3, total_pages: 1 },
+      result: {
+        count: 4,
+        issues: [
+          issue(),
+          issue({ id: "insight-2", severity: "Moderate" }),
+          issue({ id: "insight-3", severity: "weird" }),
+          issue({ id: "insight-4", severity: "Critical", status: "resolved" }),
+        ],
+        page: 1,
+        per_page: 50,
+      },
     });
     const out = await listSecurityInsights(CONNECTION, SECRETS, ACCOUNT, { limit: 10 });
-    expect(out.severityCounts).toMatchObject({ critical: 1, high: 1, unknown: 1 });
+    expect(out.severityCounts).toMatchObject({ critical: 2, medium: 1, unknown: 1 });
     expect(out.unresolvedCriticalIds).toEqual(["insight-1"]);
+    expect(out.totalAvailable).toBe(4);
+    expect(out.issues[0]).toMatchObject({
+      name: "Remove the dangling record",
+      status: "active",
+      dismissed: false,
+      zoneId: "zone-1",
+      zoneName: "example.com",
+    });
     expect(out.verdict).toBe("advisory");
     expect(JSON.stringify(out)).not.toContain(TOKEN_SENTINEL);
   });
@@ -757,6 +818,16 @@ describe("readZoneSettings", () => {
       { setting: "security_header", zoneId, ok: false, errorCode: "CLOUDFLARE_REQUEST_FAILED" },
     ]);
     expect(JSON.stringify(out)).not.toContain(TOKEN_SENTINEL);
+  });
+  it("fails the run on HTTP 401 instead of degrading it", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      Response.json({ success: false, errors: [{ code: 10000, message: "Invalid access token" }] }, { status: 401 }),
+    );
+    const err = await readZoneSettings(CONNECTION, SECRETS, ACCOUNT, { zoneIds: [zoneId], settings: ["ssl"] }).catch(
+      (error: Error) => error,
+    );
+    expect(err).toMatchObject({ code: "CLOUDFLARE_REQUEST_FAILED" });
+    expect(String((err as { message: string }).message)).toContain("HTTP 401");
   });
   it("still fails loud on timeouts", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
@@ -912,6 +983,22 @@ describe("posture remaining arms (issue #252)", () => {
     expect(() => parsePostureBaseline({ zoneExpectations: "x" })).toThrow(
       expect.objectContaining({ code: "INVALID_INPUT" }),
     );
+    expect(() =>
+      parsePostureBaseline({
+        recordedAt: "2026-09-20T00:00:00+02:00",
+        acknowledgedCriticalIds: [],
+        suppressions: [],
+        zoneExpectations: {},
+      }),
+    ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+    expect(() =>
+      parsePostureBaseline({
+        recordedAt: null,
+        acknowledgedCriticalIds: [],
+        suppressions: [{ checkId: "token-active", reason: "r", reviewer: "r", expiresAt: "tomorrow" }],
+        zoneExpectations: {},
+      }),
+    ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
     expect(() =>
       parsePostureBaseline({
         acknowledgedCriticalIds: new Array(201).fill("c"),
@@ -1378,11 +1465,22 @@ describe("insights saga replay (issue #252 S2)", () => {
       expect(headers.get("Authorization")).toBe(`Bearer ${TOKEN_SENTINEL}`);
       return Response.json({
         success: true,
-        result: [
-          { id: "crit-1", name: "Exposed DB", class: "exposed_infrastructure", severity: "critical", dismissed: false },
-          { id: "high-1", name: "Weak cipher", severity: "high", dismissed: false },
-        ],
-        result_info: { total_count: 2, total_pages: 1 },
+        result: {
+          count: 2,
+          issues: [
+            {
+              id: "crit-1",
+              issue_class: "exposed_infrastructure",
+              severity: "Critical",
+              status: "active",
+              dismissed: false,
+              subject: "db.example.com",
+            },
+            { id: "high-1", issue_class: "weak_cipher", severity: "Moderate", status: "active", dismissed: false },
+          ],
+          page: 1,
+          per_page: 50,
+        },
       });
     });
     const key = "cf-insights-replay-0001";
@@ -1421,7 +1519,7 @@ describe("insights saga replay (issue #252 S2)", () => {
     expect(payload.status).toBe("Succeeded");
     expect(payload.result.verdict).toBe("failing");
     expect(payload.result.unresolvedCriticalIds).toEqual(["crit-1"]);
-    expect(payload.result.severityCounts).toMatchObject({ critical: 1, high: 1 });
+    expect(payload.result.severityCounts).toMatchObject({ critical: 1, medium: 1 });
     expect(mock).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(payload)).not.toContain(TOKEN_SENTINEL);
   });
