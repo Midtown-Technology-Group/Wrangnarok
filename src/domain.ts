@@ -405,8 +405,10 @@ export interface NinjaLookupResult {
   matches: NinjaOrgSummary[];
 }
 /** Pure transform: case-insensitive substring match over a read-only census.
- * matchCount is the full total; matches are bounded for persistence like the
- * census itself. */
+ * matchCount totals the matches within the given census; matches are bounded
+ * for persistence like the census itself. The lookup inherits the census
+ * bound (first NINJA_ORGS_MAX): organizations beyond it are out of lookup
+ * scope until paginated reads exist. */
 export function matchNinjaOrgs(
   organizations: readonly NinjaOrgSummary[],
   query: string,

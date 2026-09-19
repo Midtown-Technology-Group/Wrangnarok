@@ -97,6 +97,11 @@ operator-declared, never derived) as `ninjaone-org-lookup`
 - Match is a substring filter, not an exact-key lookup: the census carries
   no stable external key in v0, so the Saga returns every case-insensitive
   substring match instead of guessing identity.
+- Lookup inherits the census bound: `listOrganizations` persists the first
+  `NINJA_ORGS_MAX` organizations, and `matchCount`/`matches` cover that
+  bounded census only. Matching organizations beyond the bound needs
+  paginated reads — a follow-up, not this pilot (changing the shared
+  truncation would alter the census Saga's persisted contract).
 
 ### Acceptance proof (local API + history)
 

@@ -4,7 +4,9 @@
 // workspace `features/ninjaone/workflows/sync_organizations.py` (private
 // bifrost-workspace; unreachable from this lane, mapping operator-declared):
 // only the vendor-read half is ported — one listOrganizations call, then a
-// pure local match. Mapping writes stay a follow-up, never this Saga.
+// pure local match over the same bounded census the census Saga persists
+// (first NINJA_ORGS_MAX; matchCount totals within that bound). Mapping
+// writes stay a follow-up, never this Saga.
 // Migrated to the ADR 033 interior helpers like its sibling census Saga:
 // schemaOf, prepareInput, integrationOperation, completeExecution/
 // failSagaExecution, makeSagaWorkflow.
