@@ -290,6 +290,121 @@ it("issues zero fetches for query-control edits until Refresh is pressed", async
   renderer.unmount();
 });
 
+it("keeps the create notice when only the list refresh fails", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    const method = (init as RequestInit)?.method ?? "GET";
+    if (url === "/api/tables" && method === "POST") return Response.json({ table: TABLE }, { status: 201 });
+    return Response.json({ error: { code: "D1_ERROR", message: "List refresh failed." } }, { status: 500 });
+  });
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(
+      <MemoryRouter initialEntries={["/tables"]}>
+        <Routes>
+          <Route path="/tables" element={<TablesList />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  });
+  await flushRequests();
+  await act(async () => {
+    renderer.root.findByProps({ id: "new-table" }).props.onChange({ target: { value: "notes" } });
+  });
+  const form = renderer.root
+    .findAllByType("form")
+    .find((entry) => entry.findAllByProps({ id: "new-table" }).length > 0);
+  if (!form) throw new Error("Create form not found.");
+  await act(async () => {
+    await (form.props.onSubmit as (e: { preventDefault: () => void }) => unknown)({ preventDefault: () => {} });
+  });
+  await flushRequests();
+  const text = JSON.stringify(renderer.toJSON());
+  expect(text).toContain("declared. You own it.");
+  expect(text).toContain("Table declared, but the list could not refresh:");
+  expect(text).toContain("List refresh failed.");
+  expect(text).not.toContain("Could not create Table.");
+  renderer.unmount();
+});
+
+it("ignores a second Insert while the first is still in flight", async () => {
+  const puts: string[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    if ((init as RequestInit)?.method === "PUT") puts.push(url);
+    if (url.includes("/rows")) return Response.json({ row: ROWS.rows[0] });
+    return Response.json({ table: TABLE });
+  });
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(
+      <MemoryRouter initialEntries={["/tables/notes"]}>
+        <Routes>
+          <Route path="/tables/:name" element={<TableDetailView initial={TABLE} initialRows={ROWS} />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  });
+  await act(async () => {
+    renderer.root.findByProps({ id: "row-id" }).props.onChange({ target: { value: "a" } });
+  });
+  const insert = findButton(renderer, "Insert");
+  expect(insert.props.disabled).toBe(false);
+  await act(async () => {
+    (insert.props.onClick as () => void)();
+    (insert.props.onClick as () => void)();
+  });
+  await flushRequests();
+  expect(puts).toEqual(["/api/tables/notes/rows/a"]);
+  // The guard resets once the request lands: the button works again.
+  await click(renderer, "Insert");
+  expect(puts).toEqual(["/api/tables/notes/rows/a", "/api/tables/notes/rows/a"]);
+  renderer.unmount();
+});
+
+it("lets the last-started rows refresh win when responses overlap", async () => {
+  const resolvers: ((page: TablePage) => void)[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/tables/notes")) return Response.json({ table: TABLE });
+    return new Promise<Response>((resolve) => {
+      resolvers.push((page) => resolve(Response.json(page)));
+    });
+  });
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(
+      <MemoryRouter initialEntries={["/tables/notes"]}>
+        <Routes>
+          <Route path="/tables/:name" element={<TableDetailView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  });
+  expect(resolvers).toHaveLength(1);
+  // Let the immediate table fetch land so the rows section (and its
+  // Refresh button) renders; the rows request itself stays pending.
+  await flushRequests();
+  await act(async () => {
+    (findButton(renderer, "Refresh").props.onClick as () => void)();
+  });
+  expect(resolvers).toHaveLength(2);
+  await act(async () => {
+    resolvers[1]?.({ ...ROWS, total: 222 });
+  });
+  await flushRequests();
+  // NOTE: no trailing period — the page renders the total and "." as
+  // sibling text children, which toJSON keeps as separate array items.
+  expect(JSON.stringify(renderer.toJSON())).toContain("222 matching rows");
+  await act(async () => {
+    resolvers[0]?.({ ...ROWS, total: 111 });
+  });
+  await flushRequests();
+  expect(JSON.stringify(renderer.toJSON())).toContain("222 matching rows");
+  expect(JSON.stringify(renderer.toJSON())).not.toContain("111 matching rows");
+  renderer.unmount();
+});
+
 it("Refresh count counts even while Skip count is checked", async () => {
   const calls: string[] = [];
   mockTableRoutes(calls, 7);

@@ -107,18 +107,35 @@ export function TablesList(props: { initial?: TablesResponse }): React.JSX.Eleme
     if (!props.initial) reload();
   }, [props.initial, reload]);
 
+  // Same synchronous-guard split as runMutation below: the ref stops a
+  // same-tick double submit, the state disables the Declare button.
+  const creatingRef = useRef(false);
+  const [creating, setCreating] = useState(false);
+
   async function onCreate(e: React.FormEvent): Promise<void> {
     e.preventDefault();
+    if (creatingRef.current) return;
+    creatingRef.current = true;
+    setCreating(true);
     setError(null);
     setNotice(null);
     try {
       const created = await createTable(newName.trim());
       setNewName("");
       setNotice(`Table "${created.name}" declared. You own it.`);
-      const response = await listTables();
-      setData(response);
+      try {
+        setData(await listTables());
+      } catch (failure) {
+        // The declaration landed; only the follow-up list refresh failed,
+        // so the notice stands and the error names the refresh (the
+        // Worker's own message rides along, never a "create failed").
+        setError(`Table declared, but the list could not refresh: ${getErrorMessage(failure, "unknown error")}`);
+      }
     } catch (failure) {
       setError(getErrorMessage(failure, "Could not create Table."));
+    } finally {
+      creatingRef.current = false;
+      setCreating(false);
     }
   }
 
@@ -184,7 +201,9 @@ export function TablesList(props: { initial?: TablesResponse }): React.JSX.Eleme
           onChange={(e) => setNewName(e.target.value)}
           placeholder="notes"
         />
-        <button type="submit">Declare</button>
+        <button type="submit" disabled={creating}>
+          Declare
+        </button>
       </form>
     </section>
   );
@@ -223,6 +242,28 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
   const [batchResults, setBatchResults] = useState<TableBatchItemResult[] | null>(null);
   const [grantAction, setGrantAction] = useState<TableGrantAction>("read");
   const [grantee, setGrantee] = useState("");
+  // Double-submit guard: mutation buttons stay disabled until the request
+  // and its follow-up refresh complete, so a second click cannot turn a
+  // landed write into a confusing conflict error. The ref carries the
+  // guard synchronously (state closures go stale across same-tick double
+  // clicks); the state only drives the disabled UI.
+  const mutatingRef = useRef(false);
+  const [mutating, setMutating] = useState(false);
+  // Stale-response guard: overlapping manual refreshes resolve in any
+  // order, so only the last-started request may commit its results.
+  const requestSeq = useRef(0);
+
+  async function runMutation(work: () => Promise<void>): Promise<void> {
+    if (mutatingRef.current) return;
+    mutatingRef.current = true;
+    setMutating(true);
+    try {
+      await work();
+    } finally {
+      mutatingRef.current = false;
+      setMutating(false);
+    }
+  }
 
   const reloadTable = useCallback(async () => {
     if (!tableName) return;
@@ -241,6 +282,7 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
   const runQuery = useCallback(
     async (nextCursor?: string | null) => {
       if (!tableName) return;
+      const seq = ++requestSeq.current;
       setRowsLoading(true);
       setError(null);
       try {
@@ -260,13 +302,15 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
           limit: Number(limit) || 20,
           ...(nextCursor ? { cursor: nextCursor } : {}),
         });
+        if (requestSeq.current !== seq) return;
         setRows(page);
         setCursor(page.nextCursor);
       } catch (failure) {
+        if (requestSeq.current !== seq) return;
         setError(getErrorMessage(failure, "Could not query rows."));
         setRows(null);
       } finally {
-        setRowsLoading(false);
+        if (requestSeq.current === seq) setRowsLoading(false);
       }
     },
     [tableName, filter, docIds, prefix, order, skipCount, limit],
@@ -288,6 +332,7 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
 
   async function onRefreshCount(): Promise<void> {
     if (!tableName) return;
+    const seq = ++requestSeq.current;
     setError(null);
     try {
       // Refresh count always counts: it overrides the list's skip-count
@@ -306,6 +351,7 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
         ...(prefix.trim() ? { prefix: prefix.trim() } : {}),
         skipCount: false,
       });
+      if (requestSeq.current !== seq) return;
       setRows((current) =>
         current
           ? { ...current, total: counted.total }
@@ -313,32 +359,37 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
       );
       setNotice(`Count refreshed: ${totalLabel(counted.total)}.`);
     } catch (failure) {
+      if (requestSeq.current !== seq) return;
       setError(getErrorMessage(failure, "Could not count rows."));
     }
   }
 
   async function onInsert(): Promise<void> {
-    setError(null);
-    setNotice(null);
-    try {
-      const row = await insertTableRow(tableName, docId.trim(), parseJsonObject(docBody));
-      setNotice(`Inserted "${row.id}".`);
-      await runQuery(null);
-    } catch (failure) {
-      setError(getErrorMessage(failure, "Could not insert row."));
-    }
+    await runMutation(async () => {
+      setError(null);
+      setNotice(null);
+      try {
+        const row = await insertTableRow(tableName, docId.trim(), parseJsonObject(docBody));
+        setNotice(`Inserted "${row.id}".`);
+        await runQuery(null);
+      } catch (failure) {
+        setError(getErrorMessage(failure, "Could not insert row."));
+      }
+    });
   }
 
   async function onReplace(): Promise<void> {
-    setError(null);
-    setNotice(null);
-    try {
-      const row = await updateTableRow(tableName, docId.trim(), parseJsonObject(docBody));
-      setNotice(`Replaced "${row.id}".`);
-      await runQuery(null);
-    } catch (failure) {
-      setError(getErrorMessage(failure, "Could not replace row."));
-    }
+    await runMutation(async () => {
+      setError(null);
+      setNotice(null);
+      try {
+        const row = await updateTableRow(tableName, docId.trim(), parseJsonObject(docBody));
+        setNotice(`Replaced "${row.id}".`);
+        await runQuery(null);
+      } catch (failure) {
+        setError(getErrorMessage(failure, "Could not replace row."));
+      }
+    });
   }
 
   async function onViewRow(id: string): Promise<void> {
@@ -353,47 +404,53 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
   }
 
   async function onDeleteRow(id: string): Promise<void> {
-    setError(null);
-    setNotice(null);
-    try {
-      await deleteTableRow(tableName, id);
-      setNotice(`Deleted "${id}".`);
-      await runQuery(null);
-    } catch (failure) {
-      setError(getErrorMessage(failure, "Could not delete row."));
-    }
+    await runMutation(async () => {
+      setError(null);
+      setNotice(null);
+      try {
+        await deleteTableRow(tableName, id);
+        setNotice(`Deleted "${id}".`);
+        await runQuery(null);
+      } catch (failure) {
+        setError(getErrorMessage(failure, "Could not delete row."));
+      }
+    });
   }
 
   async function onBatchWrite(): Promise<void> {
-    setError(null);
-    setNotice(null);
-    try {
-      const items: unknown = JSON.parse(batchBody);
-      if (!Array.isArray(items)) throw new Error("Batch items must be a JSON array of { id?, data }.");
-      const result = await batchWriteTableRows(tableName, { write_mode: batchMode, items: items as never });
-      setBatchResults(result.results);
-      setNotice(`Batch wrote ${result.count} of ${result.results.length} document(s).`);
-      await runQuery(null);
-    } catch (failure) {
-      setError(getErrorMessage(failure, "Could not run batch write."));
-    }
+    await runMutation(async () => {
+      setError(null);
+      setNotice(null);
+      try {
+        const items: unknown = JSON.parse(batchBody);
+        if (!Array.isArray(items)) throw new Error("Batch items must be a JSON array of { id?, data }.");
+        const result = await batchWriteTableRows(tableName, { write_mode: batchMode, items: items as never });
+        setBatchResults(result.results);
+        setNotice(`Batch wrote ${result.count} of ${result.results.length} document(s).`);
+        await runQuery(null);
+      } catch (failure) {
+        setError(getErrorMessage(failure, "Could not run batch write."));
+      }
+    });
   }
 
   async function onBatchDelete(): Promise<void> {
-    setError(null);
-    setNotice(null);
-    try {
-      const ids = batchDeleteIds
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter((entry) => entry);
-      const result = await batchDeleteTableRows(tableName, ids);
-      setBatchResults(result.results);
-      setNotice(`Batch deleted ${result.count} document(s).`);
-      await runQuery(null);
-    } catch (failure) {
-      setError(getErrorMessage(failure, "Could not run batch delete."));
-    }
+    await runMutation(async () => {
+      setError(null);
+      setNotice(null);
+      try {
+        const ids = batchDeleteIds
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter((entry) => entry);
+        const result = await batchDeleteTableRows(tableName, ids);
+        setBatchResults(result.results);
+        setNotice(`Batch deleted ${result.count} document(s).`);
+        await runQuery(null);
+      } catch (failure) {
+        setError(getErrorMessage(failure, "Could not run batch delete."));
+      }
+    });
   }
 
   async function onGrant(): Promise<void> {
@@ -421,15 +478,17 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
   }
 
   async function onDeleteTable(): Promise<void> {
-    setError(null);
-    try {
-      await deleteTable(tableName);
-      setTable(null);
-      setRows(null);
-      setNotice(`Table "${tableName}" deleted.`);
-    } catch (failure) {
-      setError(getErrorMessage(failure, "Could not delete Table."));
-    }
+    await runMutation(async () => {
+      setError(null);
+      try {
+        await deleteTable(tableName);
+        setTable(null);
+        setRows(null);
+        setNotice(`Table "${tableName}" deleted.`);
+      } catch (failure) {
+        setError(getErrorMessage(failure, "Could not delete Table."));
+      }
+    });
   }
 
   return (
@@ -551,7 +610,7 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
                       <button type="button" onClick={() => void onViewRow(row.id)}>
                         View
                       </button>{" "}
-                      <button type="button" onClick={() => void onDeleteRow(row.id)}>
+                      <button type="button" onClick={() => void onDeleteRow(row.id)} disabled={mutating}>
                         Delete
                       </button>
                     </td>
@@ -586,10 +645,10 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
             />
           </div>
           <div className="row">
-            <button type="button" onClick={() => void onInsert()}>
+            <button type="button" onClick={() => void onInsert()} disabled={mutating}>
               Insert
             </button>
-            <button type="button" onClick={() => void onReplace()}>
+            <button type="button" onClick={() => void onReplace()} disabled={mutating}>
               Replace
             </button>
           </div>
@@ -616,7 +675,7 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
               value={batchBody}
               onChange={(e) => setBatchBody(e.target.value)}
             />
-            <button type="button" onClick={() => void onBatchWrite()}>
+            <button type="button" onClick={() => void onBatchWrite()} disabled={mutating}>
               Run batch write
             </button>
           </div>
@@ -629,7 +688,7 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
               onChange={(e) => setBatchDeleteIds(e.target.value)}
               placeholder="a, b"
             />
-            <button type="button" onClick={() => void onBatchDelete()}>
+            <button type="button" onClick={() => void onBatchDelete()} disabled={mutating}>
               Run batch delete
             </button>
           </div>
@@ -677,7 +736,7 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
 
           <h2>Danger zone</h2>
           <div className="row">
-            <button type="button" onClick={() => void onDeleteTable()}>
+            <button type="button" onClick={() => void onDeleteTable()} disabled={mutating}>
               Delete table
             </button>
           </div>
