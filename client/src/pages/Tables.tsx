@@ -7,7 +7,7 @@
 // No realtime subscriptions exist on the Worker: every section refreshes
 // through an explicit bounded button (manual re-query), and the page says
 // so instead of implying push.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { getToken, setToken } from "../lib/api-client";
 import { getErrorMessage } from "../lib/api-error";
@@ -272,18 +272,27 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
     [tableName, filter, docIds, prefix, order, skipCount, limit],
   );
 
+  // Bounded manual refresh: each table auto-loads ONCE (mount or table
+  // switch). runQuery identity follows the query controls, so no effect
+  // may depend on it — control edits refetch only through explicit
+  // buttons, never while the user is still typing.
+  const runQueryRef = useRef(runQuery);
+  runQueryRef.current = runQuery;
+  const autoLoaded = useRef<string | null>(null);
   useEffect(() => {
+    if (!tableName || autoLoaded.current === tableName) return;
+    autoLoaded.current = tableName;
     if (!props.initial) void reloadTable();
-  }, [props.initial, reloadTable]);
-
-  useEffect(() => {
-    if (!props.initialRows && tableName) void runQuery(null);
-  }, [props.initialRows, tableName, runQuery]);
+    if (!props.initialRows) void runQueryRef.current(null);
+  }, [tableName, props.initial, props.initialRows, reloadTable]);
 
   async function onRefreshCount(): Promise<void> {
     if (!tableName) return;
     setError(null);
     try {
+      // Refresh count always counts: it overrides the list's skip-count
+      // optimization, which exists to skip the count scan — not to answer
+      // an explicit count request with total=-1.
       const counted = await countTableRows(tableName, {
         ...(filter.trim() ? { filters: [filter.trim()] } : {}),
         ...(docIds.trim()
@@ -295,7 +304,7 @@ export function TableDetailView(props: { initial?: TableSummary; initialRows?: T
             }
           : {}),
         ...(prefix.trim() ? { prefix: prefix.trim() } : {}),
-        skipCount,
+        skipCount: false,
       });
       setRows((current) =>
         current

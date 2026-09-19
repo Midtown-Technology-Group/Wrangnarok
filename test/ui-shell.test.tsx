@@ -76,14 +76,14 @@ it("marks unported nav entries disabled and links each tracking issue", () => {
 
 // UX-01 slice 1 (issue #176): each disabled nav entry must name its actual
 // OPEN parity owner — never a closed scaffolding issue (#15/#16/#18, all
-// CLOSED) and never #160 (APP-02, closed since the UX-01c retarget). Tables
-// -> #154 TABLE-02, Triggers -> #139 TRG-03 (only open trigger issue). The
-// Integrations family is served by the enabled Connections page, so no
-// disabled Integrations entry exists at all.
+// CLOSED) and never #160 (APP-02, closed since the UX-01c retarget).
+// Triggers -> #139 TRG-03 (only open trigger issue). Tables shipped its UI
+// in #556, so it is enabled and names no disabled owner. The Integrations
+// family is served by the enabled Connections page, so no disabled
+// Integrations entry exists at all.
 it("points each disabled nav entry at its open parity owner", () => {
   const owners: Record<string, number> = {
     Triggers: 139,
-    Tables: 154,
   };
   const disabled = NAV_ENTRIES.filter((e) => !e.enabled);
   expect(disabled.map((e) => e.label).sort()).toEqual(Object.keys(owners).sort());
@@ -106,6 +106,8 @@ it("points each disabled nav entry at its open parity owner", () => {
     expect(html).not.toContain(`/issues/${closed}"`);
   }
   expect(NAV_ENTRIES.find((e) => e.label === "Integrations")).toBeUndefined();
+  // Tables shipped its UI in #556: enabled and routed, not disabled.
+  expect(NAV_ENTRIES.find((e) => e.label === "Tables")).toMatchObject({ enabled: true, to: "/tables" });
 });
 
 // UX-01c (issue #176): disabled entries stay honestly grayed out AND

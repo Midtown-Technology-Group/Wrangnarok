@@ -7,6 +7,12 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { renderToStaticMarkup } from "react-dom/server";
+import { act, create } from "react-test-renderer";
+import type { ReactTestRenderer } from "react-test-renderer";
+
+// Mounted interaction tests below need React's act environment flag;
+// the static-markup tests above never mount, so they do not.
+(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 import {
   batchDeleteTableRows,
   batchWriteTableRows,
@@ -194,4 +200,118 @@ it("grants and revokes owner access through the grants endpoint", async () => {
     { url: "/api/tables/notes/grants", method: "POST" },
     { url: "/api/tables/notes/grants", method: "DELETE" },
   ]);
+});
+
+// Mounted regression tests for the manual-refresh contract (issue #556
+// review): query-control edits must not fetch on their own, and Refresh
+// count must count even while Skip count is checked. react-test-renderer
+// mounts without a DOM, so these run in the same workerd suite.
+function mockTableRoutes(calls: string[], counted: number): void {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.endsWith("/api/tables/notes")) return Response.json({ table: TABLE });
+    if (url.includes("/count")) return Response.json({ total: counted });
+    return Response.json(ROWS);
+  });
+}
+
+function findButton(renderer: ReactTestRenderer, label: string) {
+  const found = renderer.root.findAllByType("button").find((entry) => entry.props.children === label);
+  if (!found) throw new Error(`Button "${label}" not found.`);
+  return found;
+}
+
+/** Flush in-flight fetch().json() chains: the page's handlers are
+ * fire-and-forget by design (buttons stay responsive), so tests wait out
+ * the workerd async I/O inside an open act scope instead of awaiting a
+ * return value the handler never exposes. */
+async function flushRequests(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
+}
+
+async function click(renderer: ReactTestRenderer, label: string): Promise<void> {
+  const button = findButton(renderer, label);
+  await act(async () => {
+    (button.props.onClick as () => void)();
+  });
+  await flushRequests();
+}
+
+it("issues zero fetches for query-control edits until Refresh is pressed", async () => {
+  const calls: string[] = [];
+  mockTableRoutes(calls, 7);
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(
+      <MemoryRouter initialEntries={["/tables/notes"]}>
+        <Routes>
+          <Route path="/tables/:name" element={<TableDetailView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  });
+  await flushRequests();
+  // Mount auto-loads once per table: detail plus the default rows query.
+  expect(calls).toHaveLength(2);
+  const root = renderer.root;
+  await act(async () => {
+    root.findByProps({ id: "rows-filter" }).props.onChange({ target: { value: 'title="hello"' } });
+  });
+  await act(async () => {
+    root.findByProps({ id: "rows-prefix" }).props.onChange({ target: { value: "a" } });
+  });
+  await act(async () => {
+    root.findByProps({ id: "rows-ids" }).props.onChange({ target: { value: "a, b" } });
+  });
+  await act(async () => {
+    root.findByProps({ id: "rows-limit" }).props.onChange({ target: { value: "10" } });
+  });
+  await act(async () => {
+    root.findByProps({ id: "rows-order" }).props.onChange({ target: { value: "desc" } });
+  });
+  await act(async () => {
+    root.findByProps({ id: "rows-skip" }).props.onChange({ target: { checked: true } });
+  });
+  expect(calls).toHaveLength(2);
+  await click(renderer, "Refresh");
+  expect(calls).toHaveLength(3);
+  const query = calls[2] ?? "";
+  expect(query.startsWith("/api/tables/notes/rows?")).toBe(true);
+  expect(query).toContain("filter=title%3D%22hello%22");
+  expect(query).toContain("prefix=a");
+  expect(query).toContain("document_ids=a");
+  expect(query).toContain("document_ids=b");
+  expect(query).toContain("order=desc");
+  expect(query).toContain("limit=10");
+  expect(query).toContain("skip_count=true");
+  renderer.unmount();
+});
+
+it("Refresh count counts even while Skip count is checked", async () => {
+  const calls: string[] = [];
+  mockTableRoutes(calls, 7);
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(
+      <MemoryRouter initialEntries={["/tables/notes"]}>
+        <Routes>
+          <Route path="/tables/:name" element={<TableDetailView initial={TABLE} initialRows={ROWS} />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  });
+  expect(calls).toHaveLength(0);
+  await act(async () => {
+    renderer?.root.findByProps({ id: "rows-skip" }).props.onChange({ target: { checked: true } });
+  });
+  expect(calls).toHaveLength(0);
+  await click(renderer, "Refresh count");
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.startsWith("/api/tables/notes/count?")).toBe(true);
+  expect(calls[0]).not.toContain("skip_count=true");
+  expect(JSON.stringify(renderer.toJSON())).toContain("Count refreshed: 7 matching rows.");
+  renderer.unmount();
 });
