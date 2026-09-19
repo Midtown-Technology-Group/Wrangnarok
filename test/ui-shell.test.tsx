@@ -77,12 +77,12 @@ it("marks unported nav entries disabled and links each tracking issue", () => {
 // UX-01 slice 1 (issue #176): each disabled nav entry must name its actual
 // OPEN parity owner — never a closed scaffolding issue (#15/#16/#18, all
 // CLOSED) and never #160 (APP-02, closed since the UX-01c retarget). Tables
-// -> #154 TABLE-02, Triggers -> #139 TRG-03 (only open trigger issue). The
-// Integrations family is served by the enabled Connections page, so no
-// disabled Integrations entry exists at all.
+// -> #154 TABLE-02. Triggers shipped as an enabled page (issue #557), so it
+// no longer belongs in the disabled set. The Integrations family is served
+// by the enabled Connections page, so no disabled Integrations entry exists
+// at all.
 it("points each disabled nav entry at its open parity owner", () => {
   const owners: Record<string, number> = {
-    Triggers: 139,
     Tables: 154,
   };
   const disabled = NAV_ENTRIES.filter((e) => !e.enabled);
@@ -130,6 +130,21 @@ it("renders disabled nav entries with label, disabled state, and keyboard-reacha
     expect(html).toContain(`aria-label="${entry.label} tracking issue"`);
     expect(html).not.toContain(`href="${liveUrl}" tabindex="-1"`);
   }
+});
+
+// Issue #557: Triggers is a usable management area over the existing
+// /api/schedules, /api/event-sources, and /api/endpoints routes — an enabled
+// nav entry at /triggers, not a disabled soon-marker.
+it("enables the Triggers nav entry at /triggers", () => {
+  const triggers = NAV_ENTRIES.find((entry) => entry.label === "Triggers");
+  expect(triggers?.enabled).toBe(true);
+  expect(triggers?.to).toBe("/triggers");
+  const html = renderToStaticMarkup(
+    <MemoryRouter>
+      <Nav />
+    </MemoryRouter>,
+  );
+  expect(html).toContain("/triggers");
 });
 
 it("enables the Dashboard nav entry at /dashboard", () => {
