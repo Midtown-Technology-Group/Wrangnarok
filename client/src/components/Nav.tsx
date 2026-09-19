@@ -2,8 +2,6 @@
 import { Link, NavLink } from "react-router-dom";
 import type { BrandingView } from "../lib/client-types";
 
-const REPO = "https://github.com/Midtown-Technology-Group/Wrangnarok";
-
 export interface NavEntry {
   label: string;
   to?: string;
@@ -82,9 +80,9 @@ export const NAV_ENTRIES: NavEntry[] = [
   },
   {
     label: "Triggers",
-    enabled: false,
-    issue: `${REPO}/issues/139`,
-    phase: "Phase 2 / Phase 4",
+    to: "/triggers",
+    enabled: true,
+    phase: "Phase 2 / Phase 4 (#557)",
   },
   {
     label: "Artifacts",
