@@ -6,17 +6,19 @@ Parity means equivalent supported user/operator capabilities with explicit TypeS
 
 Status vocabulary: **Implemented** (shipped locally), **Partial** (materially narrower), **Missing** (absent), **Gated** (blocked on an explicit security/cost decision). **Adopt/Adapt are intent, not completion claims.**
 
+**Status authority (issue #132 repair): the top capability table below is the single current-state authority for every parity ID.** Detail sections and owner issue bodies are evidence/history, not independent status stores: when they disagree with the table, the table wins and the disagreement is a repair defect. `scripts/check-parity-ledger.mjs` enforces this in CI (headline totals recomputed, per-ID table-vs-detail agreement, Existing-issue column pointing at the canonical owner).
+
 Upstream tests are evidence of intended assertions, not passing-test claims. Upstream sources were inspected, not executed; no upstream production instance was used.
 
-Total: 47 capability rows — 5 Implemented, 1 Complete (pending review), 30 Partial, 10 Missing, 1 Gated.
+Total: 47 capability rows — 6 Implemented, 1 Complete (pending review), 31 Partial, 8 Missing, 1 Gated.
 
 | ID | Title | Phase | Status | Depends | Existing issue |
 | --- | --- | --- | --- | --- | --- |
-| RUN-01 | Persist and enforce per-Saga runtime policy without changing source identity | 2 | Partial | AUTH-02 | new |
-| RUN-02 | Invoke child Sagas with explicit context, completion and failure semantics | 2 | Missing | AUTH-02, RUN-01 | new |
-| TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented (gaps reopened, see #137) | AUTH-02, RUN-01 | #137 |
+| RUN-01 | Persist and enforce per-Saga runtime policy without changing source identity | 2 | Implemented (see detail; #135 reopened 2026-09-16 for timeout-lifetime drift) | AUTH-02 | #135 |
+| RUN-02 | Invoke child Sagas with explicit context, completion and failure semantics | 2 | Partial (see detail; #136 closed) | AUTH-02, RUN-01 | #136 |
+| TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented (see detail; #137 closed, #436 closed) | AUTH-02, RUN-01 | #137 |
 | TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01, AUTH-03, CON-01 | #138 |
-| TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Partial | TRG-01, TRG-02, AUTH-02 | new |
+| TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Partial | TRG-01, TRG-02, AUTH-02 | #139 |
 | DEV-01 | Provide a complete typed TypeScript author and automation SDK | 1+4 | Partial | — | new |
 | DEV-02 | Preview, sync and deploy author source with explicit dependency compatibility | 5 | Partial | DEV-01, SOL-01 | new |
 | AUTH-01 | Replace the single-org allowlist with Organization and user lifecycle management | 3 | Partial | — | new |
@@ -51,10 +53,10 @@ Total: 47 capability rows — 5 Implemented, 1 Complete (pending review), 30 Par
 | AI-04 | Review, evaluate and tune agents without replaying real side effects | 6 | Missing | AI-02, AI-03, OPS-01 | new |
 | AI-05 | Store and retrieve permission-scoped knowledge with explicit reindex lifecycle | 6 | Missing | AI-01, AUTH-02, FILE-01 | new |
 | AI-06 | Provide consent-controlled personal memory and composed required instructions | 6 | Missing | AI-05, AUTH-02 | new |
-| TOOL-01 | Expose opt-in Saga tools and an authorized inbound MCP gateway | 6 | Missing | AUTH-03, DEV-01, SEC-01 | new |
+| TOOL-01 | Expose opt-in Saga tools and an authorized inbound MCP gateway | 6 | Partial (see detail; #170 closed) | AUTH-03, DEV-01, SEC-01 | #170 |
 | TOOL-02 | Connect external MCP servers with org tools and per-user consent | 6 | Missing | TOOL-01, OAUTH-01, AI-02 | new |
 | OPS-01 | Provide administrative audit trails and user-visible operational notifications | 4 | Partial | AUTH-02, SEC-01, OBS-02 | #172 |
-| OPS-02 | Expose Cloudflare-native diagnostics, operational jobs and repair workflows | 4 | Partial | OBS-01, OPS-01, TRG-01 | new |
+| OPS-02 | Expose Cloudflare-native diagnostics, operational jobs and repair workflows | 4 | Partial | OBS-01, OPS-01, TRG-01 | #173 |
 | OPS-03 | Export and restore operational data with explicit encrypted-backup boundaries | 5 | Missing | SOL-03, TABLE-02, FILE-02, CON-02, SEC-01 | new |
 | OPS-04 | Report scoped usage, model costs and automation ROI | 4+6 | Missing | AUTH-02, AI-01, OPS-01 | new |
 | UX-01 | Provide configurable branding, user profiles and discoverable platform administration | 4 | Partial | AUTH-01, FILE-01 | new |
@@ -65,6 +67,8 @@ Total: 47 capability rows — 5 Implemented, 1 Complete (pending review), 30 Par
 Phase 2; **Implemented**; existing issue: #135
 
 Local status: Per-Saga runtime policy persists as org-scoped rows (migration 0012) with applied-policy snapshots on every Execution (ADR 018). Operator inspect/change rides GET/PUT /api/sagas/:id/policy on the AUTH-01 membership gate (admin-only writes); the typed SDK (getSagaPolicy/updateSagaPolicy), the CLI (saga-policy/saga-policy-set), and ExecutionDetail all expose it. The behavioral matrix (timeout 0/default/custom, engine-loss-only retry ceilings, business-error non-retry, pause/admission, CompletedWithErrors-as-Failed, Stuck-as-Running-until-cancel, stale fencing, crash/recovery) is proven by test/runtime-policy.test.ts on local Workflows/D1. Slice C (issue #135) proves lost-runtime-history convergence there too: terminal Execution detail converges from authoritative D1 with advisory `runtimeStatus: null` when native Workflow history/status is missing, preserving idempotency, cancel, and stale-completion fences.
+
+Drift follow-through (2026-09-16, owner #135 reopened): upstream `ca669e8` / PR #771 keeps the execution-scoped engine credential alive for the engine's long-wait window so `timeout_seconds=0` means no workflow timeout; the local `vendorTimeoutMs=0 => Integration default` dimension is a different timeout dimension and does not by itself prove this execution-lifetime invariant. Tracked on the reopened owner; the shipped scope above stands, so the table status stays Implemented with this caveat (closure is not the authority — the evidence above is).
 
 Depends: AUTH-02
 
@@ -87,9 +91,9 @@ Related Wrangnarok issues: #15, #16, #75, #76
 
 ## RUN-02: Invoke child Sagas with explicit context, completion and failure semantics
 
-Phase 2; **Missing**; existing issue: new
+Phase 2; **Partial**; existing issue: #136
 
-Local status: SagaStep exposes do/sleep only. There is no public nested invocation SDK or parent-child execution contract.
+Local status: Nested invocation ships as the remote-registered shape only (issue #136, ADR 039, ADR 043, `src/children.ts`): a parent reserves a child Execution row with lineage, dispatches it through the standard submit protocol under the same Idempotency-Key, gets back a queued receipt, and polls the child D1 row to terminal for the typed JSON result. Context inherits org/user from the parent row (foreign-org children unconstructable); dispatch re-resolves the parent principal through AUTH-02 and requires the child execute grant; child Failed/TimedOut/Cancelled yields `CHILD_FAILED` (never fabricated parent success); deterministic child IDs converge step retries and duplicate dispatches. Proven by `test/child-invocation.test.ts` (duplicate dispatch, parent cancel, child timeout) on real local bindings. Explicitly deferred per ADR 039 (retain until verified): cross-org invocation, role-gated child visibility (AUTH-02), bounded synchronous HTTP submit (RUN-03), `CompletedWithErrors`. No inline function-import path and no process-pool infrastructure by design.
 
 Depends: AUTH-02, RUN-01
 
@@ -113,7 +117,7 @@ Phase 2; **Implemented (with follow-through tracked on #436 — see caveat below
 
 Local status: Schedules ship as persisted environment state (migration 0016, `src/schedules.ts`, ADR 012 accepted): one org-scoped row binds a name to a stable Saga UUID plus cadence, timezone, enablement, input, and run-as policy. A minute Cloudflare Cron Trigger (the only Cron trigger; `test/timeout-sweeper.test.ts` tripwire pins it) promotes due rows through the standard submit protocol with deterministic `sch-` schedule-window keys. Operator create/preview/disable/delete ride the AUTH-01 membership gate (writes admin-only); run-as always resolves to the creating caller, never caller-supplied identity. Pre-dispatch fence: `promoteWindow` re-reads the row by id immediately before submit (a post-scan disable/delete wins the race as a skip with zero dispatch) and revalidates the run-as owner through request-path lifecycle semantics (disabled org/user, non-active membership fail closed; an unattended tick never activates membership). Delivery visibility maps windows to Executions. `Scheduled` is removed as an Execution state by #436 (explicit adaptation recorded here): promotion writes Pending rows, and no union member, transition, history filter, badge, or SDK descriptor names a Scheduled state.
 
-Follow-through caveat (2026-09-17, issue #436 — parent #137 is closed): (1) store/tick failures are fail-silent — `loadSchedule`/`listSchedules`/due-scan catches convert D1 faults to not-found/empty/nothing-due, and `scheduled()` swallows promotion errors, so a due window can miss a tick with no failed-Cron signal; (2) the SDK contract advertises id-based schedule routes (`GET /api/schedules/:id`, `:id/preview`, `:id/disable|enable`, `DELETE /api/schedules/:id`, `POST /api/schedules/executions/:id/cancel`) the Worker router does not implement (shipped surface is name-based); (3) resolved by #436 — the dead public `Scheduled` execution status (union, transition, history filter, UI badge, SDK descriptor wording) is removed with no migration (the D1 CHECK never admitted it); (4) resolved by #436 — the LAB bootstrap reuses the canonical migration 0016 DDL verbatim (columns, enums, indexes, UNIQUE(org_id,name), plus schedule_deliveries), proven by `test/schedule-schema-converge.test.ts` on both the ordinary migrated D1 and the LAB-fixture path. Core create/promote/cancel/disable flows are proven (24/24 schedule suites plus the convergence regression); the gaps above are owned follow-through on #436.
+Follow-through caveat (2026-09-17, issue #436 — parent #137 is closed, #436 closed 2026-09-17): (1) store/tick failures are fail-silent — `loadSchedule`/`listSchedules`/due-scan catches convert D1 faults to not-found/empty/nothing-due, and `scheduled()` swallows promotion errors, so a due window can miss a tick with no failed-Cron signal; (2) the SDK contract advertises id-based schedule routes (`GET /api/schedules/:id`, `:id/preview`, `:id/disable|enable`, `DELETE /api/schedules/:id`, `POST /api/schedules/executions/:id/cancel`) the Worker router does not implement (shipped surface is name-based); (3) resolved by #436 — the dead public `Scheduled` execution status (union, transition, history filter, UI badge, SDK descriptor wording) is removed with no migration (the D1 CHECK never admitted it); (4) resolved by #436 — the LAB bootstrap reuses the canonical migration 0016 DDL verbatim (columns, enums, indexes, UNIQUE(org_id,name), plus schedule_deliveries), proven by `test/schedule-schema-converge.test.ts` on both the ordinary migrated D1 and the LAB-fixture path. Core create/promote/cancel/disable flows are proven (24/24 schedule suites plus the convergence regression); (1)(2) remain documented here as residual TRG-01 follow-through.
 
 Depends: AUTH-02, RUN-01
 
@@ -165,7 +169,7 @@ Related Wrangnarok issues: #76
 
 ## TRG-03: Deliver topic and built-in events through scoped subscriptions with replay visibility
 
-Phase 4; **Partial**; existing issue: new
+Phase 4; **Partial**; existing issue: #139
 
 Local status: S1 ships the org-scoped event-source registry plus the typed append-only event log (migration 0030, `src/events.ts`): deterministic (source, event) identity with same-content replay and 409 on mismatched content, operator emit/list, disable fencing, and best-effort delivery appends from schedule promotion and endpoint delivery. S2 (issue #139, migration 0033) adds scoped subscriptions binding topic filters (exact or trailing-`.*` namespace) to a target Saga with bounded fan-out through the standard submit protocol: exact-org rows in name order, stable `evt-` delivery keys, per-subscriber disable/delete fencing plus pre-dispatch authority revalidation through the canonical resolver/grant path, an explicit per-event admission bound (10 dispatches, overflow reported, never silently dropped), and per-subscription delivery receipts. S3a (issue #139) ships operator retry/replay over the same receipt rows with no new DDL: a derived failed set (log minus receipts) with `?outcome=delivered|failed|all` listing, single-event retry through the shared submit-protocol dispatch with identical `evt-` keys (first retry creates the Execution, duplicates converge), dispatch-time authority revalidation (disabled/deleted/revoked fail closed), cross-org 404 posture, and the per-event 10-dispatch bound honored on replay. S3b (issue #139) ships built-in platform emissions plus the retention/admission posture with no new DDL, route, or primitive: an operator-opt-in `platform` topic source receives `platform.schedule.delivered` per promotion and `platform.webhook.delivered` per endpoint delivery (deterministic `plat-` IDs, descriptive attribution payloads, same-path bounded fan-out, best-effort silence when unregistered/disabled), and ADR 012 records the admission bounds (10 dispatches/event, 50-row newest-first reads, 4 KiB payloads) with deliberate no-purge retention (operator DELETE reclaims; no sweeper by steward-gate design). Remaining deferral: execution-lifecycle topics (no fetch-context terminal hook; a polling emitter would be sweeper-shaped — see ADR 012 S3b). Worker + Workflows + D1 only; no Queue/DO.
 
@@ -1072,7 +1076,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase 1; **Partial**; existing issue: #119
 
-Local status: hello Saga and native local test are already present; #119 remains open and broader workspace migration is not proven.
+Local status: hello Saga and native local test are already present; #119 is closed (M4 pilot verified 2026-09-14) and broader workspace migration is not proven.
 
 Depends: none
 
@@ -1242,9 +1246,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## TOOL-01: Expose opt-in Saga tools and an authorized inbound MCP gateway
 
-Phase 6; **Missing**; existing issue: new
+Phase 6; **Partial**; existing issue: #170
 
-Local status: No tool registry or MCP server exists. The static Saga catalog does not imply tool exposure.
+Local status: Tool slices ship on Worker + D1 (issue #170, ADR 022): the opt-in tool registry (`src/tools.ts`, migration 0024 `tool_enrollments` — a Saga becomes a tool only through an explicit enrollment row, so the static Saga catalog never implies tool exposure, and discovery/execution share one gate); the authorized inbound MCP gateway (`src/mcp*.ts`); OpenAPI/Code Mode (`src/openapi.ts`, including the Halo host token-exchange contract below). Proven by `test/tool-01-tools.test.ts`, `test/tool-01-mcp.test.ts`, `test/tool-01-openapi.test.ts`, and `test/tool-01-halo-proof.test.ts` on real local bindings. Explicitly deferred (retain until verified): per-agent native tool surfaces and AI-02 agent composition over these tools, which is why the owner closure still reads Partial, not Implemented or complete.
 
 Halo Code Mode auth (issue #170, landed incrementally on main): the Halo host exchanges the deployment pair at the Connection endpoint origin's `/auth/token` (OAuth2 client-credentials via the shared OAUTH-01 primitive) and sends only the returned access token as the Bearer credential — never the `clientId:clientSecret` pseudo-Bearer. The shared generator emitter copies the same contract with explicit per-provider `tokenPath`/`scope`/`timeoutMs` options, and the vendor harness models the token endpoint (validates the pair, issues a sentinel token, rejects raw-pair resource calls).
 
@@ -1458,3 +1462,7 @@ Upstream evidence (paths relative to upstream repo root):
 - `api/src/routers/packages.py`
 
 Related Wrangnarok issues: #77, #78
+
+## Checkpoint outcomes
+
+Slot reserved per `docs/architecture/000-steward-checklist.md`: the steward records each simplicity-checkpoint verdict here (or as a comment on the umbrella issue #132). No outcome recorded on this repair lane — slot only.

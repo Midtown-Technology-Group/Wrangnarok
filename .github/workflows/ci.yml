@@ -127,6 +127,12 @@ jobs:
           # docs/architecture/adr-index.md is the number ledger.
           node scripts/check-adr-numbers.mjs
           node scripts/check-adr-numbers.mjs --selftest
+          # Parity ledger is single-authority (issue #132): the top table in
+          # docs/upstream-parity.md owns every row status, the headline
+          # totals recompute from the table, and each detail section plus
+          # the Existing-issue column must agree with it. Fail-closed.
+          node scripts/check-parity-ledger.mjs
+          node scripts/check-parity-ledger.mjs --selftest
           # Migration numbers are steward-reserved (issue #528): every
           # migrations/NNNN_*.sql must have a matching Landed ledger row,
           # and newly added files must consume a merge-base Reserved row
