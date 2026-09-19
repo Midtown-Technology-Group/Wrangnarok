@@ -127,6 +127,14 @@ jobs:
           # docs/architecture/adr-index.md is the number ledger.
           node scripts/check-adr-numbers.mjs
           node scripts/check-adr-numbers.mjs --selftest
+          # Migration numbers are steward-reserved (issue #528): every
+          # migrations/NNNN_*.sql must have a matching Landed ledger row,
+          # and newly added files must consume a merge-base Reserved row
+          # for the same lane/issue (or a steward-signed Override row).
+          # Fail-closed: the ledger↔filesystem bijection plus reservation
+          # provenance are both enforced.
+          node scripts/check-migration-numbers.mjs
+          node scripts/check-migration-numbers.mjs --selftest
 
       # Temp-dir roundtrip of the file-based mailbox bridge (alias, send,
       # read, reply correlation). No credentials, no network, no live store.

@@ -8,7 +8,7 @@
 // - the file H1 must be `# ADR NNN: <title>` matching the filename prefix;
 // - the index table must list every numbered file with matching number,
 //   filename, and title, and declare Next free as max(number)+1.
-import { readdirSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,9 +27,15 @@ function parseIndex(text) {
   return { nextFree, rows };
 }
 
-function checkTree(dir, indexText) {
+const SENTINEL = "000-steward-checklist.md";
+
+function checkTree(dir, indexText, opts = {}) {
   const errors = [];
-  // 000-* is reserved steward tooling (checklist), not an ADR.
+  // 000-* is reserved steward tooling (checklist), not an ADR. The sentinel
+  // itself must exist: deleting or renaming it fails closed (issue #520).
+  if (!opts.skipSentinel && !existsSync(join(dir, SENTINEL))) {
+    errors.push(`missing ADR governance sentinel: ${SENTINEL} (see issue #520)`);
+  }
   const files = readdirSync(dir)
     .filter((f) => /^\d{3}-.+\.md$/.test(f) && !f.startsWith("000-"))
     .sort();
@@ -78,6 +84,18 @@ function checkTree(dir, indexText) {
       errors.push(`index: Next free ${nextFree} != max ADR ${String(max).padStart(3, "0")} + 1`);
     }
   }
+  // Assigned ADR headings must live in numeric files (issue #520): a
+  // TBD-*.md (or any other non-numeric doc) carrying `# ADR 012: ...`
+  // fails closed. Digit-scoped, so `# ADR TBD:` and `# ADR index` H1s pass.
+  const others = readdirSync(dir)
+    .filter((f) => f.endsWith(".md") && !/^\d{3}-.+\.md$/.test(f))
+    .sort();
+  for (const f of others) {
+    const firstLine = (readFileSync(join(dir, f), "utf8").split("\n")[0] ?? "").trim();
+    if (/^# ADR \d{3}(?::|\b)/.test(firstLine)) {
+      errors.push(`assigned ADR uses a non-numeric filename: ${f} (see issue #520)`);
+    }
+  }
   return errors;
 }
 
@@ -88,11 +106,15 @@ if (process.argv.includes("--selftest")) {
     if (!cond) throw new Error(`check-adr-numbers selftest failed: ${name}`);
     passed += 1;
   };
-  const fixture = (files, indexText) => {
+  // Fixture dirs carry no sentinel file, so the pre-existing cases opt
+  // out of the sentinel assertion (issue #520); dedicated fixtures below
+  // exercise it with default options.
+  const NO_SENTINEL = { skipSentinel: true };
+  const fixture = (files, indexText, opts = NO_SENTINEL) => {
     const dir = mkdtempSync(join(tmpdir(), "adr-"));
     try {
       for (const [name, h1] of files) writeFileSync(join(dir, name), `${h1}\n\nbody\n`);
-      return checkTree(dir, indexText);
+      return checkTree(dir, indexText, opts);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -169,6 +191,54 @@ if (process.argv.includes("--selftest")) {
   check(
     "wrong next-free fails",
     next.some((e) => e.includes("Next free")),
+  );
+  const nonNumeric = fixture(
+    [...good, ["TBD-sneaky.md", "# ADR 012: Sneaky"]],
+    idx("035", [
+      ["015", "015-form-binding.md", "Forms"],
+      ["034", "034-org-lifecycle.md", "Orgs"],
+    ]),
+  );
+  check(
+    "numbered H1 in non-numeric file fails",
+    nonNumeric.some((e) => e.includes("assigned ADR uses a non-numeric filename: TBD-sneaky.md")),
+  );
+  check(
+    "TBD and index H1s pass",
+    fixture(
+      [
+        ...good,
+        ["TBD-future.md", "# ADR TBD: Future"],
+        ["adr-index.md", "# ADR index and number ledger"],
+        ["worker-authority-boundaries.md", "# ADR TBD: Split Workers by authority boundary"],
+      ],
+      idx("035", [
+        ["015", "015-form-binding.md", "Forms"],
+        ["034", "034-org-lifecycle.md", "Orgs"],
+      ]),
+    ).length === 0,
+  );
+  check(
+    "missing sentinel fails",
+    fixture(
+      good,
+      idx("035", [
+        ["015", "015-form-binding.md", "Forms"],
+        ["034", "034-org-lifecycle.md", "Orgs"],
+      ]),
+      {},
+    ).some((e) => e.includes("missing ADR governance sentinel")),
+  );
+  check(
+    "present sentinel passes",
+    fixture(
+      [...good, [SENTINEL, "# Steward checklist"]],
+      idx("035", [
+        ["015", "015-form-binding.md", "Forms"],
+        ["034", "034-org-lifecycle.md", "Orgs"],
+      ]),
+      {},
+    ).length === 0,
   );
   console.log(`check-adr-numbers selftest: ${passed} passed.`);
   process.exit(0);

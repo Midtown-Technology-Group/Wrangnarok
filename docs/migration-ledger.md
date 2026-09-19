@@ -6,6 +6,13 @@ Wrangler applies `migrations/*.sql` in filename order, so a collision means
 ambiguous schema. Tests import migrations by explicit filename, so a rename
 must update every importing test in the same commit.
 
+Reservation workflow (enforced by `scripts/check-migration-numbers.mjs`):
+1. Lane requests a number from the steward before writing any DDL.
+2. Steward lands a `Reserved` row for that lane/issue on main.
+3. Lane writes `migrations/NNNN_*.sql` using only the reserved number.
+4. The same PR moves the `Reserved` row to `Landed` (number+filename match).
+5. CI fails closed on unreserved, mismatched-owner, or ledger-drift numbers.
+
 ## Landed on main
 
 | Number | File                            | Owner   | Content                              |
@@ -46,7 +53,10 @@ must update every importing test in the same commit.
 | 0035   | 0035_embeds.sql                   | EMBED-01 | form_embeds: signed form-embed grants (secret digest, exact-match origins, capability fingerprint, enable/expiry) (issue #156, slice 1) |
 | 0036   | 0036_anon_app_embeds.sql          | EMBED-01 | app_embeds: signed app-embed grants (secret digest, exact-match origins, deployment fingerprint, enable/expiry) + form_publications: anonymous publication (honeypot field, capability fingerprint, enable) (issue #156, slice 2) |
 | 0037   | 0037_executions_org_fk_drop.sql   | #493     | drop reintroduced executions org FK (issue #493): 0008-pattern rebuild without REFERENCES organizations(id), carrying policy_json + parent_execution_id/parent_step |
+| 0038   | 0038_capability_resolution.sql      | #262     | capability assignments + external entity mappings (issue #262, PR #515; grandfathered per #528, no renumber) |
+| 0039   | 0039_org_roles.sql                  | AUTH-02  | narrow org-role profile, member rows migrate to operator (issue #143; grandfathered per #528, no renumber) |
 | 0040   | 0040_session_uploads.sql            | EMBED-01 | form_session_uploads: session-owned upload claims (session hash, org, location, path, field, size/type bounds) for external form sessions (issue #156, slice 3) |
+| 0041   | 0041_mcp_external.sql               | TOOL-02  | external MCP servers, org tools, per-user consent, secret envelopes (issue #171, PR #534; grandfathered per #528, no renumber) |
 
 ## Stuck-database recovery (codex findings #381, #367-371)
 
@@ -111,3 +121,13 @@ repair, not from re-applying the renamed files.
 Rule: a lane renames its migration file to the reserved number, updates its
 test imports, and runs the full gate before opening its PR. The ledger is
 updated in the same PR that lands the migration.
+
+## Overrides (break-glass, steward-signed only)
+
+An urgent repair migration may land without a prior `Reserved` row only when
+this table carries a row for its number with a reason and a steward sign-off
+ref, and the consuming PR repeats the reason in a trailer. "Next free" prose
+in the PR body is not an override. No override rows are currently active.
+
+| Number | Issue | Reason | Steward sign-off |
+| ------ | ----- | ------ | ---------------- |
