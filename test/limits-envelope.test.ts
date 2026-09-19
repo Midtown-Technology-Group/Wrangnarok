@@ -82,4 +82,17 @@ describe("feasibility envelope (LIMITS-01)", () => {
   it("never lets unrelated green tests count as parity", () => {
     required(/green unrelated tests never count as parity/i, "parity-counting rule");
   });
+
+  it("names the current 64 MiB uncompressed Worker cap (no stale 3 MB hard cap)", () => {
+    // Reconciled 2026-09-19 (issue #177): Cloudflare Workers platform limits
+    // (2026-09-04 revision) enforce 64 MiB uncompressed on both plans with no
+    // compressed-size limit. The 730 KiB soft reference stays advisory.
+    required(/64\s?MiB\s+uncompressed/i, "64 MiB uncompressed provider cap");
+    required(/730\s?KiB/i, "730 KiB advisory soft reference");
+    expect(envelope, "stale 3 MB hard-cap claim").not.toMatch(/3\s?MB\s+(max|provider|hard)/i);
+    expect(budgetScript, "budget script still cites a stale 3 MB ceiling").not.toMatch(
+      /Cloudflare's 3 MB hard deploy ceiling/,
+    );
+    expect(budgetScript).toMatch(/64 MiB uncompressed/);
+  });
 });

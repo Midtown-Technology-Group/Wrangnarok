@@ -100,7 +100,7 @@ D1 recovery features are a safety net, not a substitute for compatible migration
 
 Per the owner-approved policy decision (issue #177), the repository Worker bundle budget is advisory, not a merge gate. `npm run check:bundle` stays in PR CI as an observational check: the script measures the exact bundle `wrangler deploy --dry-run --env dev --outfile` produces (no CLI output parsing), prints bytes, headroom, and prominent warnings against the 730 KiB soft reference level and the 8 KiB advisory reserve, and always exits zero for soft-threshold conditions (over the reference, low reserve, or stale `LIMITS-META` bookkeeping).
 
-Only a real build/dry-run error, a malformed script invocation, or an inability to obtain the artifact fails the run. Cloudflare Free viability and the provider 3 MB hard deploy ceiling stay truthful — Wrangler itself enforces deployment validity, so CI invents no local duplicate hard cap. When the advisory reference trips, shrink the bundle first; record reference-level changes deliberately with the reason noted.
+Only a real build/dry-run error, a malformed script invocation, or an inability to obtain the artifact fails the run. Cloudflare Free viability and the provider 64 MiB uncompressed hard deploy ceiling (2026-09-04 revision, both plans) stay truthful — Wrangler itself enforces deployment validity, so CI invents no local duplicate hard cap. When the advisory reference trips, shrink the bundle first; record reference-level changes deliberately with the reason noted.
 
 ### Observability
 

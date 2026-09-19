@@ -1,0 +1,12 @@
+# LIMITS-01 provider-number reconcile (issue #177, lane/177-limits-reconcile).
+# Docs-only: reconcile every stale "3 MB max (Paid: 10 MB)" Worker hard-cap
+# claim to Cloudflare's 2026-09-04 64 MiB uncompressed limit (both plans).
+# The 730 KiB advisory soft reference is unchanged. No production code,
+# binding, primitive, budget-policy, deployment, or product change.
+docs/feasibility-envelope.md
+docs/architecture/042-frontend-split-decision.md
+docs/architecture/004-ci-cd.md
+docs/architecture/000-steward-checklist.md
+scripts/check-bundle-budget.mjs
+test/limits-envelope.test.ts
+scopes/limits-177-reconcile.scope

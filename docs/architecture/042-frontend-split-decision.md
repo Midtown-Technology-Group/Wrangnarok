@@ -41,8 +41,10 @@ Scout evidence (all measured, not estimated):
    `run_worker_first: ["/api/*"]`. A client-only marker (`wrangnarok.token`)
    occurs 0 times in `worker.js`. A frontend split would therefore save
    **~0 Worker script bytes**.
-4. **The binding constraint is self-imposed.** 896,928 B is **~28.5% of the
-   3 MB provider hard cap** (repo-pinned envelope, `docs/feasibility-envelope.md`).
+4. **The binding constraint is self-imposed.** 896,928 B is **~1.3% of the
+   64 MiB uncompressed provider cap** (both plans, per Cloudflare Workers
+   platform limits, 2026-09-04 revision; repo-pinned envelope,
+   `docs/feasibility-envelope.md`).
    What binds first is our own 730 KiB soft reference, by design. A split
    does not address the actual pressure, which is API/domain surface growth.
 5. **Split costs are real.** Today the app is same-origin: the Vite dev
@@ -99,7 +101,7 @@ or amended ADR per AGENTS.md (upstream-archaeology rule: every divergence
 from the single-deployment default must be explicit with Cloudflare-driven
 rationale):
 
-1. **Approaching the 3 MB provider cap from domain growth** — i.e. the hard
+1. **Approaching the 64 MiB uncompressed provider cap from domain growth** — i.e. the hard
    cap, not the soft reference, becomes the binding constraint after
    documented shrink-before-raise attempts, with metafile evidence that the
    remaining bytes are load-bearing execution code. (Raising the soft budget
@@ -120,6 +122,6 @@ proved the byte gain is zero.
 - Issue #177 — bundle-budget policy (730 KiB reference, warn-only overrun).
 - ADR 008 — single-Worker full-stack deployment (kept, not amended).
 - `docs/architecture/worker-authority-boundaries.md` — authorized split axis.
-- `docs/feasibility-envelope.md` — 3 MB provider cap, budget history.
+- `docs/feasibility-envelope.md` — 64 MiB uncompressed provider cap, budget history.
 - `scripts/check-bundle-budget.mjs` — mechanical budget gate and metafile
   attribution method.

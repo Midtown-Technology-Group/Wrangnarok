@@ -345,17 +345,28 @@ import { fileURLToPath } from "node:url";
 // forms 56091, sdk 45097, orgs 35516, ops 32643); 0 client/dist inputs, so
 // Static Assets still consume 0 Worker script bytes. Client JS 410492 B raw
 // / 112373 B gzip + 12315 B CSS. No new runtime dependencies. Provider hard
-// cap 3 MB holds ~2.07 MB of margin; the binding constraint stays our own
-// soft reference by design. Any reference raise stays a #177 policy decision
-// with shrink-before-raise first.
+// cap is 64 MiB uncompressed (corrected 2026-09-19 per the 2026-09-04
+// Workers limits revision; this entry originally read "3 MB holds ~2.07 MB
+// of margin" — true margin is ~63.1 MiB); the binding constraint stays our
+// own soft reference by design. Any reference raise stays a #177 policy
+// decision with shrink-before-raise first.
+// LIMITS-META measuredBytes only; BUDGET_BYTES/MIN_HEADROOM_BYTES untouched.
+// 2026-09-19 (LIMITS-01 reconcile, issue #177): provider figure corrected.
+// Prior margin notes above were computed against the stale "3 MB" reading;
+// per Cloudflare Workers platform limits (2026-09-04 revision) the cap is
+// 64 MiB uncompressed on both plans with no compressed-size limit, so the
+// 975852-byte bundle holds ~63.1 MiB of provider margin and the binding
+// constraint stays our own 730 KiB soft reference by design. Dated history
+// above is preserved as written; only the live reference below is corrected.
 // LIMITS-META measuredBytes only; BUDGET_BYTES/MIN_HEADROOM_BYTES untouched.
 const BUDGET_BYTES = 730 * 1024;
 // LIMITS-01 advisory reserve (issue #177, advisory per owner decision): the
 // reference level should exceed the measured bundle by at least this margin.
 // Landing inside the reference level but below this margin prints a
 // prominent warning; it never fails the run. BUDGET_BYTES stays a soft
-// reference, separate from Cloudflare's 3 MB hard deploy ceiling (which
-// Wrangler itself enforces) and from billing limits.
+// reference, separate from Cloudflare's 64 MiB uncompressed hard deploy
+// ceiling (2026-09-04 revision, both plans; Wrangler itself enforces) and
+// from billing limits.
 const MIN_HEADROOM_BYTES = 8 * 1024;
 
 // Bundle-attribution options (issue #438 latest audit, smallest reversible
