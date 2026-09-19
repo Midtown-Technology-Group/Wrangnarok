@@ -22,7 +22,10 @@ import {
   GROUPS_CAPABILITY,
   IDENTITY_CAPABILITY,
   MAIL_CAPABILITY,
+  cloudflareAuditSaga,
+  cloudflareInsightsSaga,
   cloudflareInventorySaga,
+  cloudflarePostureSaga,
   cloudflareVerifySaga,
   digestSaga,
   helloParentSaga,
@@ -32,7 +35,10 @@ import {
   ninjaLookupSaga,
   ninjaSaga,
   onboardingSaga,
+  parseCloudflareAuditInput,
+  parseCloudflareInsightsInput,
   parseCloudflareInventoryInput,
+  parseCloudflarePostureInput,
   parseCloudflareVerifyInput,
   parseDigestInput,
   parseHelloInput,
@@ -122,7 +128,7 @@ function helperParameterNames(fn: (...args: never[]) => unknown): string[] {
 
 describe("Saga authoring contract (issue #57)", () => {
   it("keeps all I/O and nondeterminism inside step.do() for every registered Saga", () => {
-    expect(SAGA_DEFINITIONS).toHaveLength(10);
+    expect(SAGA_DEFINITIONS).toHaveLength(13);
     for (const def of SAGA_DEFINITIONS) {
       expect(() => assertDeterministicRun(def.name, def.run)).not.toThrow();
     }
@@ -265,6 +271,112 @@ describe("Saga authoring contract (issue #57)", () => {
           zones: [],
         },
       },
+      "cloudflare-audit-logs": {
+        input: {
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          since: "2026-09-18",
+          limit: 10,
+          classes: ["token"],
+        },
+        output: {
+          status: "completed",
+          readOnly: true,
+          integration: "Cloudflare",
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          entryCount: 1,
+          totalAvailable: 1,
+          truncated: false,
+          apiCalls: 1,
+          classCounts: { token: 1 },
+          actorKindCounts: { human: 1 },
+          entries: [
+            {
+              id: "audit-1",
+              actionType: "tokens.create",
+              actionDescription: "API token created",
+              actionResult: "true",
+              occurredAt: "2026-09-18T00:00:00Z",
+              actorKind: "human",
+              actorEmail: "op@example.com",
+              actorTokenName: null,
+              resourceType: "api_token",
+              resourceScope: "account",
+              zoneId: null,
+              zoneName: null,
+              eventClass: "token",
+            },
+          ],
+        },
+      },
+      "cloudflare-security-insights": {
+        input: {
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          baseline: { recordedAt: null, acknowledgedCriticalIds: [], suppressions: [], zoneExpectations: {} },
+        },
+        output: {
+          status: "completed",
+          readOnly: true,
+          integration: "Cloudflare",
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          issueCount: 1,
+          totalAvailable: 1,
+          truncated: false,
+          apiCalls: 1,
+          severityCounts: { high: 1 },
+          unresolvedCriticalIds: [],
+          verdict: "advisory",
+          baselineRecordedAt: null,
+          issues: [
+            {
+              id: "insight-1",
+              name: "Weak cipher",
+              issueClass: "insecure_configuration",
+              issueType: "weak_authentication",
+              severity: "high",
+              dismissed: false,
+              zoneId: null,
+              zoneName: null,
+            },
+          ],
+        },
+      },
+      "cloudflare-posture-benchmark": {
+        input: {
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          maxZones: 10,
+          settings: ["ssl"],
+          baseline: { recordedAt: null, acknowledgedCriticalIds: [], suppressions: [], zoneExpectations: {} },
+        },
+        output: {
+          status: "completed",
+          readOnly: true,
+          integration: "Cloudflare",
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          verdict: "advisory",
+          apiCalls: 3,
+          checks: [
+            { id: "token-active", title: "API token is active", status: "pass", detail: "healthy", suppressed: false },
+          ],
+          manual: [
+            {
+              id: "global-api-key-non-use",
+              title: "Global API Key is not used",
+              status: "manual",
+              detail: "Manual review required.",
+              suppressed: false,
+            },
+          ],
+          deferred: [
+            {
+              id: "audit-visibility",
+              title: "Audit-log visibility exists",
+              status: "deferred",
+              detail: "Covered by the audit Saga.",
+              suppressed: false,
+            },
+          ],
+        },
+      },
     };
     for (const def of SAGA_DEFINITIONS) {
       const sample = samples[def.name];
@@ -387,7 +499,10 @@ describe("Saga authoring contract (issue #57)", () => {
   it("keeps definitions, domain constants, catalog, and manifest in agreement", () => {
     const byName = new Map(SAGA_DEFINITIONS.map((def) => [def.name, def]));
     expect([...byName.keys()].sort()).toEqual([
+      "cloudflare-audit-logs",
       "cloudflare-inventory-zones",
+      "cloudflare-posture-benchmark",
+      "cloudflare-security-insights",
       "cloudflare-verify-connection",
       "echo",
       "employee-onboarding",
@@ -408,6 +523,9 @@ describe("Saga authoring contract (issue #57)", () => {
       { stable: helloParentSaga, parse: parseHelloParentInput },
       { stable: cloudflareVerifySaga, parse: parseCloudflareVerifyInput },
       { stable: cloudflareInventorySaga, parse: parseCloudflareInventoryInput },
+      { stable: cloudflareAuditSaga, parse: parseCloudflareAuditInput },
+      { stable: cloudflareInsightsSaga, parse: parseCloudflareInsightsInput },
+      { stable: cloudflarePostureSaga, parse: parseCloudflarePostureInput },
       { stable: onboardingSaga, parse: parseOnboardingInput },
     ];
     for (const { stable, parse } of expected) {

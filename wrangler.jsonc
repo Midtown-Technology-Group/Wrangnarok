@@ -136,6 +136,21 @@
       "class_name": "CloudflareInventoryWorkflow",
     },
     {
+      "binding": "CLOUDFLARE_AUDIT_WORKFLOW",
+      "name": "wrangnarok-cloudflare-audit-v1",
+      "class_name": "CloudflareAuditWorkflow",
+    },
+    {
+      "binding": "CLOUDFLARE_INSIGHTS_WORKFLOW",
+      "name": "wrangnarok-cloudflare-insights-v1",
+      "class_name": "CloudflareInsightsWorkflow",
+    },
+    {
+      "binding": "CLOUDFLARE_POSTURE_WORKFLOW",
+      "name": "wrangnarok-cloudflare-posture-v1",
+      "class_name": "CloudflarePostureWorkflow",
+    },
+    {
       "binding": "ONBOARDING_WORKFLOW",
       "name": "wrangnarok-onboarding-v1",
       "class_name": "OnboardingWorkflow",
@@ -249,6 +264,21 @@
           "binding": "CLOUDFLARE_INVENTORY_WORKFLOW",
           "name": "wrangnarok-cloudflare-inventory-v1-dev",
           "class_name": "CloudflareInventoryWorkflow",
+        },
+        {
+          "binding": "CLOUDFLARE_AUDIT_WORKFLOW",
+          "name": "wrangnarok-cloudflare-audit-v1-dev",
+          "class_name": "CloudflareAuditWorkflow",
+        },
+        {
+          "binding": "CLOUDFLARE_INSIGHTS_WORKFLOW",
+          "name": "wrangnarok-cloudflare-insights-v1-dev",
+          "class_name": "CloudflareInsightsWorkflow",
+        },
+        {
+          "binding": "CLOUDFLARE_POSTURE_WORKFLOW",
+          "name": "wrangnarok-cloudflare-posture-v1-dev",
+          "class_name": "CloudflarePostureWorkflow",
         },
         {
           "binding": "ONBOARDING_WORKFLOW",

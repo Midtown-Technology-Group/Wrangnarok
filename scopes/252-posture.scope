@@ -1,0 +1,35 @@
+# 252-posture implementation lane scope (issue #252): Cloudflare account
+# posture S1-S3 — Audit Logs Saga, Security Insights Saga, benchmark-as-checks
+# (NOT Steampipe). Read-only Actions on the existing cloudflare Integration
+# plus three Saga definitions with full wiring (bindings, executions,
+# wrangler workflows, manifest, solution catalogs), posture docs + recorded
+# baseline + validator, weekly credential-free CI, focused tests. No new
+# Cloudflare primitive (Workflow bindings on the earned primitive); no D1
+# migration (findings live on ExecutionHistory); no secrets-path change
+# (single provider-global CLOUDFLARE_API_TOKEN per ADR 005); S4 Terraform
+# drift stays fenced OUT (no .tf, no IaC-authoritative set).
+scopes/252-posture.scope
+src/domain.ts
+src/saga.ts
+src/sagas/posture.ts
+src/sagas/definitions.ts
+src/sagas/index.ts
+src/sagas/shared.ts
+src/integrations/cloudflare.ts
+src/bindings.ts
+src/executions.ts
+src/index.ts
+src/solutions.ts
+src/solution-export.ts
+wrangler.jsonc
+sagas.manifest.json
+package.json
+docs/posture.md
+docs/posture/
+docs/posture/baseline.json
+scripts/validate-posture-baseline.mjs
+.github/workflows/posture.yml
+test/cloudflare-posture.test.ts
+test/saga-contract.test.ts
+test/saga-init-order.test.ts
+test/saga-helper-conventions.test.ts

@@ -32,6 +32,7 @@
     "mailbox": "node scripts/mailbox-cli.mjs",
     "check:bundle:selftest": "node scripts/check-bundle-budget.mjs --selftest",
     "mailbox:selftest": "node scripts/mailbox-cli.mjs selftest",
+    "posture:baseline": "node scripts/validate-posture-baseline.mjs",
     "preview:smoke": "node scripts/smoke-preview.mjs",
     "preview:smoke:selftest": "node scripts/smoke-preview.mjs selftest",
     "preview:token": "node scripts/mint-preview-token.mjs",
