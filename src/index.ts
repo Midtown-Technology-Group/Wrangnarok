@@ -467,6 +467,7 @@ import {
   updateProfile as updateUserProfile,
 } from "./profile";
 import { logRequest } from "./usage";
+import { getUsageSummary, parseUsageSummaryQuery } from "./usage-reports";
 export {
   CloudflareInventoryWorkflow,
   CloudflareVerifyWorkflow,
@@ -1719,6 +1720,9 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         url.pathname === "/api/ops/scheduled-tasks" ||
         url.pathname === "/api/ops/preflight" ||
         url.pathname === "/api/ops/connections");
+    // OPS-04 S1 (issue #175): the usage summary read takes ?saga= +
+    // ?startDate=/?endDate= through its own allowlisted parser below.
+    const usageSummaryQuery = request.method === "GET" && url.pathname === "/api/usage/summary";
     // FILE-02 artifact routes take their own allowlisted keys (upload
     // ?name=/?mime=, list ?limit=, binding ?scope=/?refId=); each route
     // validates its keys below.
@@ -1774,6 +1778,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       !openapiSearch &&
       !scheduleDeliveriesRead &&
       !subscriptionDeliveriesRead &&
+      !usageSummaryQuery &&
       !mcpQueryList
     )
       throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
@@ -3419,6 +3424,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       rejectQuery(url);
       await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
       return json({ status: "ok", database: "ok", worker: "ok", checkedAt: new Date().toISOString() });
+    }
+    if (url.pathname === "/api/usage/summary" && request.method === "GET") {
+      // OPS-04 S1 (issue #175): attributed usage summary over usage_blocks.
+      // Org-scoped by the resolved caller (AUTH-02 viewer-ceiling reads: any
+      // same-org member, including viewers, may read; there are no writes).
+      // Cross-org rows never aggregate: the membership gate above already
+      // failed strangers closed, and the summary binds executions.org_id.
+      return json({ usage: await getUsageSummary(env.DB, caller.orgId, parseUsageSummaryQuery(url.searchParams)) });
     }
     if (url.pathname === "/api/ops/metrics" && request.method === "GET") {
       // Upstream metrics.py maps to per-status Execution counts plus the
