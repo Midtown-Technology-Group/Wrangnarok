@@ -116,7 +116,7 @@ Every pull request deploys to one shared disposable preview Worker (`preview` en
 
 Design rules:
 
-- One shared preview Worker + one disposable preview D1, last-wins across PRs at experiment scale. Per-PR environments graduate only when contention demands it.
+- One shared preview Worker + one disposable preview D1 + both R2 buckets (`FILES`, `ARTIFACTS`), last-wins across PRs at experiment scale. Per-PR environments graduate only when contention demands it.
 - The preview D1 is disposable: smoke writes land under the disposable smoke Organization and test data is never promoted anywhere.
 - Fixture credentials are ephemeral per run: the workflow generates a random `LAB_TOKEN`, masks it, plants it with `wrangler secret put`, and smokes with it. The next run replaces it, so there is nothing to rotate on leak. Demo org/user IDs ship as committed non-secret `vars`, matching the local fixture pattern.
 - Without secrets (forks) the workflow skips gracefully; credential-free CI on the PR itself stays the merge gate.
@@ -128,7 +128,42 @@ Token lifecycle (least privilege, no dashboard clicking after bootstrap):
 3. Store the child as the `CLOUDFLARE_PREVIEW_TOKEN` GitHub Actions secret and the account ID as the `CLOUDFLARE_ACCOUNT_ID` variable, then delete the parent token (or keep it offline for rotation).
 4. Rotation = rerun the mint, update the secret, delete the old child. Real Integration/Connection credentials MUST NEVER take this path — preview secrets are fixture-only by construction.
 
-Human setup before the first preview run: `wrangler d1 create wrangnarok-preview`, paste its database ID over the placeholder in the `preview` env, complete the token lifecycle above. Until then `--env preview` commands fail closed.
+Human setup before the first preview run: `wrangler d1 create wrangnarok-preview`, paste its database ID over the placeholder in the `preview` env; `wrangler r2 bucket create wrangnarok-preview` and `wrangler r2 bucket create wrangnarok-artifacts-preview` (issue #227: preview binds both buckets like local/dev so the smoke artifact probe exercises real byte storage — no R2 API permission is needed on the CI token for this, bucket creation is a one-time human operator action); complete the token lifecycle above. Until then `--env preview` commands fail closed.
+
+### Deployment topology: preview vs dev vs future test (issue #251 Slice A)
+
+Three environments, one deployment mechanic (`wrangler --env` + `smoke-preview.mjs` + ephemeral token — no second deployment system):
+
+- `preview` — shared disposable PR smoke. One Worker + one D1 + both R2 buckets, deployed per PR by `.github/workflows/preview.yml`, smoked with `system.smoke` plus the artifact byte probe (issue #227). Last-wins across PRs at experiment scale; smoke writes land under the disposable smoke Organization and nothing promotes anywhere. On failure the workflow preserves `deploy.log`, the smoke log, and the `/api/usage/summary` block as a `preview-diagnostics` CI artifact (7-day retention).
+- `dev` — stable smoke target. Own Worker name, D1, and both R2 buckets; sampled Workers Logs/Traces (0.25/0.1). Human-driven deploy + `system.smoke` per the runbook below, with usage-block archiving per the cost-logging requirement.
+- `test` (future, GATED — do not build until a live consumer needs it): a disposable isolated target for mutative/security scans. Candidate consumers #242 (Shannon) and #246 (RESTler) are both open and neither is blocked today. When the first consumer lands, clone the preview mechanics with a distinct Worker name + D1 + both R2 buckets, an ephemeral per-run token via the `mint-preview-token.mjs` pattern, a synthetic seed copied from `scripts/seed-remote-dev.sql` (generic smoke-org row only, no credentials), and the reset procedure below for reproducible cleanup. Least-privilege token, fixture-only secrets.
+
+Explicitly deferred — no concrete requirement while Workers Logs sampling covers current scale: OTel/Logpush retention, Analytics Engine adoption (ADR 025, still Proposed), and a separate test account (reuse the #376 dedicated-account pattern when Slice B arrives). Any retention claim must verify vs current Cloudflare pricing first (Free-viability constraint).
+
+### Runbook: preview reset/cleanup (issue #251 Slice A)
+
+Per-run hygiene is automatic: `system.smoke` writes under the disposable smoke Organization and the artifact probe deletes its per-run blob. Full reset is for corruption or cross-PR contention only — never part of a normal PR run. D1 has no truncate-all, so reset is destroy/recreate (or documented per-table wipe for a lighter touch):
+
+```bash
+# Preview D1 reset (destructive; preview data is disposable by design).
+wrangler d1 delete wrangnarok-preview
+wrangler d1 create wrangnarok-preview
+# Paste the new UUID over database_id in the wrangler.jsonc preview env,
+# then re-apply migrations from scratch:
+wrangler d1 migrations apply DB --env preview --remote
+
+# Preview R2 reset (destructive; same disposable posture).
+wrangler r2 bucket delete wrangnarok-preview
+wrangler r2 bucket delete wrangnarok-artifacts-preview
+wrangler r2 bucket create wrangnarok-preview
+wrangler r2 bucket create wrangnarok-artifacts-preview
+
+# Lighter touch (keep the database, drop smoke rows only):
+wrangler d1 execute DB --env preview --remote \
+  --command "DELETE FROM executions WHERE org_id='<smoke-org-id>'"
+```
+
+After a reset, re-run the preview workflow (or the dev runbook smoke) to confirm green before the next PR relies on the environment.
 
 ### Platform smoke Saga
 

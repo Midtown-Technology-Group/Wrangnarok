@@ -117,7 +117,39 @@ jobs:
 
       - name: Smoke preview
         if: steps.creds.outputs.present == 'true'
-        run: node scripts/smoke-preview.mjs --base-url "${{ steps.deploy.outputs.url }}" --token "${{ steps.lab.outputs.token }}"
+        run: |
+          set -o pipefail
+          node scripts/smoke-preview.mjs --base-url "${{ steps.deploy.outputs.url }}" --token "${{ steps.lab.outputs.token }}" 2>&1 | tee smoke-preview.log
+
+      # Issue #251 Slice A: retain diagnostics on failure. The smoke log
+      # above and deploy.log already exist as files; the usage block is
+      # fetched from the org-scoped /api/usage/summary route (counts/IDs
+      # only, no secrets) with the same ephemeral Bearer [REDACTED] Best-effort
+      # (`|| true`): collection must never mask the real smoke failure, and
+      # the upload below tolerates missing files.
+      - name: Collect preview diagnostics
+        if: failure() && steps.creds.outputs.present == 'true'
+        env:
+          PREVIEW_URL: ${{ steps.deploy.outputs.url }}
+          LAB_TOKEN: ${{ steps.lab.outputs.token }}
+        run: |
+          if [[ -n "$PREVIEW_URL" && -n "$LAB_TOKEN" ]]; then
+            curl -sS -m 30 -H "Authorization: Bearer $LAB_TOKEN" \
+              "$PREVIEW_URL/api/usage/summary" -o usage-summary.json || true
+          fi
+          ls -la deploy.log smoke-preview.log usage-summary.json 2>/dev/null || true
+
+      - name: Upload preview diagnostics
+        if: failure() && steps.creds.outputs.present == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-diagnostics
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            deploy.log
+            smoke-preview.log
+            usage-summary.json
 
       - name: Comment preview URL
         if: steps.creds.outputs.present == 'true'

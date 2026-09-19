@@ -281,10 +281,24 @@
           "migrations_dir": "migrations",
         },
       ],
+      // Issue #227: preview binds BOTH buckets like local/dev. ARTIFACTS is
+      // not a new primitive (R2 was earned by FILE-01/FILE-02, ADR 036/040):
+      // without it every preview byte route fails closed with 503
+      // ARTIFACT_STORE_NOT_CONFIGURED while metadata routes pass, leaving
+      // the Worker-proxied byte path — the part most likely to drift from
+      // the upstream presigned-URL invariant (upstream-spec §16, ADR 040
+      // §5) — unvalidated on real edge. That drift is exactly what ADR 004
+      // says preview exists to catch. HUMAN SETUP: `wrangler r2 bucket
+      // create wrangnarok-artifacts-preview` (one-time, alongside the
+      // preview D1 setup noted above).
       "r2_buckets": [
         {
           "binding": "FILES",
           "bucket_name": "wrangnarok-preview",
+        },
+        {
+          "binding": "ARTIFACTS",
+          "bucket_name": "wrangnarok-artifacts-preview",
         },
       ],
       "durable_objects": {
