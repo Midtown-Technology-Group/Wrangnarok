@@ -79,10 +79,40 @@ import type {
   McpServerSummary,
   OpenapiOperation,
   OpenapiSearchResponse,
+  OpsConnectionHealthEntry,
+  OpsConnectionHealthResponse,
+  OpsExecutionCounters,
+  OpsHealth,
+  OpsJobsResponse,
+  OpsMetricsResponse,
+  OpsPreflightEntry,
+  OpsPreflightResponse,
+  OpsRecentFailure,
+  OpsRepairRequest,
+  OpsRepairResponse,
+  OpsScheduledTask,
+  OpsScheduledTasksResponse,
+  OpsVersionResponse,
   SagasResponse,
   SagaSummary,
   ToolsResponse,
   ToolSummary,
+  UsageSummaryResponse,
+  EndpointEvent,
+  EndpointIssuedResponse,
+  EndpointsResponse,
+  EndpointSummary,
+  EmitEventResponse,
+  EventSourcesResponse,
+  EventSourceSummary,
+  RetryDeliveryResponse,
+  SchedulesResponse,
+  ScheduleDelivery,
+  ScheduleSummary,
+  SourceEvent,
+  SubscriptionDelivery,
+  SubscriptionsResponse,
+  SubscriptionSummary,
 } from "./client-types";
 
 const TOKEN_KEY = "wrangnarok.token";
@@ -1857,6 +1887,470 @@ export async function getMcpConnectionConsent(connectionId: string): Promise<Mcp
   return consent;
 }
 
+/** PATCH with a JSON body (endpoint policy updates). No other page uses PATCH
+ * yet, so the helper lives with the trigger surface that needs it. */
+async function patchJson(path: string, body: unknown): Promise<unknown> {
+  const token = getToken();
+  const headers: Record<string, string> = { Accept: "application/json", "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(path, { method: "PATCH", headers, body: JSON.stringify(body) });
+  if (!response.ok) throw await parseApiError(response);
+  return (await response.json()) as unknown;
+}
+
+const TRIGGER_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+function triggerPath(name: string): string {
+  if (!TRIGGER_NAME.test(name)) throw new Error("Unexpected trigger name shape.");
+  return encodeURIComponent(name);
+}
+
+function isScheduleSummary(value: unknown): value is ScheduleSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["name"] === "string" &&
+    typeof v["sagaId"] === "string" &&
+    typeof v["sagaName"] === "string" &&
+    (v["kind"] === "recurring" || v["kind"] === "one-off") &&
+    typeof v["cron"] === "string" &&
+    typeof v["timezone"] === "string" &&
+    typeof v["enabled"] === "boolean" &&
+    "input" in v &&
+    (v["runAt"] === null || typeof v["runAt"] === "string") &&
+    (v["nextDueAt"] === null || typeof v["nextDueAt"] === "string") &&
+    (v["lastWindow"] === null || typeof v["lastWindow"] === "string") &&
+    typeof v["createdAt"] === "string" &&
+    typeof v["updatedAt"] === "string"
+  );
+}
+
+/** GET /api/schedules — org-scoped schedule inventory. */
+export async function listSchedules(): Promise<SchedulesResponse> {
+  const data = await get("/api/schedules");
+  const schedules = (data as { schedules?: unknown }).schedules;
+  if (typeof data !== "object" || data === null || !Array.isArray(schedules) || !schedules.every(isScheduleSummary)) {
+    throw new Error("Unexpected schedules response shape.");
+  }
+  return { schedules };
+}
+
+export interface ScheduleWrite {
+  name: string;
+  sagaId: string;
+  kind: "recurring" | "one-off";
+  cron?: string;
+  timezone?: string;
+  input?: unknown;
+  runAt?: string;
+  enabled?: boolean;
+}
+
+/** POST /api/schedules — create a schedule (manage-gated; run-as resolves to
+ * the caller, never the body). Same-org duplicate names answer 409. */
+export async function createSchedule(write: ScheduleWrite): Promise<ScheduleSummary> {
+  const data = await postJson("/api/schedules", write);
+  const schedule = (data as { schedule?: unknown }).schedule;
+  if (!isScheduleSummary(schedule)) throw new Error("Unexpected schedule response shape.");
+  return schedule;
+}
+
+/** GET /api/schedules/:name — one schedule (foreign rows answer 404). */
+export async function fetchSchedule(name: string): Promise<ScheduleSummary> {
+  const data = await get(`/api/schedules/${triggerPath(name)}`);
+  const schedule = (data as { schedule?: unknown }).schedule;
+  if (!isScheduleSummary(schedule)) throw new Error("Unexpected schedule response shape.");
+  return schedule;
+}
+
+/** POST /api/schedules/:name/enable|disable — fence future promotion while
+ * promoted Executions run to terminal. */
+export async function setScheduleEnabled(name: string, enabled: boolean): Promise<ScheduleSummary> {
+  const data = await postJson(`/api/schedules/${triggerPath(name)}/${enabled ? "enable" : "disable"}`, {});
+  const schedule = (data as { schedule?: unknown }).schedule;
+  if (!isScheduleSummary(schedule)) throw new Error("Unexpected schedule response shape.");
+  return schedule;
+}
+
+/** DELETE /api/schedules/:name — remove the row (history survives on
+ * Executions). Gone-or-foreign answers 404. */
+export async function deleteSchedule(name: string): Promise<void> {
+  await deleteJson(`/api/schedules/${triggerPath(name)}`);
+}
+
+/** GET /api/schedules/:name/deliveries?window= — which Execution one window
+ * promoted to. Selection travels in the allowlisted ?window= key only. */
+export async function fetchScheduleDelivery(name: string, window: string): Promise<ScheduleDelivery> {
+  const params = new URLSearchParams({ window });
+  const data = await get(`/api/schedules/${triggerPath(name)}/deliveries?${params.toString()}`);
+  const delivery = (data as { delivery?: unknown }).delivery as Record<string, unknown> | undefined;
+  if (
+    typeof delivery !== "object" ||
+    delivery === null ||
+    typeof delivery["schedule"] !== "string" ||
+    typeof delivery["window"] !== "string" ||
+    typeof delivery["executionId"] !== "string"
+  ) {
+    throw new Error("Unexpected schedule delivery response shape.");
+  }
+  return delivery as unknown as ScheduleDelivery;
+}
+
+function isEventSourceSummary(value: unknown): value is EventSourceSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["name"] === "string" &&
+    (v["kind"] === "schedule" || v["kind"] === "webhook" || v["kind"] === "topic") &&
+    (v["refId"] === null || typeof v["refId"] === "string") &&
+    typeof v["enabled"] === "boolean" &&
+    typeof v["createdAt"] === "string"
+  );
+}
+
+/** GET /api/event-sources — org-scoped source registry. */
+export async function listEventSources(): Promise<EventSourcesResponse> {
+  const data = await get("/api/event-sources");
+  const sources = (data as { sources?: unknown }).sources;
+  if (typeof data !== "object" || data === null || !Array.isArray(sources) || !sources.every(isEventSourceSummary)) {
+    throw new Error("Unexpected event sources response shape.");
+  }
+  return { sources };
+}
+
+/** POST /api/event-sources — register a source (manage-gated). */
+export async function createEventSource(write: {
+  name: string;
+  kind: "schedule" | "webhook" | "topic";
+  refId?: string | null;
+}): Promise<EventSourceSummary> {
+  const data = await postJson("/api/event-sources", write);
+  const source = (data as { source?: unknown }).source;
+  if (!isEventSourceSummary(source)) throw new Error("Unexpected event source response shape.");
+  return source;
+}
+
+/** GET /api/event-sources/:name — one source (foreign rows answer 404). */
+export async function fetchEventSource(name: string): Promise<EventSourceSummary> {
+  const data = await get(`/api/event-sources/${triggerPath(name)}`);
+  const source = (data as { source?: unknown }).source;
+  if (!isEventSourceSummary(source)) throw new Error("Unexpected event source response shape.");
+  return source;
+}
+
+/** POST /api/event-sources/:name/enable|disable — fence future emits and
+ * delivery appends while logged events keep history. */
+export async function setSourceEnabled(name: string, enabled: boolean): Promise<EventSourceSummary> {
+  const data = await postJson(`/api/event-sources/${triggerPath(name)}/${enabled ? "enable" : "disable"}`, {});
+  const source = (data as { source?: unknown }).source;
+  if (!isEventSourceSummary(source)) throw new Error("Unexpected event source response shape.");
+  return source;
+}
+
+/** DELETE /api/event-sources/:name — remove the source plus its log rows
+ * (ExecutionHistory survives on Executions). */
+export async function deleteEventSource(name: string): Promise<void> {
+  await deleteJson(`/api/event-sources/${triggerPath(name)}`);
+}
+
+function isSourceEvent(value: unknown): value is SourceEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["eventId"] === "string" &&
+    typeof v["topic"] === "string" &&
+    "payload" in v &&
+    (v["executionId"] === null || typeof v["executionId"] === "string") &&
+    typeof v["createdAt"] === "string"
+  );
+}
+
+/** GET /api/event-sources/:name/events — bounded log history, newest first. */
+export async function listSourceEvents(name: string): Promise<SourceEvent[]> {
+  const data = await get(`/api/event-sources/${triggerPath(name)}/events`);
+  const events = (data as { events?: unknown }).events;
+  if (typeof data !== "object" || data === null || !Array.isArray(events) || !events.every(isSourceEvent)) {
+    throw new Error("Unexpected source events response shape.");
+  }
+  return events;
+}
+
+/** Back-compat alias: the log is the source history surface. */
+export const fetchSourceEvents = listSourceEvents;
+
+/** POST /api/event-sources/:name/events — operator emission with
+ * deterministic (source, event) identity: same-content replays, mismatched
+ * content answers 409. Accepted events fan out to eligible subscribers. */
+export async function emitSourceEvent(
+  name: string,
+  write: { eventId: string; topic: string; payload?: unknown },
+): Promise<EmitEventResponse> {
+  const data = await postJson(`/api/event-sources/${triggerPath(name)}/events`, write);
+  const body = data as { event?: unknown; replayed?: unknown; deliveries?: unknown; overflowSkipped?: unknown };
+  if (
+    !isSourceEvent(body.event) ||
+    typeof body.replayed !== "boolean" ||
+    !Array.isArray(body.deliveries) ||
+    typeof body.overflowSkipped !== "number"
+  ) {
+    throw new Error("Unexpected emit response shape.");
+  }
+  return {
+    event: body.event,
+    replayed: body.replayed,
+    deliveries: body.deliveries,
+    overflowSkipped: body.overflowSkipped,
+  };
+}
+
+function isSubscriptionSummary(value: unknown): value is SubscriptionSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["name"] === "string" &&
+    typeof v["sagaId"] === "string" &&
+    typeof v["topicFilter"] === "string" &&
+    typeof v["enabled"] === "boolean" &&
+    typeof v["createdAt"] === "string"
+  );
+}
+
+/** GET /api/event-sources/:source/subscriptions — subscribers in dispatch order. */
+export async function listSubscriptions(source: string): Promise<SubscriptionsResponse> {
+  const data = await get(`/api/event-sources/${triggerPath(source)}/subscriptions`);
+  const subscriptions = (data as { subscriptions?: unknown }).subscriptions;
+  if (
+    typeof data !== "object" ||
+    data === null ||
+    !Array.isArray(subscriptions) ||
+    !subscriptions.every(isSubscriptionSummary)
+  ) {
+    throw new Error("Unexpected subscriptions response shape.");
+  }
+  return { subscriptions };
+}
+
+/** POST /api/event-sources/:source/subscriptions — bind a topic filter to a
+ * target Saga (manage-gated; creator becomes the run-as owner). */
+export async function createSubscription(
+  source: string,
+  write: { name: string; topicFilter: string; sagaId: string },
+): Promise<SubscriptionSummary> {
+  const data = await postJson(`/api/event-sources/${triggerPath(source)}/subscriptions`, write);
+  const subscription = (data as { subscription?: unknown }).subscription;
+  if (!isSubscriptionSummary(subscription)) throw new Error("Unexpected subscription response shape.");
+  return subscription;
+}
+
+/** GET one subscription (foreign rows answer 404). */
+export async function fetchSubscription(source: string, name: string): Promise<SubscriptionSummary> {
+  const data = await get(`/api/event-sources/${triggerPath(source)}/subscriptions/${triggerPath(name)}`);
+  const subscription = (data as { subscription?: unknown }).subscription;
+  if (!isSubscriptionSummary(subscription)) throw new Error("Unexpected subscription response shape.");
+  return subscription;
+}
+
+/** POST .../subscriptions/:name/enable|disable — fence future fan-out while
+ * dispatched Executions run to terminal. */
+export async function setSubscriptionEnabled(
+  source: string,
+  name: string,
+  enabled: boolean,
+): Promise<SubscriptionSummary> {
+  const data = await postJson(
+    `/api/event-sources/${triggerPath(source)}/subscriptions/${triggerPath(name)}/${enabled ? "enable" : "disable"}`,
+    {},
+  );
+  const subscription = (data as { subscription?: unknown }).subscription;
+  if (!isSubscriptionSummary(subscription)) throw new Error("Unexpected subscription response shape.");
+  return subscription;
+}
+
+/** DELETE a subscription plus its delivery receipts (history survives on
+ * Executions). */
+export async function deleteSubscription(source: string, name: string): Promise<void> {
+  await deleteJson(`/api/event-sources/${triggerPath(source)}/subscriptions/${triggerPath(name)}`);
+}
+
+function isSubscriptionDelivery(value: unknown): value is SubscriptionDelivery {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["eventId"] === "string" &&
+    typeof v["topic"] === "string" &&
+    (v["executionId"] === null || typeof v["executionId"] === "string") &&
+    (v["outcome"] === "delivered" || v["outcome"] === "failed") &&
+    typeof v["createdAt"] === "string"
+  );
+}
+
+/** GET .../subscriptions/:name/deliveries — merged delivery history
+ * (receipts plus derived failures, newest first, bounded 50). ?outcome=
+ * narrows to delivered or failed. */
+export async function listSubscriptionDeliveries(
+  source: string,
+  name: string,
+  outcome?: "delivered" | "failed" | "all",
+): Promise<SubscriptionDelivery[]> {
+  const suffix = outcome ? `?${new URLSearchParams({ outcome }).toString()}` : "";
+  const data = await get(
+    `/api/event-sources/${triggerPath(source)}/subscriptions/${triggerPath(name)}/deliveries${suffix}`,
+  );
+  const deliveries = (data as { deliveries?: unknown }).deliveries;
+  if (
+    typeof data !== "object" ||
+    data === null ||
+    !Array.isArray(deliveries) ||
+    !deliveries.every(isSubscriptionDelivery)
+  ) {
+    throw new Error("Unexpected subscription deliveries response shape.");
+  }
+  return deliveries;
+}
+
+/** POST .../deliveries/:eventId/retry — re-dispatch one failed delivery
+ * through the submit protocol with the identical key (converges on the first
+ * retry's Execution). */
+export async function retrySubscriptionDelivery(
+  source: string,
+  name: string,
+  eventId: string,
+): Promise<RetryDeliveryResponse> {
+  const data = await postJson(
+    `/api/event-sources/${triggerPath(source)}/subscriptions/${triggerPath(name)}/deliveries/${encodeURIComponent(eventId)}/retry`,
+    {},
+  );
+  const delivery = (data as { delivery?: unknown }).delivery as Record<string, unknown> | undefined;
+  if (
+    typeof delivery !== "object" ||
+    delivery === null ||
+    typeof delivery["subscription"] !== "string" ||
+    typeof delivery["eventId"] !== "string" ||
+    typeof delivery["executionId"] !== "string" ||
+    typeof delivery["replayed"] !== "boolean"
+  ) {
+    throw new Error("Unexpected retry response shape.");
+  }
+  return {
+    delivery: {
+      subscription: delivery["subscription"] as string,
+      eventId: delivery["eventId"] as string,
+      executionId: delivery["executionId"] as string,
+      replayed: delivery["replayed"] as boolean,
+    },
+  };
+}
+
+function isEndpointSummary(value: unknown): value is EndpointSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["name"] === "string" &&
+    typeof v["sagaId"] === "string" &&
+    (v["kind"] === "api-key" || v["kind"] === "webhook") &&
+    typeof v["enabled"] === "boolean" &&
+    (v["keyExpiresAt"] === null || typeof v["keyExpiresAt"] === "string") &&
+    (v["challenge"] === "none" || v["challenge"] === "echo-param") &&
+    (v["rateLimitPerMinute"] === null || typeof v["rateLimitPerMinute"] === "number") &&
+    typeof v["createdAt"] === "string"
+  );
+}
+
+function isEndpointIssued(value: unknown): value is EndpointIssuedResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (!isEndpointSummary(v["endpoint"])) return false;
+  if ("apiKey" in v && v["apiKey"] !== undefined && typeof v["apiKey"] !== "string") return false;
+  if ("webhookSecret" in v && v["webhookSecret"] !== undefined && typeof v["webhookSecret"] !== "string") return false;
+  return true;
+}
+
+/** GET /api/endpoints — this Organization's endpoint inventory. */
+export async function listEndpoints(): Promise<EndpointsResponse> {
+  const data = await get("/api/endpoints");
+  const endpoints = (data as { endpoints?: unknown }).endpoints;
+  if (typeof data !== "object" || data === null || !Array.isArray(endpoints) || !endpoints.every(isEndpointSummary)) {
+    throw new Error("Unexpected endpoints response shape.");
+  }
+  return { endpoints };
+}
+
+export interface EndpointWrite {
+  name: string;
+  sagaId: string;
+  kind: "api-key" | "webhook";
+  rateLimitPerMinute?: number | null;
+  challenge?: "none" | "echo-param";
+  keyExpiresAt?: string | null;
+}
+
+/** POST /api/endpoints — create a scoped endpoint. The raw credential
+ * (apiKey, or webhookSecret to plant in the deployment secret store) is
+ * returned once; summaries never carry it again. */
+export async function createEndpoint(write: EndpointWrite): Promise<EndpointIssuedResponse> {
+  const data = await postJson("/api/endpoints", write);
+  if (!isEndpointIssued(data)) throw new Error("Unexpected endpoint response shape.");
+  return data;
+}
+
+/** GET /api/endpoints/:name — one endpoint (foreign rows answer 404). */
+export async function fetchEndpoint(name: string): Promise<EndpointSummary> {
+  const data = await get(`/api/endpoints/${triggerPath(name)}`);
+  const endpoint = (data as { endpoint?: unknown }).endpoint;
+  if (!isEndpointSummary(endpoint)) throw new Error("Unexpected endpoint response shape.");
+  return endpoint;
+}
+
+export interface EndpointPatch {
+  enabled?: boolean;
+  rateLimitPerMinute?: number | null;
+  keyExpiresAt?: string | null;
+}
+
+/** PATCH /api/endpoints/:name — update endpoint policy: enable/disable
+ * (revocation), rate limit, key expiry. There is deliberately no DELETE
+ * route: disable plus rotate is the supported credential lifecycle. */
+export async function updateEndpoint(name: string, patch: EndpointPatch): Promise<EndpointSummary> {
+  const data = await patchJson(`/api/endpoints/${triggerPath(name)}`, patch);
+  const endpoint = (data as { endpoint?: unknown }).endpoint;
+  if (!isEndpointSummary(endpoint)) throw new Error("Unexpected endpoint response shape.");
+  return endpoint;
+}
+
+/** Enable/disable affordance over the PATCH policy route. */
+export async function setEndpointEnabled(name: string, enabled: boolean): Promise<EndpointSummary> {
+  return updateEndpoint(name, { enabled });
+}
+
+/** POST /api/endpoints/:name/rotate — rotate the credential: the old raw
+ * value stops verifying, the new raw value is returned once. */
+export async function rotateEndpoint(name: string): Promise<EndpointIssuedResponse> {
+  const data = await postJson(`/api/endpoints/${triggerPath(name)}/rotate`, {});
+  if (!isEndpointIssued(data)) throw new Error("Unexpected endpoint response shape.");
+  return data;
+}
+
+function isEndpointEvent(value: unknown): value is EndpointEvent {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v["eventId"] === "string" && typeof v["executionId"] === "string" && typeof v["createdAt"] === "string";
+}
+
+/** GET /api/endpoints/:name/events — delivery history for replay visibility,
+ * newest first, bounded. */
+export async function listEndpointEvents(name: string): Promise<EndpointEvent[]> {
+  const data = await get(`/api/endpoints/${triggerPath(name)}/events`);
+  const events = (data as { events?: unknown }).events;
+  if (typeof data !== "object" || data === null || !Array.isArray(events) || !events.every(isEndpointEvent)) {
+    throw new Error("Unexpected endpoint events response shape.");
+  }
+  return events;
+}
+
 /** GET /api/auth/me — caller identity plus membership role (UX-01 admin cue).
  * The server enforces every boundary; the role only decides which affordances
  * the settings pages render. A null role means the instance-admin path, which
@@ -1876,4 +2370,329 @@ export async function fetchCaller(): Promise<CallerResponse> {
     throw new Error("Unexpected caller response shape.");
   }
   return data as CallerResponse;
+}
+
+// Operations console (issue #558): typed reads over the served /api/ops/*,
+// /api/usage/summary, and /api/logs routes. Every call rides the same
+// Bearer authorization the other console pages use; the server enforces all
+// tenancy and admin boundaries.
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isOpsCounters(value: unknown): value is OpsExecutionCounters {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  for (const key of [
+    "total",
+    "pending",
+    "pendingUndispatched",
+    "running",
+    "cancelling",
+    "succeeded",
+    "failed",
+    "timedOut",
+    "cancelled",
+  ]) {
+    if (typeof v[key] !== "number") return false;
+  }
+  return true;
+}
+
+function isOpsRecentFailure(value: unknown): value is OpsRecentFailure {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["executionId"] === "string" &&
+    typeof v["sagaName"] === "string" &&
+    typeof v["status"] === "string" &&
+    (v["code"] === null || typeof v["code"] === "string") &&
+    (v["completedAt"] === null || typeof v["completedAt"] === "string")
+  );
+}
+
+/** GET /api/ops/version — product version contract. */
+export async function fetchOpsVersion(): Promise<OpsVersionResponse> {
+  const data = await get("/api/ops/version");
+  const version = (data as { version?: unknown }).version as Record<string, unknown> | undefined;
+  if (
+    typeof version !== "object" ||
+    version === null ||
+    typeof version["sdkVersion"] !== "string" ||
+    typeof version["sagaCatalog"] !== "object" ||
+    version["sagaCatalog"] === null ||
+    typeof (version["sagaCatalog"] as Record<string, unknown>)["count"] !== "number" ||
+    typeof (version["sagaCatalog"] as Record<string, unknown>)["revision"] !== "string" ||
+    !isStringArray(version["migrationsApplied"])
+  ) {
+    throw new Error("Unexpected ops version response shape.");
+  }
+  return data as OpsVersionResponse;
+}
+
+/** GET /api/ops/health — Worker/D1 liveness. */
+export async function fetchOpsHealth(): Promise<OpsHealth> {
+  const data = await get("/api/ops/health");
+  const v = data as Record<string, unknown>;
+  if (
+    typeof v["status"] !== "string" ||
+    typeof v["database"] !== "string" ||
+    typeof v["worker"] !== "string" ||
+    typeof v["checkedAt"] !== "string"
+  ) {
+    throw new Error("Unexpected ops health response shape.");
+  }
+  return data as OpsHealth;
+}
+
+/** GET /api/ops/metrics — per-status Execution counts plus the
+ * undispatched-Pending backlog and the recent failure tail (?recent=1-50). */
+export async function fetchOpsMetrics(recent?: number): Promise<OpsMetricsResponse> {
+  const suffix = recent === undefined ? "" : `?recent=${encodeURIComponent(String(recent))}`;
+  const data = await get(`/api/ops/metrics${suffix}`);
+  const metrics = (data as { metrics?: unknown }).metrics as Record<string, unknown> | undefined;
+  if (
+    typeof metrics !== "object" ||
+    metrics === null ||
+    typeof metrics["generatedAt"] !== "string" ||
+    !isOpsCounters(metrics["executions"]) ||
+    !Array.isArray(metrics["recentFailures"]) ||
+    !(metrics["recentFailures"] as unknown[]).every(isOpsRecentFailure)
+  ) {
+    throw new Error("Unexpected ops metrics response shape.");
+  }
+  return data as OpsMetricsResponse;
+}
+
+function isOpsScheduledTask(value: unknown): value is OpsScheduledTask {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["name"] === "string" &&
+    typeof v["kind"] === "string" &&
+    typeof v["enabled"] === "boolean" &&
+    (v["cadence"] === null || typeof v["cadence"] === "string") &&
+    typeof v["detail"] === "string"
+  );
+}
+
+/** GET /api/ops/scheduled-tasks — trigger inventory that can run work. */
+export async function fetchOpsScheduledTasks(): Promise<OpsScheduledTasksResponse> {
+  const data = await get("/api/ops/scheduled-tasks");
+  const tasks = (data as { tasks?: unknown }).tasks;
+  if (!Array.isArray(tasks) || !tasks.every(isOpsScheduledTask)) {
+    throw new Error("Unexpected ops scheduled-tasks response shape.");
+  }
+  return { tasks };
+}
+
+/** GET /api/ops/jobs — Execution backlog plus per-app deploy-job aggregates. */
+export async function fetchOpsJobs(): Promise<OpsJobsResponse> {
+  const data = await get("/api/ops/jobs");
+  const jobs = (data as { jobs?: unknown }).jobs as Record<string, unknown> | undefined;
+  const builds = jobs?.["appBuilds"] as Record<string, unknown> | undefined;
+  const interrupted = builds?.["interrupted"] as unknown;
+  if (
+    typeof jobs !== "object" ||
+    jobs === null ||
+    typeof jobs["generatedAt"] !== "string" ||
+    !isOpsCounters(jobs["executions"]) ||
+    typeof builds !== "object" ||
+    builds === null ||
+    typeof builds["queued"] !== "number" ||
+    typeof builds["running"] !== "number" ||
+    typeof builds["succeeded"] !== "number" ||
+    typeof builds["failed"] !== "number" ||
+    !Array.isArray(interrupted) ||
+    !interrupted.every(
+      (entry): entry is { appId: string; appName: string } =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof (entry as Record<string, unknown>)["appId"] === "string" &&
+        typeof (entry as Record<string, unknown>)["appName"] === "string",
+    )
+  ) {
+    throw new Error("Unexpected ops jobs response shape.");
+  }
+  return data as OpsJobsResponse;
+}
+
+function isOpsPreflightEntry(value: unknown): value is OpsPreflightEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["integrationId"] === "string" &&
+    typeof v["integrationName"] === "string" &&
+    typeof v["connected"] === "boolean" &&
+    typeof v["enabled"] === "boolean" &&
+    isStringArray(v["missingSecrets"]) &&
+    typeof v["ready"] === "boolean"
+  );
+}
+
+/** GET /api/ops/preflight — mapping/credential presence, no secret values. */
+export async function fetchOpsPreflight(): Promise<OpsPreflightResponse> {
+  const data = await get("/api/ops/preflight");
+  const v = data as Record<string, unknown>;
+  if (
+    typeof v["checkedAt"] !== "string" ||
+    !Array.isArray(v["integrations"]) ||
+    !(v["integrations"] as unknown[]).every(isOpsPreflightEntry)
+  ) {
+    throw new Error("Unexpected ops preflight response shape.");
+  }
+  return data as OpsPreflightResponse;
+}
+
+function isOpsConnectionHealthEntry(value: unknown): value is OpsConnectionHealthEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["integrationId"] === "string" &&
+    typeof v["integrationName"] === "string" &&
+    typeof v["connected"] === "boolean" &&
+    typeof v["enabled"] === "boolean" &&
+    typeof v["testHint"] === "string" &&
+    typeof v["remediation"] === "string"
+  );
+}
+
+/** GET /api/ops/connections — per-Integration health with test hints. */
+export async function fetchOpsConnectionHealth(): Promise<OpsConnectionHealthResponse> {
+  const data = await get("/api/ops/connections");
+  const connections = (data as { connections?: unknown }).connections;
+  if (!Array.isArray(connections) || !connections.every(isOpsConnectionHealthEntry)) {
+    throw new Error("Unexpected ops connections response shape.");
+  }
+  return { connections };
+}
+
+/** Repair kinds the console offers (mirrors POST /api/ops/repairs). */
+export const OPS_REPAIR_KINDS = [
+  "retry-execution",
+  "cancel-execution",
+  "cleanup-pending-uploads",
+  "cleanup-expired-tokens",
+  "repair-stuck-build",
+] as const;
+
+/** POST /api/ops/repairs — inspect-then-act. dryRun omitted or true only
+ * inspects (no writes); dryRun:false executes behind the admin gate. The
+ * caller must confirm explicitly before committing; the server still
+ * refuses non-admin execution with REPAIR_FORBIDDEN. */
+export async function runOpsRepair(request: OpsRepairRequest): Promise<OpsRepairResponse> {
+  const data = await postJson("/api/ops/repairs", {
+    kind: request.kind,
+    ...(request.targetId === undefined ? {} : { targetId: request.targetId }),
+    ...(request.idempotencyKey === undefined ? {} : { idempotencyKey: request.idempotencyKey }),
+    dryRun: request.dryRun ?? true,
+  });
+  const repair = (data as { repair?: unknown }).repair as Record<string, unknown> | undefined;
+  if (
+    typeof repair !== "object" ||
+    repair === null ||
+    typeof repair["kind"] !== "string" ||
+    typeof repair["dryRun"] !== "boolean" ||
+    (repair["targetId"] !== null && typeof repair["targetId"] !== "string") ||
+    typeof repair["action"] !== "string" ||
+    !("result" in repair)
+  ) {
+    throw new Error("Unexpected ops repair response shape.");
+  }
+  return data as OpsRepairResponse;
+}
+
+export interface UsageSummaryQuery {
+  /** Exact Saga name filter (mirrors ?saga=). */
+  saga?: string;
+  /** Inclusive ISO lower bound on created_at (YYYY-MM-DD accepted). */
+  startDate?: string;
+  /** Inclusive-day / exact-datetime upper bound on created_at. */
+  endDate?: string;
+}
+
+/** GET /api/usage/summary — attributed usage over usage_blocks. Org-scoped
+ * by the resolved caller; cross-org rows never aggregate. Application
+ * counters only: never Cloudflare metering, never money. */
+export async function fetchUsageSummary(query: UsageSummaryQuery = {}): Promise<UsageSummaryResponse> {
+  const params = new URLSearchParams();
+  if (query.saga) params.set("saga", query.saga);
+  if (query.startDate) params.set("startDate", query.startDate);
+  if (query.endDate) params.set("endDate", query.endDate);
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+  const data = await get(`/api/usage/summary${suffix}`);
+  if (!isUsageSummary((data as { usage?: unknown }).usage)) {
+    throw new Error("Unexpected usage summary response shape.");
+  }
+  return data as UsageSummaryResponse;
+}
+
+function isUsageCounters(value: unknown): value is Record<string, number> {
+  if (typeof value !== "object" || value === null) return false;
+  return Object.values(value as Record<string, unknown>).every((entry) => typeof entry === "number");
+}
+
+/** Guard the full usage summary shape the console renders: totals, every
+ * per-Saga row, and the explicit no-money gap labels. */
+function isUsageSummary(value: unknown): value is UsageSummaryResponse["usage"] {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const totals = v["totals"] as Record<string, unknown> | undefined;
+  const gaps = v["gaps"] as Record<string, unknown> | undefined;
+  const bySaga = v["bySaga"] as unknown;
+  return (
+    typeof v["orgId"] === "string" &&
+    typeof totals === "object" &&
+    totals !== null &&
+    isUsageCounters(totals) &&
+    Array.isArray(bySaga) &&
+    bySaga.every((row) => {
+      if (typeof row !== "object" || row === null) return false;
+      const { saga, ...counters } = row as Record<string, unknown>;
+      return typeof saga === "string" && isUsageCounters(counters);
+    }) &&
+    typeof v["cancelledExecutions"] === "number" &&
+    typeof v["matchedExecutions"] === "number" &&
+    typeof v["truncated"] === "boolean" &&
+    typeof gaps === "object" &&
+    gaps !== null &&
+    typeof gaps["modelTokenCosts"] === "string" &&
+    typeof gaps["providerBilling"] === "string" &&
+    typeof gaps["estimates"] === "string" &&
+    typeof v["note"] === "string"
+  );
+}
+
+export interface LogSearchQuery {
+  /** Comma-joined levels are passed through as one ?level= value. */
+  level?: string;
+  sagaId?: string;
+  sagaName?: string;
+  /** Inclusive ISO lower bound on created_at (YYYY-MM-DD accepted). */
+  startDate?: string;
+  /** Inclusive-day / exact-datetime upper bound on created_at. */
+  endDate?: string;
+  limit?: number;
+  /** Opaque page marker from a previous response. */
+  cursor?: string;
+}
+
+/** GET /api/logs — operator search by date/level/Saga across the caller's
+ * own rows in seq order. DEBUG rows persist but are hidden from default
+ * reads; pass level=DEBUG explicitly to include them. */
+export async function searchLogs(query: LogSearchQuery = {}): Promise<LogPage> {
+  const params = new URLSearchParams();
+  if (query.level) params.set("level", query.level);
+  if (query.sagaId) params.set("sagaId", query.sagaId);
+  if (query.sagaName) params.set("sagaName", query.sagaName);
+  if (query.startDate) params.set("startDate", query.startDate);
+  if (query.endDate) params.set("endDate", query.endDate);
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.cursor) params.set("cursor", query.cursor);
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+  const data = await get(`/api/logs${suffix}`);
+  if (!isLogPage(data)) throw new Error("Unexpected log page shape.");
+  return data;
 }
