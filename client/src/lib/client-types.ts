@@ -742,6 +742,146 @@ export interface ProfileResponse {
   profile: ProfileView;
 }
 
+// Tool and external MCP administration (issue #559): discovery, catalog,
+// connection health, and safe management over the existing Worker routes.
+// Every view below is secret-free by server construction: tool views carry
+// identity + description only; MCP server templates carry no secret columns;
+// MCP Connection views carry provisioned flags (names/booleans), never
+// credential values. Consent views carry scope + health, never tokens.
+
+/** One enrolled Saga tool (GET /api/tools; TOOL-01, issue #170). */
+export interface ToolSummary {
+  name: string;
+  sagaId: string;
+  sagaRevision: string;
+  description: string;
+  inputSchema: { type: "object" };
+  enabled: boolean;
+}
+
+export interface ToolsResponse {
+  tools: ToolSummary[];
+}
+
+export interface ToolResponse {
+  tool: ToolSummary;
+}
+
+/** One searchable HaloPSA contract operation (GET /api/openapi/search). */
+export interface OpenapiOperation {
+  operationId: string;
+  method: string;
+  path: string;
+  summary: string;
+  risk: string;
+  deprecated: boolean;
+}
+
+export interface OpenapiSearchResponse {
+  integration: string;
+  operations: OpenapiOperation[];
+}
+
+export interface OpenapiOperationResponse {
+  operation: OpenapiOperation;
+}
+
+/** One portable MCP server template (GET /api/mcp-servers; TOOL-02). */
+export interface McpServerSummary {
+  id: string;
+  name: string;
+  serverUrl: string;
+  orgId: string | null;
+  providerFlow: string;
+  discoveryMetadata: unknown;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface McpServersResponse {
+  servers: McpServerSummary[];
+}
+
+export interface McpServerResponse {
+  server: McpServerSummary;
+}
+
+/** One per-Organization MCP Connection (GET /api/mcp-connections). */
+export interface McpConnectionSummary {
+  id: string;
+  orgId: string;
+  serverId: string;
+  serverName: string;
+  effectiveServerUrl: string;
+  serverUrlOverride: string | null;
+  tokenPath: string | null;
+  clientId: string | null;
+  clientSecretProvisioned: boolean;
+  providerFlow: string;
+  availableInChat: boolean;
+  availableToAutonomous: boolean;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface McpConnectionsResponse {
+  connections: McpConnectionSummary[];
+}
+
+export interface McpConnectionResponse {
+  connection: McpConnectionSummary;
+}
+
+/** One per-Connection catalog tool (GET /api/mcp-connections/:id/tools). */
+export interface McpCatalogTool {
+  connectionId: string;
+  toolName: string;
+  qualifiedName: string;
+  description: string;
+  inputSchema: unknown;
+  enabled: boolean;
+  autoDisabledReason: string | null;
+  syncedAt: string;
+  updatedAt: string;
+}
+
+export interface McpCatalogResponse {
+  tools: McpCatalogTool[];
+}
+
+export interface McpCatalogToolResponse {
+  tool: McpCatalogTool;
+}
+
+/** Catalog refresh summary (POST /api/mcp-connections/:id/refresh-tools). */
+export interface McpRefreshSummary {
+  total: number;
+  enabled: number;
+  disabled: number;
+}
+
+export interface McpRefreshResponse {
+  catalog: McpRefreshSummary;
+}
+
+/** Non-secret per-user consent state (GET /api/mcp-connections/:id/consent). */
+export interface McpConsentState {
+  connectionId: string;
+  userId: string;
+  orgId: string;
+  scope: string;
+  consentGrantedAt: string;
+  consentExpiresAt: string | null;
+  generation: number;
+  health: unknown;
+}
+
+export interface McpConsentResponse {
+  consent: McpConsentState | null;
+}
+
 export interface CallerResponse {
   caller: {
     userId: string;

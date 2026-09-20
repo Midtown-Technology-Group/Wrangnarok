@@ -73,6 +73,16 @@ import type {
   FormSummary,
   IntegrationsResponse,
   IntegrationSummary,
+  McpCatalogResponse,
+  McpCatalogTool,
+  McpConnectionsResponse,
+  McpConnectionSummary,
+  McpConsentState,
+  McpRefreshSummary,
+  McpServersResponse,
+  McpServerSummary,
+  OpenapiOperation,
+  OpenapiSearchResponse,
   OpsConnectionHealthEntry,
   OpsConnectionHealthResponse,
   OpsExecutionCounters,
@@ -89,6 +99,8 @@ import type {
   OpsVersionResponse,
   SagasResponse,
   SagaSummary,
+  ToolsResponse,
+  ToolSummary,
   UsageSummaryResponse,
   EndpointEvent,
   EndpointIssuedResponse,
@@ -1632,6 +1644,326 @@ export async function downloadAvatar(): Promise<Blob> {
   const response = await fetch("/api/profile/avatar", { headers });
   if (!response.ok) throw await parseApiError(response);
   return await response.blob();
+}
+
+// Tool and external MCP administration (issue #559). Read-only discovery,
+// catalog, health, and safe management over the existing Worker routes.
+// Secret-free by server construction: no function here accepts, posts, or
+// returns a credential value. Client-secret provisioning, OAuth authorize,
+// and consent callback stay outside this UI (the server owns those flows).
+
+const TOOL_NAME = /^[a-z][a-z0-9_]{2,63}$/;
+const MCP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const VENDOR_TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
+
+function checkToolName(name: string): void {
+  if (!TOOL_NAME.test(name)) throw new Error("Unexpected tool name shape.");
+}
+
+function checkMcpId(id: string, label: string): void {
+  if (!MCP_ID.test(id)) throw new Error(`Unexpected ${label} ID shape.`);
+}
+
+function isToolSummary(value: unknown): value is ToolSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["name"] === "string" &&
+    typeof v["sagaId"] === "string" &&
+    typeof v["sagaRevision"] === "string" &&
+    typeof v["description"] === "string" &&
+    typeof v["enabled"] === "boolean"
+  );
+}
+
+/** GET /api/tools — enrolled live tools for this Organization. */
+export async function listTools(): Promise<ToolsResponse> {
+  const data = await get("/api/tools");
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { tools?: unknown }).tools)) {
+    throw new Error("Unexpected tools response shape.");
+  }
+  const tools = (data as { tools: unknown[] }).tools;
+  if (!tools.every(isToolSummary)) throw new Error("Unexpected tools response shape.");
+  return { tools };
+}
+
+/** POST /api/tools — enroll one Saga as a tool (sagaId + optional name/description). */
+export async function enrollTool(body: { sagaId: string; name?: string; description?: string }): Promise<ToolSummary> {
+  if (!MCP_ID.test(body.sagaId)) throw new Error("Unexpected Saga ID shape.");
+  const data = await postJson("/api/tools", body);
+  const tool = (data as { tool?: unknown }).tool;
+  if (!isToolSummary(tool)) throw new Error("Unexpected tool response shape.");
+  return tool;
+}
+
+/** POST /api/tools/:name/disable — disable one enrollment (never deletes). */
+export async function disableTool(name: string): Promise<ToolSummary> {
+  checkToolName(name);
+  const data = await postJson(`/api/tools/${name}/disable`, {});
+  const tool = (data as { tool?: unknown }).tool;
+  if (!isToolSummary(tool)) throw new Error("Unexpected tool response shape.");
+  return tool;
+}
+
+function isOpenapiOperation(value: unknown): value is OpenapiOperation {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["operationId"] === "string" &&
+    typeof v["method"] === "string" &&
+    typeof v["path"] === "string" &&
+    typeof v["summary"] === "string" &&
+    typeof v["risk"] === "string" &&
+    typeof v["deprecated"] === "boolean"
+  );
+}
+
+/** GET /api/openapi/search — progressive discovery over the pinned Halo contract. */
+export async function searchOpenapiOperations(query: string): Promise<OpenapiSearchResponse> {
+  const params = new URLSearchParams({ integration: "halo" });
+  if (query) params.set("q", query);
+  const data = await get(`/api/openapi/search?${params.toString()}`);
+  if (typeof data !== "object" || data === null) throw new Error("Unexpected OpenAPI search response shape.");
+  const v = data as { integration?: unknown; operations?: unknown };
+  if (v["integration"] !== "halo" || !Array.isArray(v["operations"])) {
+    throw new Error("Unexpected OpenAPI search response shape.");
+  }
+  if (!(v["operations"] as unknown[]).every(isOpenapiOperation)) {
+    throw new Error("Unexpected OpenAPI search response shape.");
+  }
+  return { integration: "halo", operations: v["operations"] as OpenapiOperation[] };
+}
+
+/** GET /api/openapi/operations/:operationId — inspect one pinned operation. */
+export async function inspectOpenapiOperation(operationId: string): Promise<OpenapiOperation> {
+  if (!VENDOR_TOOL_NAME.test(operationId)) throw new Error("Unexpected operation ID shape.");
+  const data = await get(`/api/openapi/operations/${operationId}`);
+  const operation = (data as { operation?: unknown }).operation;
+  if (!isOpenapiOperation(operation)) throw new Error("Unexpected OpenAPI operation response shape.");
+  return operation;
+}
+
+function isMcpServerSummary(value: unknown): value is McpServerSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["name"] === "string" &&
+    typeof v["serverUrl"] === "string" &&
+    (v["orgId"] === null || typeof v["orgId"] === "string") &&
+    typeof v["providerFlow"] === "string" &&
+    "discoveryMetadata" in v &&
+    typeof v["isActive"] === "boolean" &&
+    typeof v["createdAt"] === "string" &&
+    typeof v["updatedAt"] === "string"
+  );
+}
+
+/** GET /api/mcp-servers — portable templates (secretless by schema). */
+export async function listMcpServers(includeInactive = false): Promise<McpServersResponse> {
+  const suffix = includeInactive ? "?include_inactive=1" : "";
+  const data = await get(`/api/mcp-servers${suffix}`);
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { servers?: unknown }).servers)) {
+    throw new Error("Unexpected MCP servers response shape.");
+  }
+  const servers = (data as { servers: unknown[] }).servers;
+  if (!servers.every(isMcpServerSummary)) throw new Error("Unexpected MCP servers response shape.");
+  return { servers };
+}
+
+/** POST /api/mcp-servers — create a template (admin-only; platform rows need instance admin). */
+export async function createMcpServer(body: {
+  name: string;
+  serverUrl: string;
+  orgId?: string | null;
+  providerFlow?: string;
+}): Promise<McpServerSummary> {
+  const data = await postJson("/api/mcp-servers", body);
+  const server = (data as { server?: unknown }).server;
+  if (!isMcpServerSummary(server)) throw new Error("Unexpected MCP server response shape.");
+  return server;
+}
+
+/** POST /api/mcp-servers/:id/(enable|disable) — flip the active flag. */
+export async function setMcpServerActive(id: string, active: boolean): Promise<McpServerSummary> {
+  checkMcpId(id, "MCP server");
+  const data = await postJson(`/api/mcp-servers/${id}/${active ? "enable" : "disable"}`, {});
+  const server = (data as { server?: unknown }).server;
+  if (!isMcpServerSummary(server)) throw new Error("Unexpected MCP server response shape.");
+  return server;
+}
+
+/** DELETE /api/mcp-servers/:id — soft delete (hard=true destroys). */
+export async function deleteMcpServer(id: string, hard = false): Promise<void> {
+  checkMcpId(id, "MCP server");
+  const token = getToken();
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(`/api/mcp-servers/${id}${hard ? "?hard=true" : ""}`, { method: "DELETE", headers });
+  if (!response.ok) throw await parseApiError(response);
+}
+
+function isMcpConnectionSummary(value: unknown): value is McpConnectionSummary {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["orgId"] === "string" &&
+    typeof v["serverId"] === "string" &&
+    typeof v["serverName"] === "string" &&
+    typeof v["effectiveServerUrl"] === "string" &&
+    (v["serverUrlOverride"] === null || typeof v["serverUrlOverride"] === "string") &&
+    (v["tokenPath"] === null || typeof v["tokenPath"] === "string") &&
+    (v["clientId"] === null || typeof v["clientId"] === "string") &&
+    typeof v["clientSecretProvisioned"] === "boolean" &&
+    typeof v["providerFlow"] === "string" &&
+    typeof v["availableInChat"] === "boolean" &&
+    typeof v["availableToAutonomous"] === "boolean" &&
+    typeof v["enabled"] === "boolean" &&
+    typeof v["createdAt"] === "string" &&
+    typeof v["updatedAt"] === "string"
+  );
+}
+
+/** GET /api/mcp-connections — this Organization's Connections (flags only, never secrets). */
+export async function listMcpConnections(): Promise<McpConnectionsResponse> {
+  const data = await get("/api/mcp-connections");
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { connections?: unknown }).connections)) {
+    throw new Error("Unexpected MCP connections response shape.");
+  }
+  const connections = (data as { connections: unknown[] }).connections;
+  if (!connections.every(isMcpConnectionSummary)) throw new Error("Unexpected MCP connections response shape.");
+  return { connections };
+}
+
+export interface McpConnectionWrite {
+  serverId: string;
+  serverUrlOverride?: string | null;
+  tokenPath?: string | null;
+  clientId?: string | null;
+  availableInChat?: boolean;
+  availableToAutonomous?: boolean;
+  enabled?: boolean;
+}
+
+/** POST /api/mcp-connections — bind one template to this Organization (admin-only). */
+export async function createMcpConnection(write: McpConnectionWrite): Promise<McpConnectionSummary> {
+  checkMcpId(write.serverId, "MCP server");
+  const data = await postJson("/api/mcp-connections", write);
+  const connection = (data as { connection?: unknown }).connection;
+  if (!isMcpConnectionSummary(connection)) throw new Error("Unexpected MCP connection response shape.");
+  return connection;
+}
+
+/** POST /api/mcp-connections/:id — update flags/override (admin-only; no secret fields). */
+export async function updateMcpConnection(
+  id: string,
+  patch: Omit<Partial<McpConnectionWrite>, "serverId">,
+): Promise<McpConnectionSummary> {
+  checkMcpId(id, "MCP connection");
+  const data = await postJson(`/api/mcp-connections/${id}`, patch);
+  const connection = (data as { connection?: unknown }).connection;
+  if (!isMcpConnectionSummary(connection)) throw new Error("Unexpected MCP connection response shape.");
+  return connection;
+}
+
+/** DELETE /api/mcp-connections/:id — hard-delete the binding (admin-only). */
+export async function deleteMcpConnection(id: string): Promise<void> {
+  checkMcpId(id, "MCP connection");
+  const token = getToken();
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const response = await fetch(`/api/mcp-connections/${id}`, { method: "DELETE", headers });
+  if (!response.ok) throw await parseApiError(response);
+}
+
+function isMcpCatalogTool(value: unknown): value is McpCatalogTool {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["connectionId"] === "string" &&
+    typeof v["toolName"] === "string" &&
+    typeof v["qualifiedName"] === "string" &&
+    typeof v["description"] === "string" &&
+    "inputSchema" in v &&
+    typeof v["enabled"] === "boolean" &&
+    (v["autoDisabledReason"] === null || typeof v["autoDisabledReason"] === "string") &&
+    typeof v["syncedAt"] === "string" &&
+    typeof v["updatedAt"] === "string"
+  );
+}
+
+/** GET /api/mcp-connections/:id/tools — verbatim per-Connection tool catalog. */
+export async function listMcpConnectionTools(connectionId: string): Promise<McpCatalogResponse> {
+  checkMcpId(connectionId, "MCP connection");
+  const data = await get(`/api/mcp-connections/${connectionId}/tools`);
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { tools?: unknown }).tools)) {
+    throw new Error("Unexpected MCP catalog response shape.");
+  }
+  const tools = (data as { tools: unknown[] }).tools;
+  if (!tools.every(isMcpCatalogTool)) throw new Error("Unexpected MCP catalog response shape.");
+  return { tools };
+}
+
+/** POST /api/mcp-connections/:id/refresh-tools — sync the catalog (needs a service credential; admin-only). */
+export async function refreshMcpConnectionTools(connectionId: string): Promise<McpRefreshSummary> {
+  checkMcpId(connectionId, "MCP connection");
+  const data = await postJson(`/api/mcp-connections/${connectionId}/refresh-tools`, {});
+  const catalog = (data as { catalog?: unknown }).catalog;
+  if (
+    typeof catalog !== "object" ||
+    catalog === null ||
+    typeof (catalog as { total?: unknown }).total !== "number" ||
+    typeof (catalog as { enabled?: unknown }).enabled !== "number" ||
+    typeof (catalog as { disabled?: unknown }).disabled !== "number"
+  ) {
+    throw new Error("Unexpected MCP refresh response shape.");
+  }
+  return catalog as McpRefreshSummary;
+}
+
+/** POST /api/mcp-connections/:id/tools/:tool/(enable|disable) — flip one catalog tool (admin-only). */
+export async function setMcpCatalogToolEnabled(
+  connectionId: string,
+  toolName: string,
+  enabled: boolean,
+): Promise<McpCatalogTool> {
+  checkMcpId(connectionId, "MCP connection");
+  if (!VENDOR_TOOL_NAME.test(toolName)) throw new Error("Unexpected catalog tool name shape.");
+  const data = await postJson(
+    `/api/mcp-connections/${connectionId}/tools/${toolName}/${enabled ? "enable" : "disable"}`,
+    {},
+  );
+  const tool = (data as { tool?: unknown }).tool;
+  if (!isMcpCatalogTool(tool)) throw new Error("Unexpected MCP catalog tool response shape.");
+  return tool;
+}
+
+function isMcpConsentState(value: unknown): value is McpConsentState {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["connectionId"] === "string" &&
+    typeof v["userId"] === "string" &&
+    typeof v["orgId"] === "string" &&
+    typeof v["scope"] === "string" &&
+    typeof v["consentGrantedAt"] === "string" &&
+    (v["consentExpiresAt"] === null || typeof v["consentExpiresAt"] === "string") &&
+    typeof v["generation"] === "number" &&
+    "health" in v
+  );
+}
+
+/** GET /api/mcp-connections/:id/consent — own non-secret consent state (null when none).
+ * OAuth authorize/callback stay outside this UI: this surface reports state
+ * only and never implies the browser consent flow is complete. */
+export async function getMcpConnectionConsent(connectionId: string): Promise<McpConsentState | null> {
+  checkMcpId(connectionId, "MCP connection");
+  const data = await get(`/api/mcp-connections/${connectionId}/consent`);
+  const consent = (data as { consent?: unknown }).consent;
+  if (consent === null || consent === undefined) return null;
+  if (!isMcpConsentState(consent)) throw new Error("Unexpected MCP consent response shape.");
+  return consent;
 }
 
 /** PATCH with a JSON body (endpoint policy updates). No other page uses PATCH

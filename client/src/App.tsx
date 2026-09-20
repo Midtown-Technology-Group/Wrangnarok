@@ -21,6 +21,7 @@ import { PolicyRulesList } from "./pages/PolicyRules";
 import { applyTheme, OwnProfile } from "./pages/Profile";
 import { SagasList } from "./pages/Sagas";
 import { TableDetailRoute, TablesList } from "./pages/Tables";
+import { ToolsMcp } from "./pages/ToolsMcp";
 import { TriggersView } from "./pages/Triggers";
 import { fetchBranding, fetchProfile, getToken } from "./lib/api-client";
 import { applyBrandingToDocument } from "./lib/brand-contrast";
@@ -102,6 +103,7 @@ export function App(): React.JSX.Element {
           <Route path="/tables/:name" element={<TableDetailRoute />} />
           <Route path="/triggers" element={<TriggersView />} />
           <Route path="/ai-profiles" element={<AiProfilesList />} />
+          <Route path="/tools-mcp" element={<ToolsMcp />} />
           <Route path="*" element={<p>Not found. Try History.</p>} />
         </Routes>
       </main>
