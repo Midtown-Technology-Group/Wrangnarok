@@ -81,6 +81,12 @@ export const NAV_ENTRIES: NavEntry[] = [
     phase: "Phase 3 (#146)",
   },
   {
+    label: "Policy rules",
+    to: "/policy-rules",
+    enabled: true,
+    phase: "Phase 4 (#560)",
+  },
+  {
     label: "Triggers",
     enabled: false,
     issue: `${REPO}/issues/139`,

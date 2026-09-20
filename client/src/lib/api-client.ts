@@ -47,6 +47,10 @@ import type {
   LogEntry,
   LogPage,
   NotificationsResponse,
+  PolicyRule,
+  PolicyRuleResponse,
+  PolicyRulesResponse,
+  PolicyRuleWrite,
   FileLocation,
   FileLocationsResponse,
   FileMeta,
@@ -841,6 +845,81 @@ export async function testConnection(integrationId: string): Promise<ConnectionT
     throw new Error("Unexpected connection test response shape.");
   }
   return { test: test as ConnectionTestResponse["test"] };
+}
+
+const RULE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isPolicyRule(value: unknown): value is PolicyRule {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    (v["orgId"] === null || typeof v["orgId"] === "string") &&
+    (v["resourceKind"] === "saga" || v["resourceKind"] === "form" || v["resourceKind"] === "app") &&
+    typeof v["resourceId"] === "string" &&
+    typeof v["action"] === "string" &&
+    (v["subjectType"] === "user" || v["subjectType"] === "kind" || v["subjectType"] === "all") &&
+    typeof v["subjectRef"] === "string" &&
+    typeof v["createdAt"] === "string"
+  );
+}
+
+function readPolicyRules(data: unknown): PolicyRulesResponse {
+  if (typeof data !== "object" || data === null || !Array.isArray((data as { rules?: unknown }).rules)) {
+    throw new Error("Unexpected policy rules response shape.");
+  }
+  const rules = (data as { rules: unknown[] }).rules;
+  if (!rules.every(isPolicyRule)) throw new Error("Unexpected policy rules response shape.");
+  return { rules };
+}
+
+function readPolicyRule(data: unknown): PolicyRuleResponse {
+  const rule = data as { id?: unknown; resourceKind?: unknown; resourceId?: unknown; action?: unknown } & Record<
+    string,
+    unknown
+  > as unknown;
+  // POST answers the created rule bare (201 with the rule fields at top
+  // level); older envelopes are rejected rather than guessed.
+  if (!isPolicyRule(rule)) throw new Error("Unexpected policy rule response shape.");
+  return rule;
+}
+
+/** GET /api/orgs/:id/policy-rules — this Organization's rules plus the
+ * global rules visible inside it (org admins via requireManageOrg). */
+export async function listOrgPolicyRules(orgId: string): Promise<PolicyRulesResponse> {
+  if (!ORG_ID.test(orgId)) throw new Error("Unexpected Organization ID shape.");
+  return readPolicyRules(await get(`/api/orgs/${orgId}/policy-rules`));
+}
+
+/** POST /api/orgs/:id/policy-rules — create one Organization-scoped rule. */
+export async function createOrgPolicyRule(orgId: string, write: PolicyRuleWrite): Promise<PolicyRuleResponse> {
+  if (!ORG_ID.test(orgId)) throw new Error("Unexpected Organization ID shape.");
+  return readPolicyRule(await postJson(`/api/orgs/${orgId}/policy-rules`, write));
+}
+
+/** DELETE /api/orgs/:id/policy-rules/:ruleId — delete one Organization rule.
+ * Global rows visible in the org listing are not deletable here (the route
+ * only deletes org-scoped rows); they delete via deleteGlobalPolicyRule. */
+export async function deleteOrgPolicyRule(orgId: string, ruleId: string): Promise<void> {
+  if (!ORG_ID.test(orgId)) throw new Error("Unexpected Organization ID shape.");
+  if (!RULE_ID.test(ruleId)) throw new Error("Unexpected Policy rule ID shape.");
+  await deleteJson(`/api/orgs/${orgId}/policy-rules/${ruleId}`);
+}
+
+/** GET /api/policy-rules — global rules (instance admins only). */
+export async function listGlobalPolicyRules(): Promise<PolicyRulesResponse> {
+  return readPolicyRules(await get("/api/policy-rules"));
+}
+
+/** POST /api/policy-rules — create one global rule (instance admins only). */
+export async function createGlobalPolicyRule(write: PolicyRuleWrite): Promise<PolicyRuleResponse> {
+  return readPolicyRule(await postJson("/api/policy-rules", write));
+}
+
+/** DELETE /api/policy-rules/:ruleId — delete one global rule. */
+export async function deleteGlobalPolicyRule(ruleId: string): Promise<void> {
+  if (!RULE_ID.test(ruleId)) throw new Error("Unexpected Policy rule ID shape.");
+  await deleteJson(`/api/policy-rules/${ruleId}`);
 }
 
 function isAiProfileSummary(value: unknown): value is AiProfileSummary {
