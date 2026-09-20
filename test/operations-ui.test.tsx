@@ -307,6 +307,38 @@ it("keeps repair execution behind an explicit confirmation", async () => {
   expect(html).toContain("repair-stuck-build");
 });
 
+it("keeps Execute gated on a successful Inspect of the current form", async () => {
+  const html = renderToStaticMarkup(
+    <MemoryRouter>
+      <OperationsView initial={initial} />
+    </MemoryRouter>,
+  );
+  // No inspection has run in a fresh render, so execution stays locked even
+  // though the confirmation box is present.
+  expect(html).toContain("Execution unlocks after a successful Inspect of the current form.");
+  expect(html).toContain("disabled");
+});
+
+it("rejects nested nulls in jobs and usage payloads before they reach the view", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    Response.json({
+      jobs: {
+        ...jobsPayload.jobs,
+        appBuilds: { ...jobsPayload.jobs.appBuilds, interrupted: [{ appId: null, appName: "stuck" }] },
+      },
+    }),
+  );
+  await expect(fetchOpsJobs()).rejects.toThrow("Unexpected ops jobs response shape.");
+
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+    Response.json({ usage: { ...usagePayload.usage, bySaga: [{ executions: 1 }] } }),
+  );
+  await expect(fetchUsageSummary()).rejects.toThrow("Unexpected usage summary response shape.");
+
+  vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(Response.json({ usage: { ...usagePayload.usage, gaps: null } }));
+  await expect(fetchUsageSummary()).rejects.toThrow("Unexpected usage summary response shape.");
+});
+
 it("inspects repairs dry-run by default and commits only with dryRun:false", async () => {
   const fetchMock = vi
     .spyOn(globalThis, "fetch")

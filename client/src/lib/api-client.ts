@@ -2161,6 +2161,7 @@ export async function fetchOpsJobs(): Promise<OpsJobsResponse> {
   const data = await get("/api/ops/jobs");
   const jobs = (data as { jobs?: unknown }).jobs as Record<string, unknown> | undefined;
   const builds = jobs?.["appBuilds"] as Record<string, unknown> | undefined;
+  const interrupted = builds?.["interrupted"] as unknown;
   if (
     typeof jobs !== "object" ||
     jobs === null ||
@@ -2172,7 +2173,14 @@ export async function fetchOpsJobs(): Promise<OpsJobsResponse> {
     typeof builds["running"] !== "number" ||
     typeof builds["succeeded"] !== "number" ||
     typeof builds["failed"] !== "number" ||
-    !Array.isArray(builds["interrupted"])
+    !Array.isArray(interrupted) ||
+    !interrupted.every(
+      (entry): entry is { appId: string; appName: string } =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof (entry as Record<string, unknown>)["appId"] === "string" &&
+        typeof (entry as Record<string, unknown>)["appName"] === "string",
+    )
   ) {
     throw new Error("Unexpected ops jobs response shape.");
   }
@@ -2283,11 +2291,46 @@ export async function fetchUsageSummary(query: UsageSummaryQuery = {}): Promise<
   if (query.endDate) params.set("endDate", query.endDate);
   const suffix = params.size > 0 ? `?${params.toString()}` : "";
   const data = await get(`/api/usage/summary${suffix}`);
-  const usage = (data as { usage?: unknown }).usage;
-  if (typeof usage !== "object" || usage === null || !Array.isArray((usage as { bySaga?: unknown }).bySaga)) {
+  if (!isUsageSummary((data as { usage?: unknown }).usage)) {
     throw new Error("Unexpected usage summary response shape.");
   }
   return data as UsageSummaryResponse;
+}
+
+function isUsageCounters(value: unknown): value is Record<string, number> {
+  if (typeof value !== "object" || value === null) return false;
+  return Object.values(value as Record<string, unknown>).every((entry) => typeof entry === "number");
+}
+
+/** Guard the full usage summary shape the console renders: totals, every
+ * per-Saga row, and the explicit no-money gap labels. */
+function isUsageSummary(value: unknown): value is UsageSummaryResponse["usage"] {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const totals = v["totals"] as Record<string, unknown> | undefined;
+  const gaps = v["gaps"] as Record<string, unknown> | undefined;
+  const bySaga = v["bySaga"] as unknown;
+  return (
+    typeof v["orgId"] === "string" &&
+    typeof totals === "object" &&
+    totals !== null &&
+    isUsageCounters(totals) &&
+    Array.isArray(bySaga) &&
+    bySaga.every((row) => {
+      if (typeof row !== "object" || row === null) return false;
+      const { saga, ...counters } = row as Record<string, unknown>;
+      return typeof saga === "string" && isUsageCounters(counters);
+    }) &&
+    typeof v["cancelledExecutions"] === "number" &&
+    typeof v["matchedExecutions"] === "number" &&
+    typeof v["truncated"] === "boolean" &&
+    typeof gaps === "object" &&
+    gaps !== null &&
+    typeof gaps["modelTokenCosts"] === "string" &&
+    typeof gaps["providerBilling"] === "string" &&
+    typeof gaps["estimates"] === "string" &&
+    typeof v["note"] === "string"
+  );
 }
 
 export interface LogSearchQuery {

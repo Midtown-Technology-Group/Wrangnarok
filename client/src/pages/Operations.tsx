@@ -28,6 +28,7 @@ import {
   searchLogs,
   setToken,
 } from "../lib/api-client";
+import type { LogSearchQuery } from "../lib/api-client";
 import { getErrorMessage } from "../lib/api-error";
 import type {
   LogEntry,
@@ -113,9 +114,13 @@ export function OperationsView(props: { initial?: OperationsInitial }): React.JS
   const [usageTo, setUsageTo] = useState("");
 
   // Log search (server-side level/saga/date filters plus cursor pages).
+  // The cursor belongs to the last submitted query: pagination reuses that
+  // applied snapshot, never the live filter fields (which the operator may
+  // have edited since searching).
   const [logPages, setLogPages] = useState<LogEntry[][]>(props.initial?.logs ? [props.initial.logs.logs] : []);
   const [logsHasMore, setLogsHasMore] = useState(props.initial?.logs?.hasMore ?? false);
   const [logsCursor, setLogsCursor] = useState<string | null>(props.initial?.logs?.nextCursor ?? null);
+  const [appliedLogQuery, setAppliedLogQuery] = useState<LogSearchQuery>({});
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [logLevel, setLogLevel] = useState("");
   const [logSagaId, setLogSagaId] = useState("");
@@ -123,16 +128,34 @@ export function OperationsView(props: { initial?: OperationsInitial }): React.JS
   const [logFrom, setLogFrom] = useState("");
   const [logTo, setLogTo] = useState("");
 
-  // Repairs: inspect-then-act. The commit stays disabled until the
-  // operator checks the explicit confirmation.
+  // Repairs: inspect-then-act. Execution needs the explicit confirmation
+  // AND a successful inspection of the exact current form: the last dry run
+  // is tracked and any edit to kind/target/key invalidates it.
   const [repairKind, setRepairKind] = useState<OpsRepairKind>("cleanup-expired-tokens");
   const [repairTarget, setRepairTarget] = useState("");
   const [repairKey, setRepairKey] = useState("");
   const [repairConfirm, setRepairConfirm] = useState(false);
   const [repairBusy, setRepairBusy] = useState(false);
   const [repairOutcome, setRepairOutcome] = useState<OpsRepairOutcome | null>(null);
+  const [inspected, setInspected] = useState<{ kind: OpsRepairKind; target: string; key: string } | null>(null);
 
-  const logQuery = {
+  const repairForm = { kind: repairKind, target: repairTarget, key: repairKind === "retry-execution" ? repairKey : "" };
+  const inspectionCurrent =
+    inspected !== null &&
+    inspected.kind === repairForm.kind &&
+    inspected.target === repairForm.target &&
+    inspected.key === repairForm.key;
+  const canExecute = repairConfirm && inspectionCurrent && !repairBusy;
+
+  function handleRepairField(next: Partial<{ kind: OpsRepairKind; target: string; key: string }>): void {
+    if (next.kind !== undefined) setRepairKind(next.kind);
+    if (next.target !== undefined) setRepairTarget(next.target);
+    if (next.key !== undefined) setRepairKey(next.key);
+    setInspected(null);
+    setRepairOutcome(null);
+  }
+
+  const logQuery: LogSearchQuery = {
     ...(logLevel !== "" ? { level: logLevel } : {}),
     ...(logSagaId !== "" ? { sagaId: logSagaId } : {}),
     ...(logSagaName !== "" ? { sagaName: logSagaName } : {}),
@@ -226,6 +249,7 @@ export function OperationsView(props: { initial?: OperationsInitial }): React.JS
       setLogPages([first.logs]);
       setLogsHasMore(first.hasMore);
       setLogsCursor(first.nextCursor);
+      setAppliedLogQuery(logQuery);
     } catch (err) {
       setError(getErrorMessage(err, "Could not search the logs."));
     } finally {
@@ -238,7 +262,7 @@ export function OperationsView(props: { initial?: OperationsInitial }): React.JS
     setLoadingLogs(true);
     setError(null);
     try {
-      const next = await searchLogs({ ...logQuery, cursor: logsCursor });
+      const next = await searchLogs({ ...appliedLogQuery, cursor: logsCursor });
       const seen = new Set(loadedLogs.map((row) => row.seq));
       setLogPages((prev) => [...prev, next.logs.filter((row) => !seen.has(row.seq))]);
       setLogsHasMore(next.hasMore);
@@ -251,6 +275,7 @@ export function OperationsView(props: { initial?: OperationsInitial }): React.JS
   }
 
   async function handleRepair(dryRun: boolean): Promise<void> {
+    if (!dryRun && !canExecute) return;
     setRepairBusy(true);
     setError(null);
     try {
@@ -261,7 +286,12 @@ export function OperationsView(props: { initial?: OperationsInitial }): React.JS
         dryRun,
       });
       setRepairOutcome(outcome.repair);
-      if (!dryRun) setRepairConfirm(false);
+      if (dryRun) {
+        setInspected(repairForm);
+      } else {
+        setRepairConfirm(false);
+        setInspected(null);
+      }
     } catch (err) {
       setError(getErrorMessage(err, dryRun ? "Could not inspect the repair." : "Could not run the repair."));
     } finally {
@@ -782,10 +812,7 @@ export function OperationsView(props: { initial?: OperationsInitial }): React.JS
         <select
           id="ops-repair-kind"
           value={repairKind}
-          onChange={(e) => {
-            setRepairKind(e.target.value as OpsRepairKind);
-            setRepairOutcome(null);
-          }}
+          onChange={(e) => handleRepairField({ kind: e.target.value as OpsRepairKind })}
         >
           {OPS_REPAIR_KINDS.map((kind) => (
             <option key={kind} value={kind}>
@@ -802,7 +829,7 @@ export function OperationsView(props: { initial?: OperationsInitial }): React.JS
               type="text"
               autoComplete="off"
               value={repairTarget}
-              onChange={(e) => setRepairTarget(e.target.value)}
+              onChange={(e) => handleRepairField({ target: e.target.value })}
               placeholder={targetHint}
             />
           </>
@@ -816,7 +843,7 @@ export function OperationsView(props: { initial?: OperationsInitial }): React.JS
               type="text"
               autoComplete="off"
               value={repairKey}
-              onChange={(e) => setRepairKey(e.target.value)}
+              onChange={(e) => handleRepairField({ key: e.target.value })}
               placeholder="retry-001-unique-key"
               maxLength={128}
             />
@@ -839,12 +866,21 @@ export function OperationsView(props: { initial?: OperationsInitial }): React.JS
         </button>{" "}
         <button
           type="button"
-          disabled={repairBusy || !repairConfirm}
-          title={repairConfirm ? "Execute the repair" : "Check the confirmation first"}
+          disabled={!canExecute}
+          title={
+            !repairConfirm
+              ? "Check the confirmation first"
+              : !inspectionCurrent
+                ? "Inspect the current form first"
+                : "Execute the repair"
+          }
           onClick={() => void handleRepair(false)}
         >
           {repairBusy ? "Working…" : "Execute (admin-gated)"}
         </button>
+        {!inspectionCurrent && !repairBusy ? (
+          <p className="muted">Execution unlocks after a successful Inspect of the current form.</p>
+        ) : null}
       </form>
       {repairOutcome ? (
         <p className="summary-line" data-testid="ops-repair-outcome">
