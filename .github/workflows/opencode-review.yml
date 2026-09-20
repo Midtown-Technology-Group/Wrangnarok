@@ -184,13 +184,17 @@ jobs:
           rm -f "$LOG_FILE" "$ERR_FILE"
 
   triage:
+    # Noise reduction: triage runs only for issues. The workflow triggers on
+    # both pull_request and issues, and without this gate the triage job also
+    # evaluated on every PR event, so it could post a triage comment on PRs.
     # Same advisory posture as `review` (issue #225: no `secrets.*` in
-    # job-level `if:`): the job always evaluates and the credential-needing
-    # step gates on the probe below. Permission note: this job inherits the
-    # workflow-level `issues: write` ONLY so it can post its single triage
-    # comment — verified 2026-09-18 that read-only tokens make the action
-    # fail with 403 when commenting. Suggest-only is enforced by the prompt:
-    # never close, label, assign, or push; contents stays read-only.
+    # job-level `if:`): the credential-needing step gates on the probe below.
+    # Permission note: this job inherits the workflow-level `issues: write`
+    # ONLY so it can post its single triage comment — verified 2026-09-18
+    # that read-only tokens make the action fail with 403 when commenting.
+    # Suggest-only is enforced by the prompt: never close, label, assign, or
+    # push; contents stays read-only.
+    if: github.event_name == 'issues'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
