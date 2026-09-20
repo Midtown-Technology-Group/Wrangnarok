@@ -79,6 +79,12 @@ export const NAV_ENTRIES: NavEntry[] = [
     phase: "Phase 3 (#146)",
   },
   {
+    label: "Operations",
+    to: "/operations",
+    enabled: true,
+    phase: "Phase 4 (#558)",
+  },
+  {
     label: "Triggers",
     to: "/triggers",
     enabled: true,

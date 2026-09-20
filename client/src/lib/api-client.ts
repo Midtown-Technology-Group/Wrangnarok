@@ -69,8 +69,23 @@ import type {
   FormSummary,
   IntegrationsResponse,
   IntegrationSummary,
+  OpsConnectionHealthEntry,
+  OpsConnectionHealthResponse,
+  OpsExecutionCounters,
+  OpsHealth,
+  OpsJobsResponse,
+  OpsMetricsResponse,
+  OpsPreflightEntry,
+  OpsPreflightResponse,
+  OpsRecentFailure,
+  OpsRepairRequest,
+  OpsRepairResponse,
+  OpsScheduledTask,
+  OpsScheduledTasksResponse,
+  OpsVersionResponse,
   SagasResponse,
   SagaSummary,
+  UsageSummaryResponse,
   EndpointEvent,
   EndpointIssuedResponse,
   EndpointsResponse,
@@ -2023,4 +2038,329 @@ export async function fetchCaller(): Promise<CallerResponse> {
     throw new Error("Unexpected caller response shape.");
   }
   return data as CallerResponse;
+}
+
+// Operations console (issue #558): typed reads over the served /api/ops/*,
+// /api/usage/summary, and /api/logs routes. Every call rides the same
+// Bearer authorization the other console pages use; the server enforces all
+// tenancy and admin boundaries.
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function isOpsCounters(value: unknown): value is OpsExecutionCounters {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  for (const key of [
+    "total",
+    "pending",
+    "pendingUndispatched",
+    "running",
+    "cancelling",
+    "succeeded",
+    "failed",
+    "timedOut",
+    "cancelled",
+  ]) {
+    if (typeof v[key] !== "number") return false;
+  }
+  return true;
+}
+
+function isOpsRecentFailure(value: unknown): value is OpsRecentFailure {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["executionId"] === "string" &&
+    typeof v["sagaName"] === "string" &&
+    typeof v["status"] === "string" &&
+    (v["code"] === null || typeof v["code"] === "string") &&
+    (v["completedAt"] === null || typeof v["completedAt"] === "string")
+  );
+}
+
+/** GET /api/ops/version — product version contract. */
+export async function fetchOpsVersion(): Promise<OpsVersionResponse> {
+  const data = await get("/api/ops/version");
+  const version = (data as { version?: unknown }).version as Record<string, unknown> | undefined;
+  if (
+    typeof version !== "object" ||
+    version === null ||
+    typeof version["sdkVersion"] !== "string" ||
+    typeof version["sagaCatalog"] !== "object" ||
+    version["sagaCatalog"] === null ||
+    typeof (version["sagaCatalog"] as Record<string, unknown>)["count"] !== "number" ||
+    typeof (version["sagaCatalog"] as Record<string, unknown>)["revision"] !== "string" ||
+    !isStringArray(version["migrationsApplied"])
+  ) {
+    throw new Error("Unexpected ops version response shape.");
+  }
+  return data as OpsVersionResponse;
+}
+
+/** GET /api/ops/health — Worker/D1 liveness. */
+export async function fetchOpsHealth(): Promise<OpsHealth> {
+  const data = await get("/api/ops/health");
+  const v = data as Record<string, unknown>;
+  if (
+    typeof v["status"] !== "string" ||
+    typeof v["database"] !== "string" ||
+    typeof v["worker"] !== "string" ||
+    typeof v["checkedAt"] !== "string"
+  ) {
+    throw new Error("Unexpected ops health response shape.");
+  }
+  return data as OpsHealth;
+}
+
+/** GET /api/ops/metrics — per-status Execution counts plus the
+ * undispatched-Pending backlog and the recent failure tail (?recent=1-50). */
+export async function fetchOpsMetrics(recent?: number): Promise<OpsMetricsResponse> {
+  const suffix = recent === undefined ? "" : `?recent=${encodeURIComponent(String(recent))}`;
+  const data = await get(`/api/ops/metrics${suffix}`);
+  const metrics = (data as { metrics?: unknown }).metrics as Record<string, unknown> | undefined;
+  if (
+    typeof metrics !== "object" ||
+    metrics === null ||
+    typeof metrics["generatedAt"] !== "string" ||
+    !isOpsCounters(metrics["executions"]) ||
+    !Array.isArray(metrics["recentFailures"]) ||
+    !(metrics["recentFailures"] as unknown[]).every(isOpsRecentFailure)
+  ) {
+    throw new Error("Unexpected ops metrics response shape.");
+  }
+  return data as OpsMetricsResponse;
+}
+
+function isOpsScheduledTask(value: unknown): value is OpsScheduledTask {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["id"] === "string" &&
+    typeof v["name"] === "string" &&
+    typeof v["kind"] === "string" &&
+    typeof v["enabled"] === "boolean" &&
+    (v["cadence"] === null || typeof v["cadence"] === "string") &&
+    typeof v["detail"] === "string"
+  );
+}
+
+/** GET /api/ops/scheduled-tasks — trigger inventory that can run work. */
+export async function fetchOpsScheduledTasks(): Promise<OpsScheduledTasksResponse> {
+  const data = await get("/api/ops/scheduled-tasks");
+  const tasks = (data as { tasks?: unknown }).tasks;
+  if (!Array.isArray(tasks) || !tasks.every(isOpsScheduledTask)) {
+    throw new Error("Unexpected ops scheduled-tasks response shape.");
+  }
+  return { tasks };
+}
+
+/** GET /api/ops/jobs — Execution backlog plus per-app deploy-job aggregates. */
+export async function fetchOpsJobs(): Promise<OpsJobsResponse> {
+  const data = await get("/api/ops/jobs");
+  const jobs = (data as { jobs?: unknown }).jobs as Record<string, unknown> | undefined;
+  const builds = jobs?.["appBuilds"] as Record<string, unknown> | undefined;
+  const interrupted = builds?.["interrupted"] as unknown;
+  if (
+    typeof jobs !== "object" ||
+    jobs === null ||
+    typeof jobs["generatedAt"] !== "string" ||
+    !isOpsCounters(jobs["executions"]) ||
+    typeof builds !== "object" ||
+    builds === null ||
+    typeof builds["queued"] !== "number" ||
+    typeof builds["running"] !== "number" ||
+    typeof builds["succeeded"] !== "number" ||
+    typeof builds["failed"] !== "number" ||
+    !Array.isArray(interrupted) ||
+    !interrupted.every(
+      (entry): entry is { appId: string; appName: string } =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof (entry as Record<string, unknown>)["appId"] === "string" &&
+        typeof (entry as Record<string, unknown>)["appName"] === "string",
+    )
+  ) {
+    throw new Error("Unexpected ops jobs response shape.");
+  }
+  return data as OpsJobsResponse;
+}
+
+function isOpsPreflightEntry(value: unknown): value is OpsPreflightEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["integrationId"] === "string" &&
+    typeof v["integrationName"] === "string" &&
+    typeof v["connected"] === "boolean" &&
+    typeof v["enabled"] === "boolean" &&
+    isStringArray(v["missingSecrets"]) &&
+    typeof v["ready"] === "boolean"
+  );
+}
+
+/** GET /api/ops/preflight — mapping/credential presence, no secret values. */
+export async function fetchOpsPreflight(): Promise<OpsPreflightResponse> {
+  const data = await get("/api/ops/preflight");
+  const v = data as Record<string, unknown>;
+  if (
+    typeof v["checkedAt"] !== "string" ||
+    !Array.isArray(v["integrations"]) ||
+    !(v["integrations"] as unknown[]).every(isOpsPreflightEntry)
+  ) {
+    throw new Error("Unexpected ops preflight response shape.");
+  }
+  return data as OpsPreflightResponse;
+}
+
+function isOpsConnectionHealthEntry(value: unknown): value is OpsConnectionHealthEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v["integrationId"] === "string" &&
+    typeof v["integrationName"] === "string" &&
+    typeof v["connected"] === "boolean" &&
+    typeof v["enabled"] === "boolean" &&
+    typeof v["testHint"] === "string" &&
+    typeof v["remediation"] === "string"
+  );
+}
+
+/** GET /api/ops/connections — per-Integration health with test hints. */
+export async function fetchOpsConnectionHealth(): Promise<OpsConnectionHealthResponse> {
+  const data = await get("/api/ops/connections");
+  const connections = (data as { connections?: unknown }).connections;
+  if (!Array.isArray(connections) || !connections.every(isOpsConnectionHealthEntry)) {
+    throw new Error("Unexpected ops connections response shape.");
+  }
+  return { connections };
+}
+
+/** Repair kinds the console offers (mirrors POST /api/ops/repairs). */
+export const OPS_REPAIR_KINDS = [
+  "retry-execution",
+  "cancel-execution",
+  "cleanup-pending-uploads",
+  "cleanup-expired-tokens",
+  "repair-stuck-build",
+] as const;
+
+/** POST /api/ops/repairs — inspect-then-act. dryRun omitted or true only
+ * inspects (no writes); dryRun:false executes behind the admin gate. The
+ * caller must confirm explicitly before committing; the server still
+ * refuses non-admin execution with REPAIR_FORBIDDEN. */
+export async function runOpsRepair(request: OpsRepairRequest): Promise<OpsRepairResponse> {
+  const data = await postJson("/api/ops/repairs", {
+    kind: request.kind,
+    ...(request.targetId === undefined ? {} : { targetId: request.targetId }),
+    ...(request.idempotencyKey === undefined ? {} : { idempotencyKey: request.idempotencyKey }),
+    dryRun: request.dryRun ?? true,
+  });
+  const repair = (data as { repair?: unknown }).repair as Record<string, unknown> | undefined;
+  if (
+    typeof repair !== "object" ||
+    repair === null ||
+    typeof repair["kind"] !== "string" ||
+    typeof repair["dryRun"] !== "boolean" ||
+    (repair["targetId"] !== null && typeof repair["targetId"] !== "string") ||
+    typeof repair["action"] !== "string" ||
+    !("result" in repair)
+  ) {
+    throw new Error("Unexpected ops repair response shape.");
+  }
+  return data as OpsRepairResponse;
+}
+
+export interface UsageSummaryQuery {
+  /** Exact Saga name filter (mirrors ?saga=). */
+  saga?: string;
+  /** Inclusive ISO lower bound on created_at (YYYY-MM-DD accepted). */
+  startDate?: string;
+  /** Inclusive-day / exact-datetime upper bound on created_at. */
+  endDate?: string;
+}
+
+/** GET /api/usage/summary — attributed usage over usage_blocks. Org-scoped
+ * by the resolved caller; cross-org rows never aggregate. Application
+ * counters only: never Cloudflare metering, never money. */
+export async function fetchUsageSummary(query: UsageSummaryQuery = {}): Promise<UsageSummaryResponse> {
+  const params = new URLSearchParams();
+  if (query.saga) params.set("saga", query.saga);
+  if (query.startDate) params.set("startDate", query.startDate);
+  if (query.endDate) params.set("endDate", query.endDate);
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+  const data = await get(`/api/usage/summary${suffix}`);
+  if (!isUsageSummary((data as { usage?: unknown }).usage)) {
+    throw new Error("Unexpected usage summary response shape.");
+  }
+  return data as UsageSummaryResponse;
+}
+
+function isUsageCounters(value: unknown): value is Record<string, number> {
+  if (typeof value !== "object" || value === null) return false;
+  return Object.values(value as Record<string, unknown>).every((entry) => typeof entry === "number");
+}
+
+/** Guard the full usage summary shape the console renders: totals, every
+ * per-Saga row, and the explicit no-money gap labels. */
+function isUsageSummary(value: unknown): value is UsageSummaryResponse["usage"] {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const totals = v["totals"] as Record<string, unknown> | undefined;
+  const gaps = v["gaps"] as Record<string, unknown> | undefined;
+  const bySaga = v["bySaga"] as unknown;
+  return (
+    typeof v["orgId"] === "string" &&
+    typeof totals === "object" &&
+    totals !== null &&
+    isUsageCounters(totals) &&
+    Array.isArray(bySaga) &&
+    bySaga.every((row) => {
+      if (typeof row !== "object" || row === null) return false;
+      const { saga, ...counters } = row as Record<string, unknown>;
+      return typeof saga === "string" && isUsageCounters(counters);
+    }) &&
+    typeof v["cancelledExecutions"] === "number" &&
+    typeof v["matchedExecutions"] === "number" &&
+    typeof v["truncated"] === "boolean" &&
+    typeof gaps === "object" &&
+    gaps !== null &&
+    typeof gaps["modelTokenCosts"] === "string" &&
+    typeof gaps["providerBilling"] === "string" &&
+    typeof gaps["estimates"] === "string" &&
+    typeof v["note"] === "string"
+  );
+}
+
+export interface LogSearchQuery {
+  /** Comma-joined levels are passed through as one ?level= value. */
+  level?: string;
+  sagaId?: string;
+  sagaName?: string;
+  /** Inclusive ISO lower bound on created_at (YYYY-MM-DD accepted). */
+  startDate?: string;
+  /** Inclusive-day / exact-datetime upper bound on created_at. */
+  endDate?: string;
+  limit?: number;
+  /** Opaque page marker from a previous response. */
+  cursor?: string;
+}
+
+/** GET /api/logs — operator search by date/level/Saga across the caller's
+ * own rows in seq order. DEBUG rows persist but are hidden from default
+ * reads; pass level=DEBUG explicitly to include them. */
+export async function searchLogs(query: LogSearchQuery = {}): Promise<LogPage> {
+  const params = new URLSearchParams();
+  if (query.level) params.set("level", query.level);
+  if (query.sagaId) params.set("sagaId", query.sagaId);
+  if (query.sagaName) params.set("sagaName", query.sagaName);
+  if (query.startDate) params.set("startDate", query.startDate);
+  if (query.endDate) params.set("endDate", query.endDate);
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.cursor) params.set("cursor", query.cursor);
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+  const data = await get(`/api/logs${suffix}`);
+  if (!isLogPage(data)) throw new Error("Unexpected log page shape.");
+  return data;
 }

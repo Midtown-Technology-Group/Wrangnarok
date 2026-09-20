@@ -16,6 +16,7 @@ import { ExecutionHistoryList } from "./pages/ExecutionHistory";
 import { FilesList } from "./pages/Files";
 import { FormDetailView, FormsList } from "./pages/Forms";
 import { NotificationsList } from "./pages/Notifications";
+import { OperationsView } from "./pages/Operations";
 import { applyTheme, OwnProfile } from "./pages/Profile";
 import { SagasList } from "./pages/Sagas";
 import { TableDetailRoute, TablesList } from "./pages/Tables";
@@ -94,6 +95,7 @@ export function App(): React.JSX.Element {
           <Route path="/forms" element={<FormsList />} />
           <Route path="/forms/:name" element={<FormRoute />} />
           <Route path="/connections" element={<ConnectionsList />} />
+          <Route path="/operations" element={<OperationsView />} />
           <Route path="/tables" element={<TablesList />} />
           <Route path="/tables/:name" element={<TableDetailRoute />} />
           <Route path="/triggers" element={<TriggersView />} />
