@@ -714,3 +714,184 @@ export interface CallerResponse {
   role: "member" | "admin" | null;
   kind: "ordinary" | "external" | null;
 }
+
+// Operations console (issue #558): typed mirrors of the served /api/ops/*,
+// /api/usage/summary, and /api/logs shapes. Counts/IDs/statuses only: no
+// inputs, results, secret values, or Cloudflare metering ride these
+// payloads. Guards in lib/api-client.ts fail loud on drift.
+
+/** Product version contract (GET /api/ops/version). */
+export interface OpsVersion {
+  sdkVersion: string;
+  sagaCatalog: { count: number; revision: string };
+  migrationsApplied: string[];
+}
+
+export interface OpsVersionResponse {
+  version: OpsVersion;
+}
+
+/** Worker/D1 liveness (GET /api/ops/health). */
+export interface OpsHealth {
+  status: string;
+  database: string;
+  worker: string;
+  checkedAt: string;
+}
+
+/** Per-status Execution counters shared by metrics and jobs. */
+export interface OpsExecutionCounters {
+  total: number;
+  pending: number;
+  pendingUndispatched: number;
+  running: number;
+  cancelling: number;
+  succeeded: number;
+  failed: number;
+  timedOut: number;
+  cancelled: number;
+}
+
+/** Recent failure tail entry: IDs/statuses/codes only, never bodies. */
+export interface OpsRecentFailure {
+  executionId: string;
+  sagaName: string;
+  status: string;
+  code: string | null;
+  completedAt: string | null;
+}
+
+/** Execution metrics (GET /api/ops/metrics). */
+export interface OpsMetrics {
+  generatedAt: string;
+  executions: OpsExecutionCounters;
+  recentFailures: OpsRecentFailure[];
+}
+
+export interface OpsMetricsResponse {
+  metrics: OpsMetrics;
+}
+
+/** One scheduled task: trigger inventory that can actually run work. */
+export interface OpsScheduledTask {
+  id: string;
+  name: string;
+  kind: string;
+  enabled: boolean;
+  cadence: string | null;
+  detail: string;
+}
+
+export interface OpsScheduledTasksResponse {
+  tasks: OpsScheduledTask[];
+}
+
+/** Platform job progress (GET /api/ops/jobs). */
+export interface OpsJobs {
+  generatedAt: string;
+  executions: OpsExecutionCounters;
+  appBuilds: {
+    queued: number;
+    running: number;
+    succeeded: number;
+    failed: number;
+    interrupted: { appId: string; appName: string }[];
+  };
+}
+
+export interface OpsJobsResponse {
+  jobs: OpsJobs;
+}
+
+/** Dependency preflight (GET /api/ops/preflight): mapping/credential
+ * presence only, no vendor HTTP, no secret values. */
+export interface OpsPreflightEntry {
+  integrationId: string;
+  integrationName: string;
+  connected: boolean;
+  enabled: boolean;
+  missingSecrets: string[];
+  ready: boolean;
+}
+
+export interface OpsPreflightResponse {
+  checkedAt: string;
+  integrations: OpsPreflightEntry[];
+}
+
+/** Connection health (GET /api/ops/connections): per-Integration health
+ * with registry test hints; live probes stay on the per-Connection test. */
+export interface OpsConnectionHealthEntry {
+  integrationId: string;
+  integrationName: string;
+  connected: boolean;
+  enabled: boolean;
+  testHint: string;
+  remediation: string;
+}
+
+export interface OpsConnectionHealthResponse {
+  connections: OpsConnectionHealthEntry[];
+}
+
+/** Repair operations the console can inspect and, with explicit
+ * confirmation, execute (POST /api/ops/repairs). */
+export type OpsRepairKind =
+  "retry-execution" | "cancel-execution" | "cleanup-pending-uploads" | "cleanup-expired-tokens" | "repair-stuck-build";
+
+export interface OpsRepairRequest {
+  kind: OpsRepairKind;
+  targetId?: string;
+  idempotencyKey?: string;
+  /** Defaults to true: inspect without mutating. Pass false to execute
+   * behind the admin gate with an explicit confirmation. */
+  dryRun?: boolean;
+}
+
+export interface OpsRepairOutcome {
+  kind: string;
+  dryRun: boolean;
+  targetId: string | null;
+  action: string;
+  result: unknown;
+}
+
+export interface OpsRepairResponse {
+  repair: OpsRepairOutcome;
+}
+
+/** Attributed usage summary (GET /api/usage/summary): application-observed
+ * counters only, never Cloudflare metering and never money (S2 no-build:
+ * model costs stay "unpriced", provider billing "unavailable"). */
+export interface UsageSagaTotals {
+  saga: string;
+  executions: number;
+  d1Reads: number;
+  d1Writes: number;
+  operationRows: number;
+  stepsExecuted: number;
+  durationMs: number;
+}
+
+export interface UsageSummary {
+  orgId: string;
+  window: { start: string | null; end: string | null };
+  totals: Omit<UsageSagaTotals, "saga">;
+  bySaga: UsageSagaTotals[];
+  byStatus: Record<string, number>;
+  cancelledExecutions: number;
+  matchedExecutions: number;
+  truncated: boolean;
+  gaps: {
+    modelTokenCosts: string;
+    providerBilling: string;
+    estimates: string;
+    currency: null;
+    unreadableBlocks: number;
+  };
+  note: string;
+}
+
+export interface UsageSummaryResponse {
+  usage: UsageSummary;
+}

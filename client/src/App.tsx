@@ -16,6 +16,7 @@ import { ExecutionHistoryList } from "./pages/ExecutionHistory";
 import { FilesList } from "./pages/Files";
 import { FormDetailView, FormsList } from "./pages/Forms";
 import { NotificationsList } from "./pages/Notifications";
+import { OperationsView } from "./pages/Operations";
 import { applyTheme, OwnProfile } from "./pages/Profile";
 import { SagasList } from "./pages/Sagas";
 import { fetchBranding, fetchProfile, getToken } from "./lib/api-client";
@@ -92,6 +93,7 @@ export function App(): React.JSX.Element {
           <Route path="/forms" element={<FormsList />} />
           <Route path="/forms/:name" element={<FormRoute />} />
           <Route path="/connections" element={<ConnectionsList />} />
+          <Route path="/operations" element={<OperationsView />} />
           <Route path="/ai-profiles" element={<AiProfilesList />} />
           <Route path="*" element={<p>Not found. Try History.</p>} />
         </Routes>
