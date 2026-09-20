@@ -111,6 +111,12 @@ export const NAV_ENTRIES: NavEntry[] = [
     phase: "Phase 6 (#164)",
   },
   {
+    label: "Tools & MCP",
+    to: "/tools-mcp",
+    enabled: true,
+    phase: "Phase 6 (#559)",
+  },
+  {
     label: "Profile",
     to: "/profile",
     enabled: true,

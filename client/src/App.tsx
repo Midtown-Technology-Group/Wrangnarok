@@ -18,6 +18,7 @@ import { FormDetailView, FormsList } from "./pages/Forms";
 import { NotificationsList } from "./pages/Notifications";
 import { applyTheme, OwnProfile } from "./pages/Profile";
 import { SagasList } from "./pages/Sagas";
+import { ToolsMcp } from "./pages/ToolsMcp";
 import { fetchBranding, fetchProfile, getToken } from "./lib/api-client";
 import { applyBrandingToDocument } from "./lib/brand-contrast";
 import type { BrandingView } from "./lib/client-types";
@@ -93,6 +94,7 @@ export function App(): React.JSX.Element {
           <Route path="/forms/:name" element={<FormRoute />} />
           <Route path="/connections" element={<ConnectionsList />} />
           <Route path="/ai-profiles" element={<AiProfilesList />} />
+          <Route path="/tools-mcp" element={<ToolsMcp />} />
           <Route path="*" element={<p>Not found. Try History.</p>} />
         </Routes>
       </main>
