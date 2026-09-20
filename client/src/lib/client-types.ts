@@ -753,3 +753,158 @@ export interface CallerResponse {
   role: "member" | "admin" | null;
   kind: "ordinary" | "external" | null;
 }
+
+// Trigger and schedule management (issue #557): summaries mirror the Worker
+// route shapes over /api/schedules, /api/event-sources, and /api/endpoints.
+// Raw credentials (apiKey, webhookSecret) appear only on the create/rotate
+// responses, never on list/detail summaries.
+
+/** One schedule row: persisted environment state binding a name to a Saga. */
+export interface ScheduleSummary {
+  id: string;
+  name: string;
+  sagaId: string;
+  sagaName: string;
+  kind: "recurring" | "one-off";
+  cron: string;
+  timezone: string;
+  enabled: boolean;
+  input: unknown;
+  runAt: string | null;
+  nextDueAt: string | null;
+  lastWindow: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SchedulesResponse {
+  schedules: ScheduleSummary[];
+}
+
+export interface ScheduleResponse {
+  schedule: ScheduleSummary;
+}
+
+export interface ScheduleDelivery {
+  schedule: string;
+  window: string;
+  executionId: string;
+}
+
+export interface ScheduleDeliveryResponse {
+  delivery: ScheduleDelivery;
+}
+
+/** One event-source row: the registry entry owning an append-only log. */
+export interface EventSourceSummary {
+  id: string;
+  name: string;
+  kind: "schedule" | "webhook" | "topic";
+  refId: string | null;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface EventSourcesResponse {
+  sources: EventSourceSummary[];
+}
+
+export interface EventSourceResponse {
+  source: EventSourceSummary;
+}
+
+export interface SourceEvent {
+  eventId: string;
+  topic: string;
+  payload: unknown;
+  executionId: string | null;
+  createdAt: string;
+}
+
+export interface SourceEventsResponse {
+  events: SourceEvent[];
+}
+
+export interface EmitEventResponse {
+  event: SourceEvent;
+  replayed: boolean;
+  deliveries: unknown[];
+  overflowSkipped: number;
+}
+
+/** One subscription: a topic filter binding a source to a target Saga. */
+export interface SubscriptionSummary {
+  id: string;
+  name: string;
+  sagaId: string;
+  topicFilter: string;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface SubscriptionsResponse {
+  subscriptions: SubscriptionSummary[];
+}
+
+export interface SubscriptionResponse {
+  subscription: SubscriptionSummary;
+}
+
+export interface SubscriptionDelivery {
+  eventId: string;
+  topic: string;
+  executionId: string | null;
+  outcome: "delivered" | "failed";
+  createdAt: string;
+}
+
+export interface SubscriptionDeliveriesResponse {
+  deliveries: SubscriptionDelivery[];
+}
+
+export interface RetryDeliveryResponse {
+  delivery: {
+    subscription: string;
+    eventId: string;
+    executionId: string;
+    replayed: boolean;
+  };
+}
+
+/** One endpoint row: identity and policy only, never digests or secrets. */
+export interface EndpointSummary {
+  id: string;
+  name: string;
+  sagaId: string;
+  kind: "api-key" | "webhook";
+  enabled: boolean;
+  keyExpiresAt: string | null;
+  challenge: "none" | "echo-param";
+  rateLimitPerMinute: number | null;
+  createdAt: string;
+}
+
+export interface EndpointsResponse {
+  endpoints: EndpointSummary[];
+}
+
+export interface EndpointResponse {
+  endpoint: EndpointSummary;
+}
+
+/** Create/rotate answers carry the raw credential exactly once. */
+export interface EndpointIssuedResponse {
+  endpoint: EndpointSummary;
+  apiKey?: string;
+  webhookSecret?: string;
+}
+
+export interface EndpointEvent {
+  eventId: string;
+  executionId: string;
+  createdAt: string;
+}
+
+export interface EndpointEventsResponse {
+  events: EndpointEvent[];
+}

@@ -59,32 +59,34 @@ it("renders ExecutionHistory rows from a mocked /api/* payload (no input/results
   expect(row).not.toContain("result");
 });
 
-it("marks unported nav entries disabled and links each tracking issue", () => {
+// Every parity slice has shipped its page (Triggers #557, Tables #556):
+// no disabled soon-marker remains, and each entry routes. If a future lane
+// re-adds a disabled entry, it must name its open tracking issue.
+it("routes every nav entry with no disabled soon-markers left", () => {
   const html = renderToStaticMarkup(
     <MemoryRouter>
       <Nav />
     </MemoryRouter>,
   );
-  expect(html).toContain('aria-disabled="true"');
+  expect(NAV_ENTRIES.filter((e) => !e.enabled)).toEqual([]);
+  expect(html).not.toContain('aria-disabled="true"');
+  expect(html).not.toContain("(soon)");
   expect(html).toContain("/history");
-  for (const entry of NAV_ENTRIES.filter((e) => !e.enabled)) {
-    expect(entry.issue).toBeDefined();
-    expect(html).toContain(entry.label);
-    expect(html).toContain(entry.issue as string);
+  for (const entry of NAV_ENTRIES) {
+    expect(entry.to).toBeDefined();
+    expect(html).toContain(entry.to as string);
   }
 });
 
 // UX-01 slice 1 (issue #176): each disabled nav entry must name its actual
 // OPEN parity owner — never a closed scaffolding issue (#15/#16/#18, all
-// CLOSED) and never #160 (APP-02, closed since the UX-01c retarget). Tables
-// -> #154 TABLE-02, Triggers -> #139 TRG-03 (only open trigger issue). The
-// Integrations family is served by the enabled Connections page, so no
-// disabled Integrations entry exists at all.
+// CLOSED) and never #160 (APP-02, closed since the UX-01c retarget).
+// Triggers shipped as an enabled page (issue #557) and Tables shipped its
+// UI in #556, so no disabled entry remains and no tracking-issue link may
+// linger. The Integrations family is served by the enabled Connections
+// page, so no disabled Integrations entry exists at all.
 it("points each disabled nav entry at its open parity owner", () => {
-  const owners: Record<string, number> = {
-    Triggers: 139,
-    Tables: 154,
-  };
+  const owners: Record<string, number> = {};
   const disabled = NAV_ENTRIES.filter((e) => !e.enabled);
   expect(disabled.map((e) => e.label).sort()).toEqual(Object.keys(owners).sort());
   for (const [label, issue] of Object.entries(owners)) {
@@ -100,12 +102,18 @@ it("points each disabled nav entry at its open parity owner", () => {
   for (const issue of Object.values(owners)) {
     expect(html).toContain(`/issues/${issue}`);
   }
+  // No disabled entry remains, so no tracking-issue link may linger.
+  expect(html).not.toContain("tracking issue");
   // Quote-boundaried: /issues/154 must not satisfy a /issues/15 check.
   // #160 joined the closed set when APP-02 shipped (UX-01 slice 1).
   for (const closed of [15, 16, 18, 160]) {
     expect(html).not.toContain(`/issues/${closed}"`);
   }
   expect(NAV_ENTRIES.find((e) => e.label === "Integrations")).toBeUndefined();
+  // Tables shipped its UI in #556 and Triggers in #557: enabled and
+  // routed, not disabled.
+  expect(NAV_ENTRIES.find((e) => e.label === "Tables")).toMatchObject({ enabled: true, to: "/tables" });
+  expect(NAV_ENTRIES.find((e) => e.label === "Triggers")).toMatchObject({ enabled: true, to: "/triggers" });
 });
 
 // UX-01c (issue #176): disabled entries stay honestly grayed out AND
@@ -130,6 +138,21 @@ it("renders disabled nav entries with label, disabled state, and keyboard-reacha
     expect(html).toContain(`aria-label="${entry.label} tracking issue"`);
     expect(html).not.toContain(`href="${liveUrl}" tabindex="-1"`);
   }
+});
+
+// Issue #557: Triggers is a usable management area over the existing
+// /api/schedules, /api/event-sources, and /api/endpoints routes — an enabled
+// nav entry at /triggers, not a disabled soon-marker.
+it("enables the Triggers nav entry at /triggers", () => {
+  const triggers = NAV_ENTRIES.find((entry) => entry.label === "Triggers");
+  expect(triggers?.enabled).toBe(true);
+  expect(triggers?.to).toBe("/triggers");
+  const html = renderToStaticMarkup(
+    <MemoryRouter>
+      <Nav />
+    </MemoryRouter>,
+  );
+  expect(html).toContain("/triggers");
 });
 
 it("enables the Dashboard nav entry at /dashboard", () => {
