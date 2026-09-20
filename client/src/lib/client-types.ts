@@ -123,6 +123,45 @@ export interface ConnectionTestResponse {
   test: ConnectionTestResult;
 }
 
+/** Direct allow rule for GET/POST /api/orgs/:id/policy-rules and
+ * GET/POST /api/policy-rules (AUTH-02, issue #560): one (resource, action)
+ * grant for one subject. Rules only grant `allow`; anything without a
+ * matching rule denies by absence — there is no deny effect and no edit
+ * or dry-run shape on the API. `orgId` null marks a global rule. */
+export interface PolicyRule {
+  id: string;
+  orgId: string | null;
+  resourceKind: "saga" | "form" | "app";
+  resourceId: string;
+  action: "execute" | "read" | "submit" | "write" | "serve";
+  subjectType: "user" | "kind" | "all";
+  subjectRef: string;
+  createdAt: string;
+}
+
+export interface PolicyRulesResponse {
+  rules: PolicyRule[];
+}
+
+export interface PolicyRuleResponse {
+  id: string;
+  orgId: string | null;
+  resourceKind: PolicyRule["resourceKind"];
+  resourceId: string;
+  action: PolicyRule["action"];
+  subjectType: PolicyRule["subjectType"];
+  subjectRef: string;
+  createdAt: string;
+}
+
+export interface PolicyRuleWrite {
+  resourceKind: string;
+  resourceId: string;
+  action: string;
+  subjectType: string;
+  subjectRef: string;
+}
+
 /** Model profile identity for GET /api/ai/profiles (AI-01, issue #164):
  * stable IDs, operator-authored capability overrides, chat flag, transport
  * label, capability state — provider model ids and key material never
