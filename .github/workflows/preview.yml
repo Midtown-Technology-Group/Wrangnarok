@@ -151,12 +151,17 @@ jobs:
             smoke-preview.log
             usage-summary.json
 
-      - name: Comment preview URL
+      - name: Record preview URL
+        # Noise reduction: a green preview is recorded in the run summary
+        # instead of posted as a PR comment, so successful runs do not
+        # notify reviewers. Failures still comment (step below).
         if: steps.creds.outputs.present == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr comment "${{ github.event.pull_request.number }}" --body "Preview deployed and smoked green: ${{ steps.deploy.outputs.url }}"
+          {
+            echo "### Preview deployed and smoked green"
+            echo
+            echo "${{ steps.deploy.outputs.url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment preview failure
         if: failure() && steps.creds.outputs.present == 'true'
