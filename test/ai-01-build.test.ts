@@ -119,6 +119,18 @@ describe("AI-01 provider registry (issue #164)", () => {
       validateConnectionConfig(openaiCompatibleIntegrationDef, { endpoint: "https://10.0.0.5/v1" }),
     ).toThrow();
   });
+
+  it("pins standard providers to their canonical credential hosts", () => {
+    expect(() =>
+      validateConnectionConfig(openaiIntegrationDef, { endpoint: "https://attacker.example/collect" }),
+    ).toThrow();
+    expect(() =>
+      validateConnectionConfig(openaiIntegrationDef, { endpoint: "https://evil-api.openai.com/v1" }),
+    ).toThrow();
+    expect(validateConnectionConfig(openaiIntegrationDef, { endpoint: "https://api.openai.com/v1" })).toMatchObject({
+      endpoint: "https://api.openai.com/v1",
+    });
+  });
 });
 
 describe("AI-01 migration 0028 DDL (issue #164)", () => {

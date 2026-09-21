@@ -178,6 +178,17 @@ export interface EndpointPolicy {
  * host). Same posture as the NinjaOne allowlist. */
 const CLOUDFLARE_ALLOWED_SUFFIXES: readonly string[] = Object.freeze(["api.cloudflare.com", ".invalid"]);
 
+/** Standard AI credentials are deployment-global, so tenant-managed
+ * Connections may only point them at the provider's documented host. The
+ * openai-compatible provider is operator-pinned at use time because it has
+ * no vendor-owned canonical host (ADR 032). */
+const AI_ALLOWED_HOSTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  openai: Object.freeze(["api.openai.com"]),
+  anthropic: Object.freeze(["api.anthropic.com"]),
+  google: Object.freeze(["generativelanguage.googleapis.com"]),
+  openrouter: Object.freeze(["openrouter.ai"]),
+});
+
 /** Suffixes a Halo Connection endpoint may live under: the lab proof origin
  * only. The runtime pins the exact origin (see halo.ts), so persist-time
  * validation admits nothing else routable — and Halo no longer inherits
@@ -190,17 +201,14 @@ function endpointPolicyFor(integrationName: string): EndpointPolicy | null {
   if (integrationName === "echo") {
     return { allowLoopback: true, requireHttps: false, allowedSuffixes: [], loopbackOnly: true };
   }
-  // AI-01 providers (issue #164, ADR 032): public https origins only, no
-  // suffix allowlist (vendor hosts vary, openai-compatible is operator-set).
-  // Default-endpoint validation keeps honest hosts honest; the use-time
-  // assertSafeEndpoint re-parse covers rows that predate this policy.
-  if (
-    integrationName === "openai" ||
-    integrationName === "anthropic" ||
-    integrationName === "google" ||
-    integrationName === "openrouter" ||
-    integrationName === "openai-compatible"
-  ) {
+  const aiAllowedHosts = AI_ALLOWED_HOSTS[integrationName];
+  if (aiAllowedHosts) {
+    return { allowLoopback: false, requireHttps: true, allowedSuffixes: aiAllowedHosts, loopbackOnly: false };
+  }
+  // OpenAI-compatible has no canonical vendor host. Persistence still
+  // accepts public HTTPS endpoints, while credentialed use additionally
+  // requires an exact operator allowlist match (ADR 032).
+  if (integrationName === "openai-compatible") {
     return { allowLoopback: false, requireHttps: true, allowedSuffixes: [], loopbackOnly: false };
   }
   if (integrationName === "cloudflare") {
@@ -281,7 +289,10 @@ function checkEndpointUrl(integrationName: string, raw: string): EndpointFailure
   if (policy.requireHttps && url.protocol !== "https:") {
     return { code: "INVALID_SCHEME", message: `Config field "endpoint" must use https.` };
   }
-  if (policy.allowedSuffixes.length > 0 && !policy.allowedSuffixes.some((suffix) => host.endsWith(suffix))) {
+  if (
+    policy.allowedSuffixes.length > 0 &&
+    !policy.allowedSuffixes.some((suffix) => (suffix.startsWith(".") ? host.endsWith(suffix) : host === suffix))
+  ) {
     return {
       code: "ENDPOINT_NOT_ALLOWED",
       message: `Config field "endpoint" must live under ${policy.allowedSuffixes.join(" or ")}.`,

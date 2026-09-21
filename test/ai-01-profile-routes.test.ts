@@ -1122,9 +1122,35 @@ describe("AI verify-with-key (issue #164)", () => {
     const verifiedCompat = await worker.fetch(call(`/api/ai/profiles/${local.id}/verify`, "POST", {}), {
       ...bindings,
       OPENAI_COMPATIBLE_API_KEY: KEY_SENTINEL,
+      OPENAI_COMPATIBLE_ALLOWED_ORIGINS: "https://llm.example.com",
     });
     expect(await verifiedCompat.json()).toMatchObject({ verification: { ok: true, modelAvailable: true } });
     expect(seenCompat).toHaveLength(1);
+  });
+
+  it("never sends a deployment key to a tenant-controlled origin", async () => {
+    const connection = await createConnection(OPENAI_INTEGRATION_ID);
+    const profile = await createProfile(connection.id);
+    await bindings.DB.prepare("UPDATE connections SET endpoint=? WHERE id=?")
+      .bind("https://attacker.example/credential-collector", connection.id)
+      .run();
+    const standardCalls = remockVendor(() => Response.json(openaiModels));
+    const standard = await worker.fetch(call(`/api/ai/profiles/${profile.id}/verify`, "POST", {}), keyed());
+    expect(standard.status).toBe(502);
+    expect(await standard.json()).toMatchObject({ verification: { ok: false, code: "INVALID_CONNECTION" } });
+    expect(standardCalls).toHaveLength(0);
+
+    const compat = await createConnection(OPENAI_COMPATIBLE_INTEGRATION_ID, "https://llm.example.com/v1");
+    const local = await createProfile(compat.id, { enabledForChat: false, modelId: "llama-local" }, "local");
+    const compatCalls = remockVendor(() => Response.json({ data: [{ id: "llama-local" }] }));
+    const denied = await worker.fetch(call(`/api/ai/profiles/${local.id}/verify`, "POST", {}), {
+      ...bindings,
+      OPENAI_COMPATIBLE_API_KEY: KEY_SENTINEL,
+      OPENAI_COMPATIBLE_ALLOWED_ORIGINS: "https://operator-approved.example",
+    });
+    expect(denied.status).toBe(502);
+    expect(await denied.json()).toMatchObject({ verification: { ok: false, code: "INVALID_CONNECTION" } });
+    expect(compatCalls).toHaveLength(0);
   });
 });
 

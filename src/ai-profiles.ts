@@ -125,6 +125,9 @@ export interface AiSecretEnv {
   readonly GOOGLE_API_KEY?: string;
   readonly OPENROUTER_API_KEY?: string;
   readonly OPENAI_COMPATIBLE_API_KEY?: string;
+  /** Comma-separated exact HTTPS origins authorized to receive the
+   * deployment-global OpenAI-compatible key. */
+  readonly OPENAI_COMPATIBLE_ALLOWED_ORIGINS?: string;
 }
 
 export interface AiVendorOpts {
@@ -140,6 +143,44 @@ function invalid(code: string, message: string, status = 400): Fault {
 function secretValue(env: AiSecretEnv, name: string): string | undefined {
   const value: unknown = (env as Record<string, unknown>)[name];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+const AI_CREDENTIAL_ORIGINS: Readonly<Record<string, string>> = Object.freeze({
+  openai: "https://api.openai.com",
+  anthropic: "https://api.anthropic.com",
+  google: "https://generativelanguage.googleapis.com",
+  openrouter: "https://openrouter.ai",
+});
+
+/** Bind every deployment-global AI key to operator-controlled origins before
+ * constructing an authenticated request. Standard providers use their
+ * canonical origin; openai-compatible fails closed unless the deployment
+ * explicitly lists the exact origin. */
+function assertCredentialOrigin(name: string, endpoint: string, env: AiSecretEnv): void {
+  const origin = new URL(endpoint).origin;
+  const canonical = AI_CREDENTIAL_ORIGINS[name];
+  if (canonical !== undefined && origin === canonical) return;
+  if (name === "openai-compatible") {
+    const configured = env.OPENAI_COMPATIBLE_ALLOWED_ORIGINS ?? "";
+    const allowed = configured
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+      .some((entry) => {
+        try {
+          const candidate = new URL(entry);
+          return (
+            candidate.protocol === "https:" &&
+            candidate.origin === entry.replace(/\/$/, "") &&
+            candidate.origin === origin
+          );
+        } catch {
+          return false;
+        }
+      });
+    if (allowed) return;
+  }
+  throw new Error("AI credential endpoint is not operator-approved");
 }
 
 interface AiProfileRow {
@@ -1039,6 +1080,7 @@ export async function verifyProfile(
   }
   try {
     assertSafeEndpoint(def.name, connection.endpoint);
+    assertCredentialOrigin(def.name, connection.endpoint, env);
   } catch {
     return failed("INVALID_CONNECTION", "This Connection endpoint is not a safe URL: update it before verifying.");
   }
@@ -1097,6 +1139,7 @@ export async function discoverModels(
   }
   try {
     assertSafeEndpoint(def.name, connection.endpoint);
+    assertCredentialOrigin(def.name, connection.endpoint, env);
   } catch {
     return failed("INVALID_CONNECTION", "This Connection endpoint is not a safe URL: update it before discovering.");
   }

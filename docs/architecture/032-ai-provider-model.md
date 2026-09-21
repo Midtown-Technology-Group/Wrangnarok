@@ -87,6 +87,13 @@ rejection. Capability state never rides the nominal provider kind alone.
 Verify/test/discovery follow the `testConnection` ladder:
 presence-check declared secrets, re-parse the persisted endpoint, 5s
 vendor probe, read-only by construction, every outward detail scrubbed.
+Because these keys are deployment-global, credentialed probes pin OpenAI,
+Anthropic, Google, and OpenRouter to their canonical HTTPS origins at both
+write and use time. `openai-compatible` has no canonical vendor origin, so
+its probes fail closed unless the deployment operator lists the exact HTTPS
+origin in `OPENAI_COMPATIBLE_ALLOWED_ORIGINS`; Organization admins cannot
+expand that allowlist. This origin binding happens before `fetch`, so response
+scrubbing and redirect handling are defense in depth rather than key controls.
 Tests use mocked vendor HTTP only (no live inference; Cloudflare Free
 never includes external model inference). Provider cost is documented per
 Connection; inference is classified paid-adaptation under LIMITS-01.
