@@ -31,6 +31,17 @@ Table realtime is **bounded revision polling over D1**, no push transport:
   page plus one lookahead row, opaque token fail-closed (`RESYNC_REQUIRED`)
   on garbage. Reconnect reconciles against D1 as the single source of truth;
   there is no server-side subscription record to go stale.
+- **Token/table binding:** the marker carries a format version plus the
+  immutable `table.id`. A token from another table — or from a deleted and
+  recreated instance under the same name — fails closed instead of silently
+  filtering the wrong row set. `since` subscribes stay unbound (a bare
+  instant is never a cross-table position; the route already loaded the
+  table).
+- **Monotonic write stamps:** row writes stamp `max(now, max(updated_at)+1ms)`
+  per table (one revision SELECT per write request), so same-millisecond
+  bursts still sort in commit order and no post-cursor write can fall behind
+  an issued cursor. Residual: concurrent same-ms writers can still tie; that
+  miss reconciles via re-list, same as deletes.
 - **Per-evaluation claim freshness (fail closed):** every poll re-resolves
   the full authorization stack from current D1 state — org-role ceiling
   (`isViewer`), then table grants (`canAct`) — and denies on whatever is
@@ -92,8 +103,9 @@ One poll costs at most 4 queries against the 50-query Free invocation cap:
 1 declaration load, up to 2 policy checks (`isViewer` + grant row), 1
 bounded scan of at most `limit + 1` rows (`limit` 1–50, no `QUERY_ROW_CAP`
 scan needed — the page window is the scan). No `batch()` statements, no
-bind-list pressure (3 binds). Existing pins (25 doc_ids, 25-doc batch,
-29-query budget, 50-query cap) are untouched.
+bind-list pressure (3 binds). The full-size batch budget moves 29 to 30
+queries (the revision SELECT above) with 20 of margin; the 25 doc_ids pin,
+the 25-doc batch pin, and the 50-query Free cap are otherwise untouched.
 
 ## Consequences
 

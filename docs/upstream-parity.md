@@ -603,7 +603,13 @@ re-resolves the role ceiling plus read grant fresh (fail closed, the local
 answer to upstream #760), revoked callers 404 on the next poll, garbage
 tokens fail closed with RESYNC_REQUIRED, and deletes reconcile via an
 authoritative re-list (no tombstones, no push transport, no TRG-03 event-log
-writes). TABLE-01 (#117) is subsumed by this slice.
+writes). Sync tokens bind to their table instance (table id plus format
+version ride the marker), so a token from another table — or from a deleted
+and recreated instance under the same name — fails closed instead of
+silently filtering the wrong row set; write stamps are monotonic per table
+(maximum observed instant plus one millisecond) so same-millisecond bursts
+still sort in commit order behind an issued cursor. TABLE-01 (#117) is
+subsumed by this slice.
 
 Physical document-ID batch filter (issue #154, upstream `8af322ac` PR #730):
 repeated `document_ids` query keys constrain rows and counts to the named IDs
@@ -626,12 +632,14 @@ D1 bounds and blockers (explicit, Free-tier posture): 4 KB per document, 0
 through 25 documents per batch, 25 document_ids per query (255 chars each),
 1000-row scan caps, limit 1-50, 5 nested filters. The 25-document bound (not
 upstream's 1000) is the Cloudflare-driven adaptation, and it holds on Free
-by construction: one request costs at most 29 queries against the
+by construction: one request costs at most 30 queries against the
 50-queries-per-invocation Free cap, proven under the strictest plausible
 counting (every batched statement counts, including a rolled-back call) — 1
-declaration load, up to 2 grant checks, 1 preflight SELECT of at most 26
+declaration load, up to 2 grant checks, 1 revision SELECT (monotonic write
+stamps per ADR 045, so same-millisecond writes still sort in commit order
+for the poll cursor), 1 preflight SELECT of at most 26
 binds (far under the 100-bound-parameter cap), and 25 statements in a single
-batch() call, with 21 queries of margin. There is deliberately no row-by-row
+batch() call, with 20 queries of margin. There is deliberately no row-by-row
 fallback that could spend more: a write transaction that aborts past a clean
 preflight fails the whole request with TABLE_BATCH_RETRY (503, nothing
 persisted) for a full-batch retry, so persistence is all-or-denied on

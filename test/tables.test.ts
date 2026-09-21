@@ -1279,6 +1279,54 @@ describe("TABLE-02 realtime bounded-poll subscriptions (issue #154, ADR 045)", (
     expect(faultCode(() => decodeChangesToken("!!!"))).toBe("RESYNC_REQUIRED");
   });
 
+  it("stamps writes monotonically so no post-cursor write falls behind", async () => {
+    // Rapid sequential writes share clock milliseconds but must still sort
+    // in commit order: updatedAt strictly increases down the poll order.
+    for (const id of ["m1", "m2", "m3", "m4", "m5"]) {
+      expect((await putDoc("live", id, { v: id })).status).toBe(201);
+    }
+    const walked = await poll("?limit=50");
+    expect(walked.status).toBe(200);
+    const walkedBody = (await walked.json()) as ChangesBody;
+    expect(walkedBody.changes).toHaveLength(8);
+    const stamps = walkedBody.changes.map((change) => change.updatedAt);
+    expect(stamps.every((stamp, i) => i === 0 || stamps[i - 1]! < stamp)).toBe(true);
+    // The reported shape: a later single write with a smaller doc_id than
+    // the cursor ("late" < "m5") still surfaces on resume — same-millisecond
+    // ties can no longer hide it behind the cursor.
+    expect((await putDoc("live", "late", { v: "late" })).status).toBe(201);
+    const resumed = await poll(`?sync_token=${encodeURIComponent(walkedBody.syncToken!)}`);
+    expect(((await resumed.json()) as ChangesBody).changes.map((change) => change.id)).toEqual(["late"]);
+  });
+
+  it("binds sync tokens to their table instance", async () => {
+    const first = await poll("");
+    expect(first.status).toBe(200);
+    const token = ((await first.json()) as ChangesBody).syncToken!;
+    // Another table rejects the foreign token instead of silently filtering
+    // its own rows through a borrowed position.
+    await createTable("other");
+    expect((await putDoc("other", "z", { v: 1 })).status).toBe(201);
+    const foreign = await call(`/api/tables/other/changes?sync_token=${encodeURIComponent(token)}`, "GET");
+    expect(foreign.status).toBe(400);
+    expect(await foreign.json()).toMatchObject({ error: { code: "RESYNC_REQUIRED" } });
+    // Delete-and-recreate under the same name mints a new table id, so the
+    // old token fails closed instead of skipping the fresh rows.
+    expect((await call("/api/tables/live", "DELETE")).status).toBe(200);
+    await createTable("live");
+    const stale = await poll(`?sync_token=${encodeURIComponent(token)}`);
+    expect(stale.status).toBe(400);
+    expect(await stale.json()).toMatchObject({ error: { code: "RESYNC_REQUIRED" } });
+    // A pre-binding marker shape (no version/table) fails closed as well.
+    const legacy = btoa(JSON.stringify({ updatedAt: new Date().toISOString(), docId: "a" }))
+      .replaceAll("+", "-")
+      .replaceAll("/", "_")
+      .replaceAll("=", "");
+    const legacyRes = await poll(`?sync_token=${encodeURIComponent(legacy)}`);
+    expect(legacyRes.status).toBe(400);
+    expect(await legacyRes.json()).toMatchObject({ error: { code: "RESYNC_REQUIRED" } });
+  });
+
   it("subscribes from since and fails closed on bad poll strings", async () => {
     const since = new Date(Date.now() - 60_000).toISOString();
     const res = await poll(`?since=${encodeURIComponent(since)}`);
