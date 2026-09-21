@@ -20,6 +20,8 @@
 import { Fault, hash, object, UUID } from "./domain";
 import type { Principal } from "./domain";
 import { loadApp } from "./apps";
+import { encodeChangesToken } from "./tables";
+import type { TableChange, TableChangesQuery } from "./tables";
 
 export const APP_SDK_VERSION = "1" as const;
 export const APP_TABLE_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -518,6 +520,26 @@ function checkRowData(data: unknown): Record<string, unknown> {
   return data;
 }
 
+/** Monotonic write stamp for the app changes feed: the poll cursor orders by
+ * (updated_at, id), so writes sharing a millisecond must still sort in
+ * commit order — otherwise a same-ms late write with a smaller row UUID
+ * sorts behind an issued cursor and never surfaces. Mirrors the TABLE-02
+ * nextRevision discipline (ADR 045): max(now, max+1ms) per table. Costs one
+ * SELECT per write; the residual (concurrent same-ms writers) still
+ * reconciles via the rows re-list. */
+async function nextAppStamp(db: D1Database, tableId: string): Promise<string> {
+  const now = new Date().toISOString();
+  const peak = await db
+    .prepare("SELECT MAX(updated_at) AS peak FROM app_rows WHERE table_id=?")
+    .bind(tableId)
+    .first<{ peak: string | null }>();
+  if (typeof peak?.peak === "string" && peak.peak >= now) {
+    const bumped = Date.parse(peak.peak);
+    if (!Number.isNaN(bumped)) return new Date(bumped + 1).toISOString();
+  }
+  return now;
+}
+
 /** Scoped row write: insert one document row. The write grant is enforced by
  * the caller before entry; the Table revision bumps once per write so
  * pollers observe change through the authoritative revision. */
@@ -544,7 +566,7 @@ export async function insertTableRow(
       409,
     );
   }
-  const now = new Date().toISOString();
+  const now = await nextAppStamp(db, table.id);
   const id = crypto.randomUUID().toLowerCase();
   const nextRevision = table.revision + 1;
   const dataJson = JSON.stringify(checked);
@@ -580,7 +602,7 @@ export async function patchTableRow(
     .bind(rowId.toLowerCase(), table.id)
     .first<{ id: string; created_at: string }>();
   if (!existing) throw invalid("APP_ROW_NOT_FOUND", "Table row not found.", 404);
-  const now = new Date().toISOString();
+  const now = await nextAppStamp(db, table.id);
   const nextRevision = table.revision + 1;
   await db
     .prepare("UPDATE app_rows SET data_json=?, table_revision=?, updated_at=? WHERE id=?")
@@ -618,6 +640,79 @@ export async function deleteTableRow(
   const nextRevision = table.revision + 1;
   await db.prepare("UPDATE app_tables SET revision=? WHERE id=?").bind(nextRevision, table.id).run();
   return { deleted: true, tableRevision: nextRevision };
+}
+
+export interface AppTableChangesPage {
+  readonly changes: TableChange[];
+  readonly hasMore: boolean;
+  /** Null only when the table holds no rows and the caller supplied no
+   * position: nothing exists to resume from yet. */
+  readonly syncToken: string | null;
+  /** Authoritative Table revision at poll time: deletes never emit on the
+   * feed, so pollers compare this against their last emitted page to
+   * notice removals and re-list. */
+  readonly tableRevision: number;
+}
+
+/** One bounded authorized poll over one app Table (APP-02 realtime
+ * composition on the ADR 045 feed shape, issue #160). The read grant is
+ * enforced by the caller before entry and re-resolved on every poll because
+ * HTTP carries no subscription state — revocation denies the very next
+ * poll and nothing about the caller survives across polls to go stale.
+ * Hidden Tables answer 404 like a missing Table; sync tokens bind to the
+ * table instance (a token from another table, or from a deleted-and-recreated
+ * instance under the same name, fails closed with RESYNC_REQUIRED instead of
+ * silently filtering the wrong row set); deletes never emit. D1 is the
+ * source of truth: the scan walks at most limit+1 rows in
+ * (updated_at, id) keyset order. Row payloads are author data — the route
+ * scrubs them at egress (SEC-01, ADR 046), D1 keeps the author bytes. */
+export async function pollAppTableChanges(
+  db: D1Database,
+  app: { id: string },
+  tableName: string,
+  query: TableChangesQuery,
+): Promise<AppTableChangesPage> {
+  const table = await loadTableForApp(db, app.id, tableName);
+  if (!table || table.visibility !== "visible") {
+    throw invalid("APP_TABLE_NOT_FOUND", "Table not found.", 404);
+  }
+  if (query.position !== undefined && query.position.tableId !== "" && query.position.tableId !== table.id) {
+    throw invalid("RESYNC_REQUIRED", "The sync token belongs to another table: re-list and resubscribe.");
+  }
+  const clauses = ["table_id=?"];
+  const binds: (string | number)[] = [table.id];
+  if (query.position !== undefined) {
+    clauses.push("(updated_at>? OR (updated_at=? AND id>?))");
+    binds.push(query.position.updatedAt, query.position.updatedAt, query.position.docId);
+  }
+  const scanned = await db
+    .prepare(
+      `SELECT id,data_json,created_at,updated_at FROM app_rows WHERE ${clauses.join(" AND ")} ORDER BY updated_at ASC, id ASC LIMIT ?`,
+    )
+    .bind(...binds, query.limit + 1)
+    .all<{ id: string; data_json: string; created_at: string; updated_at: string }>();
+  const rows = scanned.results.slice(0, query.limit);
+  const hasMore = scanned.results.length > query.limit;
+  const changes: TableChange[] = rows.map((row) => ({
+    id: row.id,
+    data: JSON.parse(row.data_json) as Record<string, unknown>,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    change: "upsert" as const,
+  }));
+  const last = rows[rows.length - 1];
+  // Every returned token binds to this table instance: a quiet page under a
+  // `since` subscribe re-encodes the request instant with the current
+  // table.id instead of echoing the unbound request token, so the token is
+  // rejected (RESYNC_REQUIRED) by any other table or by a
+  // deleted-and-recreated instance under the same name.
+  const syncToken =
+    last !== undefined
+      ? encodeChangesToken({ tableId: table.id, updatedAt: last.updated_at, docId: last.id })
+      : query.position !== undefined
+        ? encodeChangesToken({ ...query.position, tableId: table.id })
+        : null;
+  return { changes, hasMore, syncToken, tableRevision: table.revision };
 }
 
 export function parseFileDeclare(body: unknown): { name: string; contentType: string } {

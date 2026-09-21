@@ -64,6 +64,7 @@ import {
   loadRuntimeApp,
   parseTableQuery as parseAppTableQuery,
   patchTableRow,
+  pollAppTableChanges,
   readTableRows,
   recordAppExecution,
   redeemFileDownload,
@@ -1758,6 +1759,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // allowlisted parsers, like the table query/count routes above.
     const appTableRowsRead =
       request.method === "GET" && /^\/api\/apps\/[0-9a-f-]{36}\/runtime\/tables\/[^/]+\/rows$/.test(url.pathname);
+    // APP-02 tables-realtime composition (issue #160): the bounded-poll
+    // changes feed takes ?since=/?sync_token=/?limit= through
+    // parseChangesQuery at the route, like the TABLE-02 changes route above.
+    const appTableChangesRead =
+      request.method === "GET" && /^\/api\/apps\/[0-9a-f-]{36}\/runtime\/tables\/[^/]+\/changes$/.test(url.pathname);
     const appRuntimeFileDelete =
       request.method === "DELETE" && /^\/api\/apps\/[0-9a-f-]{36}\/runtime\/files\/.+$/.test(url.pathname);
     const fileList = url.pathname === "/api/files" && request.method === "GET";
@@ -1797,6 +1803,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       !opsDiagQueryList &&
       !artifactQuery &&
       !appTableRowsRead &&
+      !appTableChangesRead &&
       !appRuntimeFileDelete &&
       !fileList &&
       !fileBytes &&
@@ -3806,6 +3813,27 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const tableName = decodeURIComponent(appRowsRead[2]);
       await requireAppGrant(env.DB, app.id, "table", tableName, "read");
       return json(await readTableRows(env.DB, app, tableName, parseAppTableQuery(url.searchParams)));
+    }
+    const appChangesRead = /^\/api\/apps\/([0-9a-f-]{36})\/runtime\/tables\/([^/]+)\/changes$/.exec(url.pathname);
+    if (appChangesRead?.[1] && appChangesRead[2] && request.method === "GET") {
+      // Bounded-poll realtime subscription (APP-02 composition on the ADR 045
+      // feed shape, issue #160): per-poll grant re-resolution — the read
+      // grant is enforced on every poll because HTTP carries no subscription
+      // state, so revocation denies the very next poll. Hidden Tables stay
+      // 404; sync tokens bind to the table instance; deletes never emit
+      // (re-list rows — the response carries the authoritative
+      // tableRevision). No push transport, no DDL. SEC-01 (ADR 046): the
+      // feed scrubs row payloads at egress with deployment secrets;
+      // pollAppTableChanges and D1 truth are untouched.
+      const app = await loadRuntimeApp(env.DB, caller, parseAppId(appChangesRead[1]));
+      const tableName = decodeURIComponent(appChangesRead[2]);
+      await requireAppGrant(env.DB, app.id, "table", tableName, "read");
+      return json(
+        scrubValueWithDeploymentSecrets(
+          await pollAppTableChanges(env.DB, app, tableName, parseChangesQuery(url.searchParams)),
+          env,
+        ),
+      );
     }
     const appRowWrite = /^\/api\/apps\/([0-9a-f-]{36})\/runtime\/tables\/([^/]+)\/rows$/.exec(url.pathname);
     if (appRowWrite?.[1] && appRowWrite[2] && request.method === "POST") {
