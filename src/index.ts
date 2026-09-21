@@ -3099,10 +3099,12 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       return json({ deleted: true });
     }
     if (url.pathname === "/api/file-policies" && request.method === "POST") {
+      await requireManageOrg(env.DB, ctx, caller.orgId);
       requireJson(request);
       return json({ policy: await grantPolicy(env.DB, caller, await boundedJson(request.body)) }, 201);
     }
     if (url.pathname === "/api/file-policies" && request.method === "DELETE") {
+      await requireManageOrg(env.DB, ctx, caller.orgId);
       requireJson(request);
       await revokePolicy(env.DB, caller, await boundedJson(request.body));
       return json({ revoked: true });
