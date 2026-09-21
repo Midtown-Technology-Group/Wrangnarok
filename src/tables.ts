@@ -53,12 +53,13 @@
 // failing statement aborts or rolls back the entire sequence of that call.
 // Atomicity therefore ends at the batch() call boundary — spreading one
 // request over several batch() calls is several transactions, not one.
-// A full-size request under this bound spends at most 29 queries against
+// A full-size request under this bound spends at most 30 queries against
 // the 50-query Free cap, proven under the strictest plausible counting
 // (every batched statement counts, including a rolled-back call): 1
-// declaration load, up to 2 grant checks, 1 preflight SELECT of at most 26
-// binds against the 100-bound-parameter cap, and 25 statements in one
-// batch() call — with 21 queries of margin, and no row-by-row fallback
+// declaration load, up to 2 grant checks, 1 revision SELECT (monotonic write
+// stamps, ADR 045), 1 preflight SELECT of at most 26 binds against the
+// 100-bound-parameter cap, and 25 statements in one batch() call — with 20
+// queries of margin, and no row-by-row fallback
 // exists that could spend more. Each INSERT carries at most ~4.6 KB
 // against the 100 KB statement cap. The batch transport cap is 256 KB for
 // the route body (25 capped documents plus ids and envelope fit; what
@@ -67,10 +68,13 @@
 // unsupported query operators are recorded in the parity ledger as explicit
 // blockers.
 //
-// Realtime table-change subscriptions are NOT in this slice (the multi-slice
-// note in issue #154 lets the query/count slice land first). Polling via
-// repeated authorized queries is the interim path; any push design needs its
-// own ADR before it is built.
+// Realtime table-change subscriptions ride bounded revision polling (TABLE-02
+// realtime slice, ADR 045): GET /api/tables/:name/changes walks updated_at
+// order with opaque sync tokens against D1 as the source of truth. No push
+// transport (WebSocket/Durable Object/Queue all rejected in ADR 045), no
+// TRG-03 event-log writes, no tombstones: deletes reconcile via an
+// authoritative re-list. Every poll re-resolves the authorization stack
+// fresh (fail closed, never a cached claim).
 import { Fault, object, UUID } from "./domain";
 import type { Principal } from "./domain";
 import { isViewer } from "./orgs";
@@ -88,8 +92,8 @@ export const TABLE_QUERY_ROW_CAP = 1000;
  * to 25): 0 through 25 documents per request. 26+ is rejected before any
  * write, and the caller never auto-chunks: splitting would change
  * transaction/policy atomicity. At 25, one request fits in a single batch()
- * transaction and costs at most 29 queries against the 50-query Free
- * invocation cap counting every batched statement — 21 of margin, and no
+ * transaction and costs at most 30 queries against the 50-query Free
+ * invocation cap counting every batched statement — 20 of margin, and no
  * fallback path exists that could spend more (see the header note and
  * docs/upstream-parity.md TABLE-02). */
 export const TABLE_BATCH_MAX = 25;
@@ -618,7 +622,7 @@ export async function insertRow(
   await requireAct(db, table, caller, "insert");
   const id = parseDocId(docId);
   const document = parseDocument(data);
-  const now = new Date().toISOString();
+  const now = await nextRevision(db, table);
   try {
     await db
       .prepare(
@@ -671,7 +675,7 @@ export async function updateRow(
     .bind(table.id, id)
     .first<{ created_at: string }>();
   if (!existing) throw invalid("DOCUMENT_NOT_FOUND", "Document not found.", 404);
-  const now = new Date().toISOString();
+  const now = await nextRevision(db, table);
   await db
     .prepare("UPDATE table_rows SET data_json=?, updated_at=? WHERE table_id=? AND doc_id=?")
     .bind(JSON.stringify(document), now, table.id, id)
@@ -829,6 +833,28 @@ export async function countRows(
   return { total };
 }
 
+/** Monotonic write stamp (TABLE-02 realtime slice, ADR 045): the poll
+ * cursor orders by (updated_at, doc_id), so writes sharing a millisecond
+ * must still sort in commit order — otherwise a same-ms late write with a
+ * smaller doc_id sorts behind an issued cursor and never surfaces. Reads
+ * the table's current max(updated_at) and stamps max(now, max+1ms):
+ * strictly increasing per table short of concurrent same-ms writers (that
+ * residual still reconciles via re-list). Costs one SELECT per write
+ * request; the full-size batch worst case moves 29 to 30 queries against
+ * the 50-query Free cap. */
+async function nextRevision(db: D1Database, table: TableDefinition): Promise<string> {
+  const now = new Date().toISOString();
+  const peak = await db
+    .prepare("SELECT MAX(updated_at) AS peak FROM table_rows WHERE table_id=?")
+    .bind(table.id)
+    .first<{ peak: string | null }>();
+  if (typeof peak?.peak === "string" && peak.peak >= now) {
+    const bumped = Date.parse(peak.peak);
+    if (!Number.isNaN(bumped)) return new Date(bumped + 1).toISOString();
+  }
+  return now;
+}
+
 /** Existence preflight in one SELECT: at most TABLE_BATCH_MAX ids plus
  * table_id binds, far under the D1 100-bound-parameter cap. Empty input
  * skips the query entirely. */
@@ -913,13 +939,16 @@ export async function executeBatchWrite(
   // Idless rows (upstream permits them on the upsert path) take a server
   // UUID here, before the preflight, so the rest of the executor sees only
   // concrete ids. UUIDs satisfy the document-ID alphabet.
-  const now = new Date().toISOString();
   const ids = request.items.map((item) => item.docId ?? crypto.randomUUID().toLowerCase());
   const finish = (results: TableBatchResult[]): TableBatchResponse => {
     const count = results.filter((result) => result.ok).length;
     return request.returnDocuments ? { results, count } : { results: [], count };
   };
   if (ids.length === 0) return finish([]);
+  // One monotonic stamp for the whole request (after the empty early return,
+  // so empty batches cost no revision SELECT): every row of one atomic batch
+  // shares the instant and orders by doc_id within it.
+  const now = await nextRevision(db, table);
   const buildInsert = (docId: string, data: Record<string, unknown>): D1PreparedStatement =>
     db
       .prepare(
@@ -1063,4 +1092,189 @@ export async function executeBatchDelete(
     };
   });
   return { results, count: results.filter((result) => result.ok).length };
+}
+
+/** Bounded-poll realtime ceiling (TABLE-02 realtime slice, ADR 045): the
+ * poll window is a page, never a full scan, so the scan is bounded by
+ * construction. */
+export const TABLE_CHANGES_LIMIT_DEFAULT = 20;
+export const TABLE_CHANGES_LIMIT_MAX = 50;
+
+/** Position inside the (updated_at, doc_id) revision order: exclusive, so a
+ * sync token never replays the row it points at. A `since` subscribe uses
+ * the same shape with empty tableId/docId, which reads inclusive of the
+ * instant (every doc_id sorts past "") — at-least-once within one
+ * millisecond, then exactly-once per token after that. The tableId binds a
+ * minted token to its table instance: a token from another table, or from a
+ * deleted-and-recreated instance under the same name, fails closed instead
+ * of silently filtering the wrong row set. */
+export interface TableChangesPosition {
+  readonly tableId: string;
+  readonly updatedAt: string;
+  readonly docId: string;
+}
+
+export interface TableChangesQuery {
+  readonly position?: TableChangesPosition;
+  /** Echo source for an empty page: the request token when the caller holds
+   * one, so a quiet poll keeps a resumable position instead of null. */
+  readonly resumeToken?: string;
+  readonly limit: number;
+}
+
+export interface TableChange {
+  readonly id: string;
+  readonly data: Record<string, unknown>;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  /** Every poll change is an upsert: deletes are never emitted (no
+   * tombstones by retention posture — reconcile deletes against an
+   * authoritative re-list). The field stays explicit so no caller can
+   * mistake silence for liveness. */
+  readonly change: "upsert";
+}
+
+export interface TableChangesPage {
+  readonly changes: TableChange[];
+  readonly hasMore: boolean;
+  /** Null only when the table holds no rows and the caller supplied no
+   * position: nothing exists to resume from yet. */
+  readonly syncToken: string | null;
+}
+
+/** Opaque sync marker: base64url of {v, tableId, updatedAt, docId},
+ * mirroring the file cursor shape with a format version and the table
+ * binding. Clients treat it as inscrutable; the poll resumes strictly past
+ * the tuple in (updated_at ASC, doc_id ASC) order against the bound table. */
+export function encodeChangesToken(position: TableChangesPosition): string {
+  return btoa(JSON.stringify({ v: 1, tableId: position.tableId, updatedAt: position.updatedAt, docId: position.docId }))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
+/** Decode a client-supplied sync token, fail closed: anything that is not
+ * one of our markers (garbage, foreign cursors, wrong shapes, older format
+ * versions) answers RESYNC_REQUIRED, never an invented position — the caller
+ * re-lists from authoritative state and resubscribes. */
+export function decodeChangesToken(value: string): TableChangesPosition {
+  let token: unknown;
+  try {
+    token = JSON.parse(atob(value.replaceAll("-", "+").replaceAll("_", "/")));
+  } catch {
+    throw invalid("RESYNC_REQUIRED", "The sync token is unknown or expired: re-list the table and resubscribe.");
+  }
+  if (
+    !object(token) ||
+    token.v !== 1 ||
+    typeof token.tableId !== "string" ||
+    typeof token.updatedAt !== "string" ||
+    Number.isNaN(Date.parse(token.updatedAt)) ||
+    typeof token.docId !== "string" ||
+    (token.docId !== "" && !DOC_ID.test(token.docId))
+  ) {
+    throw invalid("RESYNC_REQUIRED", "The sync token is unknown or expired: re-list the table and resubscribe.");
+  }
+  return { tableId: token.tableId, updatedAt: token.updatedAt, docId: token.docId };
+}
+
+/** Parse the changes poll string. Only since, sync_token, and limit ride
+ * here: filters, ordering, and cursors belong to the rows query, and
+ * anything else fails closed with UNSUPPORTED_QUERY. since and sync_token
+ * position the same poll and are mutually exclusive. */
+export function parseChangesQuery(params: URLSearchParams): TableChangesQuery {
+  for (const key of params.keys()) {
+    if (!["since", "sync_token", "limit"].includes(key)) {
+      throw invalid("UNSUPPORTED_QUERY", "Table change polls accept only since, sync_token, and limit.");
+    }
+  }
+  const rawSince = params.get("since");
+  const rawToken = params.get("sync_token");
+  if (rawSince !== null && rawToken !== null) {
+    throw invalid("INVALID_POLL", "Change polls take since for subscribe or sync_token for resume, not both.");
+  }
+  let limit = TABLE_CHANGES_LIMIT_DEFAULT;
+  const rawLimit = params.get("limit");
+  if (rawLimit !== null) {
+    if (!/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > TABLE_CHANGES_LIMIT_MAX) {
+      throw invalid("INVALID_LIMIT", `Limit must be an integer from 1 to ${TABLE_CHANGES_LIMIT_MAX}.`);
+    }
+    limit = Number(rawLimit);
+  }
+  if (rawToken !== null) {
+    if (rawToken.length === 0) {
+      throw invalid("RESYNC_REQUIRED", "The sync token is unknown or expired: re-list the table and resubscribe.");
+    }
+    return { position: decodeChangesToken(rawToken), resumeToken: rawToken, limit };
+  }
+  if (rawSince !== null) {
+    const parsed = Date.parse(rawSince);
+    if (Number.isNaN(parsed)) {
+      throw invalid("INVALID_SINCE", "since must be an ISO 8601 date-time.");
+    }
+    const since = new Date(parsed).toISOString();
+    // Unbound subscribe position: the table binding attaches at poll time
+    // (the route already loaded this table), so a bare instant is never a
+    // cross-table position.
+    return {
+      position: { tableId: "", updatedAt: since, docId: "" },
+      resumeToken: encodeChangesToken({ tableId: "", updatedAt: since, docId: "" }),
+      limit,
+    };
+  }
+  return { limit };
+}
+
+/** One bounded authorized poll (TABLE-02 realtime slice, ADR 045). The
+ * authorization stack resolves fresh from current D1 state on every call —
+ * role ceiling first, then the read grant — so revocation and claim/role
+ * flips deny the very next poll; nothing about the caller survives across
+ * polls to go stale (the upstream #760 rule, satisfied by holding no
+ * snapshot at all). Denied callers answer like a missing Table (404), never
+ * an empty feed. D1 is the source of truth: the scan walks at most
+ * limit+1 rows in (updated_at, doc_id) keyset order, so one poll costs at
+ * most 4 queries against the 50-query Free cap (1 declaration load, up to 2
+ * policy checks, 1 scan) with 3 binds. */
+export async function pollRowChanges(
+  db: D1Database,
+  caller: Principal,
+  table: TableDefinition,
+  query: TableChangesQuery,
+): Promise<TableChangesPage> {
+  await requireAct(db, table, caller, "read");
+  // Token/table binding: a token minted for another table — or for a deleted
+  // and recreated instance under the same name — must not silently filter
+  // this table's rows. Fail closed so the caller resyncs from authoritative
+  // state. Policy denial (404) precedes token binding: hidden tables stay
+  // hidden even to well-formed tokens.
+  if (query.position !== undefined && query.position.tableId !== "" && query.position.tableId !== table.id) {
+    throw invalid("RESYNC_REQUIRED", "The sync token belongs to another table: re-list and resubscribe.");
+  }
+  const clauses = ["table_id=?"];
+  const binds: (string | number)[] = [table.id];
+  if (query.position !== undefined) {
+    clauses.push("(updated_at>? OR (updated_at=? AND doc_id>?))");
+    binds.push(query.position.updatedAt, query.position.updatedAt, query.position.docId);
+  }
+  const scanned = await db
+    .prepare(
+      `SELECT doc_id,owner_user_id,data_json,created_at,updated_at FROM table_rows WHERE ${clauses.join(" AND ")} ORDER BY updated_at ASC, doc_id ASC LIMIT ?`,
+    )
+    .bind(...binds, query.limit + 1)
+    .all<DocRow>();
+  const rows = scanned.results.slice(0, query.limit);
+  const hasMore = scanned.results.length > query.limit;
+  const changes: TableChange[] = rows.map((row) => ({
+    id: row.doc_id,
+    data: JSON.parse(row.data_json) as Record<string, unknown>,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    change: "upsert" as const,
+  }));
+  const last = rows[rows.length - 1];
+  const syncToken =
+    last !== undefined
+      ? encodeChangesToken({ tableId: table.id, updatedAt: last.updated_at, docId: last.doc_id })
+      : (query.resumeToken ?? null);
+  return { changes, hasMore, syncToken };
 }

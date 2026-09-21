@@ -15,7 +15,7 @@ Machine-checkable ledger of Architecture Decision Record numbers. Enforced by
   earliest-landed keeps the number, later-landed moves to the next free
   numbers in landing order, with a renumber note in each moved file.
 
-Next free ADR number: 045.
+Next free ADR number: 046.
 
 ## Index
 
@@ -65,6 +65,7 @@ Next free ADR number: 045.
 | 042 | 042-frontend-split-decision.md | Frontend/static-assets split — keep the single deployment |
 | 043 | 043-child-dispatch-authorization.md | Child dispatch authorization (RUN-02 / AUTH-02) |
 | 044 | 044-external-mcp-servers.md | External MCP servers — templates, Connections, catalog, consent, dispatch |
+| 045 | 045-table-realtime-polling.md | Table realtime stays on bounded revision polling (TABLE-02) |
 
 ## Renumber history (issue #225)
 
