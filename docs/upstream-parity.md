@@ -691,6 +691,14 @@ batch atomicity ends at the batch() call boundary (a batch never spans
 databases). Residual blocker: large Tables approaching the per-database
 cap are not production-shaped until that sharding/retention policy lands;
 small Tables under org-owned explicit deletion are decided and shippable.
+Sparse-filter reachability limit (explicit blocker, same window): nested
+filters match inside one 1000-row scan window per list/count call, so a
+filter whose only matches sit past the first window answers an empty page
+with hasMore=false and total=-2 (bounded, never an invented exact total);
+keyset continuation past a filled window that yields fewer than limit
+matches is a query-semantics follow-up, pinned by the sparse-match
+regression in the slice's test block — list/count pagination semantics
+stay unchanged in this slice.
 Large-table bounded-memory regressions, filtered page continuity at scale,
 and retention-policy pins live in `test/tables.test.ts` "TABLE-02
 large-table retention-policy slice (issue #154)".

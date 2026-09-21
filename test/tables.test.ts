@@ -1294,6 +1294,29 @@ describe("TABLE-02 large-table retention-policy slice (issue #154)", () => {
     expect(await call("/api/tables/bigf/count?filter=grp%3D3").then((r) => r.json())).toEqual({ total: -2 });
   });
 
+  it("bounds sparse matches to the scan window and reports total=-2", async () => {
+    await seedLarge("sparse");
+    // A filter whose only match sits past the 1000-row scan window (n=1099
+    // lives in row d01099, outside the first window): the bounded walk
+    // answers what the window holds and reports total=-2 instead of an
+    // invented exact total. Full sparse-match continuation past a filled
+    // window is an explicit blocker (docs/upstream-parity.md TABLE-02
+    // retention/partitioning policy), not silent success: the -2 says
+    // bounded, and list/count pagination semantics stay unchanged.
+    const res = await call(`/api/tables/sparse/rows?limit=50&filter=n%3D${LARGE_ROWS - 1}`, "GET");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListBody;
+    expect(body.rows).toEqual([]);
+    expect(body.hasMore).toBe(false);
+    expect(body.nextCursor).toBeNull();
+    expect(body.total).toBe(-2);
+    // Control: an in-window match stays reachable, so the pin targets the
+    // window edge, not filtering itself.
+    const near = await call("/api/tables/sparse/rows?limit=50&filter=n%3D5", "GET");
+    expect(near.status).toBe(200);
+    expect(((await near.json()) as ListBody).rows.map((row) => row.id)).toEqual([docId(5)]);
+  });
+
   it("pins the retention-policy bounds behind the recorded decision", async () => {
     // Concrete byte/row/query bounds from the TABLE-02 retention/
     // partitioning policy (docs/upstream-parity.md): any change reopens the
