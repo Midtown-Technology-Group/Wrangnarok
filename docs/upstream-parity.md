@@ -596,9 +596,14 @@ bodies read as insert and legacy `upsert:true` reads as merge_upsert;
 write and the caller never auto-chunks. The `rows/batch-update` and
 `rows/batch-delete` routes remain as compatibility aliases through the same
 canonical executor (no second batch semantics path). Realtime table-change
-subscriptions (visibility transitions, revocation push, reconnect
-reconciliation) remain missing per the multi-slice note; retained until
-verified. TABLE-01 (#117) is subsumed by this slice.
+subscriptions land as bounded revision polling (ADR 045, issue #154):
+`GET /api/tables/:name/changes` walks `(updated_at, doc_id)` keyset order
+with opaque sync tokens against D1 as the source of truth; every poll
+re-resolves the role ceiling plus read grant fresh (fail closed, the local
+answer to upstream #760), revoked callers 404 on the next poll, garbage
+tokens fail closed with RESYNC_REQUIRED, and deletes reconcile via an
+authoritative re-list (no tombstones, no push transport, no TRG-03 event-log
+writes). TABLE-01 (#117) is subsumed by this slice.
 
 Physical document-ID batch filter (issue #154, upstream `8af322ac` PR #730):
 repeated `document_ids` query keys constrain rows and counts to the named IDs
@@ -680,9 +685,10 @@ through upsert, and vice versa. Merge and replace upsert share one wholesale
 effect because local documents are whole objects; both modes stay accepted
 for SDK portability. Idless rows take a server UUID before the preflight.
 Tables are never auto-created on write: the declaration must exist, so
-writes cannot bypass owner attribution. Post-commit table-change events stay
-with the retained realtime subcase (TRG-03 owns the event log); no event
-wiring in this slice. The response carries `{ results, count }` with
+writes cannot bypass owner attribution. Post-commit table-change delivery is
+the bounded-poll realtime slice above (ADR 045); TRG-03 owns the event log
+exclusively, so table polls write no events and create no duplicate wiring.
+The response carries `{ results, count }` with
 submission ordering; `return_documents:false` answers `{ results: [], count }`
 (the local results never embed documents, so the flag suppresses per-item
 detail). Whole-request order is deterministic: org isolation (404),

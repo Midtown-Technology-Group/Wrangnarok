@@ -401,8 +401,10 @@ import {
   loadTable,
   parseBatchDeleteBody,
   parseBatchRequest,
+  parseChangesQuery,
   parseTableName,
   parseTableQuery,
+  pollRowChanges,
   queryRows,
   readRow,
   requireVisibleTable,
@@ -1729,7 +1731,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       (url.pathname === "/api/logs" && request.method === "GET") ||
       (/^\/api\/executions\/[a-f0-9]{64}\/logs$/.test(url.pathname) && request.method === "GET");
     const tableQueryList =
-      request.method === "GET" && /^\/api\/tables\/[a-z0-9][a-z0-9-]{0,63}\/(rows|count)$/.test(url.pathname);
+      request.method === "GET" && /^\/api\/tables\/[a-z0-9][a-z0-9-]{0,63}\/(rows|count|changes)$/.test(url.pathname);
     // OPS-01 (ADR 020): the audit list and notifications list take query
     // strings too, each through its own allowlisted parser. OPS-02 (issue
     // #173): the ops metrics/jobs reads take the same allowlisted keys as
@@ -5239,6 +5241,18 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         ),
       );
     }
+    const tableChanges = /^\/api\/tables\/([a-z0-9][a-z0-9-]{0,63})\/changes$/.exec(url.pathname);
+    if (tableChanges?.[1] && request.method === "GET") {
+      // Bounded-poll realtime subscription (TABLE-02, ADR 045): authorized
+      // revision polling over D1 as the source of truth. Policy resolves
+      // fresh per poll inside pollRowChanges (revoked callers 404 on the
+      // next poll); deletes never emit (reconcile via GET rows); no push
+      // channel, no TRG-03 event-log writes. Table-level path, so no
+      // document ID under /rows/ is shadowed.
+      const table = await loadTable(env.DB, caller.orgId, tableChanges[1]);
+      if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+      return json(await pollRowChanges(env.DB, caller, table, parseChangesQuery(url.searchParams)));
+    }
     const tableRow = /^\/api\/tables\/([a-z0-9][a-z0-9-]{0,63})\/rows\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/.exec(
       url.pathname,
     );
@@ -5276,7 +5290,8 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     if (tableGrant?.[1] && (request.method === "POST" || request.method === "DELETE")) {
       // Owner-only grant administration. Grants name user IDs in this slice;
       // role claims belong to AUTH-02. Revocation converges immediately for
-      // subsequent calls (no live push until realtime subscriptions land).
+      // subsequent calls, including the next bounded-poll poll (ADR 045);
+      // there is no push channel to drain.
       requireJson(request);
       const name = parseTableName(tableGrant[1]);
       const table = await loadTable(env.DB, caller.orgId, name);

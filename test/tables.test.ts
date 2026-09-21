@@ -24,10 +24,12 @@ import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
 import migration9 from "../migrations/0009_tables.sql?raw";
 import {
   createTable as declareTable,
+  decodeChangesToken,
   insertRow,
   loadTable,
   lookupPath,
   parseBatchRequest,
+  parseChangesQuery,
   parseDocument,
   parseTableQuery,
   readRow,
@@ -1202,6 +1204,162 @@ describe("TABLE-02 retention-posture pins (explicit deletion only, issue #154)",
       error: { code: "BODY_TOO_LARGE", message: `The body exceeds ${TABLE_BATCH_BODY_LIMIT} bytes.` },
     });
     expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 0 });
+  });
+});
+
+describe("TABLE-02 realtime bounded-poll subscriptions (issue #154, ADR 045)", () => {
+  interface ChangesBody {
+    changes: { id: string; data: Record<string, unknown>; createdAt: string; updatedAt: string; change: string }[];
+    hasMore: boolean;
+    syncToken: string | null;
+  }
+
+  async function poll(query = "", orgId = ORG, userId = OWNER) {
+    return call(`/api/tables/live/changes${query}`, "GET", undefined, orgId, userId);
+  }
+
+  async function grant(action: string) {
+    const res = await call("/api/tables/live/grants", "POST", { action, granteeUserId: OTHER_USER });
+    expect(res.status).toBe(200);
+  }
+
+  async function revoke(action: string) {
+    const res = await call("/api/tables/live/grants", "DELETE", { action, granteeUserId: OTHER_USER });
+    expect(res.status).toBe(200);
+  }
+
+  async function setRole(role: string) {
+    await bindings.DB.prepare("UPDATE org_memberships SET role=? WHERE org_id=? AND user_id=?")
+      .bind(role, ORG, OTHER_USER)
+      .run();
+  }
+
+  beforeEach(async () => {
+    await createTable("live");
+    for (const id of ["a", "b", "c"]) {
+      expect((await putDoc("live", id, { v: id })).status).toBe(201);
+    }
+  });
+
+  it("walks the revision order across reconnects with no gaps or dupes", async () => {
+    // Bounded pages in (updated_at, doc_id) order: ties share a millisecond
+    // but the keyset stays exact, so three rows walk 2 + 1 with no overlap.
+    const seen: string[] = [];
+    let token: string | null = null;
+    for (let page = 0; page < 5; page += 1) {
+      const suffix = token === null ? "?limit=2" : `?sync_token=${encodeURIComponent(token)}&limit=2`;
+      const res = await poll(suffix);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as ChangesBody;
+      expect(body.changes.every((change) => change.change === "upsert")).toBe(true);
+      seen.push(...body.changes.map((change) => change.id));
+      token = body.syncToken;
+      if (!body.hasMore) break;
+    }
+    expect(new Set(seen).size).toBe(3);
+    expect([...seen].sort()).toEqual(["a", "b", "c"]);
+    expect(token).not.toBeNull();
+    // Reconnecting on the final token is quiet but stays resumable: the
+    // empty page echoes the request token instead of null.
+    const quiet = await poll(`?sync_token=${encodeURIComponent(token!)}`);
+    expect(quiet.status).toBe(200);
+    const quietBody = (await quiet.json()) as ChangesBody;
+    expect(quietBody.changes).toEqual([]);
+    expect(quietBody.hasMore).toBe(false);
+    expect(quietBody.syncToken).toBe(token);
+    // A write after the quiet poll arrives on the next resume, exactly once.
+    expect((await putDoc("live", "d", { v: "d" })).status).toBe(201);
+    const resumed = await poll(`?sync_token=${encodeURIComponent(token!)}`);
+    expect(((await resumed.json()) as ChangesBody).changes.map((change) => change.id)).toEqual(["d"]);
+    // Garbage tokens fail closed: resync from authoritative state, never an
+    // invented position.
+    const garbage = await poll("?sync_token=not-a-token");
+    expect(garbage.status).toBe(400);
+    expect(await garbage.json()).toMatchObject({ error: { code: "RESYNC_REQUIRED" } });
+    expect(faultCode(() => decodeChangesToken("!!!"))).toBe("RESYNC_REQUIRED");
+  });
+
+  it("subscribes from since and fails closed on bad poll strings", async () => {
+    const since = new Date(Date.now() - 60_000).toISOString();
+    const res = await poll(`?since=${encodeURIComponent(since)}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ChangesBody;
+    // Inclusive of the instant: every row written after T-60s arrives.
+    expect(body.changes.map((change) => change.id).sort()).toEqual(["a", "b", "c"]);
+    expect(body.syncToken).not.toBeNull();
+    const badSince = await poll("?since=not-a-date");
+    expect(badSince.status).toBe(400);
+    expect(await badSince.json()).toMatchObject({ error: { code: "INVALID_SINCE" } });
+    expect(faultCode(() => parseChangesQuery(new URLSearchParams("since=not-a-date")))).toBe("INVALID_SINCE");
+    const both = await poll(`?since=${encodeURIComponent(since)}&sync_token=${encodeURIComponent(body.syncToken!)}`);
+    expect(both.status).toBe(400);
+    expect(await both.json()).toMatchObject({ error: { code: "INVALID_POLL" } });
+    const unknown = await poll("?order=asc");
+    expect(unknown.status).toBe(400);
+    expect(await unknown.json()).toMatchObject({ error: { code: "UNSUPPORTED_QUERY" } });
+    const badLimit = await poll("?limit=0");
+    expect(badLimit.status).toBe(400);
+    expect(await badLimit.json()).toMatchObject({ error: { code: "INVALID_LIMIT" } });
+    const emptyToken = await poll("?sync_token=");
+    expect(emptyToken.status).toBe(400);
+    expect(await emptyToken.json()).toMatchObject({ error: { code: "RESYNC_REQUIRED" } });
+  });
+
+  it("revokes on the very next poll and re-enters as current state", async () => {
+    await grant("read");
+    const first = await poll("", ORG, OTHER_USER);
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as ChangesBody;
+    expect(firstBody.changes).toHaveLength(3);
+    const token = firstBody.syncToken!;
+    // Leave: revocation denies the next poll like a missing table (404),
+    // never an empty feed that confirms the table exists.
+    await revoke("read");
+    const denied = await poll(`?sync_token=${encodeURIComponent(token)}`, ORG, OTHER_USER);
+    expect(denied.status).toBe(404);
+    expect(await denied.json()).toMatchObject({ error: { code: "TABLE_NOT_FOUND" } });
+    // Enter: a fresh grant returns current state as upserts on resubscribe.
+    await grant("read");
+    const reentered = await poll("", ORG, OTHER_USER);
+    expect(reentered.status).toBe(200);
+    expect(((await reentered.json()) as ChangesBody).changes.map((change) => change.id).sort()).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+  });
+
+  it("never broadcasts hidden rows to strangers or other orgs", async () => {
+    // Same-org stranger: 404 with the table code, never an empty feed.
+    const stranger = await poll("", ORG, OTHER_USER);
+    expect(stranger.status).toBe(404);
+    expect(await stranger.json()).toMatchObject({ error: { code: "TABLE_NOT_FOUND" } });
+    // Cross-Organization names never resolve: the generic 404, never a leak.
+    const foreign = await poll("", OTHER_ORG, OWNER);
+    expect(foreign.status).toBe(404);
+    expect(await foreign.json()).toEqual({ error: { code: "NOT_FOUND", message: "Not found." } });
+    // Unknown tables answer the same 404 as hidden ones: no existence oracle.
+    expect((await call("/api/tables/missing/changes", "GET")).status).toBe(404);
+  });
+
+  it("re-resolves claims every poll: role and grant flips land immediately", async () => {
+    await grant("read");
+    await grant("insert");
+    // Member with grants: writes land and polls read.
+    expect((await call("/api/tables/live/rows/fresh", "PUT", { data: { v: 1 } }, ORG, OTHER_USER)).status).toBe(201);
+    // Flip to viewer: the ceiling re-resolves on the next evaluation, so no
+    // stale member claim permits the write — while the read poll still holds
+    // on the intact read grant.
+    await setRole("viewer");
+    const write = await call("/api/tables/live/rows/fresh2", "PUT", { data: { v: 2 } }, ORG, OTHER_USER);
+    expect(write.status).toBe(403);
+    expect(await write.json()).toMatchObject({ error: { code: "TABLE_FORBIDDEN" } });
+    expect((await poll("", ORG, OTHER_USER)).status).toBe(200);
+    // Back to member but with the read grant revoked: the next poll denies
+    // on the missing grant — fail closed, no stale read claim.
+    await setRole("member");
+    await revoke("read");
+    expect((await poll("", ORG, OTHER_USER)).status).toBe(404);
   });
 });
 

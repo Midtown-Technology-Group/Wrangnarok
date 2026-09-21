@@ -67,10 +67,13 @@
 // unsupported query operators are recorded in the parity ledger as explicit
 // blockers.
 //
-// Realtime table-change subscriptions are NOT in this slice (the multi-slice
-// note in issue #154 lets the query/count slice land first). Polling via
-// repeated authorized queries is the interim path; any push design needs its
-// own ADR before it is built.
+// Realtime table-change subscriptions ride bounded revision polling (TABLE-02
+// realtime slice, ADR 045): GET /api/tables/:name/changes walks updated_at
+// order with opaque sync tokens against D1 as the source of truth. No push
+// transport (WebSocket/Durable Object/Queue all rejected in ADR 045), no
+// TRG-03 event-log writes, no tombstones: deletes reconcile via an
+// authoritative re-list. Every poll re-resolves the authorization stack
+// fresh (fail closed, never a cached claim).
 import { Fault, object, UUID } from "./domain";
 import type { Principal } from "./domain";
 import { isViewer } from "./orgs";
@@ -1063,4 +1066,171 @@ export async function executeBatchDelete(
     };
   });
   return { results, count: results.filter((result) => result.ok).length };
+}
+
+/** Bounded-poll realtime ceiling (TABLE-02 realtime slice, ADR 045): the
+ * poll window is a page, never a full scan, so the scan is bounded by
+ * construction. */
+export const TABLE_CHANGES_LIMIT_DEFAULT = 20;
+export const TABLE_CHANGES_LIMIT_MAX = 50;
+
+/** Position inside the (updated_at, doc_id) revision order: exclusive, so a
+ * sync token never replays the row it points at. A `since` subscribe uses
+ * the same shape with an empty docId, which reads inclusive of the instant
+ * (every doc_id sorts past "") — at-least-once within one millisecond, then
+ * exactly-once per token after that. */
+export interface TableChangesPosition {
+  readonly updatedAt: string;
+  readonly docId: string;
+}
+
+export interface TableChangesQuery {
+  readonly position?: TableChangesPosition;
+  /** Echo source for an empty page: the request token when the caller holds
+   * one, so a quiet poll keeps a resumable position instead of null. */
+  readonly resumeToken?: string;
+  readonly limit: number;
+}
+
+export interface TableChange {
+  readonly id: string;
+  readonly data: Record<string, unknown>;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  /** Every poll change is an upsert: deletes are never emitted (no
+   * tombstones by retention posture — reconcile deletes against an
+   * authoritative re-list). The field stays explicit so no caller can
+   * mistake silence for liveness. */
+  readonly change: "upsert";
+}
+
+export interface TableChangesPage {
+  readonly changes: TableChange[];
+  readonly hasMore: boolean;
+  /** Null only when the table holds no rows and the caller supplied no
+   * position: nothing exists to resume from yet. */
+  readonly syncToken: string | null;
+}
+
+/** Opaque sync marker: base64url of {updatedAt, docId}, mirroring the file
+ * cursor shape. Clients treat it as inscrutable; the poll resumes strictly
+ * past the tuple in (updated_at ASC, doc_id ASC) order. */
+export function encodeChangesToken(position: TableChangesPosition): string {
+  return btoa(JSON.stringify({ updatedAt: position.updatedAt, docId: position.docId }))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
+/** Decode a client-supplied sync token, fail closed: anything that is not
+ * one of our markers (garbage, foreign cursors, wrong shapes) answers
+ * RESYNC_REQUIRED, never an invented position — the caller re-lists from
+ * authoritative state and resubscribes. */
+export function decodeChangesToken(value: string): TableChangesPosition {
+  let token: unknown;
+  try {
+    token = JSON.parse(atob(value.replaceAll("-", "+").replaceAll("_", "/")));
+  } catch {
+    throw invalid("RESYNC_REQUIRED", "The sync token is unknown or expired: re-list the table and resubscribe.");
+  }
+  if (
+    !object(token) ||
+    typeof token.updatedAt !== "string" ||
+    Number.isNaN(Date.parse(token.updatedAt)) ||
+    typeof token.docId !== "string" ||
+    (token.docId !== "" && !DOC_ID.test(token.docId))
+  ) {
+    throw invalid("RESYNC_REQUIRED", "The sync token is unknown or expired: re-list the table and resubscribe.");
+  }
+  return { updatedAt: token.updatedAt, docId: token.docId };
+}
+
+/** Parse the changes poll string. Only since, sync_token, and limit ride
+ * here: filters, ordering, and cursors belong to the rows query, and
+ * anything else fails closed with UNSUPPORTED_QUERY. since and sync_token
+ * position the same poll and are mutually exclusive. */
+export function parseChangesQuery(params: URLSearchParams): TableChangesQuery {
+  for (const key of params.keys()) {
+    if (!["since", "sync_token", "limit"].includes(key)) {
+      throw invalid("UNSUPPORTED_QUERY", "Table change polls accept only since, sync_token, and limit.");
+    }
+  }
+  const rawSince = params.get("since");
+  const rawToken = params.get("sync_token");
+  if (rawSince !== null && rawToken !== null) {
+    throw invalid("INVALID_POLL", "Change polls take since for subscribe or sync_token for resume, not both.");
+  }
+  let limit = TABLE_CHANGES_LIMIT_DEFAULT;
+  const rawLimit = params.get("limit");
+  if (rawLimit !== null) {
+    if (!/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > TABLE_CHANGES_LIMIT_MAX) {
+      throw invalid("INVALID_LIMIT", `Limit must be an integer from 1 to ${TABLE_CHANGES_LIMIT_MAX}.`);
+    }
+    limit = Number(rawLimit);
+  }
+  if (rawToken !== null) {
+    if (rawToken.length === 0) {
+      throw invalid("RESYNC_REQUIRED", "The sync token is unknown or expired: re-list the table and resubscribe.");
+    }
+    return { position: decodeChangesToken(rawToken), resumeToken: rawToken, limit };
+  }
+  if (rawSince !== null) {
+    const parsed = Date.parse(rawSince);
+    if (Number.isNaN(parsed)) {
+      throw invalid("INVALID_SINCE", "since must be an ISO 8601 date-time.");
+    }
+    const since = new Date(parsed).toISOString();
+    return {
+      position: { updatedAt: since, docId: "" },
+      resumeToken: encodeChangesToken({ updatedAt: since, docId: "" }),
+      limit,
+    };
+  }
+  return { limit };
+}
+
+/** One bounded authorized poll (TABLE-02 realtime slice, ADR 045). The
+ * authorization stack resolves fresh from current D1 state on every call —
+ * role ceiling first, then the read grant — so revocation and claim/role
+ * flips deny the very next poll; nothing about the caller survives across
+ * polls to go stale (the upstream #760 rule, satisfied by holding no
+ * snapshot at all). Denied callers answer like a missing Table (404), never
+ * an empty feed. D1 is the source of truth: the scan walks at most
+ * limit+1 rows in (updated_at, doc_id) keyset order, so one poll costs at
+ * most 4 queries against the 50-query Free cap (1 declaration load, up to 2
+ * policy checks, 1 scan) with 3 binds. */
+export async function pollRowChanges(
+  db: D1Database,
+  caller: Principal,
+  table: TableDefinition,
+  query: TableChangesQuery,
+): Promise<TableChangesPage> {
+  await requireAct(db, table, caller, "read");
+  const clauses = ["table_id=?"];
+  const binds: (string | number)[] = [table.id];
+  if (query.position !== undefined) {
+    clauses.push("(updated_at>? OR (updated_at=? AND doc_id>?))");
+    binds.push(query.position.updatedAt, query.position.updatedAt, query.position.docId);
+  }
+  const scanned = await db
+    .prepare(
+      `SELECT doc_id,owner_user_id,data_json,created_at,updated_at FROM table_rows WHERE ${clauses.join(" AND ")} ORDER BY updated_at ASC, doc_id ASC LIMIT ?`,
+    )
+    .bind(...binds, query.limit + 1)
+    .all<DocRow>();
+  const rows = scanned.results.slice(0, query.limit);
+  const hasMore = scanned.results.length > query.limit;
+  const changes: TableChange[] = rows.map((row) => ({
+    id: row.doc_id,
+    data: JSON.parse(row.data_json) as Record<string, unknown>,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    change: "upsert" as const,
+  }));
+  const last = rows[rows.length - 1];
+  const syncToken =
+    last !== undefined
+      ? encodeChangesToken({ updatedAt: last.updated_at, docId: last.doc_id })
+      : (query.resumeToken ?? null);
+  return { changes, hasMore, syncToken };
 }
