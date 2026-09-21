@@ -134,15 +134,24 @@ function throwIfOAuthTimeout(error: unknown, timeout: OAuthFaultText): void {
   }
 }
 
-/** Resolve the absolute token URL from the Connection endpoint. The endpoint
- * itself is validated by the Integration's safe-URL policy before use; this
- * throws a provider-neutral Fault only for a value that cannot form a URL. */
+/** Resolve a token URL on the Connection endpoint's origin. The endpoint
+ * itself is validated by the Integration's safe-URL policy before use. The
+ * origin comparison is deliberately performed here, at the shared fetch
+ * boundary, so a network-path reference can never steer credentials to a
+ * different host even if a caller's validation is bypassed. */
 export function resolveTokenUrl(endpoint: string, tokenPath: string): string {
+  let endpointUrl: URL;
+  let tokenUrl: URL;
   try {
-    return new URL(tokenPath, endpoint).toString();
+    endpointUrl = new URL(endpoint);
+    tokenUrl = new URL(tokenPath, endpointUrl);
   } catch {
     throw new Fault(500, "INVALID_OAUTH_ENDPOINT", "The Connection endpoint cannot form a vendor token URL.");
   }
+  if (tokenUrl.origin !== endpointUrl.origin) {
+    throw new Fault(500, "INVALID_OAUTH_ENDPOINT", "The OAuth token URL must use the Connection endpoint origin.");
+  }
+  return tokenUrl.toString();
 }
 
 async function readTokenResponse(response: Response, faults: OAuthFaultTable): Promise<OAuthToken> {
