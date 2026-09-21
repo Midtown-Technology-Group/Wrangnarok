@@ -314,8 +314,9 @@ it("tables revocation converges on the next request, including the poll", async 
   // Revoking read denies reads, query, count, detail, and the next poll —
   // no snapshot survives across polls — while the retained insert grant
   // keeps serving (per-action granularity).
-  expect(await call("/api/tables/rev/grants", "DELETE", USER_OWNER, { action: "read", granteeUserId: USER_OP }))
-    .toMatchObject({ status: 200, body: { revoked: true } });
+  expect(
+    await call("/api/tables/rev/grants", "DELETE", USER_OWNER, { action: "read", granteeUserId: USER_OP }),
+  ).toMatchObject({ status: 200, body: { revoked: true } });
   expect(await call("/api/tables/rev/rows/r1", "GET", USER_OP)).toMatchObject({ status: 404 });
   expect(await call("/api/tables/rev/rows", "GET", USER_OP)).toMatchObject({ status: 404 });
   expect(await call("/api/tables/rev/count", "GET", USER_OP)).toMatchObject({ status: 404 });
@@ -326,8 +327,9 @@ it("tables revocation converges on the next request, including the poll", async 
   expect(await call("/api/tables/rev/rows/r2", "PUT", USER_OP, { data: { v: 2 } })).toMatchObject({ status: 201 });
   // Revoking insert denies single and batch writes without touching rows,
   // and the last grant takes detail visibility with it.
-  expect(await call("/api/tables/rev/grants", "DELETE", USER_OWNER, { action: "insert", granteeUserId: USER_OP }))
-    .toMatchObject({ status: 200, body: { revoked: true } });
+  expect(
+    await call("/api/tables/rev/grants", "DELETE", USER_OWNER, { action: "insert", granteeUserId: USER_OP }),
+  ).toMatchObject({ status: 200, body: { revoked: true } });
   expect(await call("/api/tables/rev", "GET", USER_OP)).toMatchObject({ status: 404 });
   expect(await call("/api/tables/rev/rows/r3", "PUT", USER_OP, { data: { v: 3 } })).toMatchObject({
     status: 403,
@@ -345,10 +347,12 @@ it("tables revocation converges on the next request, including the poll", async 
   });
   // Non-owners cannot revoke, and revoking a missing grant converges
   // silently instead of inventing a distinguisher.
-  expect(await call("/api/tables/rev/grants", "DELETE", USER_OP, { action: "read", granteeUserId: USER_OP }))
-    .toMatchObject({ status: 403, body: { error: { code: "TABLE_FORBIDDEN" } } });
-  expect(await call("/api/tables/rev/grants", "DELETE", USER_OWNER, { action: "read", granteeUserId: USER_OP }))
-    .toMatchObject({ status: 200, body: { revoked: true } });
+  expect(
+    await call("/api/tables/rev/grants", "DELETE", USER_OP, { action: "read", granteeUserId: USER_OP }),
+  ).toMatchObject({ status: 403, body: { error: { code: "TABLE_FORBIDDEN" } } });
+  expect(
+    await call("/api/tables/rev/grants", "DELETE", USER_OWNER, { action: "read", granteeUserId: USER_OP }),
+  ).toMatchObject({ status: 200, body: { revoked: true } });
   // Owner deletion purges rows and grants: recreating the name starts from
   // deny-by-absence with no grant residue.
   expect(await call("/api/tables/rev", "DELETE", USER_OWNER)).toMatchObject({ status: 200 });
@@ -366,8 +370,9 @@ it("tables failure/recovery: oversized batches fail closed, conflicts recover", 
   // 26 documents exceed the 25-document bound: the whole request fails
   // before policy preflight and persists nothing (L7).
   const oversized = Array.from({ length: 26 }, (_, i) => ({ id: `d${i}`, data: { v: i } }));
-  expect(await call("/api/tables/fx/rows/batch", "POST", USER_OWNER, { write_mode: "insert", items: oversized }))
-    .toMatchObject({ status: 400, body: { error: { code: "INVALID_BATCH" } } });
+  expect(
+    await call("/api/tables/fx/rows/batch", "POST", USER_OWNER, { write_mode: "insert", items: oversized }),
+  ).toMatchObject({ status: 400, body: { error: { code: "INVALID_BATCH" } } });
   expect(await call("/api/tables/fx/count", "GET", USER_OWNER)).toMatchObject({
     status: 200,
     body: { total: 0 },
@@ -433,8 +438,9 @@ it("tables failure/recovery: oversized batches fail closed, conflicts recover", 
   await grantTable("fx", "delete", USER_OP);
   // The compatibility alias answers 200 (the canonical batch write answers
   // 201); the count still reflects unique physical deletions.
-  expect(await call("/api/tables/fx/rows/batch-delete", "POST", USER_OP, { ids: ["m1", "m2", "missing"] }))
-    .toMatchObject({ status: 200, body: { count: 2 } });
+  expect(
+    await call("/api/tables/fx/rows/batch-delete", "POST", USER_OP, { ids: ["m1", "m2", "missing"] }),
+  ).toMatchObject({ status: 200, body: { count: 2 } });
 });
 
 it("files allowed/denied matrix: issuance, delivery, policy, and listing", async () => {
@@ -590,9 +596,7 @@ it("files revocation stops outstanding capabilities at use time, then re-grant r
   const survivingDown = await issuance("/api/files/downloads", USER_OP, [{ location: "rk", path: "ready.txt" }]);
   expect(survivingUp.status).toBe(200);
   expect(survivingDown.status).toBe(200);
-  await bindings.DB.prepare("DELETE FROM file_policies WHERE org_id=? AND location=?")
-    .bind(ORG_A, "rk")
-    .run();
+  await bindings.DB.prepare("DELETE FROM file_policies WHERE org_id=? AND location=?").bind(ORG_A, "rk").run();
   const stoppedPut = await worker.fetch(
     new Request(`https://local.test/api/files/content?token=${survivingUp.entries[0]?.token}`, {
       method: "PUT",
@@ -660,12 +664,15 @@ it("files failure/recovery: version fences, finalize mismatch, location lifecycl
   expect(await roundtrip("ok.txt", bytes, 1)).toMatchObject({ status: 200, body: { file: { version: 2 } } });
   // Delete fences the same way: stale versions 409, correct deletes, a
   // second delete reports the file missing.
-  expect(await call("/api/files", "DELETE", USER_OP, { location: "fy", path: "ok.txt", expectedVersion: 99 }))
-    .toMatchObject({ status: 409, body: { error: { code: "VERSION_CONFLICT" } } });
-  expect(await call("/api/files", "DELETE", USER_OP, { location: "fy", path: "ok.txt", expectedVersion: 2 }))
-    .toMatchObject({ status: 200 });
-  expect(await call("/api/files", "DELETE", USER_OP, { location: "fy", path: "ok.txt", expectedVersion: 2 }))
-    .toMatchObject({ status: 409, body: { error: { code: "FILE_MISSING" } } });
+  expect(
+    await call("/api/files", "DELETE", USER_OP, { location: "fy", path: "ok.txt", expectedVersion: 99 }),
+  ).toMatchObject({ status: 409, body: { error: { code: "VERSION_CONFLICT" } } });
+  expect(
+    await call("/api/files", "DELETE", USER_OP, { location: "fy", path: "ok.txt", expectedVersion: 2 }),
+  ).toMatchObject({ status: 200 });
+  expect(
+    await call("/api/files", "DELETE", USER_OP, { location: "fy", path: "ok.txt", expectedVersion: 2 }),
+  ).toMatchObject({ status: 409, body: { error: { code: "FILE_MISSING" } } });
   // Finalize mismatch discards the staged bytes and the pending row: the
   // retry reports missing, and a clean roundtrip recovers the path.
   const bad = new TextEncoder().encode("bad-bytes");
@@ -705,8 +712,9 @@ it("files failure/recovery: version fences, finalize mismatch, location lifecycl
     status: 409,
     body: { error: { code: "LOCATION_NOT_EMPTY" } },
   });
-  expect(await call("/api/files", "DELETE", USER_OP, { location: "fy", path: "bad.txt", expectedVersion: 1 }))
-    .toMatchObject({ status: 200 });
+  expect(
+    await call("/api/files", "DELETE", USER_OP, { location: "fy", path: "bad.txt", expectedVersion: 1 }),
+  ).toMatchObject({ status: 200 });
   expect(await call("/api/file-locations/fy", "DELETE", USER_OP)).toMatchObject({ status: 200 });
   expect(await call("/api/file-locations/fy", "GET", USER_OP)).toMatchObject({ status: 404 });
   expect(await call("/api/file-locations", "POST", USER_OP, { name: "fy", maxBytes: 16 })).toMatchObject({
