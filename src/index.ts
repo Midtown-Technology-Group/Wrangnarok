@@ -5183,7 +5183,12 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     if (tableRows?.[1] && request.method === "GET") {
       const table = await loadTable(env.DB, caller.orgId, tableRows[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
-      return json(await queryRows(env.DB, caller, table, parseTableQuery(url.searchParams)));
+      // SEC-01 (ADR 046): row payloads are author data scrubbed at
+      // read-time egress only — D1 keeps the author bytes, no HTTP render
+      // carries a deployment-secret substring.
+      return json(
+        scrubValueWithDeploymentSecrets(await queryRows(env.DB, caller, table, parseTableQuery(url.searchParams)), env),
+      );
     }
     const tableBatchInsert = /^\/api\/tables\/([a-z0-9][a-z0-9-]{0,63})\/rows\/batch$/.exec(url.pathname);
     if (tableBatchInsert?.[1] && request.method === "POST") {
@@ -5199,11 +5204,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const table = await loadTable(env.DB, caller.orgId, tableBatchInsert[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
       return json(
-        await executeBatchWrite(
-          env.DB,
-          caller,
-          table,
-          parseBatchRequest(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT)),
+        scrubValueWithDeploymentSecrets(
+          await executeBatchWrite(
+            env.DB,
+            caller,
+            table,
+            parseBatchRequest(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT)),
+          ),
+          env,
         ),
         201,
       );
@@ -5217,11 +5225,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const table = await loadTable(env.DB, caller.orgId, tableBatchUpdate[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
       return json(
-        await executeBatchWrite(
-          env.DB,
-          caller,
-          table,
-          parseBatchRequest(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT), "update"),
+        scrubValueWithDeploymentSecrets(
+          await executeBatchWrite(
+            env.DB,
+            caller,
+            table,
+            parseBatchRequest(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT), "update"),
+          ),
+          env,
         ),
       );
     }
@@ -5233,11 +5244,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const table = await loadTable(env.DB, caller.orgId, tableBatchDelete[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
       return json(
-        await executeBatchDelete(
-          env.DB,
-          caller,
-          table,
-          parseBatchDeleteBody(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT)),
+        scrubValueWithDeploymentSecrets(
+          await executeBatchDelete(
+            env.DB,
+            caller,
+            table,
+            parseBatchDeleteBody(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT)),
+          ),
+          env,
         ),
       );
     }
@@ -5251,7 +5265,15 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // document ID under /rows/ is shadowed.
       const table = await loadTable(env.DB, caller.orgId, tableChanges[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
-      return json(await pollRowChanges(env.DB, caller, table, parseChangesQuery(url.searchParams)));
+      // SEC-01 (ADR 046): the bounded-poll feed scrubs row payloads at
+      // egress with deployment secrets. pollRowChanges and D1 truth are
+      // untouched — same scan, tokens, and cursor semantics (ADR 045).
+      return json(
+        scrubValueWithDeploymentSecrets(
+          await pollRowChanges(env.DB, caller, table, parseChangesQuery(url.searchParams)),
+          env,
+        ),
+      );
     }
     const tableRow = /^\/api\/tables\/([a-z0-9][a-z0-9-]{0,63})\/rows\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/.exec(
       url.pathname,
@@ -5266,10 +5288,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           throw new Fault(400, "INVALID_DOCUMENT", "Row writes need { data } with a JSON object document.");
         }
         const row = await insertRow(env.DB, caller, table, tableRow[2], (body as Record<string, unknown>).data);
-        return json({ row }, 201);
+        return json(scrubValueWithDeploymentSecrets({ row }, env), 201);
       }
       if (request.method === "GET") {
-        return json({ row: await readRow(env.DB, caller, table, tableRow[2]) });
+        return json(scrubValueWithDeploymentSecrets({ row: await readRow(env.DB, caller, table, tableRow[2]) }, env));
       }
       if (request.method === "PATCH") {
         requireJson(request);
@@ -5277,9 +5299,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         if (body === null || typeof body !== "object" || Array.isArray(body) || !("data" in body)) {
           throw new Fault(400, "INVALID_DOCUMENT", "Row updates need { data } with a JSON object document.");
         }
-        return json({
-          row: await updateRow(env.DB, caller, table, tableRow[2], (body as Record<string, unknown>).data),
-        });
+        return json(
+          scrubValueWithDeploymentSecrets(
+            {
+              row: await updateRow(env.DB, caller, table, tableRow[2], (body as Record<string, unknown>).data),
+            },
+            env,
+          ),
+        );
       }
       if (request.method === "DELETE") {
         await deleteRow(env.DB, caller, table, tableRow[2]);
