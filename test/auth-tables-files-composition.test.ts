@@ -517,8 +517,10 @@ it("files revocation stops outstanding capabilities at use time, then re-grant r
   const digest = await sha256Hex(bytes);
   const up = await issuance("/api/files/uploads", USER_OP, [{ location: "rk", path: "ready.txt" }]);
   expect(up.status).toBe(200);
+  const upToken = up.entries[0]?.token;
+  expect(typeof upToken).toBe("string");
   const put = await worker.fetch(
-    new Request(`https://local.test/api/files/content?token=${up.entries[0]?.token}`, {
+    new Request(`https://local.test/api/files/content?token=${upToken}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
       body: bytes as Uint8Array<ArrayBuffer>,
@@ -539,6 +541,10 @@ it("files revocation stops outstanding capabilities at use time, then re-grant r
   const down = await issuance("/api/files/downloads", USER_OP, [{ location: "rk", path: "ready.txt" }]);
   expect(pending.status).toBe(200);
   expect(down.status).toBe(200);
+  const pendingToken = pending.entries[0]?.token;
+  const downToken = down.entries[0]?.token;
+  expect(typeof pendingToken).toBe("string");
+  expect(typeof downToken).toBe("string");
   // Revoking write deletes the matching capability rows, so the
   // outstanding upload token is unknown at use time (401) — and new
   // issuance closes with 403 per entry.
@@ -546,7 +552,7 @@ it("files revocation stops outstanding capabilities at use time, then re-grant r
     status: 200,
   });
   const usedPut = await worker.fetch(
-    new Request(`https://local.test/api/files/content?token=${pending.entries[0]?.token}`, {
+    new Request(`https://local.test/api/files/content?token=${pendingToken}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
       body: bytes as Uint8Array<ArrayBuffer>,
@@ -564,7 +570,7 @@ it("files revocation stops outstanding capabilities at use time, then re-grant r
     status: 200,
   });
   const usedGet = await worker.fetch(
-    new Request(`https://local.test/api/files/content?token=${down.entries[0]?.token}`, {
+    new Request(`https://local.test/api/files/content?token=${downToken}`, {
       method: "GET",
       headers: { Authorization: `Bearer ${TOKEN}` },
     }),
@@ -596,9 +602,13 @@ it("files revocation stops outstanding capabilities at use time, then re-grant r
   const survivingDown = await issuance("/api/files/downloads", USER_OP, [{ location: "rk", path: "ready.txt" }]);
   expect(survivingUp.status).toBe(200);
   expect(survivingDown.status).toBe(200);
+  const survivingUpToken = survivingUp.entries[0]?.token;
+  const survivingDownToken = survivingDown.entries[0]?.token;
+  expect(typeof survivingUpToken).toBe("string");
+  expect(typeof survivingDownToken).toBe("string");
   await bindings.DB.prepare("DELETE FROM file_policies WHERE org_id=? AND location=?").bind(ORG_A, "rk").run();
   const stoppedPut = await worker.fetch(
-    new Request(`https://local.test/api/files/content?token=${survivingUp.entries[0]?.token}`, {
+    new Request(`https://local.test/api/files/content?token=${survivingUpToken}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
       body: bytes as Uint8Array<ArrayBuffer>,
@@ -607,7 +617,7 @@ it("files revocation stops outstanding capabilities at use time, then re-grant r
   );
   expect(stoppedPut.status).toBe(403);
   const stoppedGet = await worker.fetch(
-    new Request(`https://local.test/api/files/content?token=${survivingDown.entries[0]?.token}`, {
+    new Request(`https://local.test/api/files/content?token=${survivingDownToken}`, {
       method: "GET",
       headers: { Authorization: `Bearer ${TOKEN}` },
     }),
@@ -637,8 +647,10 @@ it("files failure/recovery: version fences, finalize mismatch, location lifecycl
   async function roundtrip(path: string, content: Uint8Array, expectedVersion?: number, user: string = USER_OP) {
     const slot = await issuance("/api/files/uploads", user, [{ location: "fy", path }]);
     expect(slot.status).toBe(200);
+    const slotToken = slot.entries[0]?.token;
+    expect(typeof slotToken).toBe("string");
     const put = await worker.fetch(
-      new Request(`https://local.test/api/files/content?token=${slot.entries[0]?.token}`, {
+      new Request(`https://local.test/api/files/content?token=${slotToken}`, {
         method: "PUT",
         headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
         body: content as Uint8Array<ArrayBuffer>,
@@ -678,8 +690,10 @@ it("files failure/recovery: version fences, finalize mismatch, location lifecycl
   const bad = new TextEncoder().encode("bad-bytes");
   const badSlot = await issuance("/api/files/uploads", USER_OP, [{ location: "fy", path: "bad.txt" }]);
   expect(badSlot.status).toBe(200);
+  const badToken = badSlot.entries[0]?.token;
+  expect(typeof badToken).toBe("string");
   const badPut = await worker.fetch(
-    new Request(`https://local.test/api/files/content?token=${badSlot.entries[0]?.token}`, {
+    new Request(`https://local.test/api/files/content?token=${badToken}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "text/plain" },
       body: bad as Uint8Array<ArrayBuffer>,
