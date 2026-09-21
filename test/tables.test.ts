@@ -35,8 +35,11 @@ import {
   readRow,
   TABLE_BATCH_BODY_LIMIT,
   TABLE_BATCH_MAX,
+  TABLE_DOC_MAX_BYTES,
   TABLE_DOCUMENT_IDS_MAX,
   TABLE_DOCUMENT_ID_QUERY_MAX,
+  TABLE_FILTER_MAX,
+  TABLE_QUERY_LIMIT_MAX,
   TABLE_QUERY_ROW_CAP,
   updateRow,
 } from "../src/tables";
@@ -1204,6 +1207,141 @@ describe("TABLE-02 retention-posture pins (explicit deletion only, issue #154)",
       error: { code: "BODY_TOO_LARGE", message: `The body exceeds ${TABLE_BATCH_BODY_LIMIT} bytes.` },
     });
     expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 0 });
+  });
+});
+
+describe("TABLE-02 large-table retention-policy slice (issue #154)", () => {
+  // One scan window plus margin: over-cap by construction, small enough to
+  // seed through a few direct D1 batch() calls.
+  const LARGE_ROWS = TABLE_QUERY_ROW_CAP + 100;
+
+  interface ListBody {
+    rows: { id: string }[];
+    hasMore: boolean;
+    nextCursor: string | null;
+    total: number;
+  }
+
+  function docId(i: number): string {
+    return `d${String(i).padStart(5, "0")}`;
+  }
+
+  async function seedLarge(name: string, rows = LARGE_ROWS): Promise<void> {
+    await createTable(name);
+    const table = (await loadTable(bindings.DB, ORG, name))!;
+    const stamp = new Date().toISOString();
+    const statements = [];
+    for (let i = 0; i < rows; i += 1) {
+      statements.push(
+        bindings.DB.prepare(
+          "INSERT INTO table_rows(table_id, org_id, doc_id, owner_user_id, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ).bind(table.id, ORG, docId(i), OWNER, JSON.stringify({ grp: i % 10, n: i }), stamp, stamp),
+      );
+    }
+    for (let start = 0; start < statements.length; start += 100) {
+      await bindings.DB.batch(statements.slice(start, start + 100));
+    }
+  }
+
+  it("pages an over-cap table bounded with total=-2 and walks gap-free", async () => {
+    await seedLarge("big");
+    expect(await call("/api/tables/big/count").then((r) => r.json())).toEqual({ total: -2 });
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 40; page += 1) {
+      const query = cursor === null ? "?limit=50" : `?limit=50&cursor=${cursor}`;
+      const res = await call(`/api/tables/big/rows${query}`, "GET");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as ListBody;
+      // Bounded memory: one page plus lookahead, never the whole table.
+      expect(body.rows.length).toBeLessThanOrEqual(50);
+      expect(body.total).toBe(-2);
+      seen.push(...body.rows.map((row) => row.id));
+      cursor = body.nextCursor;
+      if (!body.hasMore) break;
+    }
+    expect(seen).toHaveLength(LARGE_ROWS);
+    expect(new Set(seen).size).toBe(LARGE_ROWS);
+    // Zero-padded ids sort lexicographically, so an in-order walk is sorted.
+    expect([...seen].sort()).toEqual(seen);
+    expect(seen[0]).toBe(docId(0));
+    expect(seen[seen.length - 1]).toBe(docId(LARGE_ROWS - 1));
+  });
+
+  it("keeps filtered pages continuous across the full keyset at scale", async () => {
+    await seedLarge("bigf");
+    // grp=3 matches every tenth row across the whole keyset, so every page
+    // boundary lands mid-span and any gap or dupe shows in the walk.
+    const expected = Array.from({ length: LARGE_ROWS }, (_, i) => i)
+      .filter((i) => i % 10 === 3)
+      .map(docId);
+    expect(expected.length).toBeGreaterThan(100);
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 20; page += 1) {
+      const query = cursor === null ? "?limit=25&filter=grp%3D3" : `?limit=25&cursor=${cursor}&filter=grp%3D3`;
+      const res = await call(`/api/tables/bigf/rows${query}`, "GET");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as ListBody;
+      expect(body.rows.length).toBeLessThanOrEqual(25);
+      seen.push(...body.rows.map((row) => row.id));
+      cursor = body.nextCursor;
+      if (!body.hasMore) break;
+    }
+    expect(seen).toEqual(expected);
+    // The filtered count over an over-cap table stays honest: bounded, not
+    // an invented exact total.
+    expect(await call("/api/tables/bigf/count?filter=grp%3D3").then((r) => r.json())).toEqual({ total: -2 });
+  });
+
+  it("pins the retention-policy bounds behind the recorded decision", async () => {
+    // Concrete byte/row/query bounds from the TABLE-02 retention/
+    // partitioning policy (docs/upstream-parity.md): any change reopens the
+    // recorded decision, so the pins fail closed here first.
+    expect(TABLE_DOC_MAX_BYTES).toBe(4096);
+    expect(TABLE_QUERY_ROW_CAP).toBe(1000);
+    expect(TABLE_BATCH_MAX).toBe(25);
+    expect(TABLE_BATCH_BODY_LIMIT).toBe(256_000);
+    expect(TABLE_QUERY_LIMIT_MAX).toBe(50);
+    expect(TABLE_FILTER_MAX).toBe(5);
+    expect(TABLE_DOCUMENT_IDS_MAX).toBe(25);
+    expect(TABLE_DOCUMENT_ID_QUERY_MAX).toBe(255);
+  });
+
+  it("retains rows without expiry and reclaims only through explicit deletion", async () => {
+    await createTable("ledger");
+    const first = await call("/api/tables/ledger/rows/batch", "POST", {
+      write_mode: "insert",
+      items: Array.from({ length: 25 }, (_, i) => ({ id: `k${i}`, data: { n: i } })),
+    });
+    expect(first.status).toBe(201);
+    // Unrelated writes never sweep earlier rows: no TTL, no background purge.
+    const second = await call("/api/tables/ledger/rows/batch", "POST", {
+      write_mode: "insert",
+      items: Array.from({ length: 25 }, (_, i) => ({ id: `j${i}`, data: { n: i } })),
+    });
+    expect(second.status).toBe(201);
+    expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 50 });
+    expect(await call("/api/tables/ledger/rows/k0").then((r) => r.status)).toBe(200);
+    // Explicit row deletion reclaims: counts drop and the ids stay gone.
+    const removed = await call("/api/tables/ledger/rows/batch-delete", "POST", {
+      ids: Array.from({ length: 25 }, (_, i) => `k${i}`),
+    });
+    expect(await removed.json()).toMatchObject({ count: 25 });
+    expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 25 });
+    expect(await call("/api/tables/ledger/rows/k0").then((r) => r.status)).toBe(404);
+  });
+
+  it("deleteTable drops every row of an over-cap table", async () => {
+    await seedLarge("bulk");
+    expect(await call("/api/tables/bulk/count").then((r) => r.json())).toEqual({ total: -2 });
+    const table = (await loadTable(bindings.DB, ORG, "bulk"))!;
+    expect((await call("/api/tables/bulk", "DELETE")).status).toBe(200);
+    const rows = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM table_rows WHERE table_id=?")
+      .bind(table.id)
+      .first<{ n: number }>();
+    expect(rows?.n).toBe(0);
+    expect((await call("/api/tables/bulk/count")).status).toBe(404);
   });
 });
 

@@ -667,6 +667,33 @@ cap (1000 statements + ~15 overhead > 1000), so a 1000-wide batch would need
 multi-invocation chaining (Queue/Workflow orchestration) — a deferred
 redesign, not this slice. Callers needing more than 25 documents issue
 several sequential batch requests; each request stays atomic on its own.
+Retention/partitioning policy (issue #154, decision with an explicit
+residual blocker): retention stays org-owned explicit deletion only — row
+deletes plus `deleteTable` cascade drop rows and grants, with no TTL
+columns, no auto-partitioning, and no background sweeper in this slice
+(pinned by `test/tables.test.ts` "TABLE-02 retention-posture pins": the
+applied DDL carries no ttl/expiry/partition/retention surface and the
+per-document bound answers to D1 itself via
+`CHECK(length(data_json) <= 4096)`). Concrete byte/row/query bounds behind
+the decision: 4096 UTF-8 bytes per document, 256 KB batch route body,
+1000-row scan cap per list/count query, page limit 1-50, at most 5 nested
+filters, at most 25 document_ids of 255 chars each; a scan window that
+fills the 1000-row cap answers total=-2 (bounded, never an invented exact
+total) while keyset pages stay continuous and bounded to page rows plus
+one lookahead. Capacity math against the D1 per-database cap (500 MB Free,
+10 GB Paid): worst-case 4096-byte documents yield on the order of 128,000
+documents per database on Free (~2.5 M on Paid) before the storage cap,
+minus row/index overhead — and no per-table quota is enforced, so one
+table can fill its database. Partitioning posture is manual: splitting
+across tables stays inside the same 500 MB envelope, and splitting across
+databases needs a future multi-DB routing decision because single-database
+batch atomicity ends at the batch() call boundary (a batch never spans
+databases). Residual blocker: large Tables approaching the per-database
+cap are not production-shaped until that sharding/retention policy lands;
+small Tables under org-owned explicit deletion are decided and shippable.
+Large-table bounded-memory regressions, filtered page continuity at scale,
+and retention-policy pins live in `test/tables.test.ts` "TABLE-02
+large-table retention-policy slice (issue #154)".
 Unsupported
 query operators fail closed (UNSUPPORTED_QUERY / INVALID_ORDER / INVALID_CURSOR
 for offset or custom sorts: no offset pagination, no custom sorts, no
