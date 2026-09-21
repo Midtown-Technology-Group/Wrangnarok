@@ -24,7 +24,7 @@ Total: 47 capability rows — 6 Implemented, 1 Complete (pending review), 31 Par
 | AUTH-01 | Replace the single-org allowlist with Organization and user lifecycle management | 3 | Partial | — | new |
 | AUTH-02 | Enforce resource roles, claims and explicit delegated authorization end to end | 3 | Implemented | AUTH-01 | #143 |
 | AUTH-03 | Manage scoped machine credentials and verify delegated human identity parity | 3 | Partial | AUTH-01, AUTH-02 | #144 |
-| SEC-01 | Enforce execution-scoped secret registration and universal output scrubbing | 3 | Partial | — | new |
+| SEC-01 | Enforce execution-scoped secret registration and universal output scrubbing | 3 | Partial | — | #576 |
 | CON-01 | Manage Integration definitions and scoped Connection mappings through authorized APIs | 3 | Complete (pending review) | AUTH-02, SEC-01 | #146 |
 | CON-02 | Expose scoped configuration and secret-reference APIs to authors and operators | 3 | Implemented | AUTH-02, SEC-01, CON-01 | #147 |
 | SEC-02 | Support genuinely per-Organization credentials behind the accepted secret-storage tripwire | 3 | Gated | SEC-01, CON-01 | new |
@@ -333,9 +333,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## SEC-01: Enforce execution-scoped secret registration and universal output scrubbing
 
-Phase 3; **Partial**; existing issue: new
+Phase 3; **Partial**; existing issue: #576
 
-Local status: ADR 005 requires a mechanism. Existing sentinel tests and fixed error shaping must not be confused with a dynamic registry covering newly materialized tokens and all outputs.
+Local status: registry mechanism plus write-time/egress wiring proven (issue #145: `src/secrets.ts`, `test/secret-scrub.test.ts`, `test/secret-scrub-live.test.ts`); choke-point boundary fixed by ADR 046 (issue #576), including read-time egress scrub of table row payloads on rows/single-row/batch/`changes` routes with D1 truth unchanged (`test/table-changes-secrets.test.ts`). Remaining: downstream lanes (CON-01, CON-02, OBS-02 streaming, FILE-01/02, AI/TOOL) claim parity against this boundary as they land.
 
 Depends: none
 
