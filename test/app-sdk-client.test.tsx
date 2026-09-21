@@ -10,10 +10,11 @@
 //   retry blindly (single attempt counted).
 // - Token rotation: exactly one 401 refresh + one retry, then 401 surfaces
 //   and onAuthFailure runs (no refresh loop).
-// - subscribeTable polls revisions, re-lists from the last revision on
-//   reconnect, replaces (never merges) rows on the authoritative refetch
-//   after a server-side burst, and halts on unsubscribe; subscribeFiles
-//   re-emits the authoritative list after an outage.
+// - subscribeTable polls the changes feed with table-bound sync tokens,
+//   resumes from the token on reconnect, replaces (never merges) rows on
+//   the authoritative refetch after a server-side burst, re-lists and
+//   resubscribes fresh on RESYNC_REQUIRED, and halts on unsubscribe;
+//   subscribeFiles re-emits the authoritative list after an outage.
 // - useAppTable returns FLAT rows vs the nested imperative shape;
 //   provider covers basename, theme/logout, repeat mount/unmount.
 import { afterEach, expect, it, vi } from "vitest";
@@ -42,6 +43,13 @@ const HANDSHAKE = {
   version: APP_SDK_VERSION,
   app: { id: APP_ID, name: "shop", slug: "shop", status: "live" },
 };
+
+/** Zero-delay sleep that still yields to the event loop: a bare resolved
+ * promise would let an unstopped poll loop starve the very timers
+ * `vi.waitFor` needs when the test stops the poller externally. */
+function tick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 function stubFetch(scenarios: (Response | Error)[]) {
   const calls: { url: string; init?: RequestInit }[] = [];
@@ -181,29 +189,36 @@ it("rotates the token exactly once on 401, then surfaces and logs out", async ()
   expect(secondFailure).toBe(1);
 });
 
-it("polls Table revisions, resumes from the last revision, and halts on unsubscribe", async () => {
-  const page = (revision: number, rows: unknown[] = []) => ({
-    rows,
+it("polls Table changes, resumes from the sync token, and halts on unsubscribe", async () => {
+  const feed = (syncToken: string | null, tableRevision: number, changes: unknown[] = []) => ({
+    changes,
     hasMore: false,
-    nextCursor: null,
-    tableRevision: revision,
+    syncToken,
+    tableRevision,
   });
+  const page = (revision: number) => ({ rows: [], hasMore: false, nextCursor: null, tableRevision: revision });
   const pages: { tableRevision: number }[] = [];
   const calls: string[] = [];
   const fetch = (async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     calls.push(url);
     if (url.endsWith("/sdk")) return jsonResponse(HANDSHAKE);
-    if (calls.filter((entry) => entry.includes("/rows")).length === 2) throw new Error("transport down");
-    const revision = calls.filter((entry) => entry.includes("/rows")).length <= 2 ? 1 : 2;
-    return jsonResponse(page(revision));
+    if (url.includes("/rows")) {
+      return jsonResponse(page(calls.filter((entry) => entry.includes("/rows")).length <= 1 ? 1 : 2));
+    }
+    const seen = calls.filter((entry) => entry.includes("/changes")).length;
+    // Second feed poll drops: the reconnect must resume from the token.
+    if (seen === 2) throw new Error("transport down");
+    if (seen <= 2) return jsonResponse(feed("tok-1", 1));
+    // Revision moved with no emitted rows (a delete): still refetches.
+    return jsonResponse(feed("tok-1", 2));
   }) as unknown as typeof globalThis.fetch;
   const client = createAppRuntimeClient({
     baseUrl: BASE,
     token: "tok",
     appId: APP_ID,
     fetchImpl: fetch,
-    sleep: async () => {},
+    sleep: tick,
   });
   const stop = client.subscribeTable(
     "orders",
@@ -218,10 +233,13 @@ it("polls Table revisions, resumes from the last revision, and halts on unsubscr
     },
   );
   await vi.waitFor(() => expect(pages.some((entry) => entry.tableRevision === 2)).toBe(true));
-  const rowCalls = calls.filter((entry) => entry.includes("/rows"));
-  expect(rowCalls.length).toBeGreaterThanOrEqual(3);
-  // The reconnect re-requests from the last known revision.
-  expect(rowCalls.some((entry) => entry.includes("sinceRevision=1"))).toBe(true);
+  const feedCalls = calls.filter((entry) => entry.includes("/changes"));
+  expect(feedCalls.length).toBeGreaterThanOrEqual(3);
+  // The first poll subscribes from an instant; every later poll resumes
+  // from the last issued sync token — never a bare re-list.
+  expect(feedCalls[0]).toContain("since=");
+  expect(feedCalls[0]).not.toContain("sync_token=");
+  expect(feedCalls.slice(1).every((entry) => entry.includes("sync_token=tok-1"))).toBe(true);
   const settled = calls.length;
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(calls.length).toBe(settled);
@@ -229,9 +247,9 @@ it("polls Table revisions, resumes from the last revision, and halts on unsubscr
 
 it("replaces poller rows with the authoritative page after a server-side burst", async () => {
   // Upstream v2 delivers one table_invalidated frame per batch commit; this
-  // client polls revisions instead. A server-side burst (several revision
-  // bumps between polls) must surface as one authoritative replacement with
-  // no stale rows retained — the poller never merges pages.
+  // client polls the changes feed instead. A server-side burst (several
+  // writes between polls) must surface as one authoritative replacement
+  // with no stale rows retained — the poller never merges feed entries.
   const row = (id: string, sku: string, revision: number) => ({
     id,
     data: { sku },
@@ -244,20 +262,43 @@ it("replaces poller rows with the authoritative page after a server-side burst",
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     calls.push(url);
     if (url.endsWith("/sdk")) return jsonResponse(HANDSHAKE);
-    const seen = calls.filter((entry) => entry.includes("/rows")).length;
-    if (seen <= 1) {
+    if (url.includes("/rows")) {
+      const seen = calls.filter((entry) => entry.includes("/rows")).length;
+      if (seen <= 1) {
+        return jsonResponse({
+          rows: [row("a", "a", 4), row("b", "b", 4)],
+          hasMore: false,
+          nextCursor: null,
+          tableRevision: 4,
+        });
+      }
+      // Burst landed between polls: a deleted, b rewritten, c inserted (rev 7).
       return jsonResponse({
-        rows: [row("a", "a", 4), row("b", "b", 4)],
+        rows: [row("b", "b", 7), row("c", "c", 7)],
         hasMore: false,
         nextCursor: null,
+        tableRevision: 7,
+      });
+    }
+    const seen = calls.filter((entry) => entry.includes("/changes")).length;
+    if (seen <= 1) {
+      return jsonResponse({
+        changes: [
+          { id: "a", data: { sku: "a" }, createdAt: "t", updatedAt: "t", change: "upsert" },
+          { id: "b", data: { sku: "b" }, createdAt: "t", updatedAt: "t", change: "upsert" },
+        ],
+        hasMore: false,
+        syncToken: "tok-1",
         tableRevision: 4,
       });
     }
-    // Burst landed between polls: a deleted, b rewritten, c inserted (rev 7).
     return jsonResponse({
-      rows: [row("b", "b", 7), row("c", "c", 7)],
+      changes: [
+        { id: "b", data: { sku: "b" }, createdAt: "t", updatedAt: "t", change: "upsert" },
+        { id: "c", data: { sku: "c" }, createdAt: "t", updatedAt: "t", change: "upsert" },
+      ],
       hasMore: false,
-      nextCursor: null,
+      syncToken: "tok-2",
       tableRevision: 7,
     });
   }) as unknown as typeof globalThis.fetch;
@@ -266,7 +307,7 @@ it("replaces poller rows with the authoritative page after a server-side burst",
     token: "tok",
     appId: APP_ID,
     fetchImpl: fetch,
-    sleep: async () => {},
+    sleep: tick,
   });
   const pages: { rows: { id: string }[]; tableRevision: number }[] = [];
   const stop = client.subscribeTable(
@@ -281,10 +322,57 @@ it("replaces poller rows with the authoritative page after a server-side burst",
     },
   );
   await vi.waitFor(() => expect(pages.length).toBeGreaterThanOrEqual(2));
-  const rowCalls = calls.filter((entry) => entry.includes("/rows"));
-  expect(rowCalls[1]).toContain("sinceRevision=4");
+  const feedCalls = calls.filter((entry) => entry.includes("/changes"));
+  expect(feedCalls[1]).toContain("sync_token=tok-1");
   expect(pages[1]?.tableRevision).toBe(7);
   expect(pages[1]?.rows.map((entry) => entry.id).sort()).toEqual(["b", "c"]);
+});
+
+it("re-lists and resubscribes from a fresh position on RESYNC_REQUIRED", async () => {
+  const page = (revision: number) => ({ rows: [], hasMore: false, nextCursor: null, tableRevision: revision });
+  const calls: string[] = [];
+  const fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    calls.push(url);
+    if (url.endsWith("/sdk")) return jsonResponse(HANDSHAKE);
+    if (url.includes("/rows")) return jsonResponse(page(1));
+    const seen = calls.filter((entry) => entry.includes("/changes")).length;
+    if (seen <= 1) {
+      return jsonResponse({ changes: [], hasMore: false, syncToken: "tok-1", tableRevision: 1 });
+    }
+    if (seen === 2) {
+      // Foreign-table token: the server fails the resume closed.
+      return jsonResponse({ error: { code: "RESYNC_REQUIRED", message: "resync" } }, 400);
+    }
+    return jsonResponse({ changes: [], hasMore: false, syncToken: "tok-2", tableRevision: 1 });
+  }) as unknown as typeof globalThis.fetch;
+  const client = createAppRuntimeClient({
+    baseUrl: BASE,
+    token: "tok",
+    appId: APP_ID,
+    fetchImpl: fetch,
+    sleep: tick,
+  });
+  const pages: { tableRevision: number }[] = [];
+  const stop = client.subscribeTable(
+    "orders",
+    {},
+    (next) => {
+      pages.push(next);
+    },
+    (cause) => {
+      throw cause;
+    },
+  );
+  await vi.waitFor(() => expect(calls.filter((entry) => entry.includes("/changes")).length).toBeGreaterThanOrEqual(3));
+  stop();
+  // RESYNC re-listed the authoritative page (second emit) without surfacing
+  // an error, and the resubscribe starts from a fresh instant — the stale
+  // token never rides again.
+  expect(pages).toHaveLength(2);
+  const feedCalls = calls.filter((entry) => entry.includes("/changes"));
+  expect(feedCalls[2]).toContain("since=");
+  expect(feedCalls[2]).not.toContain("sync_token=");
 });
 
 it("re-emits the authoritative file list after an outage", async () => {

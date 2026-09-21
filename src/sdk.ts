@@ -3028,6 +3028,11 @@ export function describeContract(): SdkContractDescriptor {
         description: "Filtered Table page read (filter/limit/cursor/sinceRevision).",
       },
       {
+        method: "GET",
+        path: "/api/apps/:id/runtime/tables/:name/changes",
+        description: "Bounded-poll Table changes (since/sync_token/limit; table-bound tokens).",
+      },
+      {
         method: "POST",
         path: "/api/apps/:id/runtime/tables/:name/rows",
         description: "Insert one Table row.",

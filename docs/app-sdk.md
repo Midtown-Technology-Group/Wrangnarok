@@ -13,7 +13,7 @@ ADR 019; this page is operator and migration notes.
 | `wire-surface.ts` + `sdk-contract.test.ts` tripwire | `GET /api/apps/:id/sdk` handshake + `APP_SDK_VERSION` | Version tripwire, not file-hash tripwire. Client asserts before first scoped call; drift is `APP_SDK_MISMATCH`. |
 | `provider.tsx` `BifrostProvider` | `AppRuntimeProvider` | Authed fetch, install/org/app context, theme, logout, bounded one-401 refresh. No `globalThis` platform bridge. |
 | `use-workflow` run/status/result | `invokeSaga` + `pollExecution` + `useAppInvoke` | POST invoke (caller `Idempotency-Key`) then terminal poll. No WebSocket. |
-| `use-table` + `tables.ts` | `queryTable`/`insertRow`/`patchRow`/`deleteRow` + `subscribeTable` + `useAppTable` | Bounded equality reads; revision polling; flat hook rows vs nested imperative shape. |
+| `use-table` + `tables.ts` | `queryTable`/`insertRow`/`patchRow`/`deleteRow` + `pollTableChanges`/`subscribeTable` + `useAppTable` | Bounded equality reads; changes-feed polling (table-bound sync tokens, per-poll grant re-resolution); flat hook rows vs nested imperative shape. |
 | `use-files` + `files.ts` | `uploadFile`/`downloadFile`/`deleteFile` + `useAppFiles` | Single-use tokens in `X-File-Token`; finalize-after-upload verification. |
 | Forms/config hooks | None | FORM-02 / CON-02 own them; nothing invented here. |
 
@@ -32,9 +32,16 @@ ADR 019; this page is operator and migration notes.
 - Auth contract: one 401 triggers one token rotation and one retry. A second
   401 (or no rotation) surfaces and runs `onAuthFailure`. There is no refresh
   loop by construction.
-- Subscription contract: pollers back off on failure, re-list from the last
-  known revision on reconnect, and stop fully on unsubscribe. Mounting twice
-  creates two independent pollers; unmounting one never disturbs the other
+- Subscription contract: `subscribeTable` polls
+  `GET /api/apps/:id/runtime/tables/:name/changes` (`since`/`sync_token`/`limit`,
+  ADR 045 shape) and refetches the authoritative filtered page whenever the
+  feed advances or the Table revision moves (deletes never emit on the feed).
+  Sync tokens bind to the table instance (foreign tokens fail closed with
+  `RESYNC_REQUIRED`: re-list and resubscribe); the read grant is re-resolved
+  on every poll, so revocation denies the next poll; hidden tables 404.
+  Pollers back off on failure, resume from the last issued token on
+  reconnect, and stop fully on unsubscribe. Mounting twice creates two
+  independent pollers; unmounting one never disturbs the other
   (per-client state, no module-global transport).
 - Query limits: exact-match equality on top-level fields only (8 clauses,
   `limit` 1–100). Nested operators fail with `APP_TABLE_QUERY_UNSUPPORTED`:
@@ -55,14 +62,19 @@ SDKs ignore the unknown frame and stay stale until reload/manual refresh.
 
 Wrangnarök does not consume `table_invalidated` frames — there is no
 WebSocket transport here (polling instead, per ADR 019 exception 1) — and
-there is no batch endpoint to emit them from (TABLE-02 owns batch). For the
-currently supported single-row surface, revision polling gives the same
-observable freshness: every insert/patch/delete bumps the per-Table revision
-exactly once, and a poller holding a stale `sinceRevision` refetches the full
-authoritative page with no stale rows retained. Proven by
-`test/app-runtime.test.ts` ("converges batch-adjacent writes…", real local
-workerd/D1) and `test/app-sdk-client.test.tsx` ("replaces poller rows…",
-stub-fetch poller replacement).
+there is no batch endpoint to emit them from (TABLE-02 owns batch). The app
+runtime composes the TABLE-02 bounded-poll feed shape instead
+(`GET /api/apps/:id/runtime/tables/:name/changes`, issue #160 remainder):
+table-bound sync tokens order writes by monotonic `(updated_at, id)` stamps,
+so every insert/patch surfaces exactly once in commit order; deletes never
+emit but bump the per-Table revision, and the feed response carries it, so a
+poller notices removals and refetches the full authoritative page with no
+stale rows retained. Row payloads are scrubbed at egress (SEC-01, ADR 046).
+Proven by `test/app-tables-realtime-composition.test.ts` (token-scoped poll,
+hidden-ref 404, revocation mid-subscription, scrubbed rows; real local
+workerd/D1), `test/app-runtime.test.ts` ("converges batch-adjacent writes…")
+and `test/app-sdk-client.test.tsx` ("replaces poller rows…", stub-fetch
+poller replacement).
 
 Handshake implications: `APP_SDK_VERSION` stays `"1"`. It bumps only on a
 breaking change to the runtime routes, the handshake shape, or these client
