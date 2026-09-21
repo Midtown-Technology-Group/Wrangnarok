@@ -134,7 +134,7 @@ it("composes token-scoped poll, hidden-ref 404s, mid-subscription revocation, an
   // Table-bound tokens: a cursor minted for "other" fails closed on
   // "orders" instead of silently filtering the wrong row set — as does a
   // garbage token. The caller re-lists and resubscribes.
-  await insertRow(appId, "other", { status: "foreign" });
+  const foreignRow = await insertRow(appId, "other", { status: "foreign" });
   const foreign = (await (await poll(appId, "other", "?since=1970-01-01T00:00:00.000Z")).json()) as Feed;
   expect(typeof foreign.syncToken).toBe("string");
   const cross = await poll(appId, "orders", `?sync_token=${encodeURIComponent(foreign.syncToken as string)}`);
@@ -143,6 +143,72 @@ it("composes token-scoped poll, hidden-ref 404s, mid-subscription revocation, an
   const garbage = await poll(appId, "orders", "?sync_token=!!!");
   expect(garbage.status).toBe(400);
   expect(await garbage.json()).toMatchObject({ error: { code: "RESYNC_REQUIRED" } });
+  // Quiet-page tokens bind too: a cursor minted by subscribing to an empty
+  // table carries that table's instance id, so replaying it against
+  // "orders" fails closed instead of silently subscribing.
+  await declareTable(appId, "hushed");
+  await grant(appId, "table", "hushed", "read");
+  await grant(appId, "table", "hushed", "write");
+  const hushed = (await (await poll(appId, "hushed", "?since=1970-01-01T00:00:00.000Z")).json()) as Feed;
+  expect(hushed.changes).toEqual([]);
+  expect(typeof hushed.syncToken).toBe("string");
+  const hushedCross = await poll(appId, "orders", `?sync_token=${encodeURIComponent(hushed.syncToken as string)}`);
+  expect(hushedCross.status).toBe(400);
+  expect(await hushedCross.json()).toMatchObject({ error: { code: "RESYNC_REQUIRED" } });
+
+  // Bare polls (no since/token): a table with rows answers the full window
+  // with a bound token; an empty table answers quiet with a null token —
+  // nothing exists to resume from yet.
+  const bare = (await (await poll(appId, "other", "")).json()) as Feed;
+  expect(bare.changes.map((change) => change.id)).toEqual([foreignRow.id]);
+  expect(typeof bare.syncToken).toBe("string");
+  const bareEmpty = (await (await poll(appId, "hushed", "")).json()) as Feed;
+  expect(bareEmpty.changes).toEqual([]);
+  expect(bareEmpty.syncToken).toBeNull();
+
+  // Monotonic stamps: a row planted with a future updated_at forces the
+  // next write past it (max+1ms), so the (updated_at, id) cursor still
+  // surfaces the late write in commit order instead of missing it.
+  const hushedTable = await bindings.DB.prepare("SELECT id FROM app_tables WHERE app_id=? AND name=?")
+    .bind(appId, "hushed")
+    .first<{ id: string }>();
+  const stamp = new Date().toISOString();
+  await bindings.DB.prepare(
+    "INSERT INTO app_rows(id, table_id, app_id, org_id, data_json, table_revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  )
+    .bind(
+      crypto.randomUUID(),
+      hushedTable?.id ?? "",
+      appId,
+      ORG,
+      '{"v":"planted"}',
+      0,
+      stamp,
+      "2999-01-01T00:00:00.000Z",
+    )
+    .run();
+  const bumped = await insertRow(appId, "hushed", { v: "late" });
+  const bumpedFeed = (await (await poll(appId, "hushed", "?since=1970-01-01T00:00:00.000Z")).json()) as {
+    changes: { id: string; updatedAt: string }[];
+  };
+  const bumpedRow = bumpedFeed.changes.find((change) => change.id === bumped.id);
+  // Same-shape ISO instants compare lexicographically: the late write was
+  // stamped past the planted future peak (max+1ms).
+  expect((bumpedRow?.updatedAt ?? "") > "2999-01-01T00:00:00.000Z").toBe(true);
+
+  // Corrupt-stamp guard: an unparseable max(updated_at) falls back to now
+  // instead of poisoning the write — the feed keeps serving.
+  const otherTable = await bindings.DB.prepare("SELECT id FROM app_tables WHERE app_id=? AND name=?")
+    .bind(appId, "other")
+    .first<{ id: string }>();
+  await bindings.DB.prepare(
+    "INSERT INTO app_rows(id, table_id, app_id, org_id, data_json, table_revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  )
+    .bind(crypto.randomUUID(), otherTable?.id ?? "", appId, ORG, '{"v":"corrupt"}', 0, stamp, "not-a-date")
+    .run();
+  await insertRow(appId, "other", { v: "after-corrupt" });
+  const corruptFeed = await poll(appId, "other", "?since=1970-01-01T00:00:00.000Z");
+  expect(corruptFeed.status).toBe(200);
 
   // Revocation mid-subscription: the grant enforced on every poll denies
   // the very next resume on the previously valid cursor — no snapshot

@@ -701,10 +701,17 @@ export async function pollAppTableChanges(
     change: "upsert" as const,
   }));
   const last = rows[rows.length - 1];
+  // Every returned token binds to this table instance: a quiet page under a
+  // `since` subscribe re-encodes the request instant with the current
+  // table.id instead of echoing the unbound request token, so the token is
+  // rejected (RESYNC_REQUIRED) by any other table or by a
+  // deleted-and-recreated instance under the same name.
   const syncToken =
     last !== undefined
       ? encodeChangesToken({ tableId: table.id, updatedAt: last.updated_at, docId: last.id })
-      : (query.resumeToken ?? null);
+      : query.position !== undefined
+        ? encodeChangesToken({ ...query.position, tableId: table.id })
+        : null;
   return { changes, hasMore, syncToken, tableRevision: table.revision };
 }
 
