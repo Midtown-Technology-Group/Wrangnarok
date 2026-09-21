@@ -2,8 +2,10 @@
 // Browser App SDK client (APP-02, issue #160; ADR 019): retry rules,
 // handshake tripwire, subscriptions, theme, logout, and hook shapes.
 //
-// Pure client tests with stub fetch: no Worker, no D1. The live Worker proof
-// is test/app-runtime.test.ts. Proven here:
+// Pure client tests with stub fetch: no Worker, no D1. The live Worker proofs
+// are test/app-runtime.test.ts (routes, raw fetch) and
+// test/app-sdk-remainder-composition.test.ts (real client, real Worker).
+// Proven here:
 // - Handshake asserts sdk name + version before scoped calls (drift is
 //   APP_SDK_MISMATCH); every scoped call handshakes first.
 // - GET retries bounded on network/503 (then surfaces); mutations never
