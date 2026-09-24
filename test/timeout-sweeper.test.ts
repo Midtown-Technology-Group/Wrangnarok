@@ -50,7 +50,13 @@ it("asserts no Cron trigger while dormant", () => {
   // minute promotion tick means restoring ["* * * * *"] here alongside the
   // wrangler.jsonc "crons" entry. Any second schedule or non-promotion Cron
   // use needs its own ADR per AGENTS.md constraint 7.
-  const crons = [...wranglerConfig.matchAll(/"crons"\s*:\s*\[([^\]]*)\]/g)].flatMap((match) =>
+  // Strip line comments: the assertion must see real config, and a removed
+  // key must fail rather than pass vacuously (absent key reads as no
+  // schedules, which Wrangler treats as "leave deployed triggers alone").
+  const stripped = wranglerConfig.replace(/^\s*\/\/.*$/gm, "");
+  const blocks = [...stripped.matchAll(/"crons"\s*:\s*\[([^\]]*)\]/g)];
+  expect(blocks.length).toBeGreaterThan(0);
+  const crons = blocks.flatMap((match) =>
     [...(match[1] ?? "").matchAll(/"([^"]+)"/g)].map((entry) => entry[1]),
   );
   expect(crons).toEqual([]);

@@ -22,10 +22,12 @@
   "preview_urls": false,
   "routes": [],
   // TRG-01 (issue #137, ADR 012): minute Cron tick DISABLED by operator
-  // request 2026-09-24 to hold Cloudflare usage at true zero while the
-  // account is dormant. Due-schedule promotion is paused until the tick is
-  // re-enabled; no sweeper, reconciler, or timeout inference runs either.
-  // Re-enable by restoring the every-minute schedule below.
+  // request 2026-09-24 while the account is dormant. Scope: only
+  // Cron-driven schedule promotion is paused. Authenticated API
+  // submissions can still dispatch Workflows, and explicit vendor-timeout
+  // handling still writes TimedOut on those runs — this is not a full
+  // execution freeze. Re-enable by restoring the every-minute schedule
+  // below, then redeploying the worker (CI never deploys dev per ADR 004).
   "triggers": {
     "crons": [],
   },
