@@ -56,9 +56,7 @@ it("asserts no Cron trigger while dormant", () => {
   const stripped = wranglerConfig.replace(/^\s*\/\/.*$/gm, "");
   const blocks = [...stripped.matchAll(/"crons"\s*:\s*\[([^\]]*)\]/g)];
   expect(blocks.length).toBeGreaterThan(0);
-  const crons = blocks.flatMap((match) =>
-    [...(match[1] ?? "").matchAll(/"([^"]+)"/g)].map((entry) => entry[1]),
-  );
+  const crons = blocks.flatMap((match) => [...(match[1] ?? "").matchAll(/"([^"]+)"/g)].map((entry) => entry[1]));
   expect(crons).toEqual([]);
 });
 it("leaves a stuck Running execution alone until its owner cancels it", async () => {
