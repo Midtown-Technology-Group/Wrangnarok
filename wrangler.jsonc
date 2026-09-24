@@ -21,15 +21,15 @@
   "workers_dev": false,
   "preview_urls": false,
   "routes": [],
-  // TRG-01 (issue #137, ADR 012): the minute Cron tick promotes due schedule
-  // rows through the submit protocol. The tick is the only writer here —
-  // no sweeper, no reconciler, no timeout inference. Earned per AGENTS.md
-  // constraint 7 by the durable due-time requirement; no other primitive
-  // (Queue, Durable Object) is adopted for schedule promotion — the
-  // OAUTH_REFRESH_FENCE DO below is separately earned (OAUTH-01, issue
-  // #149) and unrelated to this tick path.
+  // TRG-01 (issue #137, ADR 012): minute Cron tick DISABLED by operator
+  // request 2026-09-24 while the account is dormant. Scope: only
+  // Cron-driven schedule promotion is paused. Authenticated API
+  // submissions can still dispatch Workflows, and explicit vendor-timeout
+  // handling still writes TimedOut on those runs — this is not a full
+  // execution freeze. Re-enable by restoring the every-minute schedule
+  // below, then redeploying the worker (CI never deploys dev per ADR 004).
   "triggers": {
-    "crons": ["* * * * *"],
+    "crons": [],
   },
   "assets": {
     "directory": "./client/dist/",
