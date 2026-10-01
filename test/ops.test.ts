@@ -351,6 +351,10 @@ it("searches audit details and tolerates corrupt stored rows", async () => {
   expect(degraded.events[0]).toMatchObject({ action: "app.create" });
   expect(degraded.events[0]!.detail).toBeNull();
   // Date bounds filter server-side; reversed bounds fail closed.
+  // Pin this row instead of depending on the month in which the suite runs.
+  await bindings.DB.prepare(
+    "UPDATE audit_events SET created_at='2026-09-15T12:00:00.000Z' WHERE action='app.create'",
+  ).run();
   const window = await auditEvents("?startDate=2026-09-01&endDate=2026-09-30");
   expect(window.events.length).toBeGreaterThan(0);
   expect(await (await call("/api/audit?startDate=2026-09-10&endDate=2026-09-01")).json()).toMatchObject({
