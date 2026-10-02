@@ -1,29 +1,13 @@
-# Charter — bands-probe relay
+# Charter: bands-probe relay
 
-## Goal
-Prove that this packet alone lets a fresh agent context (no transcript, no prior conversation)
-continue bounded verification work in the Wrangnarok checkout and report back.
+This relay is complete. No new leg is authorized by this packet.
 
-## Observable finish line
-`log.md` contains a Leg 2 entry, written by a runner that started cold, recording:
-the exact command run, pass/fail, and (if failing) the first error — plus a one-line verdict
-on whether this packet sufficed without transcript replay.
+The historical agreement is preserved byte-for-byte in [charter.original.txt](charter.original.txt), transferred from `charter.md` at commit `755c5f646ea71dcec82e8be2a3edaa46dfaa9224`. Its Git blob is `0e8bb301f087ce14f2d0295b7f6b38673f4f6bae`. This entrypoint does not redefine the finish line or the completed leg's acceptance criteria.
 
-## Minimum outcome acceptance
-- Leg 2 runner touches only: the typecheck command, `status.md`, `log.md`.
-- No source files modified. No fixes attempted, even if the typecheck fails.
-- Verdict line present: "packet sufficed" or "packet insufficient because …".
+## Runtime clarification
 
-## In-scope edges
-- Checkout: any clean clone of `Midtown-Technology-Group/Wrangnarok` at branch
-  `experiment/bands-relay-probe` (packet travels with the branch).
-- Command: `npm run typecheck` from the repo root (Node 22+, dependencies installed).
+The original agreement's shorthand "Node 22+" is imprecise. The declared supported minimum in `package.json` is **Node >=22.16.0**. This clarification is not an instruction to rerun the completed leg.
 
-## Explicit non-goals
-- Fixing type errors. Improving the packet format. Touching CI, deployments, or D1.
-- Replaying or reconstructing Leg 1's conversation. The packet is the whole context.
+## Evidence custody
 
-## Material assumptions / human decisions
-- Operator approved this experiment end to end (dispatch authorized, 2026-09-16).
-- `npm install` state is the runner's responsibility; network access assumed.
-- AGENTS.md constraints apply to any source change — but this relay makes none.
+Read [status.md](status.md) for completion and [log.md](log.md) for the unmodified historical evidence. The raw agreement and log are immutable archival artifacts, not editable Markdown source. Their `.txt` extensions describe their raw evidence role. No formatter ignore, CI exemption, or agreement rewrite is used.

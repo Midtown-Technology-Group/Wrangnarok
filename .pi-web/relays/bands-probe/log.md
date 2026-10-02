@@ -1,35 +1,18 @@
-# Log — bands-probe relay (append-only)
+# Log: bands-probe relay
 
-## Leg 1 — packet authored + pushed (2026-09-16, drafting checkout Wrangnarok)
-- Authored charter/operations/status/log per relay method (agreement / baton / history split).
-- Task selected: read-only `npm run typecheck` + report. Deliberately trivial work so the
-  experiment measures *packet sufficiency*, not task difficulty.
-- Committed on `experiment/bands-relay-probe`, pushed to origin for git-mailbox delivery.
-- Handoff: Leg 2 runner starts cold in a separate checkout of this branch.
+## Immutable historical evidence
 
-## Leg 2 — typecheck PASS, cold runner (2026-09-16, checkout Wrangnarok-up)
-- Command: `npm install` (node_modules was absent) then `npm run typecheck` from repo root.
-- Result: PASS (exit 0).
-- Output tail (19 lines):
-```
-	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
-};
-declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "ENVIRONMENT" | "LAB_ENABLED" | "LAB_ORG_ID" | "LAB_USER_ID">> {}
-}
+The entire original append-only log, including Leg 1 and Leg 2, is preserved byte-for-byte in [log.original.txt](log.original.txt). No historical entry or captured output was rewritten or reformatted.
 
-Generating runtime types...
+Custody transfer on 2026-10-02:
 
-Runtime types generated.
+- Source: `log.md` at commit `755c5f646ea71dcec82e8be2a3edaa46dfaa9224`.
+- Destination: `log.original.txt` in this directory.
+- Original and destination Git blob: `ae7293d46cd14fedd14a03ed655d21283e93c55d`.
+- This Markdown file is an evidence index, not a replacement transcript or a new relay leg.
 
+The raw log remains immutable. Future stewardship notes belong below this index or in a separate current document, never inside the original artifact. Leg 2 is complete, with the historical PASS and "packet sufficed" verdict in the linked original. Do not rerun the completed relay from this packet.
 
-✨ Types written to worker-configuration.d.ts
+## Preservation and formatting
 
-Action required Install @types/node
-Since your Worker has Node.js compatibility enabled, you should install Node.js types by running "npm i --save-dev @types/node".
-
-📖 Read about runtime types
-https://developers.cloudflare.com/workers/languages/typescript/#generate-types
-📣 Remember to rerun 'wrangler types' after you change your wrangler.jsonc file.
-```
-- packet sufficed
+Raw text custody keeps historical bytes intact while allowing this Markdown entrypoint to follow the repository's native formatter. CI configuration and formatter rules are unchanged. The original agreement is likewise preserved in [charter.original.txt](charter.original.txt), with a current clarification in [charter.md](charter.md).
