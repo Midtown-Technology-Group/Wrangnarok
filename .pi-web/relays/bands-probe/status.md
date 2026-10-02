@@ -1,7 +1,7 @@
 # Status — bands-probe relay
 
 ## State
-**Leg 1 complete. Leg 2 dispatched (cold runner, separate checkout).**
+**Complete. Leg 2 typecheck PASS (exit 0, 2026-09-16, checkout Wrangnarok-up).**
 
 ## Leg 1 (done)
 Authored packet, committed on `experiment/bands-relay-probe`, pushed to origin.
