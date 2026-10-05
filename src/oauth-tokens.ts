@@ -23,12 +23,15 @@
 // expected persisted generation (`UPDATE ... WHERE generation=?`): a
 // superseded writer observes zero changed rows and fails with
 // OAUTH_TOKEN_GENERATION_STALE instead of marking a newer generation failed
-// or revoked after vendor HTTP returns. The failure write additionally
-// compare-and-swaps on the observed health, so a same-generation revocation
-// the fence does not serialize wins over a stale failure computed from a
-// superseded read (ordered reread, not a new outcome); the revocation write
-// sets only status plus write stamps, preserving committed failure
-// diagnostics by construction.
+// or revoked after vendor HTTP returns. Same-generation ordering (issue
+// #451): revoked wins the status, failure diagnostics are preserved, and
+// the losing writer records its outcome. The failure write
+// compare-and-swaps on the observed health; when a same-generation
+// revocation the fence does not serialize lands first, the losing failure
+// merges its consecutive count plus vendor code onto the committed row
+// without moving its status, then returns the authoritative reread (no new
+// outcome code). The revocation write sets only status plus write stamps,
+// preserving committed failure diagnostics by construction.
 //
 // Deliberately out of this slice (stays deferred per the #149 archaeology
 // matrix): operator callback routes, per-org consent rows beyond the token
@@ -459,17 +462,21 @@ export async function replaceOAuthToken(db: D1Database, input: ReplaceOAuthToken
  * lands after a newer generation replaced it observes
  * OAUTH_TOKEN_GENERATION_STALE and the newer row stands untouched. When the
  * generation still matches but the health moved underneath — a concurrent
- * same-generation revocation the fence does not serialize — the stale
- * transition is dropped and the committed health is returned instead: a
- * failure computed from a superseded healthy read must not overwrite a
- * committed revoked state. That is ordering, not status precedence: no new
- * outcome code, just the authoritative reread. The compare must run against
- * the pre-vendor observation (`expectedHealth`, carried through from the
- * read before vendor HTTP), never against a write-time re-read that would
- * trivially match its own successor. Vendor-coupled callers (refresh around
- * vendor HTTP) always supply both; direct operator writes with no vendor
- * HTTP in between may omit both, in which case the compare runs against the
- * freshly read row. */
+ * same-generation revocation the fence does not serialize — the losing
+ * failure still records its outcome as diagnostic metadata (issue #451):
+ * an atomic generation-guarded increment merges the consecutive count plus
+ * the vendor code onto the committed row without moving its status, so
+ * revoked stays terminal while the failure evidence is preserved. The
+ * committed row is then reread and its health returned: a failure computed
+ * from a superseded healthy read must not overwrite a committed revoked
+ * state, and callers always observe authoritative committed state rather
+ * than a pre-write projection. No new outcome code either way. The compare
+ * must run against the pre-vendor observation (`expectedHealth`, carried
+ * through from the read before vendor HTTP), never against a write-time
+ * re-read that would trivially match its own successor. Vendor-coupled
+ * callers (refresh around vendor HTTP) always supply both; direct operator
+ * writes with no vendor HTTP in between may omit both, in which case the
+ * compare runs against the freshly read row. */
 export async function recordOAuthTokenFailure(
   db: D1Database,
   orgId: string,
@@ -497,9 +504,13 @@ export async function recordOAuthTokenFailure(
   if (!state) throw invalid("OAUTH_TOKEN_NOT_FOUND", "No OAuth token is stored for this Connection.", 404);
   const next = recordTokenFailure(state.health, code, checkedAt);
   if (expectedGeneration === undefined) {
+    // Direct operator write with no vendor HTTP in between. A committed
+    // revocation is terminal (issue #451): the failure diagnostics are
+    // still recorded, but the status never moves off revoked. The
+    // committed row is reread so callers observe authoritative state.
     await db
       .prepare(
-        "UPDATE oauth_tokens SET status=?,consecutive_failures=?,last_failure_code=?,last_success_at=?,checked_at=?,updated_at=? WHERE org_id=? AND connection_id=?",
+        "UPDATE oauth_tokens SET status=CASE WHEN status='revoked' THEN status ELSE ? END,consecutive_failures=?,last_failure_code=?,last_success_at=?,checked_at=?,updated_at=? WHERE org_id=? AND connection_id=?",
       )
       .bind(
         next.status,
@@ -512,7 +523,9 @@ export async function recordOAuthTokenFailure(
         connectionId,
       )
       .run();
-    return next;
+    const committed = await readOAuthTokenState(db, orgId, connectionId);
+    if (!committed) throw invalid("OAUTH_TOKEN_NOT_FOUND", "No OAuth token is stored for this Connection.", 404);
+    return committed.health;
   }
   const observed = expectedHealth ?? state.health;
   const applied = await db
@@ -540,7 +553,26 @@ export async function recordOAuthTokenFailure(
     if (current.generation !== expectedGeneration) {
       throw invalid("OAUTH_TOKEN_GENERATION_STALE", "A newer OAuth token generation already replaced this one.", 409);
     }
-    return current.health;
+    // Same-generation race (issue #451): revoked wins the status, but the
+    // losing failure records its outcome. The merge touches diagnostic
+    // columns only — status is never moved, so a committed revoked state
+    // survives — and the atomic increment keeps concurrent losers honest
+    // without a transaction. A replacement landing between the conflict
+    // read and this write matches zero rows on the old generation, and the
+    // reread below then observes the newer generation and fails stale, so
+    // the fencing authority still wins over the stale vendor outcome.
+    await db
+      .prepare(
+        "UPDATE oauth_tokens SET consecutive_failures=consecutive_failures+1,last_failure_code=?,checked_at=?,updated_at=? WHERE org_id=? AND connection_id=? AND generation=?",
+      )
+      .bind(code, checkedAt, checkedAt, orgId, connectionId, expectedGeneration)
+      .run();
+    const committed = await readOAuthTokenState(db, orgId, connectionId);
+    if (!committed) throw invalid("OAUTH_TOKEN_NOT_FOUND", "No OAuth token is stored for this Connection.", 404);
+    if (committed.generation !== expectedGeneration) {
+      throw invalid("OAUTH_TOKEN_GENERATION_STALE", "A newer OAuth token generation already replaced this one.", 409);
+    }
+    return committed.health;
   }
   return next;
 }
@@ -692,8 +724,9 @@ export interface RefreshedPersistedToken {
  *   call, so a failure that lands after a newer generation replaced the row
  *   observes OAUTH_TOKEN_GENERATION_STALE instead — the fencing authority
  *   wins over the stale vendor outcome and the newer row stands untouched.
- *   A failure that lands after a same-generation revocation drops its stale
- *   transition and keeps the committed health (authoritative reread).
+ *   A failure that lands after a same-generation revocation merges its
+ *   count and code onto the committed revoked row without moving its
+ *   status, and the authoritative reread is returned (issue #451).
  * - A superseded racer (its generation already replaced) observes
  *   OAUTH_TOKEN_GENERATION_STALE from the conditional write; the newer row
  *   stands untouched. */

@@ -340,6 +340,7 @@ export const SDK_ERROR_CODES = [
   "AI_INVALID_EMBEDDING",
   "AI_INVALID_BEHAVIOR",
   "AI_VERIFY_FAILED",
+  "AI_CONFORMANCE_FAILED",
   "AI_DISCOVERY_FAILED",
 ] as const;
 
@@ -401,6 +402,9 @@ export interface SdkSaga {
   readonly category?: string;
   readonly tags?: readonly string[];
   readonly requiredIntegrations: readonly string[];
+  /** Semantic capability names this Saga requires (issue #262): discovery
+   * only. Older payloads without it read as empty. */
+  readonly requiredCapabilities: readonly string[];
   readonly inputSchema?: IoSchema;
   readonly outputSchema?: IoSchema;
 }
@@ -633,7 +637,8 @@ function isSaga(value: unknown): value is SdkSaga {
     typeof value.description === "string" &&
     (value.category === undefined || typeof value.category === "string") &&
     (value.tags === undefined || isStringArray(value.tags)) &&
-    isStringArray(value.requiredIntegrations)
+    isStringArray(value.requiredIntegrations) &&
+    (value.requiredCapabilities === undefined || isStringArray(value.requiredCapabilities))
   );
 }
 
@@ -642,7 +647,10 @@ export function parseSagaCatalog(value: unknown): readonly SdkSaga[] {
   if (!isRecord(value) || !Array.isArray(value.sagas) || !value.sagas.every(isSaga)) {
     throw new SdkError("SDK_CLIENT_MISMATCH", "The Saga catalog has an unexpected shape.");
   }
-  return value.sagas;
+  return value.sagas.map((entry) => ({
+    ...entry,
+    requiredCapabilities: entry.requiredCapabilities ?? [],
+  }));
 }
 
 function isOperation(value: unknown): value is SdkOperation {
@@ -3020,6 +3028,11 @@ export function describeContract(): SdkContractDescriptor {
         description: "Filtered Table page read (filter/limit/cursor/sinceRevision).",
       },
       {
+        method: "GET",
+        path: "/api/apps/:id/runtime/tables/:name/changes",
+        description: "Bounded-poll Table changes (since/sync_token/limit; table-bound tokens).",
+      },
+      {
         method: "POST",
         path: "/api/apps/:id/runtime/tables/:name/rows",
         description: "Insert one Table row.",
@@ -3246,6 +3259,11 @@ export function describeContract(): SdkContractDescriptor {
         method: "POST",
         path: "/api/ai/profiles/:id/verify",
         description: "Bounded key-authenticated model verification, admin-gated (AI-01).",
+      },
+      {
+        method: "GET",
+        path: "/api/ai/profiles/:id/conformance",
+        description: "Read-only asserted-vs-observed capability conformance, admin-gated (AI-01).",
       },
       {
         method: "GET",

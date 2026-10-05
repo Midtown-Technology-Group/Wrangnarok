@@ -1,0 +1,27 @@
+# UX-01 branding/profile/admin-settings lane scope (issue #176, slice 1):
+# per-Organization branding (member-open read, admin-only write/reset/logo,
+# safe public read), caller-scoped own profile (display name, theme, avatar)
+# over the FILES R2 bucket with D1 metadata, /profile + /admin/branding
+# console pages, shell branding/theme application, Nav IA correction
+# (stale disabled Integrations entry removed; Triggers/Tables keep real open
+# owners), UX-01 parity row, migration 0034 + ledger + chain entry. No auth
+# model change, no forms.ts/apps.ts, no new Cloudflare primitive, no password
+# store (IdP-owned), no test/helpers or workflow changes.
+migrations/0034_branding_profile.sql
+src/branding.ts
+src/profile.ts
+src/index.ts
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+client/src/components/Nav.tsx
+client/src/App.tsx
+client/src/pages/Profile.tsx
+client/src/pages/Branding.tsx
+client/src/styles.css
+test/branding-profile.test.ts
+test/branding-profile-ui.test.tsx
+test/ui-shell.test.tsx
+test/migrations-chain.test.ts
+docs/upstream-parity.md
+docs/migration-ledger.md
+scopes/ux-176-branding.scope

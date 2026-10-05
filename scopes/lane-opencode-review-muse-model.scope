@@ -1,0 +1,7 @@
+# Muse-reviewer lane scope (owner correction on PR #536): the auto-review
+# workflow must use a Meta Muse Spark model billed through the OpenCode Go
+# subscription (`opencode-go/muse-spark-1.3-contributor`, verified in the Go
+# catalog) — never GPT/Claude/Gemini or other-vendor slugs. CI-config only:
+# the one workflow file plus this scope file. No src/, no product code.
+.github/workflows/opencode-review.yml
+scopes/lane-opencode-review-muse-model.scope

@@ -297,7 +297,9 @@ describe("codex #364: per-org fairness and skip quarantine (workerd)", () => {
       .bind(last)
       .first<{ n: number }>();
     expect(promotedLast?.n).toBeGreaterThan(0);
-  }, 120000);
+    // Degraded-runner headroom (PR #516): ~13s locally, timed out at 120s on
+    // a ~3x-slowed shared runner. Same stall mechanism as the workers default.
+  }, 180000);
   it("admits a full window every tick with one omission per org per cycle (#364 wraparound)", async () => {
     const { promoteDueSchedules } = await import("../src/schedules");
     const { submit } = await import("../src/executions");
@@ -386,7 +388,8 @@ describe("codex #364: per-org fairness and skip quarantine (workerd)", () => {
     // Uniform omission: every org admitted exactly 10 of 11 ticks.
     expect([...admissions.keys()].sort()).toEqual([...orgIds].sort());
     for (const orgId of orgIds) expect(admissions.get(orgId)).toBe(10);
-  }, 120000);
+    // Degraded-runner headroom (PR #516): same stall mechanism as above.
+  }, 180000);
   it("caps one org's promotions per tick so other orgs still promote", async () => {
     const tick = worker as unknown as { scheduled: (event: unknown, env: Bindings) => Promise<void> };
     // Seed six due one-off rows via the API (membership-gated create keeps

@@ -18,7 +18,7 @@
 // and schedule promotion / endpoint delivery append best-effort delivery
 // rows (topics `schedule.delivered` / `webhook.delivered`) that never fail
 // the delivery itself. Operator retry/replay ships in the S3a slice below;
-// built-in platform events and retention policy stay deferred. No Queue,
+// built-in platform emissions and retention policy ship in S3b. No Queue,
 // no Durable Object, no second auth or execution path.
 //
 // TRG-03 S2 (issue #139) adds scoped subscriptions plus bounded fan-out in
@@ -436,7 +436,7 @@ export async function recordSourceDelivery(
 // there is no cursor to resume and no Queue to drain.
 //
 // Worker + Workflows + D1 only. Operator retry/replay APIs ship in the S3a
-// slice below; built-in platform events and retention policy stay deferred.
+// slice below; built-in platform emissions and retention policy ship in S3b.
 
 /** Deterministic per-event fan-out admission bound. Every dispatch is a
  * full submit-protocol call; the bound keeps one emit inside the D1
@@ -918,7 +918,7 @@ export async function dispatchEventFanout(
 // already dispatched EVENT_FANOUT_LIMIT times refuses further retries.
 //
 // Worker + Workflows + D1 only. Built-in platform emissions and the
-// retention/admission policy stay deferred to later slices.
+// retention/admission policy ship in the S3b slice below.
 
 /** An event ID from the retry route. Unknown shapes answer 404 like the
  * sibling path-segment parsers, never a leak. */
@@ -1071,4 +1071,126 @@ export async function retrySubscriptionDelivery(
     executionId: accepted.executionId,
     replayed: accepted.replayed,
   };
+}
+
+// ---------------------------------------------------------------------------
+// TRG-03 S3b (issue #139): built-in platform emissions.
+//
+// The schedule/webhook delivery paths already append per-source log rows when
+// the operator registered an observing source. The platform itself is a third
+// producer: when the operator opts in by registering an enabled topic-kind
+// source named `platform` (an ordinary row through the ordinary registry —
+// no auto-provisioning, no reserved-name rule, no new table or migration),
+// each schedule promotion and each endpoint delivery additionally lands a
+// `platform.*` event there and fans out through the shared
+// dispatchEventFanout helper with the same stable `evt-` keys and the same
+// per-subscriber fences as operator emits. No platform source (or a disabled
+// one, or one registered under another kind): the emission resolves to
+// silence after one indexed lookup, and the promotion/delivery is unaffected.
+//
+// Payloads are descriptive delivery attribution, not Saga input:
+//   platform.schedule.delivered {schedule, window, executionId, sagaId}
+//   platform.webhook.delivered  {endpoint, eventId, executionId, sagaId}
+// Subscriber Sagas consume them through the usual parse gate — a Saga whose
+// input shape does not fit skips with its parse code, exactly like any other
+// non-conforming payload, and the derived failed set keeps it retry-visible.
+// Execution-lifecycle topics (succeeded/failed) stay deferred by design: the
+// terminal checkpoints run inside Workflow steps with no submit access, and
+// dispatching new Workflow instances from inside a step would be a second
+// execution path. The two delivery topics above run in fetch/cron context
+// where submit is already the single path, and they cannot recurse: fan-out
+// executions complete without emitting (no terminal hook), so platform
+// fan-out is exactly one level deep.
+//
+// Best-effort throughout: any fault — old database, oversize payload, fan-out
+// backend fault — resolves to null and never fails the promotion/delivery it
+// observes. Redelivery converges: the `plat-` event ID is deterministic per
+// (org, topic, producer delivery), so the append is ON CONFLICT DO NOTHING
+// and the fan-out replays the same `evt-` keys like every other re-emit.
+//
+// Worker + Workflows + D1 only. Retention/admission posture is documented in
+// ADR 012 (S3b note): bounded newest-first reads, no automatic purge (the
+// operator DELETEs the source or subscription to reclaim rows), and the
+// per-event 10-dispatch admission bound shared with operator emits.
+
+/** Well-known opt-in source name for built-in platform emissions. An
+ * ordinary registry row: the operator creates it, disables it to fence
+ * platform fan-out, or deletes it to purge platform history (the next
+ * delivery then finds no source and stays silent — nothing recreates it). */
+export const PLATFORM_SOURCE_NAME = "platform";
+
+/** Built-in topic for schedule promotions. Emitted per promoted window. */
+export const PLATFORM_SCHEDULE_DELIVERED_TOPIC = "platform.schedule.delivered";
+/** Built-in topic for endpoint deliveries. Emitted per accepted vendor event. */
+export const PLATFORM_WEBHOOK_DELIVERED_TOPIC = "platform.webhook.delivered";
+
+export interface PlatformSchedulePayload {
+  readonly schedule: string;
+  readonly window: string;
+  readonly executionId: string;
+  readonly sagaId: string;
+}
+
+export interface PlatformWebhookPayload {
+  readonly endpoint: string;
+  readonly eventId: string;
+  readonly executionId: string;
+  readonly sagaId: string;
+}
+
+export interface PlatformDelivery {
+  readonly orgId: string;
+  readonly topic: string;
+  /** Producer-side uniqueness: schedule ID plus window, or endpoint ID plus
+   * vendor event ID. Hashed into the `plat-` event ID, so any deterministic
+   * per-delivery string fits regardless of alphabet or length. */
+  readonly distinctId: string;
+  readonly payload: PlatformSchedulePayload | PlatformWebhookPayload | unknown;
+  readonly executionId: string;
+}
+
+/** Derive the deterministic platform event ID for one producer delivery.
+ * `plat-` plus 64 hex satisfies the 128-char safe alphabet by construction
+ * and never collides with caller keys (those travel the Idempotency-Key
+ * header through parseCallerKey; this ID lives in the event log only). */
+export async function platformEventId(orgId: string, topic: string, distinctId: string): Promise<string> {
+  return `plat-${await hash(JSON.stringify(["wrangnarok.platform-delivery.v1", orgId, topic, distinctId]))}`;
+}
+
+/** Append one platform emission plus same-path fan-out, best-effort. Returns
+ * the fan-out result, or null when there is no eligible platform source (or
+ * on any fault, by the best-effort contract above). */
+export async function recordPlatformDelivery(
+  db: D1Database,
+  env: Bindings,
+  submitFn: typeof submit,
+  delivery: PlatformDelivery,
+): Promise<FanoutResult | null> {
+  try {
+    const topic = parseTopic(delivery.topic);
+    const source = await db
+      .prepare("SELECT * FROM event_sources WHERE org_id=? AND name=? AND kind='topic' AND enabled=1")
+      .bind(delivery.orgId, PLATFORM_SOURCE_NAME)
+      .first<EventSourceRow>();
+    if (!source) return null;
+    const eventId = await platformEventId(delivery.orgId, topic, delivery.distinctId);
+    const payloadJson = parseEventPayload(delivery.payload);
+    const payload = JSON.parse(payloadJson) as unknown;
+    await db
+      .prepare(
+        "INSERT INTO events(source_id,event_id,org_id,topic,payload_json,execution_id,created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(source_id,event_id) DO NOTHING",
+      )
+      .bind(source.id, eventId, delivery.orgId, topic, payloadJson, delivery.executionId, new Date().toISOString())
+      .run();
+    return await dispatchEventFanout(db, env, submitFn, {
+      orgId: delivery.orgId,
+      sourceId: source.id,
+      eventId,
+      topic,
+      payload,
+    });
+  } catch {
+    // Best-effort by contract: see the S3b block comment above.
+    return null;
+  }
 }

@@ -20,9 +20,8 @@ deny-by-default), and both planning (`resolve_agent_tools`, keyed on
 table) are caller-aware (`api/src/services/execution/agent_helpers.py`,
 `api/src/services/mcp_client/auth_resolution.py`).
 
-Wrangnarök has no agent entity: AI-02 (#165) is Missing, ADR 023
-(Cloudflare Agents runtime) is Proposed, and the 023 number collides with
-`023-sync-providers.md` (governance #225 open). Blocking TOOL-02 P2 on AI-02
+Wrangnarök has no agent entity: AI-02 (#165) is Missing, ADR 041
+(Cloudflare Agents runtime, renumbered from 023 by issue #225) is Proposed. Blocking TOOL-02 P2 on AI-02
 would stall outbound MCP on the heaviest Phase-6 dependency and drag the
 Agents-SDK/Durable-Object primitive into the MCP path before AI-02 earns it
 (project constraint 7: Worker + Workflows + D1 first).
@@ -35,7 +34,7 @@ Agents-SDK/Durable-Object primitive into the MCP path before AI-02 earns it
    where caller is a user identity or an explicit service principal.
 2. Autonomous runs use an explicit Connection-owned service principal, not
    ambient authority — consistent with the existing machine-principal shape
-   (`endpoint:<id>` principals in ADR 018, service allowlist in ADR 014).
+   (`endpoint:<id>` principals in ADR 037, service allowlist in ADR 014).
 3. AI-02 agents attach later as an additional deny-by-default grant filter
    on the same resolver (same shape as upstream `agent_mcp_connections`),
    without changing the resolution table.

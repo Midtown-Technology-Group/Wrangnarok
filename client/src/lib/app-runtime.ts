@@ -14,8 +14,11 @@
 // - use-workflow run/status/result -> invokeSaga/pollExecution/getResult:
 //   POST invoke (Idempotency-Key) plus terminal poll; no WebSocket.
 // - use-table/tables.ts -> queryTable/insertRow/patchRow/deleteRow plus
-//   subscribeTable: bounded polling against the authoritative tableRevision
-//   (no WebSocket, Durable Object, or Queue in this slice).
+//   subscribeTable: bounded polling of the changes feed
+//   (GET .../runtime/tables/:name/changes, ADR 045 shape: table-bound sync
+//   tokens, per-poll grant re-resolution) with an authoritative page refetch
+//   whenever the feed advances — no WebSocket, Durable Object, or Queue in
+//   this slice.
 // - use-files/files.ts -> declareFile/issueToken/uploadFile/downloadFile:
 //   single-use scoped tokens with finalize-after-upload verification.
 // - wire-surface.ts/sdk-contract.test.ts tripwire -> handshake: the client
@@ -27,7 +30,7 @@
 // - POST/PATCH/PUT/DELETE: never retried blindly. Invoke carries a caller
 //   Idempotency-Key so a caller-driven retry is safe; PATCH has no key and
 //   is last-writer-wins, so a failed PATCH surfaces and the caller re-lists.
-import { parseApiError } from "./api-error";
+import { ApiError, parseApiError } from "./api-error";
 import type { AppExecutionLink, AppFileMeta, AppGrant, AppHandshake, AppTableDef, AppTableRow } from "./client-types";
 
 /** Browser App SDK contract version. Must equal the served handshake
@@ -76,6 +79,36 @@ export interface TablePage {
   readonly tableRevision: number;
 }
 
+/** One Table change from the bounded-poll feed. Every change is an upsert:
+ * deletes never emit (no tombstones — reconcile deletes against an
+ * authoritative re-list, keyed by the feed's tableRevision). */
+export interface TableChange {
+  readonly id: string;
+  readonly data: Record<string, unknown>;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly change: "upsert";
+}
+
+export interface TableChangesFeed {
+  readonly changes: TableChange[];
+  readonly hasMore: boolean;
+  /** Opaque resume marker bound to the polled table instance. Null only
+   * when the table holds no rows and no position was supplied. */
+  readonly syncToken: string | null;
+  /** Authoritative Table revision at poll time (covers deletes). */
+  readonly tableRevision: number;
+}
+
+export interface TableChangesOptions {
+  /** Resume from a previously issued sync token (preferred). */
+  readonly syncToken?: string | null;
+  /** Subscribe from an ISO instant when no token is held. Mutually
+   * exclusive with syncToken. */
+  readonly since?: string | null;
+  readonly limit?: number;
+}
+
 export interface ExecutionReceipt {
   readonly executionId: string;
   readonly replayed: boolean;
@@ -101,6 +134,16 @@ function isTablePage(value: unknown): value is TablePage {
     Array.isArray(value.rows) &&
     typeof value.hasMore === "boolean" &&
     (value.nextCursor === null || typeof value.nextCursor === "string") &&
+    typeof value.tableRevision === "number"
+  );
+}
+
+function isTableChangesFeed(value: unknown): value is TableChangesFeed {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.changes) &&
+    typeof value.hasMore === "boolean" &&
+    (value.syncToken === null || typeof value.syncToken === "string") &&
     typeof value.tableRevision === "number"
   );
 }
@@ -135,10 +178,18 @@ export interface AppRuntimeClient {
   uploadFile(name: string, bytes: Uint8Array, contentType?: string): Promise<AppFileMeta>;
   downloadFile(name: string): Promise<{ meta: AppFileMeta; bytes: Uint8Array }>;
   deleteFile(name: string, expectedVersion?: number): Promise<{ deleted: true }>;
-  /** Bounded polling subscription against the authoritative Table revision.
-   * Reconnect: on transport failure the poller backs off, re-lists from the
-   * last known revision, and resumes. Returns an unsubscribe that halts all
-   * further fetches (repeat mount/unmount safe). */
+  /** One bounded poll of the Table changes feed (table-bound sync token or
+   * subscribe-from instant; the server re-resolves the read grant on every
+   * poll, so revocation denies the next poll). Stale or foreign tokens fail
+   * with RESYNC_REQUIRED — re-list and resubscribe. */
+  pollTableChanges(name: string, options?: TableChangesOptions): Promise<TableChangesFeed>;
+  /** Bounded polling subscription over the changes feed with an
+   * authoritative page refetch whenever the feed advances (or the Table
+   * revision moves — deletes never emit on the feed). Reconnect: on
+   * transport failure the poller backs off and resumes from the last issued
+   * sync token; on RESYNC_REQUIRED it re-lists the authoritative page and
+   * resubscribes from a fresh position. Returns an unsubscribe that halts
+   * all further fetches (repeat mount/unmount safe). */
   subscribeTable(
     name: string,
     query: TablePageQuery | undefined,
@@ -318,6 +369,21 @@ export function createAppRuntimeClient(options: AppRuntimeOptions): AppRuntimeCl
       return data;
     },
 
+    async pollTableChanges(name: string, options: TableChangesOptions = {}): Promise<TableChangesFeed> {
+      await ensureHandshake();
+      const params = new URLSearchParams();
+      if (options.syncToken) {
+        params.set("sync_token", options.syncToken);
+      } else if (options.since) {
+        params.set("since", options.since);
+      }
+      if (options.limit !== undefined) params.set("limit", String(options.limit));
+      const suffix = params.size > 0 ? `?${params.toString()}` : "";
+      const data = await getJson(tablePath(name, `/changes${suffix}`), "table changes");
+      if (!isTableChangesFeed(data)) throw new Error("Unexpected table changes shape.");
+      return data;
+    },
+
     async insertRow(table: string, data: Record<string, unknown>): Promise<AppTableRow> {
       await ensureHandshake();
       const payload = await mutate(tablePath(table, "/rows"), "POST", { data }, "table insert");
@@ -486,30 +552,75 @@ export function createAppRuntimeClient(options: AppRuntimeOptions): AppRuntimeCl
       onError: (error: Error) => void,
     ): () => void {
       let stopped = false;
-      let revision: number | null = query?.sinceRevision ?? null;
+      let syncToken: string | null = null;
+      let revision: number | null = null;
       let failures = 0;
       const stop = () => {
         stopped = true;
+      };
+      const fail = (error: unknown) => {
+        if (stopped) return;
+        failures += 1;
+        if (failures >= maxGetRetries + 1) {
+          // Reconnect exhausted for this window: surface, reset the
+          // counter, and keep the loop on backoff until unsubscribed.
+          // The next successful poll resumes from the last issued sync
+          // token, so no change is silently skipped.
+          onError(error instanceof Error ? error : new Error(String(error)));
+          failures = 0;
+        }
+      };
+      const emitAuthoritative = async (): Promise<void> => {
+        const page = await this.queryTable(name, { ...query });
+        if (stopped) return;
+        revision = page.tableRevision;
+        failures = 0;
+        onPage(page);
       };
       void (async () => {
         for (;;) {
           if (stopped) return;
           try {
-            const page = await this.queryTable(name, { ...query, sinceRevision: revision });
+            // Drain the bounded feed to its terminal token, then refetch
+            // the authoritative filtered page only when the feed advanced
+            // or the Table revision moved (deletes never emit on the feed,
+            // but every delete bumps the revision).
+            let token: string | null = syncToken;
+            const since = token === null ? new Date().toISOString() : null;
+            let advanced = false;
+            let seen: number | null = revision;
+            for (;;) {
+              const feed = await this.pollTableChanges(
+                name,
+                token !== null ? { syncToken: token, limit: 50 } : { since, limit: 50 },
+              );
+              if (stopped) return;
+              if (feed.changes.length > 0) advanced = true;
+              seen = feed.tableRevision;
+              token = feed.syncToken;
+              if (!feed.hasMore || token === null) break;
+            }
+            syncToken = token;
             if (stopped) return;
-            revision = page.tableRevision;
-            failures = 0;
-            onPage(page);
+            if (revision === null || advanced || seen !== revision) {
+              await emitAuthoritative();
+            } else {
+              failures = 0;
+            }
           } catch (error) {
             if (stopped) return;
-            failures += 1;
-            if (failures >= maxGetRetries + 1) {
-              // Reconnect exhausted for this window: surface, reset the
-              // counter, and keep the loop on backoff until unsubscribed.
-              // The next successful poll re-lists from the last known
-              // revision, so no change is silently skipped.
-              onError(error instanceof Error ? error : new Error(String(error)));
-              failures = 0;
+            if (error instanceof ApiError && error.code === "RESYNC_REQUIRED") {
+              // Stale or foreign sync token: replace from the authoritative
+              // page and resubscribe from a fresh position. Control flow,
+              // not a transport failure — the ceiling does not advance.
+              syncToken = null;
+              try {
+                await emitAuthoritative();
+              } catch (nested) {
+                fail(nested);
+              }
+            } else {
+              fail(error);
             }
           }
           if (stopped) return;

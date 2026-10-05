@@ -288,6 +288,23 @@ explicitly adds no second secret store:
   Connection identity. Raw transport errors propagate without a health
   write (reachability unknown). Deleting a Connection deletes its token
   row (explicit delete beside the FK cascade; pre-0031 chains skip it).
+- Same-generation health-write ordering (issue #451, steward decision
+  2026-09-17): revoked wins, failure counters/code are preserved as
+  diagnostic metadata, and the losing writer records its outcome. A
+  refresh failure and a confirmed revocation that both read generation N
+  resolve on the D1 row itself: the revocation write sets status plus
+  write stamps only (never restores stale diagnostics), and a failure
+  that loses the compare-and-swap merges its consecutive count plus
+  vendor code onto the committed row without moving its status, then
+  returns the authoritative reread. Unfenced direct failure writes
+  likewise record diagnostics without moving a committed revoked status.
+  Both orders end revoked with the failure evidence attached, both stay
+  fail-closed, and no new outcome code is introduced. Cross-generation staleness still answers
+  OAUTH_TOKEN_GENERATION_STALE. The `OAuthRefreshFence` object
+  serializes refresh-vs-refresh per generation only; refresh-vs-revoke
+  ordering is owned by these D1 conditional writes, so there is still
+  exactly one authority path per race (no second fence, no transaction
+  held across vendor HTTP).
 - No new operator surface: no callback route, no consent UI, no secret
   value echoed on any path. No scheduled refresh (still needs its own
   demonstrated need and ADR). No Integration-list health aggregate (the

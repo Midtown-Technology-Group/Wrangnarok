@@ -1,0 +1,7 @@
+# Muse pin-proof lane scope (lead verification on the Muse slug): record the
+# live-catalog sources proving `opencode-go/muse-spark-1.3-contributor` is the
+# exact Go-subscription slug (and that the Zen-prefixed form does not exist)
+# in the auto-review workflow comment. Comment-only change to the one
+# workflow file plus this scope file. No src/, no product code.
+.github/workflows/opencode-review.yml
+scopes/lane-opencode-review-pin-proof.scope

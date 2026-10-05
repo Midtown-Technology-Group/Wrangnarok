@@ -3,7 +3,7 @@
 Author source stays Git-owned TypeScript (ADR 002). This slice adds the
 fast local loop: no-registration preview, explicit sync/conflict handling,
 Git target validation, dependency lock/build validation, and deploy checks.
-Design: ADR 016. Compatibility inventory: `docs/dev-compatibility.md`.
+Design: ADR 035 (renumbered from 016 by issue #225). Compatibility inventory: `docs/dev-compatibility.md`.
 
 ## No-registration local preview
 

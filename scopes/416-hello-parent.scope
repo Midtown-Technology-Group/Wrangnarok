@@ -1,0 +1,7 @@
+# ADR-033-5 hello-parent migration (issue #416, 6/6): hello-parent onto
+# the ADR 033 interior helpers with byte-identical behavior. Child
+# dispatch/await steps stay bespoke (no Integration legs); the catch keeps
+# its Fault-to-specific mapping through failSagaExecution. No other Saga,
+# no contract change, no new primitive. Worker+D1 only.
+scopes/416-hello-parent.scope
+src/sagas/hello-parent.ts

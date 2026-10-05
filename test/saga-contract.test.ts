@@ -19,21 +19,34 @@ import {
   BODY_LIMIT,
   CLOUDFLARE_INTEGRATION_ID,
   ECHO_INTEGRATION_ID,
+  GROUPS_CAPABILITY,
+  IDENTITY_CAPABILITY,
+  MAIL_CAPABILITY,
+  cloudflareAuditSaga,
+  cloudflareInsightsSaga,
   cloudflareInventorySaga,
+  cloudflarePostureSaga,
   cloudflareVerifySaga,
   digestSaga,
   helloParentSaga,
   helloSaga,
   echoSaga,
   NINJA_INTEGRATION_ID,
+  ninjaLookupSaga,
   ninjaSaga,
+  onboardingSaga,
+  parseCloudflareAuditInput,
+  parseCloudflareInsightsInput,
   parseCloudflareInventoryInput,
+  parseCloudflarePostureInput,
   parseCloudflareVerifyInput,
   parseDigestInput,
   parseHelloInput,
   parseHelloParentInput,
   parseInput,
+  parseNinjaLookupInput,
   parseNinjaOrgsInput,
+  parseOnboardingInput,
   parseSmokeInput,
   smokeSaga,
 } from "../src/domain";
@@ -115,7 +128,7 @@ function helperParameterNames(fn: (...args: never[]) => unknown): string[] {
 
 describe("Saga authoring contract (issue #57)", () => {
   it("keeps all I/O and nondeterminism inside step.do() for every registered Saga", () => {
-    expect(SAGA_DEFINITIONS).toHaveLength(8);
+    expect(SAGA_DEFINITIONS).toHaveLength(13);
     for (const def of SAGA_DEFINITIONS) {
       expect(() => assertDeterministicRun(def.name, def.run)).not.toThrow();
     }
@@ -198,6 +211,10 @@ describe("Saga authoring contract (issue #57)", () => {
         input: {},
         output: { organizationCount: 1, organizations: [{ id: 7, name: "Acme" }] },
       },
+      "ninjaone-org-lookup": {
+        input: { query: "Acme" },
+        output: { query: "Acme", organizationCount: 2, matchCount: 1, matches: [{ id: 7, name: "Acme" }] },
+      },
       "ninjaone-echo-digest": {
         input: {},
         output: { organizationCount: 1, echoed: { message: "NinjaOne organizations (1 total): Acme" } },
@@ -226,6 +243,19 @@ describe("Saga authoring contract (issue #57)", () => {
           apiCalls: 1,
         },
       },
+      "employee-onboarding": {
+        input: {
+          employee: { givenName: "Ada", familyName: "Lovelace", userPrincipalName: "ada@example.com" },
+          groups: ["engineering"],
+        },
+        output: {
+          userId: "user-1",
+          userPrincipalName: "ada@example.com",
+          groupsAssigned: ["engineering"],
+          mailboxProvisioned: true,
+          escapeHatch: { attempted: false, applied: false },
+        },
+      },
       "cloudflare-inventory-zones": {
         input: { max_zones: 75, account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" } },
         output: {
@@ -239,6 +269,114 @@ describe("Saga authoring contract (issue #57)", () => {
           apiCalls: 1,
           summary: { statusCounts: { active: 1 }, typeCounts: { full: 1 }, paused: 0, developmentModeActive: 0 },
           zones: [],
+        },
+      },
+      "cloudflare-audit-logs": {
+        input: {
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          since: "2026-09-18",
+          limit: 10,
+          classes: ["token"],
+        },
+        output: {
+          status: "completed",
+          readOnly: true,
+          integration: "Cloudflare",
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          entryCount: 1,
+          totalAvailable: 1,
+          truncated: false,
+          apiCalls: 1,
+          classCounts: { token: 1 },
+          actorKindCounts: { human: 1 },
+          entries: [
+            {
+              id: "audit-1",
+              actionType: "tokens.create",
+              actionDescription: "API token created",
+              actionResult: "true",
+              occurredAt: "2026-09-18T00:00:00Z",
+              actorKind: "human",
+              actorContext: "dash",
+              actorEmail: "op@example.com",
+              actorTokenName: null,
+              resourceType: "api_token",
+              resourceScope: "account",
+              zoneId: null,
+              zoneName: null,
+              eventClass: "token",
+            },
+          ],
+        },
+      },
+      "cloudflare-security-insights": {
+        input: {
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          baseline: { recordedAt: null, acknowledgedCriticalIds: [], suppressions: [], zoneExpectations: {} },
+        },
+        output: {
+          status: "completed",
+          readOnly: true,
+          integration: "Cloudflare",
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          issueCount: 1,
+          totalAvailable: 1,
+          truncated: false,
+          apiCalls: 1,
+          severityCounts: { high: 1 },
+          unresolvedCriticalIds: [],
+          verdict: "advisory",
+          baselineRecordedAt: null,
+          issues: [
+            {
+              id: "insight-1",
+              name: "Weak cipher",
+              issueClass: "insecure_configuration",
+              issueType: "weak_authentication",
+              severity: "high",
+              status: "active",
+              dismissed: false,
+              zoneId: null,
+              zoneName: null,
+            },
+          ],
+        },
+      },
+      "cloudflare-posture-benchmark": {
+        input: {
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          maxZones: 10,
+          settings: ["ssl"],
+          baseline: { recordedAt: null, acknowledgedCriticalIds: [], suppressions: [], zoneExpectations: {} },
+        },
+        output: {
+          status: "completed",
+          readOnly: true,
+          integration: "Cloudflare",
+          account: { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" },
+          verdict: "advisory",
+          apiCalls: 3,
+          checks: [
+            { id: "token-active", title: "API token is active", status: "pass", detail: "healthy", suppressed: false },
+          ],
+          manual: [
+            {
+              id: "global-api-key-non-use",
+              title: "Global API Key is not used",
+              status: "manual",
+              detail: "Manual review required.",
+              suppressed: false,
+            },
+          ],
+          deferred: [
+            {
+              id: "audit-visibility",
+              title: "Audit-log visibility exists",
+              status: "deferred",
+              detail: "Covered by the audit Saga.",
+              suppressed: false,
+            },
+          ],
         },
       },
     };
@@ -308,6 +446,7 @@ describe("Saga authoring contract (issue #57)", () => {
     const byName = new Map(SAGA_DEFINITIONS.map((def) => [def.name, def]));
     expect(byName.get("echo")?.requiredIntegrations).toEqual([ECHO_INTEGRATION_ID]);
     expect(byName.get("ninjaone-orgs")?.requiredIntegrations).toEqual([NINJA_INTEGRATION_ID]);
+    expect(byName.get("ninjaone-org-lookup")?.requiredIntegrations).toEqual([NINJA_INTEGRATION_ID]);
     expect(byName.get("ninjaone-echo-digest")?.requiredIntegrations).toEqual([
       NINJA_INTEGRATION_ID,
       ECHO_INTEGRATION_ID,
@@ -317,8 +456,21 @@ describe("Saga authoring contract (issue #57)", () => {
     expect(byName.get("hello-parent")?.requiredIntegrations).toEqual([]);
     expect(byName.get("cloudflare-verify-connection")?.requiredIntegrations).toEqual([CLOUDFLARE_INTEGRATION_ID]);
     expect(byName.get("cloudflare-inventory-zones")?.requiredIntegrations).toEqual([CLOUDFLARE_INTEGRATION_ID]);
+    expect(byName.get("employee-onboarding")?.requiredIntegrations).toEqual([]);
     for (const def of SAGA_DEFINITIONS) {
       expect(Array.isArray(def.requiredIntegrations)).toBe(true);
+    }
+    // Capability declarations (issue #262): the proving Saga routes through
+    // capabilities instead of direct Integrations; every other Saga binds
+    // none, which keeps their resolution path unchanged.
+    expect(byName.get("employee-onboarding")?.requiredCapabilities).toEqual([
+      IDENTITY_CAPABILITY,
+      GROUPS_CAPABILITY,
+      MAIL_CAPABILITY,
+    ]);
+    for (const def of SAGA_DEFINITIONS) {
+      if (def.name === "employee-onboarding") continue;
+      expect(def.requiredCapabilities ?? []).toEqual([]);
     }
     // Knob boundary (ADR 010 section 4): timeouts, retries, schedules, and
     // other runtime policy must never live in Saga source — only the
@@ -349,24 +501,34 @@ describe("Saga authoring contract (issue #57)", () => {
   it("keeps definitions, domain constants, catalog, and manifest in agreement", () => {
     const byName = new Map(SAGA_DEFINITIONS.map((def) => [def.name, def]));
     expect([...byName.keys()].sort()).toEqual([
+      "cloudflare-audit-logs",
       "cloudflare-inventory-zones",
+      "cloudflare-posture-benchmark",
+      "cloudflare-security-insights",
       "cloudflare-verify-connection",
       "echo",
+      "employee-onboarding",
       "hello",
       "hello-parent",
       "ninjaone-echo-digest",
+      "ninjaone-org-lookup",
       "ninjaone-orgs",
       "system.smoke",
     ]);
     const expected = [
       { stable: echoSaga, parse: parseInput },
       { stable: ninjaSaga, parse: parseNinjaOrgsInput },
+      { stable: ninjaLookupSaga, parse: parseNinjaLookupInput },
       { stable: digestSaga, parse: parseDigestInput },
       { stable: smokeSaga, parse: parseSmokeInput },
       { stable: helloSaga, parse: parseHelloInput },
       { stable: helloParentSaga, parse: parseHelloParentInput },
       { stable: cloudflareVerifySaga, parse: parseCloudflareVerifyInput },
       { stable: cloudflareInventorySaga, parse: parseCloudflareInventoryInput },
+      { stable: cloudflareAuditSaga, parse: parseCloudflareAuditInput },
+      { stable: cloudflareInsightsSaga, parse: parseCloudflareInsightsInput },
+      { stable: cloudflarePostureSaga, parse: parseCloudflarePostureInput },
+      { stable: onboardingSaga, parse: parseOnboardingInput },
     ];
     for (const { stable, parse } of expected) {
       const def = byName.get(stable.name);
@@ -384,6 +546,7 @@ describe("Saga authoring contract (issue #57)", () => {
       expect(entry.description.length).toBeGreaterThan(0);
       expect(entry.tags?.length).toBeGreaterThan(0);
       expect(entry.requiredIntegrations).toEqual(byName.get(entry.name)?.requiredIntegrations);
+      expect(entry.requiredCapabilities).toEqual(byName.get(entry.name)?.requiredCapabilities ?? []);
       expect(entry.inputSchema?.type).toBe("object");
       expect(entry.outputSchema?.type).toBe("object");
       expect(entry).not.toHaveProperty("retries");

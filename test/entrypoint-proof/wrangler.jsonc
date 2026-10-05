@@ -1,0 +1,30 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  // Test-only workerd config for the ADR-033-5 native-entrypoint proof
+  // (issue #416). Boots ONLY under vitest via the entrypoint-proof project
+  // in vitest.config.ts. Never deployed: no routes, no envs, local D1 only.
+  "name": "wrangnarok-entrypoint-proof",
+  "main": "./worker.ts",
+  "compatibility_date": "2026-09-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [],
+  "vars": {
+    "LAB_ENABLED": "true",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "wrangnarok-entrypoint-proof",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+    },
+  ],
+  "workflows": [
+    {
+      "binding": "PROOF_WORKFLOW",
+      "name": "wrangnarok-proof-v1",
+      "class_name": "ProofWorkflow",
+    },
+  ],
+}

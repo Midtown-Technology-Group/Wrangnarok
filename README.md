@@ -1,3 +1,5 @@
+> **Project status (2026-09-24):** Development of Wrangnarök is paused. We may return to the project in the future; until then, this repository is maintained as-is.
+
 # Wrangnarök
 
 [![codecov](https://codecov.io/gh/MTG-Thomas/Wrangnarok/branch/main/graph/badge.svg)](https://codecov.io/gh/MTG-Thomas/Wrangnarok)

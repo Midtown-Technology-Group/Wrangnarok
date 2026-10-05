@@ -56,7 +56,7 @@ const APP_ID = "12345678-1234-4234-8234-123456789012";
 function ctxFor(userId: string, admin = false): CallerCtx {
   return {
     principal: { userId, orgId: ORG_A },
-    role: admin ? "admin" : "member",
+    role: admin ? "admin" : "operator",
     kind: userId === USER_EXTERNAL ? "external" : "ordinary",
     isInstanceAdmin: false,
     isOrgAdmin: admin,

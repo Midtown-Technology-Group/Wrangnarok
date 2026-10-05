@@ -1,0 +1,9 @@
+# Steward-gates lane scope (issues #520 + #528): reconcile migration ledger
+# Landed rows for 0038/0039/0041, new fail-closed migration-number checker
+# plus CI wiring, and ported ADR checker rules (non-numeric H1s, sentinel).
+# Docs, scripts, and CI only: no DDL, no execution semantics, no renumbering.
+docs/migration-ledger.md
+scripts/check-migration-numbers.mjs
+scripts/check-adr-numbers.mjs
+.github/workflows/ci.yml
+scopes/520-528-gates.scope

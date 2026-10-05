@@ -3,7 +3,10 @@ import { NonRetryableError } from "cloudflare:workflows";
 import {
   DEFAULT_SAGA_POLICY,
   EXECUTION_ID,
+  cloudflareAuditSaga,
+  cloudflareInsightsSaga,
   cloudflareInventorySaga,
+  cloudflarePostureSaga,
   cloudflareVerifySaga,
   digestSaga,
   encodeHistoryCursor,
@@ -11,7 +14,9 @@ import {
   executionId,
   helloParentSaga,
   helloSaga,
+  ninjaLookupSaga,
   ninjaSaga,
+  onboardingSaga,
   parseSagaPolicy,
   POLICY_JSON_BOUND,
   POLICY_VERSION,
@@ -242,12 +247,17 @@ export async function visibleExecution(db: D1Database, id: string, caller: Princ
 /** One native Workflow binding per Saga. Never inferred from the request. */
 export function workflowForSaga(env: Bindings, sagaId: string): Workflow<{ executionId: string }> {
   if (sagaId === ninjaSaga.id) return env.NINJA_WORKFLOW;
+  if (sagaId === ninjaLookupSaga.id) return env.NINJA_LOOKUP_WORKFLOW;
   if (sagaId === digestSaga.id) return env.DIGEST_WORKFLOW;
   if (sagaId === smokeSaga.id) return env.SMOKE_WORKFLOW;
   if (sagaId === helloSaga.id) return env.HELLO_WORKFLOW;
   if (sagaId === helloParentSaga.id) return env.HELLO_PARENT_WORKFLOW;
   if (sagaId === cloudflareVerifySaga.id) return env.CLOUDFLARE_VERIFY_WORKFLOW;
   if (sagaId === cloudflareInventorySaga.id) return env.CLOUDFLARE_INVENTORY_WORKFLOW;
+  if (sagaId === cloudflareAuditSaga.id) return env.CLOUDFLARE_AUDIT_WORKFLOW;
+  if (sagaId === cloudflareInsightsSaga.id) return env.CLOUDFLARE_INSIGHTS_WORKFLOW;
+  if (sagaId === cloudflarePostureSaga.id) return env.CLOUDFLARE_POSTURE_WORKFLOW;
+  if (sagaId === onboardingSaga.id) return env.ONBOARDING_WORKFLOW;
   return env.ECHO_WORKFLOW;
 }
 export async function submit(env: Bindings, caller: Principal, key: string, saga: SagaDef, input: unknown) {

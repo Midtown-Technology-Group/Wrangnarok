@@ -1,34 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0
 // Stable echo Saga definition (ADR 002): prepare input and call the local
-// HTTP echo Integration. Moved verbatim from src/sagas.ts; no behavior change.
-import { WorkflowEntrypoint } from "cloudflare:workers";
-import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
+// HTTP echo Integration. Migrated to the ADR 033 interior helpers (issue
+// #416): schemaOf, prepareInput, integrationOperation (since #415),
+// completeExecution/failSagaExecution, makeSagaWorkflow. Behavior unchanged;
+// the timeout-mark-v1 step is gone — failSagaExecution classifies
+// ECHO_VENDOR_TIMEOUT as TimedOut inside persist-failure-v1.
 import { NonRetryableError } from "cloudflare:workflows";
-import type { Bindings } from "../bindings";
-import { echoSaga, ECHO_INTEGRATION_ID, Fault, parseInput, VENDOR_TIMEOUT_MS } from "../domain";
-import { loadExecutionPolicy } from "../executions";
-import { vendorDeadlineMs } from "../domain";
-import type { EchoInput, ExecutionParams, SafeError } from "../domain";
-import { defineSaga, withOperation } from "../saga";
-import { scrubExecutionError } from "../secrets";
-import {
-  assertRunExecutionId,
-  beginOperation,
-  failExecution,
-  finishOperation,
-  persistRunFailure,
-  persistRunSuccess,
-  prepareExecution,
-  resolveConnection,
-} from "../executions";
-import { executeSaga } from "./shared";
-
-const echoInputSchema = Object.freeze({
-  type: "object" as const,
-  properties: Object.freeze({ message: Object.freeze({ type: "string" }) }),
-  required: Object.freeze(["message"]),
-  additionalProperties: false,
-});
+import { echoSaga, ECHO_INTEGRATION_ID, parseInput, VENDOR_TIMEOUT_MS } from "../domain";
+import type { EchoInput, SafeError } from "../domain";
+import { defineSaga, schemaOf } from "../saga";
+import { integrationOperation, prepareInput } from "../saga-helpers";
+import { assertRunExecutionId, completeExecution, failSagaExecution } from "../executions";
+import { makeSagaWorkflow } from "./shared";
+import { registerSagaDef } from "./registry";
 
 /** Stable echo Saga: prepare input and call the local HTTP echo Integration. */
 export const echoSagaDef = defineSaga<EchoInput>({
@@ -38,90 +22,55 @@ export const echoSagaDef = defineSaga<EchoInput>({
   description: echoSaga.description,
   tags: ["utility", "fixture"],
   requiredIntegrations: [ECHO_INTEGRATION_ID],
-  inputSchema: echoInputSchema,
-  outputSchema: echoInputSchema,
+  inputSchema: schemaOf({ message: "string" }, ["message"]),
+  outputSchema: schemaOf({ message: "string" }, ["message"]),
   parse: parseInput,
   run: async (ctx, step): Promise<EchoInput> => {
     const id = assertRunExecutionId(ctx.executionId);
-    let expectedFailure: SafeError | undefined;
-    let timedOut = false;
+    // The expected-failure branch below persists before throwing, so the
+    // catch rethrows an already-persisted failure untouched: step names are
+    // unique per Execution, so exactly one persist-failure-v1 runs.
+    let terminalWritten = false;
     try {
-      const prepared = await step.do("prepare-input-v1", () =>
-        prepareExecution(ctx.db, id, echoSaga.id, echoSaga.revision, parseInput),
+      const prepared = await step.do("prepare-input-v1", () => prepareInput(ctx, echoSaga, parseInput));
+      // ADR-033-4: the Integration-step interior lives in
+      // integrationOperation, which derives required-vs-optional from the
+      // Saga definition plus the integration ID — the call site passes no
+      // required list and branches on no required/optional shape.
+      const outcome = await step.do("echo-http-v1", () =>
+        integrationOperation(ctx, echoSagaDef, prepared, {
+          op: "echo-http-v1",
+          position: 1,
+          integrationId: ECHO_INTEGRATION_ID,
+          vendorDefaultMs: VENDOR_TIMEOUT_MS,
+          failureCode: "ECHO_INTEGRATION_FAILED",
+          failureMessage: "The echo Integration could not complete.",
+          call: (connection, _secrets, deadline, operationId) =>
+            ctx.integrations.echo.echo(connection, prepared.input, operationId, deadline),
+        }),
       );
-      const outcome = await step.do("echo-http-v1", async () => {
-        await beginOperation(ctx.db, id, "echo-http-v1", 1);
-        // RUN-01 (ADR 018, Slice A issue #135): the vendor deadline resolves
-        // through the Execution's snapshotted policy (timeout 0 keeps the
-        // Integration default, custom overrides it). 0 disables only the
-        // override. A snapshot read failure throws before any vendor work.
-        const deadline = vendorDeadlineMs(await loadExecutionPolicy(ctx.db, id), VENDOR_TIMEOUT_MS);
-        // Phase 1b (ADR 010): exact-org Connection resolution through the
-        // step's own OrgCtx. Echo is declared required, so a miss fails loud
-        // with 424 as a structured step result (no retry via NonRetryableError
-        // downstream). The outbound key derives from the step ctx, so the
-        // stable operation ID and the downstream Idempotency-Key agree.
-        const stepOrg = withOperation(prepared.orgCtx, "echo-http-v1");
-        const resolved = await resolveConnection(
-          ctx.db,
-          stepOrg,
-          ECHO_INTEGRATION_ID,
-          echoSagaDef.requiredIntegrations,
-        );
-        if (!resolved.found && !resolved.declared) {
-          // Unreachable while echo stays declared required: optional access
-          // would resolve to None here instead of failing.
-          throw new NonRetryableError("Unexpected optional Integration access.");
-        }
-        if (!resolved.found) return { ok: false as const, error: resolved.error };
-        const connection = resolved.connection;
-        let result: EchoInput;
-        try {
-          result = await ctx.integrations.echo.echo(
-            connection,
-            prepared.input,
-            `${id}-${stepOrg.operationId}`,
-            deadline,
-          );
-        } catch (error) {
-          // Raw echo transport errors map to the generic failure; Fault text is
-          // fixed-shape and scrubbed against this Execution's registry.
-          const safe =
-            error instanceof Fault
-              ? scrubExecutionError({ code: error.code, message: error.message }, id)
-              : { code: "ECHO_INTEGRATION_FAILED", message: "The echo Integration could not complete." };
-          return { ok: false as const, error: safe };
-        }
-        await finishOperation(ctx.db, id, "echo-http-v1", result);
-        return { ok: true as const, result };
-      });
       if (!outcome.ok) {
-        expectedFailure = outcome.error;
-        timedOut = outcome.error.code === "ECHO_VENDOR_TIMEOUT";
-        if (timedOut) {
-          // Explicit timeout step: the sole writer of TimedOut. The vendor
-          // deadline fired inside echo-http-v1; nothing here is inferred from
-          // native Workflow introspection. The shared catch below skips its
-          // Failed checkpoint once this marker has persisted.
-          const failure: SafeError = scrubExecutionError(outcome.error, id);
-          await step.do("timeout-mark-v1", () => failExecution(ctx.db, id, failure, "TimedOut"));
-        }
-        throw new NonRetryableError(expectedFailure.code);
+        await step.do("persist-failure-v1", () => failSagaExecution(ctx.db, id, outcome.error));
+        terminalWritten = true;
+        throw new NonRetryableError(outcome.error.code);
       }
       const output = outcome.result;
       // Native wait primitive. Deliberately not a product Operation: not every
       // infrastructure checkpoint is ExecutionHistory.
       await step.sleep("settle-wait-v1", "1 second");
-      await step.do("persist-success-v1", () => persistRunSuccess(ctx.db, id, output));
+      await step.do("persist-success-v1", () => completeExecution(ctx.db, id, output));
       return output;
-    } catch {
-      return persistRunFailure(ctx, step, id, expectedFailure, timedOut);
+    } catch (error) {
+      if (terminalWritten) throw error;
+      const failure: SafeError = {
+        code: "EXECUTION_FAILED",
+        message: "The Execution could not complete. Inspect local runtime diagnostics.",
+      };
+      await step.do("persist-failure-v1", () => failSagaExecution(ctx.db, id, failure));
+      throw new NonRetryableError(failure.code);
     }
   },
 });
 
-export class EchoWorkflow extends WorkflowEntrypoint<Bindings, ExecutionParams> {
-  async run(event: WorkflowEvent<ExecutionParams>, step: WorkflowStep): Promise<EchoInput> {
-    return executeSaga(this.env, event, step, echoSagaDef);
-  }
-}
+registerSagaDef(echoSagaDef);
+export class EchoWorkflow extends makeSagaWorkflow(echoSagaDef) {}

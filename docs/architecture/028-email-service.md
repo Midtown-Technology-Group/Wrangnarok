@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-12
-- **Extends:** ADR 012 (Triggers), ADR 018 (endpoint/webhook Triggers), ADR 003 (Integration capabilities)
+- **Extends:** ADR 012 (Triggers), ADR 037 (endpoint/webhook Triggers, renumbered from 018 by issue #225), ADR 003 (Integration capabilities)
 
 ## Context
 

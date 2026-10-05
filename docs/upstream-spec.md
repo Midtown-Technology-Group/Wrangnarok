@@ -242,7 +242,7 @@ Webhook adapters (`api/src/services/webhooks/adapters/generic.py`, `api/src/serv
 
 Ordering and correlation (issue-ledger drift): at `08a8f58b` upstream commits event/delivery records before enqueueing execution, so a dispatched run can never race the rows it needs to resolve. At `21bc39a` (PR #740, 2026-09-13) the processor returns the persisted event ID and the router queues that exact ID after commit — concurrent webhooks must queue the event created by each request rather than re-querying the newest event for the source. Upstream tests: `test_hooks_delivery_queueing.py`, `test_processor_delivery.py`.
 
-**Wrangnarök implication (TRG-02, ADR 018):** Adopt the product shape — scoped endpoints bound to a stable Saga, per-endpoint revocable credentials, HMAC verification with the evidenced encodings/whitespace rules, echo-param challenges answered in plaintext with no Execution, per-endpoint rate limiting before any Execution write, vendor event IDs with deterministic `wep-` delivery keys (same event replays, mismatched duplicates conflict), Organization/run-as identity from the endpoint row only, and synchronous HTTP responses kept distinct from asynchronous Execution receipts (async-first; bounded sync stays with RUN-03). Adapt the mechanism: Worker fetch plus D1 plus the standard submit protocol (Execution row written before Workflow dispatch; no Queue or Durable Object), deployment-scoped webhook secrets per ADR 005 v0, and fail-closed admission (rate-window read faults and endpoint-lookup faults propagate as sanitized 5xx, never as 404 or an invented zero count). No automatic retry of business mutations: submit failures propagate and the vendor redelivers the same event ID.
+**Wrangnarök implication (TRG-02, ADR 037):** Adopt the product shape — scoped endpoints bound to a stable Saga, per-endpoint revocable credentials, HMAC verification with the evidenced encodings/whitespace rules, echo-param challenges answered in plaintext with no Execution, per-endpoint rate limiting before any Execution write, vendor event IDs with deterministic `wep-` delivery keys (same event replays, mismatched duplicates conflict), Organization/run-as identity from the endpoint row only, and synchronous HTTP responses kept distinct from asynchronous Execution receipts (async-first; bounded sync stays with RUN-03). Adapt the mechanism: Worker fetch plus D1 plus the standard submit protocol (Execution row written before Workflow dispatch; no Queue or Durable Object), deployment-scoped webhook secrets per ADR 005 v0, and fail-closed admission (rate-window read faults and endpoint-lookup faults propagate as sanitized 5xx, never as 404 or an invented zero count). No automatic retry of business mutations: submit failures propagate and the vendor redelivers the same event ID.
 
 ### 23. External MCP servers: templates, connections, catalog, consent, refresh (TOOL-02, issue #171, Sep 2026)
 
@@ -400,12 +400,80 @@ the five-path resolution table with the no-privilege-fallback rule
 catalog rules, the `mcp__<connection>__<tool>` namespace policy, and the
 Streamable-HTTP-only transport as parity. Adapt the substrate: no agent
 entity exists yet, so P2/P3 resolve Connection-first with an explicit
-service principal for autonomous callers (consistent with ADR 018 machine
+service principal for autonomous callers (consistent with ADR 037 machine
 principals) and AI-02 grants attach later; secrets land in the settled
 OAUTH-01 token envelopes + SEC-02 envelope path with inline/on-demand
 refresh only (scheduled refresh stays deferred with OAUTH-01). Private
 endpoints, non-HTTP transports, and SSE/stdio are explicit v0 non-support
 with P4 compatibility statements.
+
+### 24. Personal memory and required instructions: consent-controlled, owner-isolated, composed (AI-06, issue #169, Sep 2026)
+
+Lane-0 pin only (docs-only): no memory/instruction tables, routes, flags, or
+composition code exist in Wrangnarök. Scout verdict is **no-build** until AI-05
+storage and the AI-02 agent-tool path land — personal memory without a
+retriever that reads it and without a tool path that enforces its isolation
+would be dead schema. Future AI-05/AI-02 lanes inherit the constraints below.
+
+All pins at upstream `3543c7e` (the parity-audit baseline), from
+`api/src/routers/memory.py`, `api/src/routers/required_instructions.py`,
+`api/src/services/memory.py`, `api/tests/e2e/api/test_memory.py`, and
+`api/tests/unit/services/test_required_instructions.py`. `vendor/upstream/`
+is empty in the local checkout, so these paths rest on the #169 ledger and
+must be re-inspected against upstream sources at build time; no vector
+storage is assumed and no upstream behavior is invented here.
+
+**Distinct-from-shared-knowledge clause.** Personal memory and composed
+required instructions are distinct from shared knowledge. The two closest
+current local surfaces are lookalikes that MUST NOT be adopted as memory:
+
+- `ai_behavior` default system prompt (`migrations/0028_ai_profiles.sql`,
+  `AiBehaviorView` in `src/ai-profiles.ts`, `GET/PUT /api/ai/behavior`) is an
+  org-wide operator config singleton (AI-01) — not consent-controlled
+  personal memory and not required instructions.
+- `src/profile.ts` display/theme/avatar preferences carry no memory
+  semantics, no search, and no composition.
+- Scoped config (ADR 031, CON-02) is org-only with explicitly no global tier
+  in v1, so AI-06 global/org required-instruction precedence is an undecided
+  modeling question that owes its own global-tier ADR — not a reuse.
+
+**Invariants the build must hold:**
+
+- Owner-only memory access with cross-user denial: no caller can read,
+  delete, or export another user's memory, including through agent tools.
+  Owner/org identity binds exclusively to the server-derived
+  `Principal{userId, orgId}` — caller-supplied owner or organization
+  identifiers are rejected. The memory-through-tools isolation test must
+  mirror §18 caller-scoped resolution + listable-equals-executable
+  (deny-by-default agent grants).
+- Platform enablement plus per-user opt-out with *effective* disablement:
+  a disabled user gets no memory reads/writes surfacing anywhere.
+- Deletion/retention semantics: hard delete and export on request (export
+  is owner-scoped under the same Principal binding); the retention rule
+  must state what disablement deletes vs keeps.
+- Deterministic composition with exact expected output: global < org <
+  memory-section precedence, clearing behavior (later sections clearing
+  earlier named ones), every composed section carrying source + revision.
+- Memory content is untrusted context, never an authority source:
+  instructions never replace server permission enforcement, and visibility
+  is revalidated on read.
+- Org switching re-scopes memory reads to the *current* org; memory rows
+  key `(org_id, user_id)` against the `Principal{userId, orgId}` caller.
+- Required-instruction authorization (exact roles are a build-time ADR
+  decision, not pinned here): management (create/update/clear) is
+  restricted to authorized principals per scope; reads resolve only
+  within the caller's current org (plus the global tier only if the
+  ADR-031 amendment lands it); org switching re-scopes instruction reads
+  to the new org with no carryover from the previous org and no implicit
+  cross-org fallback.
+
+**Wrangnarök implication (AI-06, blocked):** Consent-flag schema, owner-only
+CRUD, cross-user/org denial, deterministic composer unit tests, and
+disablement/deletion tests can proceed against local D1 once AI-05 storage
+predicates exist; semantic memory search waits for the AI-05 cost gate, and
+agent-tool surfacing waits for the AI-02 tool path. Memory opt-in/out rows
+should copy the OAUTH-01/MCP per-user consent provenance shape
+(who/when/scopes, cf. §23) without forking a second consent store.
 
 ## Candidate product invariants
 

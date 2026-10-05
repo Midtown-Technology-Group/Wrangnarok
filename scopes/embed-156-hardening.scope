@@ -1,0 +1,18 @@
+# EMBED-01 hardening lane scope (issue #156):
+# stale startup handles stay invalid after form-grant rotation or
+# publication review/re-publish (outstanding-session invalidation, no DDL),
+# and session-owned upload admission fails closed with an atomic
+# per-session cap of 10 (single-statement claim insert, no DDL).
+# One auth/submit path preserved: shared submit core, standard submit
+# protocol, existing grant/publication gates; no new Cloudflare primitive,
+# no Turnstile/CAPTCHA, no authenticated external-user access, no client
+# change, no deployment.
+src/forms.ts
+src/embeds.ts
+src/public-forms.ts
+src/session-uploads.ts
+src/index.ts
+test/embeds.test.ts
+test/form-publication.test.ts
+test/embed-session-uploads.test.ts
+scopes/embed-156-hardening.scope

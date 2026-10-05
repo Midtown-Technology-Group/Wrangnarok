@@ -25,6 +25,7 @@
 // (ADR 018 section 7); no such surface ships, so no such fault tests exist.
 import { Fault, hash, object } from "./domain";
 import type { Principal } from "./domain";
+import { isViewer } from "./orgs";
 
 export const LOCATION_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const PATH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -460,6 +461,20 @@ interface Slot {
 
 /** Mint an upload slot: a pending metadata row plus a single-use upload
  * capability. Requires a declared location and a write allow row. */
+/**
+ * Org-role ceiling for file location actions (AUTH-02 narrow profile:
+ * role ceiling, then file_policies). Viewers are read-only: write/delete
+ * actions deny even when an org-wide policy row allows them, so policy
+ * narrows authority and never widens it. Hidden-reference discipline
+ * applies first — unknown locations answer 404 before the ceiling denies,
+ * so viewers cannot probe location names.
+ */
+async function requireActionCeiling(db: D1Database, caller: Principal, location: string): Promise<void> {
+  if (!(await isViewer(db, caller.orgId, caller.userId))) return;
+  if (!(await loadLocation(db, caller.orgId, location))) throw fail(404, "NOT_FOUND", "Not found.");
+  throw fail(403, "FORBIDDEN", "Forbidden.");
+}
+
 export async function issueUploadSlot(
   db: D1Database,
   caller: Principal,
@@ -467,6 +482,7 @@ export async function issueUploadSlot(
   path: string,
   expiresIn: number,
 ): Promise<Slot> {
+  await requireActionCeiling(db, caller, location);
   const verdict = await evaluateAccess(db, caller.orgId, location, path, "write");
   if (!verdict.allowed) {
     const declared = await loadLocation(db, caller.orgId, location);
@@ -773,6 +789,7 @@ export async function finalizeUpload(
 ): Promise<FileMeta> {
   const declared = await loadLocation(db, caller.orgId, claim.location);
   if (!declared) throw fail(404, "NOT_FOUND", "Not found.");
+  await requireActionCeiling(db, caller, claim.location);
   if (!(await hasPolicy(db, caller.orgId, claim.location, "write"))) {
     throw fail(403, "FORBIDDEN", "Forbidden.");
   }
@@ -872,6 +889,7 @@ export async function deleteFile(db: D1Database, bucket: R2Bucket, caller: Princ
   }
   const declared = await loadLocation(db, caller.orgId, location);
   if (!declared) throw fail(404, "NOT_FOUND", "Not found.");
+  await requireActionCeiling(db, caller, location);
   if (!(await hasPolicy(db, caller.orgId, location, "delete"))) {
     throw fail(403, "FORBIDDEN", "Forbidden.");
   }

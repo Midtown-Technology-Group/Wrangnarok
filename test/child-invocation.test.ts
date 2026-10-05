@@ -28,6 +28,7 @@ import {
 } from "../src/children";
 import type { ChildEnv } from "../src/children";
 import { storeSagaPolicy } from "../src/executions";
+import { addGrant, assignRole, createRole } from "../src/roles";
 import { executionId, Fault, helloParentSaga, helloSaga } from "../src/domain";
 import { parseHelloParentInput } from "../src/domain";
 import { bindSagaStep } from "../src/saga";
@@ -53,6 +54,38 @@ function detailRequest(id: string) {
 
 function cancelRequest(id: string) {
   return new Request(`https://local.test/api/executions/${id}/cancel`, { method: "POST", headers: { ...auth } });
+}
+
+/** Seed AUTH-02 authority for one caller: org + user + membership rows.
+ * Fixture callers default to the admin bypass (mirrors ensureLabFixture);
+ * pass explicit role/status/userId for the denied-caller matrix. */
+async function seedAuthority(
+  userId: string = principal.userId,
+  orgId: string = principal.orgId,
+  role = "admin",
+  status = "active",
+) {
+  const stamp = new Date().toISOString();
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?) ON CONFLICT(id) DO NOTHING")
+    .bind(orgId, "Seed org")
+    .run();
+  await bindings.DB.prepare("INSERT INTO users(user_id,status,created_at) VALUES (?,'active',?)")
+    .bind(userId, stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+  )
+    .bind(orgId, userId, role, status, "ordinary", stamp, stamp)
+    .run();
+}
+
+/** Direct saga execute grant for one caller (the policy-rule path). */
+async function seedExecuteGrant(orgId: string, sagaId: string, userId: string) {
+  await bindings.DB.prepare(
+    "INSERT INTO policy_rules(id,org_id,resource_kind,resource_id,action,subject_type,subject_ref,created_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind(crypto.randomUUID(), orgId, "saga", sagaId.toLowerCase(), "execute", "user", userId, new Date().toISOString())
+    .run();
 }
 
 async function detail(id: string) {
@@ -171,6 +204,9 @@ describe("RUN-02 nested invocation (issue #136)", () => {
   });
 
   it("rejects unknown children, non-serializable input, self-invocation, and bad keys before any write", async () => {
+    // Seeded admin authority: every rejection below is the validation code,
+    // never an auth code, and no dispatch row is reserved.
+    await seedAuthority();
     const parentId = "c3".repeat(32);
     const org: OrgCtx = {
       orgId: principal.orgId,
@@ -296,6 +332,7 @@ describe("RUN-02 nested invocation (issue #136)", () => {
   });
 
   it("converges duplicate child dispatches on one child row", async () => {
+    await seedAuthority();
     const parentId = "2b".repeat(32);
     await bindings.DB.prepare(
       "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -361,6 +398,7 @@ describe("RUN-02 nested invocation (issue #136)", () => {
   it("fences child dispatch on RUN-01 admission exactly like top-level submit (issue #136)", async () => {
     // Pause the child Saga: child dispatch must refuse with SAGA_PAUSED
     // through the shared admitExecution gate, never dispatch the Workflow.
+    await seedAuthority();
     await storeSagaPolicy(bindings.DB, principal.orgId, helloSaga.id, { admission: { enabled: false } });
     const parentId = "4d".repeat(32);
     await bindings.DB.prepare(
@@ -421,6 +459,7 @@ describe("RUN-02 nested invocation (issue #136)", () => {
   });
 
   it("maps dispatch ambiguity to CHILD_DISPATCH_UNCONFIRMED with the reservation intact", async () => {
+    await seedAuthority();
     const parentId = "3c".repeat(32);
     await bindings.DB.prepare(
       "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -734,6 +773,179 @@ describe("RUN-02 nested invocation (issue #136)", () => {
   });
 });
 
+describe("RUN-02 child authorization (AUTH-02, issue #136)", () => {
+  const OPERATOR = "00000000-0000-4000-8000-000000000011";
+  const STRANGER = "00000000-0000-4000-8000-000000000012";
+  const REVOKED = "00000000-0000-4000-8000-000000000013";
+  const VIEWER = "00000000-0000-4000-8000-000000000014";
+
+  function childEnvFor(userId: string, parentId: string, workflow = "HELLO_WORKFLOW"): ChildEnv {
+    const live = {
+      ...bindings,
+      [workflow]: { createBatch: async () => {} } as unknown as Bindings["HELLO_WORKFLOW"],
+    };
+    return {
+      env: live,
+      catalog: { sagas: [{ ...helloSaga, parse: (v: unknown) => v }] },
+      parentOrg: {
+        orgId: principal.orgId,
+        userId,
+        executionId: parentId,
+        sagaId: helloParentSaga.id,
+        sagaRevision: helloParentSaga.revision,
+        attemptToken: `${parentId}:0`,
+      },
+      parentExecutionId: parentId,
+      parentSagaId: helloParentSaga.id,
+    };
+  }
+
+  async function seedParent(parentId: string) {
+    await bindings.DB.prepare(
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        parentId,
+        helloParentSaga.id,
+        helloParentSaga.name,
+        helloParentSaga.revision,
+        principal.orgId,
+        principal.userId,
+        JSON.stringify({ name: "Ada" }),
+        1,
+        "Running",
+        new Date().toISOString(),
+      )
+      .run();
+  }
+
+  async function childRowCount(parentId: string): Promise<number> {
+    const row = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM executions WHERE parent_execution_id=?")
+      .bind(parentId)
+      .first<{ n: number }>();
+    return row?.n ?? -1;
+  }
+
+  it("dispatches for an operator holding a direct execute grant, inheriting the parent org", async () => {
+    await seedAuthority(OPERATOR, principal.orgId, "operator");
+    await seedExecuteGrant(principal.orgId, helloSaga.id, OPERATOR);
+    const parentId = "5a".repeat(32);
+    await seedParent(parentId);
+    const receipt = await invokeChild(childEnvFor(OPERATOR, parentId), "child-dispatch-invoke-v1", helloSaga.id, {
+      name: "Ada",
+    });
+    expect(receipt.executionId).toMatch(/^[a-f0-9]{64}$/);
+    const row = await bindings.DB.prepare("SELECT org_id,user_id,parent_execution_id FROM executions WHERE id=?")
+      .bind(receipt.executionId)
+      .first<{ org_id: string; user_id: string; parent_execution_id: string }>();
+    // The child inherits caller/org/install context from the parent D1 row:
+    // no org parameter exists to point it elsewhere.
+    expect(row).toMatchObject({
+      org_id: principal.orgId,
+      user_id: OPERATOR,
+      parent_execution_id: parentId,
+    });
+  });
+
+  it("dispatches for an operator holding the grant through a role assignment", async () => {
+    await seedAuthority(OPERATOR, principal.orgId, "operator");
+    const role = await createRole(bindings.DB, principal.orgId, "child-runners");
+    await addGrant(bindings.DB, principal.orgId, role.id, "saga", helloSaga.id, "execute");
+    await assignRole(bindings.DB, principal.orgId, role.id, OPERATOR);
+    const parentId = "5b".repeat(32);
+    await seedParent(parentId);
+    const receipt = await invokeChild(childEnvFor(OPERATOR, parentId), "child-dispatch-invoke-v1", helloSaga.id, {
+      name: "Ada",
+    });
+    expect(receipt.executionId).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("rejects a stranger with no membership before any write", async () => {
+    // No authority rows at all: the persisted parent identity proves nothing.
+    const parentId = "5c".repeat(32);
+    await seedParent(parentId);
+    await expect(
+      invokeChild(childEnvFor(STRANGER, parentId), "child-dispatch-invoke-v1", helloSaga.id, { name: "Ada" }),
+    ).rejects.toMatchObject({ code: "ORG_NOT_FOUND" });
+    expect(await childRowCount(parentId)).toBe(0);
+  });
+
+  it("rejects a member with no execute grant on the hidden child before any write", async () => {
+    // The caller may run other Sagas; this child stays hidden by absence.
+    await seedAuthority(OPERATOR, principal.orgId, "operator");
+    const parentId = "5d".repeat(32);
+    await seedParent(parentId);
+    await expect(
+      invokeChild(childEnvFor(OPERATOR, parentId), "child-dispatch-invoke-v1", helloSaga.id, { name: "Ada" }),
+    ).rejects.toMatchObject({ code: "GRANT_REQUIRED" });
+    expect(await childRowCount(parentId)).toBe(0);
+  });
+
+  it("rejects a revoked member even when a grant row still names them", async () => {
+    await seedAuthority(REVOKED, principal.orgId, "operator", "revoked");
+    await seedExecuteGrant(principal.orgId, helloSaga.id, REVOKED);
+    const parentId = "5e".repeat(32);
+    await seedParent(parentId);
+    await expect(
+      invokeChild(childEnvFor(REVOKED, parentId), "child-dispatch-invoke-v1", helloSaga.id, { name: "Ada" }),
+    ).rejects.toMatchObject({ code: "MEMBERSHIP_REVOKED" });
+    expect(await childRowCount(parentId)).toBe(0);
+  });
+
+  it("rejects a viewer under the read-only ceiling even with a direct execute rule", async () => {
+    await seedAuthority(VIEWER, principal.orgId, "viewer");
+    await seedExecuteGrant(principal.orgId, helloSaga.id, VIEWER);
+    const parentId = "5f".repeat(32);
+    await seedParent(parentId);
+    await expect(
+      invokeChild(childEnvFor(VIEWER, parentId), "child-dispatch-invoke-v1", helloSaga.id, { name: "Ada" }),
+    ).rejects.toMatchObject({ code: "GRANT_REQUIRED" });
+    expect(await childRowCount(parentId)).toBe(0);
+  });
+
+  it("fails an HTTP parent actionably when the caller may run the parent but not the child", async () => {
+    // Hidden-child end to end on real local bindings: the caller holds
+    // execute on hello-parent only, submits the parent over HTTP, and the
+    // parent persists GRANT_REQUIRED instead of fabricating a greeting.
+    await seedAuthority(OPERATOR, principal.orgId, "operator");
+    await seedExecuteGrant(principal.orgId, helloParentSaga.id, OPERATOR);
+    const callerEnv = { ...bindings, LAB_USER_ID: OPERATOR, LAB_FIXTURE_USER_ID: principal.userId };
+    const key = "run02-hidden-child-001";
+    // Execution identity binds the submitting caller: derive it from the
+    // operator principal, never the fixture one.
+    const id = await executionId({ orgId: principal.orgId, userId: OPERATOR }, key);
+    const submit = await worker.fetch(
+      new Request("https://local.test/api/executions", {
+        method: "POST",
+        headers: { ...auth, "Idempotency-Key": key },
+        body: JSON.stringify({ sagaId: helloParentSaga.id, input: { name: "Ada" } }),
+      }),
+      callerEnv,
+    );
+    // The parent submit itself is authorized; the denial lands at child
+    // dispatch inside the Workflow, so this stays 202 with a receipt.
+    expect(submit.status).toBe(202);
+    const { inner: instance } = await trackWorkflowInstance(bindings.HELLO_PARENT_WORKFLOW, id);
+    // The D1 row persists Failed while the native instance ends errored
+    // (NonRetryableError after the persist-failure checkpoint): wait for the
+    // native terminal, then read the inspectable row.
+    await instance.waitForStatus("errored");
+    // Reads are owner-scoped (org + user): the operator reads their own row.
+    const response = await worker.fetch(detailRequest(id), callerEnv);
+    expect(response.status).toBe(200);
+    const parent = (await response.json()) as {
+      status: string;
+      result: unknown;
+      error: { code: string; message: string } | null;
+      children: unknown[];
+    };
+    expect(parent.status).toBe("Failed");
+    expect(parent.error).toMatchObject({ code: "GRANT_REQUIRED" });
+    expect(parent.result).toBeNull();
+    expect(parent.children).toHaveLength(0);
+  }, 25000);
+});
+
 describe("RUN-02 child helpers (pure, no bindings)", () => {
   it("rejects invalid Execution identity and forwards explicit child keys", async () => {
     const step: SagaStep = {
@@ -863,6 +1075,7 @@ describe("RUN-02 child helpers (pure, no bindings)", () => {
     // Crosses invoke -> awaitResult: reserve and dispatch a real child row,
     // drive it to Failed at the row level, then prove the parent-visible
     // await surfaces CHILD_FAILED (not invented success, not a silent pass).
+    await seedAuthority();
     const parentId = "d4".repeat(32);
     await bindings.DB.prepare(
       "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -942,6 +1155,7 @@ describe("RUN-02 child helpers (pure, no bindings)", () => {
   });
 
   it("binds the ctx.children handle to invoke plus await", async () => {
+    await seedAuthority();
     const parentId = "ad".repeat(32);
     const org: OrgCtx = {
       orgId: principal.orgId,
@@ -1004,6 +1218,7 @@ describe("RUN-02 child helpers (pure, no bindings)", () => {
     // (parent, step, child, key) tuple must carry the owning Operation, so
     // two distinct step.do callbacks sharing one key fork two children with
     // correct parent_step instead of converging on one row.
+    await seedAuthority();
     const parentId = "aa".repeat(32);
     await bindings.DB.prepare(
       "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -1117,6 +1332,7 @@ describe("RUN-02 child helpers (pure, no bindings)", () => {
   });
 
   it("refuses to dispatch into a cancelled child instead of resurrecting it", async () => {
+    await seedAuthority();
     const parentId = "1c".repeat(32);
     const org: OrgCtx = {
       orgId: principal.orgId,

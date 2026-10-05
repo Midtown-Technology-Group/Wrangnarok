@@ -1,0 +1,8 @@
+# Org-226 lane scope (issue #226): fail-closed delete preview + cascade-or-block completion.
+# Allowed: org-delete graph (preview counts, TRG-01/TRG-03 reuse, AI/policy/tool
+# cascade, FK drift backstop), worker-runtime tests, ADR record. Out (hard):
+# grant-model changes (#143), secret-storage changes, new lifecycle APIs, UI.
+src/orgs.ts
+test/org-lifecycle.test.ts
+docs/architecture/015-org-lifecycle.md
+scopes/org-226-delete-preview.scope

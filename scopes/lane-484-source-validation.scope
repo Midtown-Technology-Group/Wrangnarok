@@ -1,0 +1,8 @@
+# lane/484-source-validation (issue #484, A1 only): sanitized retained-source
+# validation-time deny-list in validateAppSource (secrets/build/VCS/vendor)
+# plus regression tests. Out of scope: migrations/schema changes, SDK
+# provenance stamps, durable update job, operator status/update/export
+# surfaces, multi-route apps, custom domains, build logs, ADR edits.
+src/apps.ts
+test/apps-branches.test.ts
+scopes/lane-484-source-validation.scope

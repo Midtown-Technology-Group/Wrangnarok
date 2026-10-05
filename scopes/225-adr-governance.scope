@@ -1,0 +1,14 @@
+# ADR governance lane scope (issue #225): renumber duplicate ADR numbers
+# 015/016/018(x5)/019/023 to 034-041 (later-landed moves), update docs
+# references, add the ADR index ledger plus the fail-closed CI guard.
+# Docs and CI only: no execution semantics, migrations, or frontend changes.
+docs/architecture/
+docs/dev-preview.md
+docs/feasibility-envelope.md
+docs/sdk-capability-map.md
+docs/tool-02-p0-decisions.md
+docs/upstream-parity.md
+docs/upstream-spec.md
+.github/workflows/ci.yml
+scripts/check-adr-numbers.mjs
+scopes/225-adr-governance.scope

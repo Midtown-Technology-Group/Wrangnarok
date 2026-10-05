@@ -700,6 +700,24 @@ export function parseFormDeclaration(value: unknown): {
   };
 }
 
+/** Canonical declaration bytes: the persisted fields_json shape. saveForm
+ * writes it; embed fingerprints (EMBED-01 slice 1, issue #156) hash it
+ * together with the bound Saga id — one serializer, so a future shape
+ * change cannot silently desync fingerprints from declarations. */
+export function serializeFormDeclaration(declaration: {
+  readonly title?: string;
+  readonly description?: string;
+  readonly allowPrefill: boolean;
+  readonly fields: readonly FormField[];
+}): string {
+  return JSON.stringify({
+    ...(declaration.title === undefined ? {} : { title: declaration.title }),
+    ...(declaration.description === undefined ? {} : { description: declaration.description }),
+    ...(declaration.allowPrefill ? { allowPrefill: true } : {}),
+    fields: declaration.fields,
+  });
+}
+
 /** Load one persisted declaration for this Organization. Unknown names (or
  * foreign-Organization names) resolve to null so the route answers 404,
  * never a cross-tenant leak. */
@@ -760,12 +778,7 @@ export async function saveForm(db: D1Database, caller: Principal, body: unknown)
   } catch (error) {
     throw new Fault(400, "INVALID_FORM", error instanceof Error ? error.message : "Invalid form declaration.");
   }
-  const fieldsJson = JSON.stringify({
-    ...(declaration.title === undefined ? {} : { title: declaration.title }),
-    ...(declaration.description === undefined ? {} : { description: declaration.description }),
-    ...(declaration.allowPrefill ? { allowPrefill: true } : {}),
-    fields: declaration.fields,
-  });
+  const fieldsJson = serializeFormDeclaration(declaration);
   if (new TextEncoder().encode(fieldsJson).length > 4096) {
     throw new Fault(400, "INVALID_FORM", "Form declarations hold at most 4 KB of JSON.");
   }
@@ -1481,6 +1494,29 @@ export function parseStartupHandle(value: unknown): string {
   return value;
 }
 
+/** Pre-gate startup identity for embed submissions (EMBED-01 slice 1, issue
+ * #156): resolve a presented handle to its bound (org, user, form) without
+ * an operator session. The 256-bit handle-hash lookup is exactly as narrow
+ * as the operator peek (same table, same hash); a wrong shape or a missing
+ * row answers null and the caller maps that to STALE_FORM_HANDLE. Expiry,
+ * single-use, and form-identity checks stay in peekStartupHandle — this
+ * helper only binds the pre-gate request to the session's Organization and
+ * principal so the embed route can load the right grant before running the
+ * full submit contract. */
+export async function peekStartupIdentity(
+  db: D1Database,
+  handle: unknown,
+): Promise<{ orgId: string; userId: string; formId: string; formName: string } | null> {
+  if (typeof handle !== "string" || !FORM_STARTUP_HANDLE_RE.test(handle)) return null;
+  await ensureStartupTable(db);
+  const row = await db
+    .prepare("SELECT org_id,user_id,form_id,form_name FROM form_startups WHERE handle_hash=?")
+    .bind(await hashHandle(handle))
+    .first<{ org_id: string; user_id: string; form_id: string; form_name: string }>();
+  if (!row) return null;
+  return { orgId: row.org_id, userId: row.user_id, formId: row.form_id, formName: row.form_name };
+}
+
 /** Parse an optional scheduleAt instant: ISO 8601, future, at most 30 days
  * out. Returns the normalized ISO instant, or null when absent. */
 export function parseScheduleAt(value: unknown): string | null {
@@ -1920,6 +1956,20 @@ export async function consumeAfterAdmission(
     if (!(error instanceof Fault) || error.code !== "STALE_FORM_HANDLE") throw error;
     await verifyOwnAdmission(db, caller, handle, key, saga, admittedInput);
   }
+}
+
+/** Invalidate every outstanding startup session for one external principal
+ * (EMBED-01 hardening, issue #156). Grant rotation and publication
+ * review/re-publish re-bind the capability to the live declaration, and
+ * sessions minted before that change must stay stale afterwards — never be
+ * revived by the re-bind. Deleting the rows makes pre-change handles
+ * unknown, so every submit/finalize/issuance peek answers STALE_FORM_HANDLE;
+ * sessions minted after the re-bind do not exist yet and are unaffected.
+ * D1 faults propagate: a rotation/review that cannot invalidate fails
+ * rather than healing the grant while leaving old handles live. */
+export async function invalidateFormSessions(db: D1Database, userId: string): Promise<void> {
+  await ensureStartupTable(db);
+  await db.prepare("DELETE FROM form_startups WHERE user_id=?").bind(userId).run();
 }
 
 /** Parse a file-field reference against its declared policy (shape only;

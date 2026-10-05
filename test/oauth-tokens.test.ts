@@ -63,14 +63,15 @@ function tokenJson(body: unknown, status = 200): Response {
 
 interface StubCall {
   readonly body: string;
+  readonly method: string;
 }
 
-/** Vendor stub: records every POST body, answers from a queue. */
+/** Vendor stub: records every POST body plus the request method, answers from a queue. */
 function stubVendor(responses: Array<Response | ((body: string) => Response | Promise<Response>) | Error>) {
   const calls: StubCall[] = [];
   const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const body = typeof init?.body === "string" ? init.body : "";
-    calls.push({ body });
+    calls.push({ body, method: typeof init?.method === "string" ? init.method : "GET" });
     const next = responses.shift();
     if (next instanceof Error) throw next;
     if (typeof next === "function") return next(body);
@@ -494,6 +495,50 @@ describe("persisted refresh rotation (no D1 across vendor HTTP)", () => {
     // Transient values registered for write-time scrubbing, then dropped by
     // the caller (afterEach clears; the registry held them during the call).
     expect(getExecutionSecrets("e".repeat(64))).toContain(ACCESS_NEXT);
+  });
+
+  it("recovers an expired token on demand with no scheduler (issue #149 scheduled-path decision)", async () => {
+    // Upstream refreshes on a 15-minute scheduler within 20 minutes of
+    // expiry; Wrangnarok covers that job on demand instead. A token already
+    // past expires_at rotates through the same fenced path — one vendor
+    // POST, generation advance, recovery to healthy — so no Cron Trigger or
+    // second refresh path is needed until a concrete requirement (vendor
+    // refresh-token idle expiry, warm-token latency SLO) earns it.
+    const connectionId = await seedMapping();
+    await storeInitialOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      accessToken: ACCESS,
+      refreshToken: REFRESH,
+      scope: "monitoring",
+      expiresAtMs: Date.now() - 3600_000,
+      kekMaterial: KEK,
+      checkedAt: AT,
+    });
+    const before = await readOAuthTokenState(bindings.DB, ORG, connectionId);
+    expect(before?.expiresAtMs).toBeLessThan(Date.now());
+    const { calls, fetchImpl } = stubVendor([
+      tokenJson({ access_token: ACCESS_NEXT, refresh_token: REFRESH_NEXT, expires_in: 3600 }),
+    ]);
+    const rotated = await refreshPersistedOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      endpoint: ENDPOINT,
+      tokenPath: TOKEN_PATH,
+      credentials: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET },
+      faults: FAULTS,
+      keks: { 1: KEK },
+      kekMaterial: KEK,
+      fetchImpl,
+      checkedAt: LATER,
+    });
+    expect(calls).toHaveLength(1);
+    // The rotation reaches the vendor as exactly one POST: a regression to
+    // any other method fails here, not silently downstream.
+    expect(calls[0]?.method).toBe("POST");
+    expect(rotated).toMatchObject({ rotated: true, refreshToken: REFRESH_NEXT, generation: 2 });
+    expect(rotated.health).toMatchObject({ status: "healthy", lastSuccessAt: LATER });
+    expect(rotated.token.expiresAtMs).toBeGreaterThan(Date.now());
   });
 
   it("honors a scope override and the default vendor path", async () => {
@@ -1046,11 +1091,16 @@ describe("stale-generation health/revocation fencing (issue #149)", () => {
     await expect(pendingRevoke).resolves.toMatchObject({ revoked: true });
     releaseRefresh();
     // Same generation, so this is a health conflict, not a stale generation:
-    // the vendor failure still reports, but the committed revoked state wins
-    // over the failure computed from the pre-vendor read.
+    // the vendor failure still reports to its own caller, the committed
+    // revoked status wins, and the losing failure records its outcome as
+    // diagnostic metadata on the revoked row (issue #451).
     await expect(pendingRefresh).rejects.toMatchObject({ code: "TEST_AUTH_FAILED" });
     const health = (await readOAuthTokenState(bindings.DB, ORG, connectionId))?.health;
-    expect(health).toMatchObject({ status: "revoked", consecutiveFailures: 0 });
+    expect(health).toMatchObject({
+      status: "revoked",
+      consecutiveFailures: 1,
+      lastFailureCode: "TEST_AUTH_FAILED",
+    });
     expect(health && isTokenUsable(health)).toBe(false);
   });
 
@@ -1161,6 +1211,112 @@ describe("stale-generation health/revocation fencing (issue #149)", () => {
     expect(await readOAuthTokenState(bindings.DB, ORG, connectionId)).toMatchObject({
       generation: 2,
       health: { status: "healthy", consecutiveFailures: 0 },
+    });
+  });
+});
+
+describe("same-generation health-write ordering (issue #451)", () => {
+  async function seedHealthy() {
+    const connectionId = await seedMapping();
+    await storeInitialOAuthToken(bindings.DB, {
+      orgId: ORG,
+      connectionId,
+      accessToken: ACCESS,
+      refreshToken: REFRESH,
+      kekMaterial: KEK,
+      checkedAt: AT,
+    });
+    return connectionId;
+  }
+
+  it("a failure losing to committed revoked merges diagnostics and keeps revoked", async () => {
+    const connectionId = await seedHealthy();
+    // Both writers read generation 1 healthy before either lands.
+    const observed = (await readOAuthTokenState(bindings.DB, ORG, connectionId))?.health;
+    expect(observed).toMatchObject({ status: "healthy" });
+    // Revocation lands first: terminal status, no diagnostics to preserve yet.
+    const revoked = await recordOAuthTokenRevoked(bindings.DB, ORG, connectionId, LATER, 1);
+    expect(revoked).toMatchObject({ status: "revoked", consecutiveFailures: 0 });
+    // The stale failure lands second on the same generation: revoked wins
+    // the status, but the loser records its outcome as diagnostics and the
+    // authoritative reread is returned (no new outcome, no stale throw).
+    const merged = await recordOAuthTokenFailure(
+      bindings.DB,
+      ORG,
+      connectionId,
+      "TEST_AUTH_FAILED",
+      LATER,
+      1,
+      observed,
+    );
+    expect(merged).toMatchObject({
+      status: "revoked",
+      consecutiveFailures: 1,
+      lastFailureCode: "TEST_AUTH_FAILED",
+    });
+    expect(await readOAuthTokenState(bindings.DB, ORG, connectionId)).toMatchObject({
+      generation: 1,
+      health: { status: "revoked", consecutiveFailures: 1, lastFailureCode: "TEST_AUTH_FAILED" },
+    });
+    expect(isTokenUsable(merged)).toBe(false);
+  });
+
+  it("a revocation landing after a failure preserves its counters and code", async () => {
+    const connectionId = await seedHealthy();
+    await recordOAuthTokenFailure(bindings.DB, ORG, connectionId, "TEST_AUTH_FAILED", LATER, 1);
+    // Same generation, so the revocation applies: terminal status with the
+    // committed failure diagnostics preserved, never restored over.
+    const revoked = await recordOAuthTokenRevoked(bindings.DB, ORG, connectionId, LATER, 1);
+    expect(revoked).toMatchObject({
+      status: "revoked",
+      consecutiveFailures: 1,
+      lastFailureCode: "TEST_AUTH_FAILED",
+    });
+    expect(isTokenUsable(revoked)).toBe(false);
+  });
+
+  it("a direct failure write on a revoked row records diagnostics without moving status", async () => {
+    const connectionId = await seedHealthy();
+    await recordOAuthTokenRevoked(bindings.DB, ORG, connectionId, LATER);
+    // Unfenced direct write (no vendor HTTP in between): revoked is
+    // terminal, so the failure count and code land while revoked stands.
+    const health = await recordOAuthTokenFailure(bindings.DB, ORG, connectionId, "TEST_AUTH_FAILED", LATER);
+    expect(health).toMatchObject({
+      status: "revoked",
+      consecutiveFailures: 1,
+      lastFailureCode: "TEST_AUTH_FAILED",
+    });
+    expect(await readOAuthTokenState(bindings.DB, ORG, connectionId)).toMatchObject({
+      generation: 1,
+      health: { status: "revoked", consecutiveFailures: 1, lastFailureCode: "TEST_AUTH_FAILED" },
+    });
+    expect(isTokenUsable(health)).toBe(false);
+  });
+
+  it("concurrent same-generation failures accumulate instead of dropping", async () => {
+    const connectionId = await seedHealthy();
+    const observed = (await readOAuthTokenState(bindings.DB, ORG, connectionId))?.health;
+    const first = await recordOAuthTokenFailure(bindings.DB, ORG, connectionId, "TEST_AUTH_FAILED", LATER, 1, observed);
+    expect(first).toMatchObject({ status: "failed", consecutiveFailures: 1 });
+    // Second failure computed from the same superseded healthy read: the
+    // status is already failed, so the loser merges its count and code.
+    const second = await recordOAuthTokenFailure(
+      bindings.DB,
+      ORG,
+      connectionId,
+      "TEST_RATE_LIMITED",
+      LATER,
+      1,
+      observed,
+    );
+    expect(second).toMatchObject({
+      status: "failed",
+      consecutiveFailures: 2,
+      lastFailureCode: "TEST_RATE_LIMITED",
+    });
+    expect(await readOAuthTokenState(bindings.DB, ORG, connectionId)).toMatchObject({
+      generation: 1,
+      health: { status: "failed", consecutiveFailures: 2, lastFailureCode: "TEST_RATE_LIMITED" },
     });
   });
 });

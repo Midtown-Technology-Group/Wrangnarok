@@ -21,13 +21,15 @@
   "workers_dev": false,
   "preview_urls": false,
   "routes": [],
-  // TRG-01 (issue #137, ADR 012): the minute Cron tick promotes due schedule
-  // rows through the submit protocol. The tick is the only writer here —
-  // no sweeper, no reconciler, no timeout inference. Earned per AGENTS.md
-  // constraint 7 by the durable due-time requirement; no other primitive
-  // (Queue, Durable Object) is adopted.
+  // TRG-01 (issue #137, ADR 012): minute Cron tick DISABLED by operator
+  // request 2026-09-24 while the account is dormant. Scope: only
+  // Cron-driven schedule promotion is paused. Authenticated API
+  // submissions can still dispatch Workflows, and explicit vendor-timeout
+  // handling still writes TimedOut on those runs — this is not a full
+  // execution freeze. Re-enable by restoring the every-minute schedule
+  // below, then redeploying the worker (CI never deploys dev per ADR 004).
   "triggers": {
-    "crons": ["* * * * *"],
+    "crons": [],
   },
   "assets": {
     "directory": "./client/dist/",
@@ -101,6 +103,11 @@
       "class_name": "NinjaOrgsWorkflow",
     },
     {
+      "binding": "NINJA_LOOKUP_WORKFLOW",
+      "name": "wrangnarok-ninjaone-org-lookup-v1",
+      "class_name": "NinjaLookupWorkflow",
+    },
+    {
       "binding": "DIGEST_WORKFLOW",
       "name": "wrangnarok-ninjaone-echo-digest-v1",
       "class_name": "NinjaEchoDigestWorkflow",
@@ -129,6 +136,26 @@
       "binding": "CLOUDFLARE_INVENTORY_WORKFLOW",
       "name": "wrangnarok-cloudflare-inventory-v1",
       "class_name": "CloudflareInventoryWorkflow",
+    },
+    {
+      "binding": "CLOUDFLARE_AUDIT_WORKFLOW",
+      "name": "wrangnarok-cloudflare-audit-v1",
+      "class_name": "CloudflareAuditWorkflow",
+    },
+    {
+      "binding": "CLOUDFLARE_INSIGHTS_WORKFLOW",
+      "name": "wrangnarok-cloudflare-insights-v1",
+      "class_name": "CloudflareInsightsWorkflow",
+    },
+    {
+      "binding": "CLOUDFLARE_POSTURE_WORKFLOW",
+      "name": "wrangnarok-cloudflare-posture-v1",
+      "class_name": "CloudflarePostureWorkflow",
+    },
+    {
+      "binding": "ONBOARDING_WORKFLOW",
+      "name": "wrangnarok-onboarding-v1",
+      "class_name": "OnboardingWorkflow",
     },
   ],
   // ADR 004 environments: dev is the first deployment target and smoke-test
@@ -206,6 +233,11 @@
           "class_name": "NinjaOrgsWorkflow",
         },
         {
+          "binding": "NINJA_LOOKUP_WORKFLOW",
+          "name": "wrangnarok-ninjaone-org-lookup-v1-dev",
+          "class_name": "NinjaLookupWorkflow",
+        },
+        {
           "binding": "DIGEST_WORKFLOW",
           "name": "wrangnarok-ninjaone-echo-digest-v1-dev",
           "class_name": "NinjaEchoDigestWorkflow",
@@ -234,6 +266,26 @@
           "binding": "CLOUDFLARE_INVENTORY_WORKFLOW",
           "name": "wrangnarok-cloudflare-inventory-v1-dev",
           "class_name": "CloudflareInventoryWorkflow",
+        },
+        {
+          "binding": "CLOUDFLARE_AUDIT_WORKFLOW",
+          "name": "wrangnarok-cloudflare-audit-v1-dev",
+          "class_name": "CloudflareAuditWorkflow",
+        },
+        {
+          "binding": "CLOUDFLARE_INSIGHTS_WORKFLOW",
+          "name": "wrangnarok-cloudflare-insights-v1-dev",
+          "class_name": "CloudflareInsightsWorkflow",
+        },
+        {
+          "binding": "CLOUDFLARE_POSTURE_WORKFLOW",
+          "name": "wrangnarok-cloudflare-posture-v1-dev",
+          "class_name": "CloudflarePostureWorkflow",
+        },
+        {
+          "binding": "ONBOARDING_WORKFLOW",
+          "name": "wrangnarok-onboarding-v1-dev",
+          "class_name": "OnboardingWorkflow",
         },
       ],
     },
@@ -271,10 +323,24 @@
           "migrations_dir": "migrations",
         },
       ],
+      // Issue #227: preview binds BOTH buckets like local/dev. ARTIFACTS is
+      // not a new primitive (R2 was earned by FILE-01/FILE-02, ADR 036/040):
+      // without it every preview byte route fails closed with 503
+      // ARTIFACT_STORE_NOT_CONFIGURED while metadata routes pass, leaving
+      // the Worker-proxied byte path — the part most likely to drift from
+      // the upstream presigned-URL invariant (upstream-spec §16, ADR 040
+      // §5) — unvalidated on real edge. That drift is exactly what ADR 004
+      // says preview exists to catch. HUMAN SETUP: `wrangler r2 bucket
+      // create wrangnarok-artifacts-preview` (one-time, alongside the
+      // preview D1 setup noted above).
       "r2_buckets": [
         {
           "binding": "FILES",
           "bucket_name": "wrangnarok-preview",
+        },
+        {
+          "binding": "ARTIFACTS",
+          "bucket_name": "wrangnarok-artifacts-preview",
         },
       ],
       "durable_objects": {
@@ -301,6 +367,11 @@
           "binding": "NINJA_WORKFLOW",
           "name": "wrangnarok-ninjaone-orgs-v1-preview",
           "class_name": "NinjaOrgsWorkflow",
+        },
+        {
+          "binding": "NINJA_LOOKUP_WORKFLOW",
+          "name": "wrangnarok-ninjaone-org-lookup-v1-preview",
+          "class_name": "NinjaLookupWorkflow",
         },
         {
           "binding": "DIGEST_WORKFLOW",

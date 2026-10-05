@@ -82,4 +82,29 @@ describe("feasibility envelope (LIMITS-01)", () => {
   it("never lets unrelated green tests count as parity", () => {
     required(/green unrelated tests never count as parity/i, "parity-counting rule");
   });
+
+  it("names the current 64 MiB uncompressed Worker cap (no stale 3 MB hard cap)", () => {
+    // Reconciled 2026-09-19 (issue #177): Cloudflare Workers platform limits
+    // (2026-09-04 revision) enforce 64 MiB uncompressed on both plans with no
+    // compressed-size limit. The 730 KiB soft reference stays advisory.
+    // Live declarations are asserted on their own rows so a retained
+    // historical correction note can never mask a regressed live row.
+    const workerRow = envelope.split("\n").find((line) => /^\|\s*Worker script size\s*\|/i.test(line)) ?? "";
+    expect(workerRow, "live Worker script size row missing").not.toBe("");
+    expect(workerRow).toMatch(/64\s?MiB/i);
+    expect(workerRow).toMatch(/uncompressed/i);
+    expect(workerRow).toMatch(/both plans/i);
+    expect(workerRow).toMatch(/no compressed-size limit/i);
+    expect(workerRow, "stale 3 MB claim in live Worker row").not.toMatch(/3\s?MB/i);
+    const bundleRow = envelope.split("\n").find((line) => /^\|\s*Workers bundle\s*\|/i.test(line)) ?? "";
+    expect(bundleRow, "live Workers bundle row missing").not.toBe("");
+    expect(bundleRow).toMatch(/64\s?MiB\s+uncompressed/i);
+    expect(bundleRow).toMatch(/730\s?KiB/i);
+    expect(bundleRow, "stale 3 MB claim in live bundle row").not.toMatch(/3\s?MB/i);
+    expect(envelope, "stale 3 MB hard-cap claim").not.toMatch(/3\s?MB\s+(max|provider|hard)/i);
+    expect(budgetScript, "budget script still cites a stale 3 MB ceiling").not.toMatch(
+      /Cloudflare's 3 MB hard deploy ceiling/,
+    );
+    expect(budgetScript).toMatch(/64 MiB uncompressed/);
+  });
 });

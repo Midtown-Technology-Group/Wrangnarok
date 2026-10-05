@@ -1,0 +1,5 @@
+# OpenCode auto-review lane scope: automatic advisory PR review via the native
+# OpenCode GitHub Action. CI-config only: one new workflow plus this scope
+# file. No src/, no product code, no migrations, no new Cloudflare primitive.
+.github/workflows/opencode-review.yml
+scopes/lane-opencode-review.scope

@@ -105,8 +105,9 @@ describe("integrationOperation", () => {
       vendorDefaultMs: 1000,
       failureCode: "ECHO_INTEGRATION_FAILED",
       failureMessage: "The echo Integration could not complete.",
-      call: async (connection, deadline, operationId) => {
+      call: async (connection, secrets, deadline, operationId) => {
         expect(connection.integrationId).toBe(ECHO_INTEGRATION_ID);
+        expect(secrets).toBe(ctx.secrets);
         expect(typeof deadline).toBe("number");
         expect(operationId).toBe(`${id}-echo-http-v1`);
         return { message: "ok" };
@@ -144,6 +145,34 @@ describe("integrationOperation", () => {
         message: "This Saga requires an Integration Connection that is not configured for this Organization.",
       },
     });
+  });
+
+  it("threads the secret handle through the one Action convention", async () => {
+    // ADR-033-4: every leg takes the same
+    // (connection, secrets, deadline, operationId) call shape — ninjaorgs-style
+    // legs read secrets, echo-style legs ignore them, but the helper always
+    // passes the Execution's handle straight through the Action boundary.
+    const id = "2".repeat(64);
+    await insertExecution(id);
+    const secrets = { clientId: "ninja-client", clientSecret: "ninja-secret" };
+    const ctx = { ...testCtx(id), secrets };
+    const prepared = await prepareInput(testCtx(id), echoSaga, parseInput);
+    const outcome = await integrationOperation(ctx, echoSagaDef, prepared, {
+      op: "echo-http-v1",
+      position: 1,
+      integrationId: ECHO_INTEGRATION_ID,
+      vendorDefaultMs: 1000,
+      failureCode: "ECHO_INTEGRATION_FAILED",
+      failureMessage: "The echo Integration could not complete.",
+      call: async (connection, actionSecrets, deadline, operationId) => {
+        expect(connection.integrationId).toBe(ECHO_INTEGRATION_ID);
+        expect(actionSecrets).toBe(secrets);
+        expect(typeof deadline).toBe("number");
+        expect(operationId).toBe(`${id}-echo-http-v1`);
+        return { message: "ok" };
+      },
+    });
+    expect(outcome).toEqual({ ok: true, result: { message: "ok" } });
   });
 
   it("throws NonRetryableError on unreachable optional access", async () => {

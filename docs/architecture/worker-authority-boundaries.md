@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-09-12
 - **Amends:** ADR 008 — Full-stack app on a single Worker
-- **Related:** ADR 001 — Saga, Execution, and Operation execution model; ADR 003 — Integrations and Connections; ADR 005 — Secret storage; ADR 014 — Access authentication; ADR 015 — Organization lifecycle
+- **Related:** ADR 001 — Saga, Execution, and Operation execution model; ADR 003 — Integrations and Connections; ADR 005 — Secret storage; ADR 014 — Access authentication; ADR 034 — Organization lifecycle (renumbered from 015 by issue #225)
 
 ## Context
 

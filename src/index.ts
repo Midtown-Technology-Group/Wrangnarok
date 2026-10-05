@@ -18,6 +18,7 @@ import {
   swapSlugs,
   validateApp,
 } from "./apps";
+import { deleteLogo, getBranding, putLogo, readLogoBytes, resetBranding, updateBranding } from "./branding";
 import { cancelDirectChildren, isMissingLineageColumn } from "./children";
 import {
   artifactDetail,
@@ -63,6 +64,7 @@ import {
   loadRuntimeApp,
   parseTableQuery as parseAppTableQuery,
   patchTableRow,
+  pollAppTableChanges,
   readTableRows,
   recordAppExecution,
   redeemFileDownload,
@@ -97,10 +99,38 @@ import { indexOperations, inspectOperation, searchOperations } from "./openapi";
 import type { CodeModeProvenance } from "./openapi";
 import { toolRegistry } from "./tools";
 import {
+  authorizeMcpUserConsent,
+  completeMcpUserConsent,
+  connectMcpServiceCredential,
+  disconnectMcpUserConsentSelf,
+} from "./mcp-consent";
+import {
+  createMcpConnection,
+  deleteMcpConnection,
+  getMcpConnection,
+  listMcpConnections,
+  putMcpConnectionClientSecret,
+  updateMcpConnection,
+} from "./mcp-connections";
+import { listMcpCatalog, setMcpCatalogToolEnabled } from "./mcp-catalog";
+import { dispatchMcpTool, refreshMcpTools } from "./mcp-dispatch";
+import {
+  createMcpServerTemplate,
+  deleteMcpServerTemplate,
+  getMcpServerTemplate,
+  listMcpServerTemplates,
+  setMcpServerTemplateActive,
+  updateMcpServerTemplate,
+} from "./mcp-servers";
+import { disconnectMcpServiceCredential, readMcpUserConsent } from "./mcp-tokens";
+import {
   boundedJson,
   canTransition,
   classifyTerminateError,
+  cloudflareAuditSaga,
+  cloudflareInsightsSaga,
   cloudflareInventorySaga,
+  cloudflarePostureSaga,
   cloudflareVerifySaga,
   digestSaga,
   echoSaga,
@@ -108,10 +138,14 @@ import {
   Fault,
   helloParentSaga,
   helloSaga,
+  ninjaLookupSaga,
   ninjaSaga,
   object,
   parseCallerKey,
+  parseCloudflareAuditInput,
+  parseCloudflareInsightsInput,
   parseCloudflareInventoryInput,
+  parseCloudflarePostureInput,
   parseCloudflareVerifyInput,
   parseDigestInput,
   parseHelloInput,
@@ -119,6 +153,7 @@ import {
   parseHistoryQuery,
   parseInput,
   parseKey,
+  parseNinjaLookupInput,
   parseNinjaOrgsInput,
   parseSmokeInput,
   parseSubmission,
@@ -148,6 +183,44 @@ import {
   updateEndpoint,
   vendorChallenge,
 } from "./endpoints";
+import {
+  appEmbedSummary,
+  checkAppEmbedBinding,
+  checkAppEmbedOrigin,
+  createAppEmbedGrant,
+  listAppEmbedGrants,
+  loadAppEmbedGrant,
+  loadLiveDeployment,
+  parseAppEmbedGrantId,
+  revokeAppEmbedGrant,
+  rotateAppEmbedGrant,
+  touchAppEmbedGrantUse,
+  verifyAppEmbedSecret,
+} from "./app-embeds";
+import {
+  assertSessionOwnedFileRefs,
+  claimSessionUpload,
+  loadSessionUploads,
+  mintSessionUploadPath,
+  parseSessionUploadField,
+  sessionUploadKey,
+  SESSION_UPLOAD_TTL_SECONDS,
+} from "./session-uploads";
+import {
+  checkEmbedBinding,
+  checkEmbedOrigin,
+  createEmbedGrant,
+  embedGrantIdFromUser,
+  embedSummary,
+  fingerprintFormDef,
+  listEmbedGrants,
+  loadEmbedGrant,
+  parseEmbedGrantId,
+  revokeEmbedGrant,
+  rotateEmbedGrant,
+  touchEmbedGrantUse,
+  verifyEmbedSecret,
+} from "./embeds";
 import {
   createEventSource,
   createSubscription,
@@ -194,6 +267,7 @@ import {
   parseScheduleAt,
   parseStartupHandle,
   peekStartupHandle,
+  peekStartupIdentity,
   resolveFormProviders,
   saveForm,
   startFormSession,
@@ -229,6 +303,7 @@ import {
   grantPolicy,
   issueDownloadBatch,
   issueUploadBatch,
+  issueUploadSlot,
   listFiles,
   listLocations,
   listPolicies,
@@ -257,6 +332,17 @@ import {
   updateConnection,
 } from "./connections";
 import {
+  assignCapability,
+  checkReadiness,
+  deleteMapping,
+  listCapabilities,
+  listExecutionBindings,
+  listMappings,
+  removeCapability,
+  upsertMapping,
+} from "./capabilities";
+import {
+  checkConformance,
   createProfile,
   deleteProfile,
   discoverModels,
@@ -284,6 +370,7 @@ import {
   deletePreview,
   getOrgSummary,
   inviteMember,
+  isViewer,
   listMembers,
   listOrgs,
   listOrgHistory,
@@ -315,8 +402,10 @@ import {
   loadTable,
   parseBatchDeleteBody,
   parseBatchRequest,
+  parseChangesQuery,
   parseTableName,
   parseTableQuery,
+  pollRowChanges,
   queryRows,
   readRow,
   requireVisibleTable,
@@ -347,6 +436,20 @@ import {
   type ResourceAction,
   type ResourceKind,
 } from "./roles";
+import {
+  anonPrincipal,
+  anonPubIdFromUser,
+  checkPublicationBinding,
+  disablePublication,
+  isHoneypotFilled,
+  loadPublication,
+  loadScopedPublication,
+  parsePublicationId,
+  publicationSummary,
+  publishForm,
+  reviewPublication,
+  touchPublicationUse,
+} from "./public-forms";
 import { SAGA_CATALOG, SAGA_DEFINITIONS } from "./sagas";
 import { describeContract, SDK_DOC_PATH, SDK_VERSION } from "./sdk";
 import { isProviderEligible, parseProviderSubmission, providerSummary, runProvider } from "./sync";
@@ -365,15 +468,28 @@ import {
 } from "./executions";
 import { listExecutionLogs, parseLogSearchQuery, parseLogTailQuery, searchExecutionLogs } from "./logs";
 import { deploymentSecretsFromEnv, scrubValueWithDeploymentSecrets } from "./secrets";
+import {
+  deleteAvatar,
+  getProfile as getUserProfile,
+  putAvatar,
+  readAvatarBytes,
+  updateProfile as updateUserProfile,
+} from "./profile";
 import { logRequest } from "./usage";
+import { getUsageSummary, parseUsageSummaryQuery } from "./usage-reports";
 export {
+  CloudflareAuditWorkflow,
+  CloudflareInsightsWorkflow,
   CloudflareInventoryWorkflow,
+  CloudflarePostureWorkflow,
   CloudflareVerifyWorkflow,
   EchoWorkflow,
   HelloParentWorkflow,
   HelloWorkflow,
   NinjaEchoDigestWorkflow,
+  NinjaLookupWorkflow,
   NinjaOrgsWorkflow,
+  OnboardingWorkflow,
   SmokeWorkflow,
 } from "./sagas";
 // OAUTH-01 follow-up (issue #149): the cross-instance rotating-refresh fence
@@ -778,6 +894,313 @@ async function scheduleFormExecution(
   };
 }
 
+/** Issue one session-owned upload slot for an external form session
+ * (EMBED-01 slice 3, hardened on issue #156). The caller already
+ * authenticated the session class (grant secret + origin, or publication
+ * liveness) and the live declaration; everything below is shared: peek the
+ * live session bound to this form (unknown, expired, foreign, or
+ * definition-drifted handles answer STALE and stage nothing), resolve the
+ * named file field against the declaration (unknown or non-file names
+ * answer 400), admit the claim atomically under the per-session cap, then
+ * mint a single-use FILE-01 upload token for the server-chosen path. The
+ * atomic claim (count check plus insert in one D1 statement) keeps
+ * concurrent issuers from jointly exceeding the cap, and any D1 fault
+ * fails closed before a slot exists. The org-wide FILE-01 write policy
+ * still gates issuance, so deleting the location or revoking its policy
+ * stops new slots. */
+async function issueSessionUpload(
+  db: D1Database,
+  principal: Principal,
+  def: FormDefinition,
+  body: unknown,
+): Promise<{ location: string; path: string; token: string; expiresAt: string; maxBytes: number }> {
+  const record =
+    body !== null && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : ({} as Record<string, unknown>);
+  const session = await peekStartupHandle(db, principal, def.name, record.handle as string, def.id);
+  const field = parseSessionUploadField(def.fields, record.field);
+  const path = mintSessionUploadPath();
+  await claimSessionUpload(db, {
+    sessionHash: session.handleHash,
+    orgId: principal.orgId,
+    field: field.field,
+    location: field.location,
+    path,
+    maxBytes: field.maxBytes,
+    contentTypes: field.contentTypes,
+  });
+  let slot;
+  try {
+    slot = await issueUploadSlot(db, principal, field.location, path, SESSION_UPLOAD_TTL_SECONDS);
+  } catch (error) {
+    // The slot never minted, so release the claim rather than burning one
+    // of the session's admissions on a failed issuance. Best-effort: the
+    // original failure still propagates, and the session TTL bounds a
+    // leaked claim regardless.
+    await db
+      .prepare("DELETE FROM form_session_uploads WHERE session_hash=? AND location=? AND path=?")
+      .bind(session.handleHash, field.location, path)
+      .run()
+      .catch(() => undefined);
+    throw error;
+  }
+  return { location: field.location, path, token: slot.token, expiresAt: slot.expiresAt, maxBytes: field.maxBytes };
+}
+
+/** Finalize one session-owned upload (EMBED-01 slice 3, issue #156). The
+ * presented handle re-binds the pre-gate request to its session exactly
+ * like the submit routes: signed sessions re-resolve the live grant
+ * (revocation, expiry, origin, and capability drift kill outstanding
+ * finalizes with STALE, no grace), anonymous sessions re-resolve the live
+ * publication, and every other handle class answers STALE. The claimed
+ * triple must name a path this session issued; the asserted size and type
+ * must fit the issuing field's bounds; then the standard
+ * finalize-after-upload verification measures the staged bytes itself. */
+async function finalizeSessionUpload(
+  env: Bindings,
+  request: Request,
+  body: unknown,
+): Promise<{ finalized: true; location: string; path: string }> {
+  const claim = parseFinalizeBody(body);
+  // parseFinalizeBody already proved the body is an object, so the handle
+  // read has no shape fallback: a missing handle is simply unbound.
+  const presented = (body as Record<string, unknown>).handle ?? null;
+  const stale = () => new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+  const bound = await peekStartupIdentity(env.DB, presented);
+  if (!bound) throw stale();
+  let principal: Principal;
+  let def: FormDefinition;
+  const grantId = embedGrantIdFromUser(bound.userId);
+  const pubId = grantId ? null : anonPubIdFromUser(bound.userId);
+  if (grantId) {
+    const grant = await loadEmbedGrant(env.DB, grantId).catch(() => null);
+    if (!grant || grant.org_id !== bound.orgId || grant.form_name !== bound.formName) throw stale();
+    if (grant.enabled !== 1 || (grant.expires_at !== null && Date.parse(grant.expires_at) <= Date.now())) {
+      throw stale();
+    }
+    checkEmbedOrigin(grant, request.headers.get("Origin"));
+    const live = await loadForm(env.DB, grant.org_id, grant.form_name);
+    if (!live) throw stale();
+    if (grant.form_id !== live.id || grant.capability_fingerprint !== (await fingerprintFormDef(live))) {
+      throw stale();
+    }
+    principal = { orgId: grant.org_id, userId: `embed:${grant.id}` };
+    def = live;
+  } else if (pubId) {
+    const pub = await loadPublication(env.DB, pubId).catch(() => null);
+    if (!pub || pub.org_id !== bound.orgId || pub.form_name !== bound.formName) throw stale();
+    if (pub.enabled !== 1) throw stale();
+    const live = await loadForm(env.DB, pub.org_id, pub.form_name);
+    if (!live) throw stale();
+    if (pub.form_id !== live.id || pub.capability_fingerprint !== (await fingerprintFormDef(live))) {
+      throw stale();
+    }
+    principal = anonPrincipal(pub.org_id, pub.id);
+    def = live;
+  } else {
+    throw stale();
+  }
+  const session = await peekStartupHandle(env.DB, principal, def.name, presented as string, def.id);
+  const owned = await loadSessionUploads(env.DB, session.handleHash, principal.orgId);
+  const issued = owned.get(sessionUploadKey(claim.location, claim.path));
+  if (!issued) {
+    throw new Fault(422, "FORM_VALIDATION_FAILED", "The form submission did not pass validation.", [
+      { field: "", code: "FILE_NOT_SESSION_OWNED", message: "This path was not uploaded by this form session." },
+    ]);
+  }
+  if (claim.size > issued.maxBytes) {
+    throw new Fault(413, "FILE_TOO_LARGE", "The referenced file exceeds the field bound.");
+  }
+  if (issued.contentTypes.length > 0 && !issued.contentTypes.includes(claim.contentType)) {
+    throw new Fault(415, "CONTENT_TYPE_REJECTED", "The referenced file type is not accepted.");
+  }
+  await finalizeUpload(env.DB, env.FILES, principal, claim);
+  return { finalized: true, location: claim.location, path: claim.path };
+}
+
+/** Shared FORM-02 submit core: one authoritative path from a live startup
+ * handle to dispatch, entered by the operator submit route (caller holds
+ * the form submit grant), the signed-embed submit route (caller holds
+ * the grant secret plus an allowed origin and a fresh fingerprint), and
+ * the anonymous public submit route (live publication, confirmation-only
+ * disclosure). Authorization happens in the routes; everything below is
+ * identical: peek the session without consuming, re-resolve provider
+ * options, run the declaration gate (422 + per-field details, handle left
+ * live for a corrected retry), apply the file posture, run the Saga parse
+ * gate, then schedule or dispatch down the standard Execution path and
+ * consume the handle only after durable admission
+ * (consume-after-admission keeps 503 DISPATCH_UNCONFIRMED retries on the
+ * idempotent recovery path).
+ *
+ * File posture is the single deliberate fork: operator submissions
+ * re-validate merged file references against the live FILE-01 rows, while
+ * external sessions (signed embeds and anonymous publication) first
+ * require every presented file reference to name a (location, path) the
+ * submitting session itself staged through the session-upload routes
+ * (EMBED-01 slice 3) and then re-validate the merged remainder the same
+ * way — a merged file ref past the ownership check can only come from an
+ * author-declared default, and stale defaults fail identically on every
+ * path. `extraHeaders` rides both receipts as-is (the external routes
+ * pass their CORS headers; the operator route passes nothing).
+ * `disclosure` selects the receipt shape: anonymous public submissions
+ * dispatch identically but answer confirmation-only (`{ form, received:
+ * true }`, no execution ID, no status URL, no Location header), so the
+ * receipt never discloses execution/history. */
+async function runFormSubmit(
+  env: Bindings,
+  caller: Principal,
+  key: string,
+  def: FormDefinition,
+  body: unknown,
+  files: "check" | "session",
+  extraHeaders: Record<string, string> = {},
+  disclosure: "standard" | "confirmation-only" = "standard",
+): Promise<Response> {
+  const name = def.name;
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    throw new Fault(422, "FORM_VALIDATION_FAILED", "The form submission must be a JSON object.", [
+      { field: "", code: "NOT_OBJECT", message: "The form submission must be a JSON object." },
+    ]);
+  }
+  const record = body as Record<string, unknown>;
+  if (Object.keys(record).some((entry) => !["handle", "values", "scheduleAt"].includes(entry))) {
+    throw new Fault(422, "FORM_VALIDATION_FAILED", "Submissions carry handle, values, and scheduleAt only.", [
+      { field: "", code: "UNKNOWN_FIELD", message: "Submissions carry handle, values, and scheduleAt only." },
+    ]);
+  }
+  const handle = parseStartupHandle(record.handle);
+  const scheduleAt = parseScheduleAt(record.scheduleAt);
+  // Peek the session without consuming: validation, provider refresh,
+  // and the file check all run first so a submission that fails them
+  // leaves the handle live for a corrected retry. The handle binds to
+  // the current definition id, so delete/recreate under the same name
+  // invalidates sessions minted against the old form. The caller's key
+  // rides along so a handle spent by THIS key still peeks live for
+  // same-key retries and canonical replays.
+  const session = await peekStartupHandle(env.DB, caller, name, handle, def.id, key);
+  // One provider pass per submit too: fresh options re-check membership
+  // while auto-fill values ride the persisted snapshot, never the scan.
+  const fresh = await resolveFormProviders(env.DB, caller, def.fields, readProviderRows);
+  const values = record.values === undefined ? {} : record.values;
+  // Order matters: form-gate validation + defaults merge first, then
+  // the file posture, then the Saga parse gate last — so a stale file
+  // pointer answers 422 even when the declaration drifts from its Saga
+  // schema (which answers the Saga 400 instead).
+  const merged = validateAndMerge(def, values, { allowedOptions: fresh.options, values: session.snapshot });
+  if (files === "session") {
+    const owned = await loadSessionUploads(env.DB, session.handleHash, caller.orgId);
+    assertSessionOwnedFileRefs(def.fields, values, owned);
+  }
+  await checkFormFiles(env.DB, caller, def, merged);
+  const { saga, input } = parseSubmission({ sagaId: def.sagaId, input: merged });
+  // FORM-02 recovery (#155): consume AFTER durable admission, not
+  // before. The old consume-then-dispatch order burned the one-time
+  // handle when submit answered 503 DISPATCH_UNCONFIRMED, making the
+  // documented same-request retry impossible (STALE_FORM_HANDLE instead
+  // of the idempotent recovery path). The flow below:
+  // 1. peek the fence (unused + live + same form id),
+  // 2. dispatch (or durable schedule insert) first,
+  // 3. consume only on success, tolerating a lost consume race only
+  //    when the Execution row proves OUR submission admitted (same
+  //    deterministic execution id + same input). A lost race over a
+  //    foreign admission still answers stale, never a replay of ours.
+  if (scheduleAt !== null) {
+    const scheduled = await scheduleFormExecution(env.DB, caller, key, name, saga, input, scheduleAt);
+    // Consume on every confirmed admission, including idempotent
+    // replay: the replay proves OUR key admitted, so the handle binds
+    // to it here. A live handle after replay would stay reusable under
+    // a different key (PR 320 review).
+    const scheduledInput = { ...(input as Record<string, unknown>), __form: name, __scheduleAt: scheduleAt };
+    await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, scheduledInput);
+    if (disclosure === "confirmation-only") {
+      return json({ form: name, received: true }, scheduled.replayed ? 200 : 202, { ...extraHeaders });
+    }
+    return json({ form: name, ...scheduled }, scheduled.replayed ? 200 : 202, {
+      Location: scheduled.statusUrl,
+      ...extraHeaders,
+    });
+  }
+  // Defensive strip before the immediate Saga parse gate: a form
+  // field can never declare __-prefixed names (FIELD_NAME), so any
+  // such key would be internal linkage, never caller input.
+  const { __form: _internalForm, __scheduleAt: _internalAt, ...sagaInput } = input as Record<string, unknown>;
+  void _internalForm;
+  void _internalAt;
+  const accepted = await submit(env, caller, key, saga, sagaInput);
+  // Consume on every confirmed admission, including idempotent replay
+  // (same rationale as the scheduled path above): the replayed row
+  // proves OUR key, so the handle binds to it and cannot be reused
+  // under a different key afterwards.
+  await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, sagaInput);
+  // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
+  if (disclosure === "confirmation-only") {
+    return json({ form: name, received: true }, accepted.replayed ? 200 : 202, { ...extraHeaders });
+  }
+  return json({ form: name, ...accepted }, accepted.replayed ? 200 : 202, {
+    Location: accepted.statusUrl,
+    ...extraHeaders,
+  });
+}
+
+/** Serialize a route Fault (or an unexpected error) to its error response:
+ * status challenges, the FORM-01 422 details channel, and the outward
+ * secret scrub. Shared by the main catch-all and the embed routes, which
+ * add their CORS headers through `extra` so browsers can read embed
+ * failures as well as receipts. */
+function faultResponse(error: unknown, env: Bindings, url: URL, extra: Record<string, string> = {}): Response {
+  const fault =
+    error instanceof Fault ? error : new Fault(500, "INTERNAL_ERROR", "The request could not be completed.");
+  const headers: Record<string, string> = { ...extra };
+  // TOOL-01 S1: MCP clients learn the discovery document URL from the
+  // rejection itself (RFC 9728 resource_metadata pointer). Every other
+  // route keeps the bare Bearer [REDACTED]
+  if (fault.status === 401)
+    headers["WWW-Authenticate"] = url.pathname === "/api/mcp" ? mcpUnauthorizedChallenge(url.origin) : "Bearer";
+  if (fault.status === 503) headers["Retry-After"] = "5";
+  // Outward error path: a secret substring embedded in a Fault message
+  // (caller input echoed back, miswired env text) is replaced before send.
+  // FORM-01 details channel: the 422 form-validation Fault carries its
+  // per-field failure list here. No other Fault sets details; details are
+  // field names and fixed reason strings, scrubbed like the rest.
+  const faultBody =
+    fault.details === undefined
+      ? { code: fault.code, message: fault.message }
+      : { code: fault.code, message: fault.message, details: fault.details };
+  return json(scrubValueWithDeploymentSecrets({ error: faultBody }, env), fault.status, headers);
+}
+
+/** CORS headers for the embed routes: browser embeds are cross-origin by
+ * design, so the JSON POSTs preflight and their responses must be
+ * readable. The request Origin reflects only as
+ * `Access-Control-Allow-Origin` plus `Vary: Origin`; reflection alone
+ * authorizes nothing — the POST handlers still enforce the grant
+ * allowlist before doing anything. Error responses carry the same headers
+ * so browsers can read embed failures (codes and fixed messages, never
+ * secrets) instead of surfacing opaque TypeErrors. Missing origins yield
+ * `Vary` only. */
+function embedCorsHeaders(origin: string | null): Record<string, string> {
+  return origin === null ? { Vary: "Origin" } : { "Access-Control-Allow-Origin": origin, Vary: "Origin" };
+}
+
+/** Answer a CORS preflight for one embed route: reflect the request Origin
+ * with the route's allowed methods/headers (cached 10 minutes). Carries
+ * no grant context and touches no D1 — the submit preflight has no body
+ * to resolve a handle from, and preflight authorizes nothing either way;
+ * the POST enforces the allowlist. Unknown or malformed grant IDs still
+ * answer 204 here and fail on the POST. */
+function embedPreflight(request: Request, allowHeaders: string): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      ...embedCorsHeaders(request.headers.get("Origin")),
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": allowHeaders,
+      "Access-Control-Max-Age": "600",
+    },
+  });
+}
+
 async function handleFetch(request: Request, env: Bindings): Promise<Response> {
   const url = new URL(request.url);
   // Single-Worker full-stack app (ADR 008): the browser UI ships as Static
@@ -830,6 +1253,438 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       if (delivered) return delivered;
       return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
     }
+    // UX-01 slice 1 (issue #176): safe public branding read. Unauthenticated
+    // by design — name, colors, and logo bytes carry no secrets — so pre-auth
+    // shells and future embeds can render the Organization brand. Org UUIDs
+    // are unguessable lookup keys; unknown orgs 404 like unknown endpoints.
+    const publicBranding = /^\/api\/branding\/public\/([0-9a-fA-F-]{36})(\/logo)?$/.exec(url.pathname);
+    if (publicBranding?.[1] && request.method === "GET") {
+      rejectQuery(url);
+      const orgId = parseOrgId(publicBranding[1]);
+      const org = await env.DB.prepare("SELECT id FROM organizations WHERE id=?").bind(orgId).first<{ id: string }>();
+      if (!org) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+      if (publicBranding[2]) {
+        const logo = await readLogoBytes({ db: env.DB, bucket: env.FILES }, orgId);
+        if (!logo) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+        return apiBytes(logo.bytes as Uint8Array<ArrayBuffer>, 200, {
+          "Content-Type": logo.contentType,
+          "Content-Length": String(logo.bytes.byteLength),
+          ETag: `"${logo.sha256}"`,
+          "Cache-Control": "public, max-age=300",
+        });
+      }
+      return json({ branding: await getBranding(env.DB, orgId) });
+    }
+    // EMBED-01 slice 1 (issue #156): signed form-embed bootstrap. Pre-gate
+    // like endpoint deliveries — the grant secret authenticates, never an
+    // operator session. Secret, origin, and fingerprint all verify before
+    // any session exists; success mints a standard FORM-02 startup handle
+    // bound to the embed principal, plus the inspectable snapshot, the
+    // resolved options, and the server-authoritative declaration (the
+    // external host cannot call the authed designer routes). Unknown
+    // grants answer 404; revoked grants 410; expired or wrong secrets 401;
+    // foreign origins 403; a form changed since issue/rotate 409.
+    const embedStartup = /^\/api\/embeds\/([0-9a-fA-F-]{36})\/startup$/.exec(url.pathname);
+    if (embedStartup?.[1] && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin, X-Embed-Secret");
+    }
+    if (embedStartup?.[1] && request.method === "POST") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read embed receipts and embed errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        requireJson(request);
+        const grantId = parseEmbedGrantId(embedStartup[1]);
+        const grant = await loadEmbedGrant(env.DB, grantId).catch(() => null);
+        if (!grant) throw new Fault(404, "NOT_FOUND", "Not found.");
+        const principal = await verifyEmbedSecret(grant, request.headers.get("X-Embed-Secret"));
+        checkEmbedOrigin(grant, request.headers.get("Origin"));
+        const def = await loadForm(env.DB, grant.org_id, grant.form_name);
+        if (!def) throw new Fault(404, "FORM_NOT_FOUND", "Form not found.");
+        checkEmbedBinding(grant, { formId: def.id, fingerprint: await fingerprintFormDef(def) });
+        const started = await startFormSession(
+          env.DB,
+          principal,
+          def,
+          await boundedJson(request.body),
+          readProviderRows,
+        );
+        await touchEmbedGrantUse(env.DB, grant.id);
+        return json(
+          {
+            form: def.name,
+            handle: started.handle,
+            expiresAt: started.expiresAt,
+            snapshot: started.snapshot,
+            options: started.options,
+            declaration: serializeForm(def),
+            fingerprint: grant.capability_fingerprint,
+          },
+          201,
+          cors,
+        );
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // Signed-embed submit: the handle binds the pre-gate request to its
+    // session (org, embed principal, form) before any other check. The
+    // grant re-resolves on every submit — revocation and expiry kill
+    // outstanding sessions with STALE, no grace — the browser Origin
+    // re-verifies against the allowlist, and the live declaration
+    // re-fingerprints (a form changed after startup answers STALE, the
+    // FORM-02 definition-mismatch contract; 409 exists only at bootstrap,
+    // where no session exists to be stale). Operator handles are rejected
+    // here exactly as embed handles are rejected on the operator route:
+    // the two paths never accept each other's sessions. Dispatch enters
+    // the shared submit core — the standard submit protocol, never a fork.
+    if (url.pathname === "/api/embeds/submit" && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Idempotency-Key, Origin");
+    }
+    if (url.pathname === "/api/embeds/submit" && request.method === "POST") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read embed receipts and embed errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        const key = parseCallerKey(request.headers.get("Idempotency-Key"));
+        requireJson(request);
+        const body: unknown = await boundedJson(request.body);
+        const presented =
+          body !== null && typeof body === "object" && !Array.isArray(body)
+            ? ((body as Record<string, unknown>).handle ?? null)
+            : null;
+        const bound = await peekStartupIdentity(env.DB, presented);
+        const grantId = bound ? embedGrantIdFromUser(bound.userId) : null;
+        const grant = grantId ? await loadEmbedGrant(env.DB, grantId).catch(() => null) : null;
+        if (!bound || !grant || grant.org_id !== bound.orgId || grant.form_name !== bound.formName) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        if (grant.enabled !== 1 || (grant.expires_at !== null && Date.parse(grant.expires_at) <= Date.now())) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        checkEmbedOrigin(grant, request.headers.get("Origin"));
+        const def = await loadForm(env.DB, grant.org_id, grant.form_name);
+        if (!def) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        const live = { formId: def.id, fingerprint: await fingerprintFormDef(def) };
+        if (grant.form_id !== live.formId || grant.capability_fingerprint !== live.fingerprint) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        // Awaited (not returned): a bare `return runFormSubmit(...)` would
+        // adopt the rejection past this try/catch, escaping Faults as worker
+        // exceptions instead of serialized error responses.
+        return await runFormSubmit(
+          env,
+          { orgId: grant.org_id, userId: `embed:${grant.id}` },
+          key,
+          def,
+          body,
+          "session",
+          cors,
+        );
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // EMBED-01 slice 2 (issue #156): signed app-embed asset reads. Pre-gate
+    // like the form-embed routes — the grant secret authenticates, never an
+    // operator session. Secret, origin, and deployment fingerprint all
+    // verify before any byte serves; success serves the ACTIVE deployment's
+    // stored bundle file. Unknown grants answer 404; revoked grants 410;
+    // expired or wrong secrets 401; foreign origins 403; a redeploy since
+    // issue/rotate 409. Form-embed grant IDs never resolve here (404), so
+    // the two signed classes cannot be repurposed across surfaces.
+    const appAssetEmbed = /^\/api\/app-embeds\/([0-9a-fA-F-]{36})\/assets\/(.+)$/.exec(url.pathname);
+    if (appAssetEmbed?.[1] && appAssetEmbed[2] && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin, X-Embed-Secret");
+    }
+    if (appAssetEmbed?.[1] && appAssetEmbed[2] && request.method === "GET") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read embed receipts and embed errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        const grantId = parseAppEmbedGrantId(appAssetEmbed[1]);
+        const grant = await loadAppEmbedGrant(env.DB, grantId).catch(() => null);
+        if (!grant) throw new Fault(404, "NOT_FOUND", "Not found.");
+        await verifyAppEmbedSecret(grant, request.headers.get("X-Embed-Secret"));
+        checkAppEmbedOrigin(grant, request.headers.get("Origin"));
+        const live = await loadLiveDeployment(env.DB, grant.org_id, grant.app_id);
+        if (!live) throw new Fault(404, "APP_NOT_FOUND", "App not found.");
+        await checkAppEmbedBinding(grant, live);
+        const served = await serveAsset(
+          env.DB,
+          { orgId: grant.org_id, userId: `appembed:${grant.id}` },
+          grant.app_id,
+          appAssetEmbed[2],
+        );
+        await touchAppEmbedGrantUse(env.DB, grant.id);
+        return apiBytes(served.content, 200, {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-store",
+          ETag: `"${served.contentHash}"`,
+          "X-Content-Type-Options": "nosniff",
+          ...cors,
+        });
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // EMBED-01 slice 2 (issue #156): anonymous public-form bootstrap.
+    // Pre-gate and credential-free by design — the publication ID is a
+    // public lookup key, never a secret. A live, capability-fresh
+    // publication mints a standard FORM-02 startup handle bound to the
+    // anonymous principal, plus the inspectable snapshot, resolved options,
+    // the server-authoritative declaration, the fingerprint, and the
+    // honeypot field the client must leave empty. Unknown publications
+    // answer 404; disabled ones 404 FORM_NOT_PUBLISHED (blocked means gone
+    // to the outside world); a form changed since publish/review 409
+    // PUBLICATION_STALE.
+    const publicStartup = /^\/api\/public\/([0-9a-fA-F-]{36})\/startup$/.exec(url.pathname);
+    if (publicStartup?.[1] && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin");
+    }
+    if (publicStartup?.[1] && request.method === "POST") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read public receipts and public errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        requireJson(request);
+        const pubId = parsePublicationId(publicStartup[1]);
+        const pub = await loadPublication(env.DB, pubId).catch(() => null);
+        if (!pub) throw new Fault(404, "NOT_FOUND", "Not found.");
+        if (pub.enabled !== 1) throw new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
+        const def = await loadForm(env.DB, pub.org_id, pub.form_name);
+        if (!def) throw new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
+        checkPublicationBinding(pub, { formId: def.id, fingerprint: await fingerprintFormDef(def) });
+        const started = await startFormSession(
+          env.DB,
+          anonPrincipal(pub.org_id, pub.id),
+          def,
+          await boundedJson(request.body),
+          readProviderRows,
+        );
+        await touchPublicationUse(env.DB, pub.id);
+        return json(
+          {
+            form: def.name,
+            handle: started.handle,
+            expiresAt: started.expiresAt,
+            snapshot: started.snapshot,
+            options: started.options,
+            declaration: serializeForm(def),
+            fingerprint: pub.capability_fingerprint,
+            honeypotField: pub.honeypot_field,
+          },
+          201,
+          cors,
+        );
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // Anonymous public submit: the handle binds the pre-gate request to its
+    // session (org, anonymous principal, form) before any other check. The
+    // publication re-resolves on every submit — disabling and capability
+    // drift kill outstanding sessions with STALE, no grace. Dispatch enters
+    // the shared submit core with confirmation-only disclosure (the receipt
+    // never names an execution), and the honeypot spam trap answers the
+    // identical confirmation without dispatching. Operator, form-embed, and
+    // app-embed handles are rejected here exactly as anonymous handles are
+    // rejected on those routes: the classes never accept each other.
+    if (url.pathname === "/api/public/submit" && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Idempotency-Key, Origin");
+    }
+    if (url.pathname === "/api/public/submit" && request.method === "POST") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read public receipts and public errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        const key = parseCallerKey(request.headers.get("Idempotency-Key"));
+        requireJson(request);
+        const body: unknown = await boundedJson(request.body);
+        const presented =
+          body !== null && typeof body === "object" && !Array.isArray(body)
+            ? ((body as Record<string, unknown>).handle ?? null)
+            : null;
+        const bound = await peekStartupIdentity(env.DB, presented);
+        const pubId = bound ? anonPubIdFromUser(bound.userId) : null;
+        const pub = pubId ? await loadPublication(env.DB, pubId).catch(() => null) : null;
+        if (!bound || !pub || pub.org_id !== bound.orgId || pub.form_name !== bound.formName) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        if (pub.enabled !== 1) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        const def = await loadForm(env.DB, pub.org_id, pub.form_name);
+        if (!def) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        const live = { formId: def.id, fingerprint: await fingerprintFormDef(def) };
+        if (pub.form_id !== live.formId || pub.capability_fingerprint !== live.fingerprint) {
+          throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+        }
+        const values =
+          body !== null && typeof body === "object" && !Array.isArray(body)
+            ? (body as Record<string, unknown>).values
+            : undefined;
+        if (isHoneypotFilled(values, pub.honeypot_field)) {
+          // Spam trap: identical confirmation, no dispatch, no consume —
+          // the response shape teaches bots nothing.
+          return json({ form: def.name, received: true }, 202, cors);
+        }
+        // Awaited (not returned): a bare `return runFormSubmit(...)` would
+        // adopt the rejection past this try/catch, escaping Faults as worker
+        // exceptions instead of serialized error responses.
+        return await runFormSubmit(
+          env,
+          anonPrincipal(pub.org_id, pub.id),
+          key,
+          def,
+          body,
+          "session",
+          cors,
+          "confirmation-only",
+        );
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // EMBED-01 slice 3 (issue #156): session-owned uploads for external
+    // form sessions. Issuance rides the existing session authentication —
+    // grant secret plus exact-match origin for signed embeds, publication
+    // liveness for anonymous links — and mints a server-chosen path plus
+    // a single-use FILE-01 upload token bound to the startup session. The
+    // byte PUT and the finalize re-verify against that claim; submit
+    // requires every presented file reference to name a claimed triple
+    // for the submitting session. Unknown grants/publications answer 404;
+    // revoked or expired grants deny issuance with 410/401 and kill
+    // outstanding finalizes with STALE; foreign origins answer 403; a
+    // form changed since issue/rotate/publish answers 409 at issuance.
+    const embedUploadIssue = /^\/api\/embeds\/([0-9a-fA-F-]{36})\/uploads$/.exec(url.pathname);
+    if (embedUploadIssue?.[1] && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin, X-Embed-Secret");
+    }
+    if (embedUploadIssue?.[1] && request.method === "POST") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read issuance receipts and errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        requireJson(request);
+        const grantId = parseEmbedGrantId(embedUploadIssue[1]);
+        const grant = await loadEmbedGrant(env.DB, grantId).catch(() => null);
+        if (!grant) throw new Fault(404, "NOT_FOUND", "Not found.");
+        const principal = await verifyEmbedSecret(grant, request.headers.get("X-Embed-Secret"));
+        checkEmbedOrigin(grant, request.headers.get("Origin"));
+        const def = await loadForm(env.DB, grant.org_id, grant.form_name);
+        if (!def) throw new Fault(404, "FORM_NOT_FOUND", "Form not found.");
+        checkEmbedBinding(grant, { formId: def.id, fingerprint: await fingerprintFormDef(def) });
+        const issued = await issueSessionUpload(env.DB, principal, def, await boundedJson(request.body));
+        await touchEmbedGrantUse(env.DB, grant.id);
+        return json(issued, 201, cors);
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    const publicUploadIssue = /^\/api\/public\/([0-9a-fA-F-]{36})\/uploads$/.exec(url.pathname);
+    if (publicUploadIssue?.[1] && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin");
+    }
+    if (publicUploadIssue?.[1] && request.method === "POST") {
+      // CORS rides success and failure alike (inner catch, not the outer
+      // one) so browsers can read issuance receipts and errors.
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        requireJson(request);
+        const pubId = parsePublicationId(publicUploadIssue[1]);
+        const pub = await loadPublication(env.DB, pubId).catch(() => null);
+        if (!pub) throw new Fault(404, "NOT_FOUND", "Not found.");
+        if (pub.enabled !== 1) throw new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
+        const def = await loadForm(env.DB, pub.org_id, pub.form_name);
+        if (!def) throw new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
+        checkPublicationBinding(pub, { formId: def.id, fingerprint: await fingerprintFormDef(def) });
+        const issued = await issueSessionUpload(
+          env.DB,
+          anonPrincipal(pub.org_id, pub.id),
+          def,
+          await boundedJson(request.body),
+        );
+        await touchPublicationUse(env.DB, pub.id);
+        return json(issued, 201, cors);
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // Session byte PUT: the single-use upload token is the credential
+    // (FILE-01 shape — hashed storage, expiry, policy re-checked at
+    // consume), so this route is pre-gate like the other session routes.
+    // Staging authorizes nothing beyond the minted path: submit still
+    // requires the session ownership claim.
+    if (url.pathname === "/api/session-uploads/content" && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin");
+    }
+    if (url.pathname === "/api/session-uploads/content" && request.method === "PUT") {
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        const token = url.searchParams.get("token");
+        const extra = [...url.searchParams.keys()].filter((key) => key !== "token");
+        if (token === null || extra.length > 0)
+          throw new Fault(400, "UNSUPPORTED_QUERY", "Uploads need exactly ?token= from an issued slot.");
+        const consumed = await consumeUploadToken(env.DB, token);
+        const declared = await loadLocation(env.DB, consumed.orgId, consumed.location);
+        if (!declared) throw new Fault(404, "NOT_FOUND", "Not found.");
+        if (!request.body) throw new Fault(400, "EMPTY_UPLOAD", "The upload body must not be empty.");
+        const contentType = request.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() || "";
+        if (declared.contentTypes.length > 0 && !declared.contentTypes.includes(contentType)) {
+          throw new Fault(
+            415,
+            "CONTENT_TYPE_REJECTED",
+            `Content type "${contentType}" is not allowed in this location.`,
+          );
+        }
+        const bytes = await readBoundedBytes(request.body, declared.maxBytes + 1);
+        await env.FILES.put(consumed.staging, bytes, { httpMetadata: { contentType: contentType || undefined } });
+        return json({ staged: true, size: bytes.byteLength }, 200, cors);
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
+    // Session finalize: binds the staged bytes to the session claim after
+    // verifying the live grant/publication, the live session, the issued
+    // triple, and the field's size/type bounds — then delegates to the
+    // standard finalize-after-upload verification (server-measured size
+    // and digest, never trusted assertions).
+    if (url.pathname === "/api/session-uploads/finalize" && request.method === "OPTIONS") {
+      rejectQuery(url);
+      return embedPreflight(request, "Content-Type, Origin");
+    }
+    if (url.pathname === "/api/session-uploads/finalize" && request.method === "POST") {
+      const cors = embedCorsHeaders(request.headers.get("Origin"));
+      try {
+        rejectQuery(url);
+        requireJson(request);
+        const body: unknown = await boundedJson(request.body);
+        const finalized = await finalizeSessionUpload(env, request, body);
+        return json(finalized, 200, cors);
+      } catch (error) {
+        return faultResponse(error, env, url, cors);
+      }
+    }
     const identity = await authenticate(request, env);
     // AUTH-01 membership gate (ADR 015): every /api/* request resolves the
     // caller against D1. The effective org is the path target for org admin
@@ -877,7 +1732,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       (url.pathname === "/api/logs" && request.method === "GET") ||
       (/^\/api\/executions\/[a-f0-9]{64}\/logs$/.test(url.pathname) && request.method === "GET");
     const tableQueryList =
-      request.method === "GET" && /^\/api\/tables\/[a-z0-9][a-z0-9-]{0,63}\/(rows|count)$/.test(url.pathname);
+      request.method === "GET" && /^\/api\/tables\/[a-z0-9][a-z0-9-]{0,63}\/(rows|count|changes)$/.test(url.pathname);
     // OPS-01 (ADR 020): the audit list and notifications list take query
     // strings too, each through its own allowlisted parser. OPS-02 (issue
     // #173): the ops metrics/jobs reads take the same allowlisted keys as
@@ -892,6 +1747,9 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         url.pathname === "/api/ops/scheduled-tasks" ||
         url.pathname === "/api/ops/preflight" ||
         url.pathname === "/api/ops/connections");
+    // OPS-04 S1 (issue #175): the usage summary read takes ?saga= +
+    // ?startDate=/?endDate= through its own allowlisted parser below.
+    const usageSummaryQuery = request.method === "GET" && url.pathname === "/api/usage/summary";
     // FILE-02 artifact routes take their own allowlisted keys (upload
     // ?name=/?mime=, list ?limit=, binding ?scope=/?refId=); each route
     // validates its keys below.
@@ -901,6 +1759,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // allowlisted parsers, like the table query/count routes above.
     const appTableRowsRead =
       request.method === "GET" && /^\/api\/apps\/[0-9a-f-]{36}\/runtime\/tables\/[^/]+\/rows$/.test(url.pathname);
+    // APP-02 tables-realtime composition (issue #160): the bounded-poll
+    // changes feed takes ?since=/?sync_token=/?limit= through
+    // parseChangesQuery at the route, like the TABLE-02 changes route above.
+    const appTableChangesRead =
+      request.method === "GET" && /^\/api\/apps\/[0-9a-f-]{36}\/runtime\/tables\/[^/]+\/changes$/.test(url.pathname);
     const appRuntimeFileDelete =
       request.method === "DELETE" && /^\/api\/apps\/[0-9a-f-]{36}\/runtime\/files\/.+$/.test(url.pathname);
     const fileList = url.pathname === "/api/files" && request.method === "GET";
@@ -913,6 +1776,13 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // TOOL-01 Code Mode search (issue #170): ?integration= + ?q= through the
     // route's own allowlisted parser below.
     const openapiSearch = request.method === "GET" && url.pathname === "/api/openapi/search";
+    // TOOL-02 outbound MCP (issue #171): ?include_inactive= on the template
+    // reads and ?hard= on template delete ride the routes' own allowlisted
+    // parsers below.
+    const mcpQueryList =
+      (request.method === "GET" && url.pathname === "/api/mcp-servers") ||
+      (request.method === "GET" && /^\/api\/mcp-servers\/[0-9a-f-]{36}$/.test(url.pathname)) ||
+      (request.method === "DELETE" && /^\/api\/mcp-servers\/[0-9a-f-]{36}$/.test(url.pathname));
     // TRG-01 delivery visibility (issue #137): ?window= through the route's
     // own allowlisted parser below.
     const scheduleDeliveriesRead =
@@ -933,13 +1803,16 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       !opsDiagQueryList &&
       !artifactQuery &&
       !appTableRowsRead &&
+      !appTableChangesRead &&
       !appRuntimeFileDelete &&
       !fileList &&
       !fileBytes &&
       !isPolicyConsumers &&
       !openapiSearch &&
       !scheduleDeliveriesRead &&
-      !subscriptionDeliveriesRead
+      !subscriptionDeliveriesRead &&
+      !usageSummaryQuery &&
+      !mcpQueryList
     )
       throw new Fault(400, "UNSUPPORTED_QUERY", "Query parameters are not supported on this route.");
     if (isOrgPath) {
@@ -1598,19 +2471,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     }
     const formSubmit = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/submit$/.exec(url.pathname);
     if (formSubmit?.[1] && request.method === "POST") {
-      // Form-to-Saga submission (FORM-01 binding, FORM-02 lifecycle):
-      // the caller presents a live startup handle bound to (org, user,
-      // form); the server peeks it, re-resolves provider options,
-      // validates against the persisted declaration (422 + per-field
-      // details), re-validates file references against the live FILE-01
-      // rows, merges validated values over declared defaults, and submits
-      // down the standard Execution path, consuming the handle only after
-      // validation passes so failed validation leaves it live for retry. `{
-      // scheduleAt }` defers dispatch (deferred receipt, undispatched
-      // Pending row with `__scheduleAt` linkage for TRG-01 promotion).
+      // Form-to-Saga submission (FORM-01 binding, FORM-02 lifecycle): the
+      // caller presents a live startup handle bound to (org, user, form);
+      // authorization is the form submit grant, and the consumed handle is
+      // the form-to-Saga delegation (never a separate direct-Saga grant).
       // Unknown, expired, foreign, or replayed handles answer 422
-      // STALE_FORM_HANDLE and dispatch nothing. The consumed handle is
-      // the form-to-Saga grant: no separate direct-Saga grant required.
+      // STALE_FORM_HANDLE and dispatch nothing. Peek, validation,
+      // dispatch, and consume live in the shared submit core (signed
+      // embeds enter the same core after grant authentication).
       const name = formSubmit[1];
       if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
       rejectQuery(url);
@@ -1627,76 +2495,221 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         { orgId: caller.orgId, resourceKind: "form", resourceId: name, action: "submit" },
         "Submitting this Form requires a submit grant.",
       );
-      const body: unknown = await boundedJson(request.body);
-      if (body === null || typeof body !== "object" || Array.isArray(body)) {
-        throw new Fault(422, "FORM_VALIDATION_FAILED", "The form submission must be a JSON object.", [
-          { field: "", code: "NOT_OBJECT", message: "The form submission must be a JSON object." },
-        ]);
+      // Awaited (not returned): a bare `return runFormSubmit(...)` would
+      // adopt the rejection past this try/catch, escaping Faults as worker
+      // exceptions instead of serialized error responses.
+      return await runFormSubmit(env, caller, key, def, await boundedJson(request.body), "check");
+    }
+    const embedAdminList = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/embeds$/.exec(url.pathname);
+    if (embedAdminList?.[1] && (request.method === "GET" || request.method === "POST")) {
+      // EMBED-01 slice 1 (issue #156): signed form-embed grant inventory.
+      // Admin-only (requireManageOrg): grants are external capabilities, so
+      // ordinary members neither list nor mint them. Unknown or foreign
+      // forms answer 404 FORM_NOT_FOUND. Create returns the raw secret
+      // once; every other response carries summaries only (no readback).
+      const name = embedAdminList[1];
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      rejectQuery(url);
+      if (request.method === "POST") requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      const def = await loadForm(env.DB, caller.orgId, name);
+      if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      if (request.method === "GET") {
+        return json({ embeds: await listEmbedGrants(env.DB, caller.orgId, name).catch(() => []) });
+      }
+      const body = await boundedJson(request.body);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(400, "INVALID_EMBED", "Provide allowedOrigins and an optional expiresAt.");
       }
       const record = body as Record<string, unknown>;
-      if (Object.keys(record).some((entry) => !["handle", "values", "scheduleAt"].includes(entry))) {
-        throw new Fault(422, "FORM_VALIDATION_FAILED", "Submissions carry handle, values, and scheduleAt only.", [
-          { field: "", code: "UNKNOWN_FIELD", message: "Submissions carry handle, values, and scheduleAt only." },
-        ]);
+      const created = await createEmbedGrant(env.DB, def, {
+        allowedOrigins: record.allowedOrigins,
+        ...(record.expiresAt === undefined ? {} : { expiresAt: record.expiresAt }),
+      });
+      return json({ grant: embedSummary(created.row), secret: created.secret }, 201);
+    }
+    const embedAdminAction =
+      /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/embeds\/([0-9a-fA-F-]{36})\/(rotate|revoke)$/.exec(url.pathname);
+    if (embedAdminAction?.[1] && embedAdminAction[2] && embedAdminAction[3] && request.method === "POST") {
+      // Rotate mints a fresh secret and re-fingerprints against the live
+      // declaration (the old secret stops verifying); revoke disables the
+      // grant terminally (410 on bootstrap, STALE on outstanding submits).
+      // Unknown shapes, foreign grants, and cross-form IDs answer 404.
+      const name = embedAdminAction[1];
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      rejectQuery(url);
+      requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      const grantId = parseEmbedGrantId(embedAdminAction[2]);
+      const def = await loadForm(env.DB, caller.orgId, name);
+      if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      // Drain the body: rotation and revocation are state changes, so they
+      // share the JSON-write gate (unencoded application/json rejects
+      // cross-origin form posts against Access-authenticated sessions).
+      await boundedJson(request.body);
+      if (embedAdminAction[3] === "rotate") {
+        const rotated = await rotateEmbedGrant(env.DB, def, grantId);
+        return json({ grant: embedSummary(rotated.row), secret: rotated.secret });
       }
-      const handle = parseStartupHandle(record.handle);
-      const scheduleAt = parseScheduleAt(record.scheduleAt);
-      // Peek the session without consuming: validation, provider refresh,
-      // and the file check all run first so a submission that fails them
-      // leaves the handle live for a corrected retry. The handle binds to
-      // the current definition id, so delete/recreate under the same name
-      // invalidates sessions minted against the old form. The caller's key
-      // rides along so a handle spent by THIS key still peeks live for
-      // same-key retries and canonical replays.
-      const session = await peekStartupHandle(env.DB, caller, name, handle, def.id, key);
-      // One provider pass per submit too: fresh options re-check membership
-      // while auto-fill values ride the persisted snapshot, never the scan.
-      const fresh = await resolveFormProviders(env.DB, caller, def.fields, readProviderRows);
-      const values = record.values === undefined ? {} : record.values;
-      // Order matters: form-gate validation + defaults merge first, then
-      // the live FILE-01 file check, then the Saga parse gate last — so a
-      // stale file pointer answers 422 even when the declaration drifts
-      // from its Saga schema (which answers the Saga 400 instead).
-      const merged = validateAndMerge(def, values, { allowedOptions: fresh.options, values: session.snapshot });
-      await checkFormFiles(env.DB, caller, def, merged);
-      const { saga, input } = parseSubmission({ sagaId: def.sagaId, input: merged });
-      // FORM-02 recovery (#155): consume AFTER durable admission, not
-      // before. The old consume-then-dispatch order burned the one-time
-      // handle when submit answered 503 DISPATCH_UNCONFIRMED, making the
-      // documented same-request retry impossible (STALE_FORM_HANDLE instead
-      // of the idempotent recovery path). The flow below:
-      // 1. peek the fence (unused + live + same form id),
-      // 2. dispatch (or durable schedule insert) first,
-      // 3. consume only on success, tolerating a lost consume race only
-      //    when the Execution row proves OUR submission admitted (same
-      //    deterministic execution id + same input). A lost race over a
-      //    foreign admission still answers stale, never a replay of ours.
-      if (scheduleAt !== null) {
-        const scheduled = await scheduleFormExecution(env.DB, caller, key, name, saga, input, scheduleAt);
-        // Consume on every confirmed admission, including idempotent
-        // replay: the replay proves OUR key admitted, so the handle binds
-        // to it here. A live handle after replay would stay reusable under
-        // a different key (PR 320 review).
-        const scheduledInput = { ...(input as Record<string, unknown>), __form: name, __scheduleAt: scheduleAt };
-        await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, scheduledInput);
-        return json({ form: name, ...scheduled }, scheduled.replayed ? 200 : 202, {
-          Location: scheduled.statusUrl,
+      const revoked = await revokeEmbedGrant(env.DB, caller.orgId, name, grantId);
+      return json({ grant: embedSummary(revoked) });
+    }
+    const appEmbedAdminList = /^\/api\/apps\/([0-9a-fA-F-]{36})\/embeds$/.exec(url.pathname);
+    if (appEmbedAdminList?.[1] && (request.method === "GET" || request.method === "POST")) {
+      // EMBED-01 slice 2 (issue #156): signed app-embed grant inventory.
+      // Admin-only (requireManageOrg), same posture as the form-embed
+      // inventory: grants are external capabilities, so ordinary members
+      // neither list nor mint them. Unknown or foreign apps answer 404
+      // APP_NOT_FOUND; apps with no active deployment answer 404 too (a
+      // grant fingerprints the live deployment, so there must be one).
+      // Create returns the raw secret once; every other response carries
+      // summaries only (no readback).
+      const id = parseAppId(appEmbedAdminList[1]);
+      rejectQuery(url);
+      if (request.method === "POST") requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      const live = await loadLiveDeployment(env.DB, caller.orgId, id);
+      if (!live) return json({ error: { code: "APP_NOT_FOUND", message: "App not found." } }, 404);
+      if (request.method === "GET") {
+        return json({ embeds: await listAppEmbedGrants(env.DB, caller.orgId, id).catch(() => []) });
+      }
+      const body = await boundedJson(request.body);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(400, "INVALID_APP_EMBED", "Provide allowedOrigins and an optional expiresAt.");
+      }
+      const record = body as Record<string, unknown>;
+      const created = await createAppEmbedGrant(env.DB, caller.orgId, live, {
+        allowedOrigins: record.allowedOrigins,
+        ...(record.expiresAt === undefined ? {} : { expiresAt: record.expiresAt }),
+      });
+      return json({ grant: appEmbedSummary(created.row), secret: created.secret }, 201);
+    }
+    const appEmbedAdminAction = /^\/api\/apps\/([0-9a-fA-F-]{36})\/embeds\/([0-9a-fA-F-]{36})\/(rotate|revoke)$/.exec(
+      url.pathname,
+    );
+    if (appEmbedAdminAction?.[1] && appEmbedAdminAction[2] && appEmbedAdminAction[3] && request.method === "POST") {
+      // Rotate mints a fresh secret and re-fingerprints against the live
+      // deployment (the old secret stops verifying, and a redeploy drift
+      // heals); revoke disables the grant terminally (410 on reads).
+      // Unknown shapes, foreign grants, and cross-app IDs answer 404.
+      const id = parseAppId(appEmbedAdminAction[1]);
+      rejectQuery(url);
+      requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      const grantId = parseAppEmbedGrantId(appEmbedAdminAction[2]);
+      const live = await loadLiveDeployment(env.DB, caller.orgId, id);
+      if (!live) return json({ error: { code: "APP_NOT_FOUND", message: "App not found." } }, 404);
+      // Drain the body: rotation and revocation are state changes, so they
+      // share the JSON-write gate (unencoded application/json rejects
+      // cross-origin form posts against Access-authenticated sessions).
+      await boundedJson(request.body);
+      if (appEmbedAdminAction[3] === "rotate") {
+        const rotated = await rotateAppEmbedGrant(env.DB, caller.orgId, live, grantId);
+        return json({ grant: appEmbedSummary(rotated.row), secret: rotated.secret });
+      }
+      const revoked = await revokeAppEmbedGrant(env.DB, caller.orgId, id, grantId);
+      return json({ grant: appEmbedSummary(revoked) });
+    }
+    const publicationAdmin = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/publication$/.exec(url.pathname);
+    if (
+      publicationAdmin?.[1] &&
+      (request.method === "GET" || request.method === "POST" || request.method === "DELETE")
+    ) {
+      // EMBED-01 slice 2 (issue #156): anonymous public-form publication.
+      // Admin-only (requireManageOrg): publishing opens an anonymous
+      // admission path, so ordinary members neither read nor change it.
+      // GET answers the summary (with the live staleness bit) or
+      // { publication: null } when never published; POST publishes (or
+      // re-publishes, healing drift) with an optional honeypotField;
+      // DELETE blocks the publication (anonymous routes answer 404 after).
+      // Unknown or foreign forms answer 404 FORM_NOT_FOUND. There is no
+      // secret material in this class, so summaries carry everything.
+      const name = publicationAdmin[1];
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      rejectQuery(url);
+      // POST shares the JSON-write gate (unencoded application/json rejects
+      // cross-origin form posts against Access-authenticated sessions).
+      // DELETE carries no body and is never a CORS-safelisted method, so a
+      // cross-origin form cannot issue it; no gate needed.
+      if (request.method === "POST") requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      const def = await loadForm(env.DB, caller.orgId, name);
+      const existing = await loadScopedPublication(env.DB, caller.orgId, name).catch(() => null);
+      if (!def) {
+        if (!existing) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+        return json({ publication: publicationSummary(existing, null) });
+      }
+      if (request.method === "GET") {
+        if (!existing) return json({ publication: null });
+        return json({
+          publication: publicationSummary(existing, {
+            formId: def.id,
+            fingerprint: await fingerprintFormDef(def),
+          }),
         });
       }
-      // Defensive strip before the immediate Saga parse gate: a form
-      // field can never declare __-prefixed names (FIELD_NAME), so any
-      // such key would be internal linkage, never caller input.
-      const { __form: _internalForm, __scheduleAt: _internalAt, ...sagaInput } = input as Record<string, unknown>;
-      void _internalForm;
-      void _internalAt;
-      const accepted = await submit(env, caller, key, saga, sagaInput);
-      // Consume on every confirmed admission, including idempotent replay
-      // (same rationale as the scheduled path above): the replayed row
-      // proves OUR key, so the handle binds to it and cannot be reused
-      // under a different key afterwards.
-      await consumeAfterAdmission(env.DB, caller, name, handle, def.id, key, saga, sagaInput);
-      // Canonical replay: first submit 202, same-key same-input replay 200 + replayed:true (ADR 001 #15).
-      return json({ form: name, ...accepted }, accepted.replayed ? 200 : 202, { Location: accepted.statusUrl });
+      if (request.method === "DELETE") {
+        const disabled = await disablePublication(env.DB, caller.orgId, name);
+        if (!disabled) return json({ publication: null });
+        return json({
+          publication: publicationSummary(disabled, {
+            formId: def.id,
+            fingerprint: await fingerprintFormDef(def),
+          }),
+        });
+      }
+      const body = await boundedJson(request.body);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        throw new Fault(400, "INVALID_PUBLICATION", "Provide an optional honeypotField.");
+      }
+      const record = body as Record<string, unknown>;
+      const published = await publishForm(env.DB, def, {
+        ...(record.honeypotField === undefined ? {} : { honeypotField: record.honeypotField }),
+      });
+      return json(
+        {
+          publication: publicationSummary(published, {
+            formId: def.id,
+            fingerprint: await fingerprintFormDef(def),
+          }),
+        },
+        existing ? 200 : 201,
+      );
+    }
+    const publicationReview = /^\/api\/forms\/([a-z0-9][a-z0-9-]{0,63})\/publication\/review$/.exec(url.pathname);
+    if (publicationReview?.[1] && request.method === "POST") {
+      // Republish review: the admin deliberately re-binds the publication
+      // to the live declaration after a capability change (the review UX
+      // keys on the summary's stale bit). The body must carry
+      // { approve: true } — anything else answers 400, never a rebind.
+      // Unknown or foreign forms answer 404; a form with no publication
+      // answers 404 FORM_NOT_PUBLISHED.
+      const name = publicationReview[1];
+      if (!FORM_NAME.test(name)) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      rejectQuery(url);
+      requireJson(request);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      const body = await boundedJson(request.body);
+      if (
+        !body ||
+        typeof body !== "object" ||
+        Array.isArray(body) ||
+        (body as Record<string, unknown>).approve !== true
+      ) {
+        throw new Fault(400, "INVALID_PUBLICATION", "Review requires { approve: true }.");
+      }
+      const def = await loadForm(env.DB, caller.orgId, name);
+      if (!def) return json({ error: { code: "FORM_NOT_FOUND", message: "Form not found." } }, 404);
+      const reviewed = await reviewPublication(env.DB, def);
+      if (!reviewed) {
+        return json({ error: { code: "FORM_NOT_PUBLISHED", message: "This form is not published." } }, 404);
+      }
+      return json({
+        publication: publicationSummary(reviewed, {
+          formId: def.id,
+          fingerprint: await fingerprintFormDef(def),
+        }),
+      });
     }
     if (url.pathname === "/api/dev/preview" && request.method === "POST") {
       // DEV-02 no-registration local preview (ADR 017): read-only by
@@ -1722,12 +2735,16 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const parsers = new Map<string, (value: unknown) => unknown>([
         [echoSaga.id, parseInput],
         [ninjaSaga.id, parseNinjaOrgsInput],
+        [ninjaLookupSaga.id, parseNinjaLookupInput],
         [digestSaga.id, parseDigestInput],
         [smokeSaga.id, parseSmokeInput],
         [helloSaga.id, parseHelloInput],
         [helloParentSaga.id, parseHelloParentInput],
         [cloudflareVerifySaga.id, parseCloudflareVerifyInput],
         [cloudflareInventorySaga.id, parseCloudflareInventoryInput],
+        [cloudflareAuditSaga.id, parseCloudflareAuditInput],
+        [cloudflareInsightsSaga.id, parseCloudflareInsightsInput],
+        [cloudflarePostureSaga.id, parseCloudflarePostureInput],
       ]);
       const { meta, parsed, requiredIntegrations } = previewLocal(SAGA_CATALOG, parsers, record.sagaId, record.input);
       const withEnv = record.checkEnvironment === true;
@@ -1943,6 +2960,11 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
               result: op.result_json ? JSON.parse(op.result_json) : null,
               error: op.error_json ? JSON.parse(op.error_json) : null,
             })),
+            // Capability resolution audit (issue #262, ADR TBD §2): the
+            // frozen capability → Connection → Integration revision chain
+            // for this Execution. Empty for Sagas that never route through
+            // a capability, and for stores before migration 0038.
+            capabilityBindings: await listExecutionBindings(env.DB, row.id),
           },
           env,
         ),
@@ -2440,6 +3462,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
       return json({ status: "ok", database: "ok", worker: "ok", checkedAt: new Date().toISOString() });
     }
+    if (url.pathname === "/api/usage/summary" && request.method === "GET") {
+      // OPS-04 S1 (issue #175): attributed usage summary over usage_blocks.
+      // Org-scoped by the resolved caller (AUTH-02 viewer-ceiling reads: any
+      // same-org member, including viewers, may read; there are no writes).
+      // Cross-org rows never aggregate: the membership gate above already
+      // failed strangers closed, and the summary binds executions.org_id.
+      return json({ usage: await getUsageSummary(env.DB, caller.orgId, parseUsageSummaryQuery(url.searchParams)) });
+    }
     if (url.pathname === "/api/ops/metrics" && request.method === "GET") {
       // Upstream metrics.py maps to per-status Execution counts plus the
       // undispatched-Pending admission backlog and recent failure codes.
@@ -2784,6 +3814,27 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       await requireAppGrant(env.DB, app.id, "table", tableName, "read");
       return json(await readTableRows(env.DB, app, tableName, parseAppTableQuery(url.searchParams)));
     }
+    const appChangesRead = /^\/api\/apps\/([0-9a-f-]{36})\/runtime\/tables\/([^/]+)\/changes$/.exec(url.pathname);
+    if (appChangesRead?.[1] && appChangesRead[2] && request.method === "GET") {
+      // Bounded-poll realtime subscription (APP-02 composition on the ADR 045
+      // feed shape, issue #160): per-poll grant re-resolution — the read
+      // grant is enforced on every poll because HTTP carries no subscription
+      // state, so revocation denies the very next poll. Hidden Tables stay
+      // 404; sync tokens bind to the table instance; deletes never emit
+      // (re-list rows — the response carries the authoritative
+      // tableRevision). No push transport, no DDL. SEC-01 (ADR 046): the
+      // feed scrubs row payloads at egress with deployment secrets;
+      // pollAppTableChanges and D1 truth are untouched.
+      const app = await loadRuntimeApp(env.DB, caller, parseAppId(appChangesRead[1]));
+      const tableName = decodeURIComponent(appChangesRead[2]);
+      await requireAppGrant(env.DB, app.id, "table", tableName, "read");
+      return json(
+        scrubValueWithDeploymentSecrets(
+          await pollAppTableChanges(env.DB, app, tableName, parseChangesQuery(url.searchParams)),
+          env,
+        ),
+      );
+    }
     const appRowWrite = /^\/api\/apps\/([0-9a-f-]{36})\/runtime\/tables\/([^/]+)\/rows$/.exec(url.pathname);
     if (appRowWrite?.[1] && appRowWrite[2] && request.method === "POST") {
       requireJson(request);
@@ -3013,6 +4064,75 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       await deleteConnection(env.DB, caller, connOne[1]);
       return json({ deleted: true });
     }
+    // Capability-based Connection resolution (issue #262, ADR TBD slice 6):
+    // administration routes for CapabilityAssignments plus secret-safe
+    // readiness reporting. Same caller/admin posture as the Connection
+    // mapping routes above (org-scoped reads, admin-only writes) — no
+    // authz model change. Views carry ids and names only, never secrets.
+    if (url.pathname === "/api/capabilities" && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ capabilities: await listCapabilities(env.DB, caller) }, env));
+    }
+    if (url.pathname === "/api/capabilities/readiness" && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ capabilities: await checkReadiness(env.DB, caller) }, env));
+    }
+    const capabilityOne = /^\/api\/capabilities\/([A-Za-z0-9.-]{1,128})$/.exec(url.pathname);
+    if (capabilityOne?.[1] && (request.method === "PUT" || request.method === "DELETE")) {
+      // Same admin rule as the Connection mapping writes above (issue #346).
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CAPABILITY_FORBIDDEN", "Only an admin may manage capability bindings.");
+      }
+      if (request.method === "DELETE") {
+        await removeCapability(env.DB, caller, capabilityOne[1]);
+        return json({ deleted: true });
+      }
+      requireJson(request);
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      if (typeof body.integrationId !== "string") {
+        throw new Fault(400, "UNKNOWN_INTEGRATION", "A capability binding needs an integrationId.");
+      }
+      if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+        throw new Fault(400, "INVALID_CAPABILITY", "A capability binding enabled flag must be true or false.");
+      }
+      const bound = await assignCapability(
+        env.DB,
+        caller,
+        capabilityOne[1],
+        body.integrationId,
+        body.enabled === undefined ? true : (body.enabled as boolean),
+      );
+      return json(scrubConnectionPayload({ capability: bound }, env));
+    }
+    // External entity mappings (issue #262): what this Organization is
+    // called inside Vendor X, separate from the Connection and the role
+    // binding. Same caller/admin posture as above.
+    const connMappings = /^\/api\/connections\/([0-9a-f-]{36})\/mappings(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
+    if (connMappings?.[1] && request.method === "GET" && !connMappings[2]) {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ mappings: await listMappings(env.DB, caller, connMappings[1]) }, env));
+    }
+    if (connMappings?.[1] && request.method === "PUT" && !connMappings[2]) {
+      requireJson(request);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CAPABILITY_FORBIDDEN", "Only an admin may manage entity mappings.");
+      }
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const mapped = await upsertMapping(env.DB, caller, connMappings[1], {
+        ...(body.entityId === undefined ? {} : { entityId: body.entityId }),
+        ...(body.displayName === undefined ? {} : { displayName: body.displayName }),
+        ...(body.primary === undefined ? {} : { primary: body.primary }),
+        ...(body.source === undefined ? {} : { source: body.source }),
+      });
+      return json(scrubConnectionPayload({ mapping: mapped }, env));
+    }
+    if (connMappings?.[1] && connMappings[2] && request.method === "DELETE") {
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "CAPABILITY_FORBIDDEN", "Only an admin may manage entity mappings.");
+      }
+      await deleteMapping(env.DB, caller, connMappings[2]);
+      return json({ deleted: true });
+    }
     // Per-Organization secrets (SEC-02, issue #411): the exclusive route
     // that accepts secret values. Values arrive in the POST body only
     // (stdin-fed by the CLI in P2); the response carries the masked view,
@@ -3086,7 +4206,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     // fail-closed read-only resolver, bounded verify/discovery probes, and
     // org-scoped embedding/behavior singletons. Same boundary as CON-01
     // above: reads ride the membership gate, every mutation (plus the
-    // key-authenticated verify) is admin-only, and every response is
+    // key-authenticated verify and conformance probes) is admin-only, and every response is
     // scrubbed with the deployment secrets before send. Views carry
     // profile identities only — provider model ids and key material never
     // reach the browser. One explicit matcher per route.
@@ -3140,6 +4260,18 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const verified = await verifyProfile(env.DB, caller, aiVerify[1], env);
       if (!verified.ok) return json(scrubConnectionPayload({ verification: verified }, env), 502);
       return json(scrubConnectionPayload({ verification: verified }, env));
+    }
+    const aiConformance = /^\/api\/ai\/profiles\/([0-9a-f-]{36})\/conformance$/.exec(url.pathname);
+    if (aiConformance?.[1] && request.method === "GET") {
+      // Key-authenticated conformance is an admin action even though it is
+      // read-only: it exercises the deployment credential against the vendor.
+      rejectQuery(url);
+      if (!isAdminCaller(ctx)) {
+        throw new Fault(403, "AI_FORBIDDEN", "Only an admin may manage AI model profiles.");
+      }
+      const conformance = await checkConformance(env.DB, caller, aiConformance[1], env);
+      if (!conformance.ok) return json(scrubConnectionPayload({ conformance }, env), 502);
+      return json(scrubConnectionPayload({ conformance }, env));
     }
     const aiProfileOne = /^\/api\/ai\/profiles\/([0-9a-f-]{36})$/.exec(url.pathname);
     if (aiProfileOne?.[1] && request.method === "GET") {
@@ -3540,6 +4672,394 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         return json(scrubConnectionPayload(mcpResult(envelope.id, { error: { code, message } }), env));
       }
     }
+    // TOOL-02 outbound MCP servers (issue #171, ADR 044): portable
+    // templates, per-Organization Connections, verbatim tool catalog,
+    // per-user consent, and single-call dispatch. Reads ride the membership
+    // gate; management writes are admin-only (platform-tier template rows
+    // additionally need an instance admin, enforced in the module);
+    // per-user consent is self-service; dispatch denies viewers through
+    // the AUTH-02 read-only ceiling. Token values never appear in any
+    // response — views carry provisioned flags, never material.
+    const mcpAdmin = (what: string): void => {
+      if (!isAdminCaller(ctx)) throw new Fault(403, "MCP_FORBIDDEN", `Only an admin may ${what}.`);
+    };
+    if (url.pathname === "/api/mcp-servers" && request.method === "GET") {
+      const keys = [...url.searchParams.keys()];
+      if (keys.some((key) => key !== "include_inactive")) {
+        throw new Fault(400, "UNSUPPORTED_QUERY", "Only ?include_inactive= is supported here.");
+      }
+      const servers = await listMcpServerTemplates(env.DB, caller, url.searchParams.get("include_inactive") !== "1");
+      return json(scrubConnectionPayload({ servers }, env));
+    }
+    if (url.pathname === "/api/mcp-servers" && request.method === "POST") {
+      requireJson(request);
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      if (body.orgId === undefined || body.orgId === null) {
+        if (!ctx.isInstanceAdmin)
+          throw new Fault(403, "MCP_ADMIN_ONLY", "Platform-level MCP servers need an instance admin.");
+      } else {
+        mcpAdmin("manage MCP servers");
+      }
+      const server = await createMcpServerTemplate(env.DB, caller, { isInstanceAdmin: ctx.isInstanceAdmin }, body);
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-server.create",
+        { type: "mcp-server", id: server.id },
+        "success",
+        { name: server.name },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ server }, env), 201);
+    }
+    const mcpServerOne = /^\/api\/mcp-servers\/([0-9a-f-]{36})$/.exec(url.pathname);
+    if (mcpServerOne?.[1] && request.method === "GET") {
+      const keys = [...url.searchParams.keys()];
+      if (keys.some((key) => key !== "include_inactive")) {
+        throw new Fault(400, "UNSUPPORTED_QUERY", "Only ?include_inactive= is supported here.");
+      }
+      const server = await getMcpServerTemplate(
+        env.DB,
+        caller,
+        mcpServerOne[1],
+        url.searchParams.get("include_inactive") === "1",
+      );
+      return json(scrubConnectionPayload({ server }, env));
+    }
+    if (mcpServerOne?.[1] && request.method === "POST") {
+      requireJson(request);
+      if (!ctx.isInstanceAdmin) mcpAdmin("manage MCP servers");
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const server = await updateMcpServerTemplate(
+        env.DB,
+        caller,
+        { isInstanceAdmin: ctx.isInstanceAdmin },
+        mcpServerOne[1],
+        body,
+      );
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-server.update",
+        { type: "mcp-server", id: server.id },
+        "success",
+        { name: server.name },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ server }, env));
+    }
+    const mcpServerToggle = /^\/api\/mcp-servers\/([0-9a-f-]{36})\/(disable|enable)$/.exec(url.pathname);
+    if (mcpServerToggle?.[1] && mcpServerToggle[2] && request.method === "POST") {
+      rejectQuery(url);
+      requireJson(request);
+      if (!ctx.isInstanceAdmin) mcpAdmin("manage MCP servers");
+      const server = await setMcpServerTemplateActive(
+        env.DB,
+        caller,
+        { isInstanceAdmin: ctx.isInstanceAdmin },
+        mcpServerToggle[1],
+        mcpServerToggle[2] === "enable",
+      );
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-server.toggle",
+        { type: "mcp-server", id: server.id },
+        "success",
+        { active: server.isActive },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ server }, env));
+    }
+    if (mcpServerOne?.[1] && request.method === "DELETE") {
+      const keys = [...url.searchParams.keys()];
+      if (keys.some((key) => key !== "hard")) {
+        throw new Fault(400, "UNSUPPORTED_QUERY", "Only ?hard= is supported here.");
+      }
+      if (!ctx.isInstanceAdmin) mcpAdmin("manage MCP servers");
+      const deleted = await deleteMcpServerTemplate(
+        env.DB,
+        caller,
+        { isInstanceAdmin: ctx.isInstanceAdmin },
+        mcpServerOne[1],
+        url.searchParams.get("hard") === "true",
+      );
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-server.delete",
+        { type: "mcp-server", id: deleted.id },
+        "success",
+        { hard: deleted.hard },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ deleted }, env));
+    }
+    if (url.pathname === "/api/mcp-connections" && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ connections: await listMcpConnections(env.DB, caller) }, env));
+    }
+    if (url.pathname === "/api/mcp-connections" && request.method === "POST") {
+      requireJson(request);
+      mcpAdmin("manage MCP Connections");
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const connection = await createMcpConnection(env.DB, caller, body);
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-connection.create",
+        { type: "mcp-connection", id: connection.id },
+        "success",
+        { serverId: connection.serverId },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ connection }, env), 201);
+    }
+    const mcpConnOne = /^\/api\/mcp-connections\/([0-9a-f-]{36})$/.exec(url.pathname);
+    if (mcpConnOne?.[1] && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ connection: await getMcpConnection(env.DB, caller, mcpConnOne[1]) }, env));
+    }
+    if (mcpConnOne?.[1] && request.method === "POST") {
+      requireJson(request);
+      mcpAdmin("manage MCP Connections");
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const connection = await updateMcpConnection(env.DB, caller, mcpConnOne[1], body);
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-connection.update",
+        { type: "mcp-connection", id: connection.id },
+        "success",
+        { serverId: connection.serverId },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ connection }, env));
+    }
+    if (mcpConnOne?.[1] && request.method === "DELETE") {
+      rejectQuery(url);
+      mcpAdmin("manage MCP Connections");
+      const deleted = await deleteMcpConnection(env.DB, caller, mcpConnOne[1]);
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-connection.delete",
+        { type: "mcp-connection", id: deleted.id },
+        "success",
+        {},
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ deleted }, env));
+    }
+    const mcpConnSecret = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/client-secret$/.exec(url.pathname);
+    if (mcpConnSecret?.[1] && request.method === "PUT") {
+      requireJson(request);
+      mcpAdmin("manage MCP Connections");
+      const body = (await boundedJson(request.body)) as { secret?: unknown };
+      const connection = await putMcpConnectionClientSecret(
+        env.DB,
+        caller,
+        mcpConnSecret[1],
+        body.secret,
+        env.SECRETS_KEK,
+      );
+      return json(scrubConnectionPayload({ connection }, env));
+    }
+    const mcpServiceConnect = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/service-connect$/.exec(url.pathname);
+    if (mcpServiceConnect?.[1] && request.method === "POST") {
+      requireJson(request);
+      mcpAdmin("manage MCP Connections");
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const state = await connectMcpServiceCredential(
+        env.DB,
+        caller,
+        { connectionId: mcpServiceConnect[1], scope: body.scope },
+        env,
+      );
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-service.connect",
+        { type: "mcp-connection", id: mcpServiceConnect[1] },
+        "success",
+        { generation: state.generation },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ service: state }, env));
+    }
+    const mcpServiceDrop = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/service$/.exec(url.pathname);
+    if (mcpServiceDrop?.[1] && request.method === "DELETE") {
+      rejectQuery(url);
+      mcpAdmin("manage MCP Connections");
+      const disconnected = await disconnectMcpServiceCredential(env.DB, caller.orgId, mcpServiceDrop[1]);
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-service.disconnect",
+        { type: "mcp-connection", id: mcpServiceDrop[1] },
+        "success",
+        {},
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload(disconnected, env));
+    }
+    const mcpRefresh = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/refresh-tools$/.exec(url.pathname);
+    if (mcpRefresh?.[1] && request.method === "POST") {
+      rejectQuery(url);
+      requireJson(request);
+      mcpAdmin("manage MCP Connections");
+      const summary = await refreshMcpTools(env.DB, caller.orgId, mcpRefresh[1], env.SECRETS_KEK, {
+        ...(env.OAUTH_REFRESH_FENCE === undefined ? {} : { fence: env.OAUTH_REFRESH_FENCE }),
+      });
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-tools.refresh",
+        { type: "mcp-connection", id: mcpRefresh[1] },
+        "success",
+        summary,
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ catalog: summary }, env));
+    }
+    const mcpTools = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/tools$/.exec(url.pathname);
+    if (mcpTools?.[1] && request.method === "GET") {
+      rejectQuery(url);
+      return json(scrubConnectionPayload({ tools: await listMcpCatalog(env.DB, caller, mcpTools[1]) }, env));
+    }
+    const mcpToolToggle =
+      /^\/api\/mcp-connections\/([0-9a-f-]{36})\/tools\/([A-Za-z][A-Za-z0-9_.-]{0,127})\/(disable|enable)$/.exec(
+        url.pathname,
+      );
+    if (mcpToolToggle?.[1] && mcpToolToggle[2] && mcpToolToggle[3] && request.method === "POST") {
+      rejectQuery(url);
+      requireJson(request);
+      mcpAdmin("manage MCP Connections");
+      const tool = await setMcpCatalogToolEnabled(
+        env.DB,
+        caller,
+        mcpToolToggle[1],
+        mcpToolToggle[2],
+        mcpToolToggle[3] === "enable",
+      );
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-tool.toggle",
+        { type: "mcp-connection", id: mcpToolToggle[1] },
+        "success",
+        { tool: tool.toolName, enabled: tool.enabled },
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload({ tool }, env));
+    }
+    const mcpConsentSelf = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/consent$/.exec(url.pathname);
+    if (mcpConsentSelf?.[1] && request.method === "GET") {
+      rejectQuery(url);
+      return json(
+        scrubConnectionPayload(
+          { consent: await readMcpUserConsent(env.DB, caller.orgId, mcpConsentSelf[1], caller.userId) },
+          env,
+        ),
+      );
+    }
+    if (mcpConsentSelf?.[1] && request.method === "DELETE") {
+      rejectQuery(url);
+      const disconnected = await disconnectMcpUserConsentSelf(env.DB, caller, mcpConsentSelf[1]);
+      await recordAudit(
+        env.DB,
+        caller,
+        "mcp-consent.disconnect",
+        { type: "mcp-connection", id: mcpConsentSelf[1] },
+        "success",
+        {},
+        deploymentSecretsFromEnv(env),
+      );
+      return json(scrubConnectionPayload(disconnected, env));
+    }
+    const mcpAuthorize = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/consent\/authorize$/.exec(url.pathname);
+    if (mcpAuthorize?.[1] && request.method === "POST") {
+      requireJson(request);
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const authorization = await authorizeMcpUserConsent(env.DB, caller, {
+        connectionId: mcpAuthorize[1],
+        authorizeEndpoint: body.authorizeEndpoint,
+        redirectUri: body.redirectUri,
+        scope: body.scope,
+      });
+      return json(scrubConnectionPayload({ authorization }, env));
+    }
+    const mcpCallback = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/consent\/callback$/.exec(url.pathname);
+    if (mcpCallback?.[1] && request.method === "POST") {
+      requireJson(request);
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      try {
+        const consent = await completeMcpUserConsent(
+          env.DB,
+          caller,
+          {
+            connectionId: mcpCallback[1],
+            code: body.code,
+            state: body.state,
+            expectedState: body.expectedState,
+            error: body.error,
+            errorDescription: body.errorDescription,
+            codeVerifier: body.codeVerifier,
+            redirectUri: body.redirectUri,
+            scope: body.scope,
+          },
+          env,
+        );
+        await recordAudit(
+          env.DB,
+          caller,
+          "mcp-consent.grant",
+          { type: "mcp-connection", id: mcpCallback[1] },
+          "success",
+          { generation: consent.generation },
+          deploymentSecretsFromEnv(env),
+        );
+        return json(scrubConnectionPayload({ consent }, env));
+      } catch (error) {
+        await recordAudit(
+          env.DB,
+          caller,
+          "mcp-consent.grant",
+          { type: "mcp-connection", id: mcpCallback[1] },
+          "failure",
+          { code: error instanceof Fault ? error.code : "INTERNAL_ERROR" },
+          deploymentSecretsFromEnv(env),
+        );
+        throw error;
+      }
+    }
+    const mcpCall = /^\/api\/mcp-connections\/([0-9a-f-]{36})\/tools\/([A-Za-z][A-Za-z0-9_.-]{0,127})\/call$/.exec(
+      url.pathname,
+    );
+    if (mcpCall?.[1] && mcpCall[2] && request.method === "POST") {
+      requireJson(request);
+      // AUTH-02 viewer ceiling composition (ADR 035 addendum): dispatch is
+      // a non-read action, so viewer grants stay inert here the same way
+      // the role evaluator ignores them. AI-02 agent grants attach later
+      // as an additional deny-by-default filter on the same path (P0 D1.3).
+      if (await isViewer(env.DB, caller.orgId, caller.userId)) {
+        throw new Fault(403, "GRANT_REQUIRED", "Dispatching MCP tools requires an operator grant.");
+      }
+      const body = (await boundedJson(request.body)) as Record<string, unknown>;
+      const origin = new URL(request.url).origin;
+      const executed = await dispatchMcpTool({
+        db: env.DB,
+        orgId: caller.orgId,
+        caller: { kind: "user", userId: caller.userId },
+        connectionId: mcpCall[1],
+        toolName: mcpCall[2],
+        args: body.arguments,
+        kekMaterial: env.SECRETS_KEK,
+        reauthUrl: `${origin}/api/mcp-connections/${mcpCall[1]}/consent/authorize`,
+        ...(env.OAUTH_REFRESH_FENCE === undefined ? {} : { fence: env.OAUTH_REFRESH_FENCE }),
+      });
+      return json(scrubConnectionPayload({ result: executed.result, provenance: executed.provenance }, env));
+    }
     // TRG-02 endpoint management (issue #138, ADR 018): operator-owned
     // inventory over this Organization's scoped endpoints. Create returns
     // the raw credential once (apiKey, or webhookSecret to plant in the
@@ -3691,7 +5211,12 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     if (tableRows?.[1] && request.method === "GET") {
       const table = await loadTable(env.DB, caller.orgId, tableRows[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
-      return json(await queryRows(env.DB, caller, table, parseTableQuery(url.searchParams)));
+      // SEC-01 (ADR 046): row payloads are author data scrubbed at
+      // read-time egress only — D1 keeps the author bytes, no HTTP render
+      // carries a deployment-secret substring.
+      return json(
+        scrubValueWithDeploymentSecrets(await queryRows(env.DB, caller, table, parseTableQuery(url.searchParams)), env),
+      );
     }
     const tableBatchInsert = /^\/api\/tables\/([a-z0-9][a-z0-9-]{0,63})\/rows\/batch$/.exec(url.pathname);
     if (tableBatchInsert?.[1] && request.method === "POST") {
@@ -3707,11 +5232,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const table = await loadTable(env.DB, caller.orgId, tableBatchInsert[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
       return json(
-        await executeBatchWrite(
-          env.DB,
-          caller,
-          table,
-          parseBatchRequest(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT)),
+        scrubValueWithDeploymentSecrets(
+          await executeBatchWrite(
+            env.DB,
+            caller,
+            table,
+            parseBatchRequest(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT)),
+          ),
+          env,
         ),
         201,
       );
@@ -3725,11 +5253,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const table = await loadTable(env.DB, caller.orgId, tableBatchUpdate[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
       return json(
-        await executeBatchWrite(
-          env.DB,
-          caller,
-          table,
-          parseBatchRequest(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT), "update"),
+        scrubValueWithDeploymentSecrets(
+          await executeBatchWrite(
+            env.DB,
+            caller,
+            table,
+            parseBatchRequest(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT), "update"),
+          ),
+          env,
         ),
       );
     }
@@ -3741,11 +5272,34 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       const table = await loadTable(env.DB, caller.orgId, tableBatchDelete[1]);
       if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
       return json(
-        await executeBatchDelete(
-          env.DB,
-          caller,
-          table,
-          parseBatchDeleteBody(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT)),
+        scrubValueWithDeploymentSecrets(
+          await executeBatchDelete(
+            env.DB,
+            caller,
+            table,
+            parseBatchDeleteBody(await boundedJson(request.body, TABLE_BATCH_BODY_LIMIT)),
+          ),
+          env,
+        ),
+      );
+    }
+    const tableChanges = /^\/api\/tables\/([a-z0-9][a-z0-9-]{0,63})\/changes$/.exec(url.pathname);
+    if (tableChanges?.[1] && request.method === "GET") {
+      // Bounded-poll realtime subscription (TABLE-02, ADR 045): authorized
+      // revision polling over D1 as the source of truth. Policy resolves
+      // fresh per poll inside pollRowChanges (revoked callers 404 on the
+      // next poll); deletes never emit (reconcile via GET rows); no push
+      // channel, no TRG-03 event-log writes. Table-level path, so no
+      // document ID under /rows/ is shadowed.
+      const table = await loadTable(env.DB, caller.orgId, tableChanges[1]);
+      if (!table) return json({ error: { code: "NOT_FOUND", message: "Not found." } }, 404);
+      // SEC-01 (ADR 046): the bounded-poll feed scrubs row payloads at
+      // egress with deployment secrets. pollRowChanges and D1 truth are
+      // untouched — same scan, tokens, and cursor semantics (ADR 045).
+      return json(
+        scrubValueWithDeploymentSecrets(
+          await pollRowChanges(env.DB, caller, table, parseChangesQuery(url.searchParams)),
+          env,
         ),
       );
     }
@@ -3762,10 +5316,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           throw new Fault(400, "INVALID_DOCUMENT", "Row writes need { data } with a JSON object document.");
         }
         const row = await insertRow(env.DB, caller, table, tableRow[2], (body as Record<string, unknown>).data);
-        return json({ row }, 201);
+        return json(scrubValueWithDeploymentSecrets({ row }, env), 201);
       }
       if (request.method === "GET") {
-        return json({ row: await readRow(env.DB, caller, table, tableRow[2]) });
+        return json(scrubValueWithDeploymentSecrets({ row: await readRow(env.DB, caller, table, tableRow[2]) }, env));
       }
       if (request.method === "PATCH") {
         requireJson(request);
@@ -3773,9 +5327,14 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         if (body === null || typeof body !== "object" || Array.isArray(body) || !("data" in body)) {
           throw new Fault(400, "INVALID_DOCUMENT", "Row updates need { data } with a JSON object document.");
         }
-        return json({
-          row: await updateRow(env.DB, caller, table, tableRow[2], (body as Record<string, unknown>).data),
-        });
+        return json(
+          scrubValueWithDeploymentSecrets(
+            {
+              row: await updateRow(env.DB, caller, table, tableRow[2], (body as Record<string, unknown>).data),
+            },
+            env,
+          ),
+        );
       }
       if (request.method === "DELETE") {
         await deleteRow(env.DB, caller, table, tableRow[2]);
@@ -3786,7 +5345,8 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
     if (tableGrant?.[1] && (request.method === "POST" || request.method === "DELETE")) {
       // Owner-only grant administration. Grants name user IDs in this slice;
       // role claims belong to AUTH-02. Revocation converges immediately for
-      // subsequent calls (no live push until realtime subscriptions land).
+      // subsequent calls, including the next bounded-poll poll (ADR 045);
+      // there is no push channel to drain.
       requireJson(request);
       const name = parseTableName(tableGrant[1]);
       const table = await loadTable(env.DB, caller.orgId, name);
@@ -3880,6 +5440,93 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         return json({ deleted: true });
       }
     }
+    // UX-01 slice 1 (issue #176): Organization branding. Reads are
+    // member-open (safe fields only); writes and reset are operator-managed
+    // (requireManageOrg). Logo bytes ride the FILES bucket with D1 metadata.
+    const brandingStore = { db: env.DB, bucket: env.FILES };
+    if (url.pathname === "/api/branding" && request.method === "GET") {
+      rejectQuery(url);
+      return json({ branding: await getBranding(env.DB, caller.orgId) });
+    }
+    if (url.pathname === "/api/branding" && request.method === "PUT") {
+      rejectQuery(url);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
+      return json({ branding: await updateBranding(env.DB, caller.orgId, await boundedJson(request.body)) });
+    }
+    if (url.pathname === "/api/branding/reset" && request.method === "POST") {
+      rejectQuery(url);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
+      return json({ branding: await resetBranding(brandingStore, caller.orgId) });
+    }
+    if (url.pathname === "/api/branding/logo" && request.method === "GET") {
+      rejectQuery(url);
+      const logo = await readLogoBytes(brandingStore, caller.orgId);
+      if (!logo) return json({ error: { code: "LOGO_NOT_FOUND", message: "No custom logo is set." } }, 404);
+      return apiBytes(logo.bytes as Uint8Array<ArrayBuffer>, 200, {
+        "Content-Type": logo.contentType,
+        "Content-Length": String(logo.bytes.byteLength),
+        ETag: `"${logo.sha256}"`,
+        "Cache-Control": "private, max-age=300",
+      });
+    }
+    if (url.pathname === "/api/branding/logo" && request.method === "PUT") {
+      rejectQuery(url);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      if (request.headers.has("Content-Encoding")) {
+        throw new Fault(415, "BYTES_REQUIRED", "Logo bytes require unencoded image bytes.");
+      }
+      if (request.body === null) throw new Fault(400, "EMPTY_LOGO", "Logo bytes must not be empty.");
+      const buffer = await request.arrayBuffer();
+      return json({
+        branding: await putLogo(brandingStore, caller, request.headers.get("Content-Type"), new Uint8Array(buffer)),
+      });
+    }
+    if (url.pathname === "/api/branding/logo" && request.method === "DELETE") {
+      rejectQuery(url);
+      await requireManageOrg(env.DB, ctx, caller.orgId);
+      return json({ branding: await deleteLogo(brandingStore, caller.orgId) });
+    }
+    // UX-01 slice 1 (issue #176): own profile. Every route resolves the
+    // profile from the membership-gated caller — no caller-supplied user ID
+    // appears on any path, so own-scope is structural, not checked.
+    const profileStore = { db: env.DB, bucket: env.FILES };
+    if (url.pathname === "/api/profile" && request.method === "GET") {
+      rejectQuery(url);
+      return json({ profile: await getUserProfile(env.DB, caller) });
+    }
+    if (url.pathname === "/api/profile" && request.method === "PUT") {
+      rejectQuery(url);
+      requireJson(request);
+      return json({ profile: await updateUserProfile(env.DB, caller, await boundedJson(request.body)) });
+    }
+    if (url.pathname === "/api/profile/avatar" && request.method === "GET") {
+      rejectQuery(url);
+      const avatar = await readAvatarBytes(profileStore, caller);
+      if (!avatar) return json({ error: { code: "AVATAR_NOT_FOUND", message: "No avatar is set." } }, 404);
+      return apiBytes(avatar.bytes as Uint8Array<ArrayBuffer>, 200, {
+        "Content-Type": avatar.contentType,
+        "Content-Length": String(avatar.bytes.byteLength),
+        ETag: `"${avatar.sha256}"`,
+        "Cache-Control": "private, max-age=300",
+      });
+    }
+    if (url.pathname === "/api/profile/avatar" && request.method === "PUT") {
+      rejectQuery(url);
+      if (request.headers.has("Content-Encoding")) {
+        throw new Fault(415, "BYTES_REQUIRED", "Avatar bytes require unencoded image bytes.");
+      }
+      if (request.body === null) throw new Fault(400, "EMPTY_AVATAR", "Avatar bytes must not be empty.");
+      const buffer = await request.arrayBuffer();
+      return json({
+        profile: await putAvatar(profileStore, caller, request.headers.get("Content-Type"), new Uint8Array(buffer)),
+      });
+    }
+    if (url.pathname === "/api/profile/avatar" && request.method === "DELETE") {
+      rejectQuery(url);
+      return json({ profile: await deleteAvatar(profileStore, caller) });
+    }
     // Gray-out is server-enforced: mapped /api/* routes serve, every other
     // /api/* path reports UNIMPLEMENTED (never a generic NOT_FOUND).
     return json(
@@ -3887,25 +5534,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       501,
     );
   } catch (error) {
-    const fault =
-      error instanceof Fault ? error : new Fault(500, "INTERNAL_ERROR", "The request could not be completed.");
-    const headers: Record<string, string> = {};
-    // TOOL-01 S1: MCP clients learn the discovery document URL from the
-    // rejection itself (RFC 9728 resource_metadata pointer). Every other
-    // route keeps the bare bearer challenge.
-    if (fault.status === 401)
-      headers["WWW-Authenticate"] = url.pathname === "/api/mcp" ? mcpUnauthorizedChallenge(url.origin) : "Bearer";
-    if (fault.status === 503) headers["Retry-After"] = "5";
-    // Outward error path: a secret substring embedded in a Fault message
-    // (caller input echoed back, miswired env text) is replaced before send.
-    // FORM-01 details channel: the 422 form-validation Fault carries its
-    // per-field failure list here. No other Fault sets details; details are
-    // field names and fixed reason strings, scrubbed like the rest.
-    const faultBody =
-      fault.details === undefined
-        ? { code: fault.code, message: fault.message }
-        : { code: fault.code, message: fault.message, details: fault.details };
-    return json(scrubValueWithDeploymentSecrets({ error: faultBody }, env), fault.status, headers);
+    return faultResponse(error, env, url);
   }
 }
 
@@ -3920,10 +5549,10 @@ function parseMemberBody(value: unknown): { userId: string; role: OrgRole; kind:
   if (!object(value) || typeof value.userId !== "string") {
     throw new Fault(400, "INVALID_USER_ID", "Provide a userId string to invite.");
   }
-  const role: OrgRole = value.role === undefined ? "member" : (value.role as OrgRole);
+  const role: OrgRole = value.role === undefined ? "operator" : (value.role as OrgRole);
   const kind: MembershipKind = value.kind === undefined ? "ordinary" : (value.kind as MembershipKind);
-  if (role !== "member" && role !== "admin") {
-    throw new Fault(400, "INVALID_MEMBERSHIP", "Role must be member or admin.");
+  if (role !== "admin" && role !== "operator" && role !== "viewer") {
+    throw new Fault(400, "INVALID_MEMBERSHIP", "Role must be admin, operator, or viewer.");
   }
   if (kind !== "ordinary" && kind !== "external") {
     throw new Fault(400, "INVALID_MEMBERSHIP", "Kind must be ordinary or external.");
@@ -3939,8 +5568,8 @@ function parseMemberUpdate(value: unknown): MemberUpdate {
   }
   const update: { role?: OrgRole; status?: MembershipStatus; kind?: MembershipKind } = {};
   if (value.role !== undefined) {
-    if (value.role !== "member" && value.role !== "admin") {
-      throw new Fault(400, "INVALID_MEMBERSHIP", "Role must be member or admin.");
+    if (value.role !== "admin" && value.role !== "operator" && value.role !== "viewer") {
+      throw new Fault(400, "INVALID_MEMBERSHIP", "Role must be admin, operator, or viewer.");
     }
     update.role = value.role;
   }

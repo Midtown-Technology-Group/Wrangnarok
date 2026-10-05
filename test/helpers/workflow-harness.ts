@@ -48,6 +48,8 @@ import migration0029 from "../../migrations/0029_connection_secrets.sql?raw";
 import migration0030 from "../../migrations/0030_events.sql?raw";
 import migration0031 from "../../migrations/0031_oauth_tokens.sql?raw";
 import migration0033 from "../../migrations/0033_event_subscriptions.sql?raw";
+import migration0038 from "../../migrations/0038_capability_resolution.sql?raw";
+import migration0041 from "../../migrations/0041_mcp_external.sql?raw";
 import seed from "../../scripts/seed-local.sql?raw";
 
 /** Every migration in filename order. 0017 is reserved (see
@@ -82,6 +84,8 @@ const FULL_MIGRATIONS = [
   migration0030,
   migration0031,
   migration0033,
+  migration0038,
+  migration0041,
 ] as const;
 
 export type WorkflowHarnessDb = Pick<D1Database, "exec" | "prepare" | "batch">;

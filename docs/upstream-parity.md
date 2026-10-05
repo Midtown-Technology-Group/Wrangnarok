@@ -6,23 +6,25 @@ Parity means equivalent supported user/operator capabilities with explicit TypeS
 
 Status vocabulary: **Implemented** (shipped locally), **Partial** (materially narrower), **Missing** (absent), **Gated** (blocked on an explicit security/cost decision). **Adopt/Adapt are intent, not completion claims.**
 
+**Status authority (issue #132 repair): the top capability table below is the single current-state authority for every parity ID.** Detail sections and owner issue bodies are evidence/history, not independent status stores: when they disagree with the table, the table wins and the disagreement is a repair defect. `scripts/check-parity-ledger.mjs` enforces this in CI (headline totals recomputed, per-ID table-vs-detail agreement, Existing-issue column pointing at the canonical owner).
+
 Upstream tests are evidence of intended assertions, not passing-test claims. Upstream sources were inspected, not executed; no upstream production instance was used.
 
-Total: 47 capability rows — 5 Implemented, 1 Complete (pending review), 29 Partial, 11 Missing, 1 Gated.
+Total: 47 capability rows — 6 Implemented, 1 Complete (pending review), 31 Partial, 8 Missing, 1 Gated.
 
 | ID | Title | Phase | Status | Depends | Existing issue |
 | --- | --- | --- | --- | --- | --- |
-| RUN-01 | Persist and enforce per-Saga runtime policy without changing source identity | 2 | Partial | AUTH-02 | new |
-| RUN-02 | Invoke child Sagas with explicit context, completion and failure semantics | 2 | Missing | AUTH-02, RUN-01 | new |
-| TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented (gaps reopened, see #137) | AUTH-02, RUN-01 | #137 |
+| RUN-01 | Persist and enforce per-Saga runtime policy without changing source identity | 2 | Implemented (see detail; #135 reopened 2026-09-16 for timeout-lifetime drift) | AUTH-02 | #135 |
+| RUN-02 | Invoke child Sagas with explicit context, completion and failure semantics | 2 | Partial (see detail; #136 closed) | AUTH-02, RUN-01 | #136 |
+| TRG-01 | Run one-off and recurring schedules with durable due-time and cancellation semantics | 2 | Implemented (see detail; #137 closed, #436 closed) | AUTH-02, RUN-01 | #137 |
 | TRG-02 | Expose authenticated webhook and custom HTTP execution endpoints | 2 | Partial | AUTH-01, AUTH-03, CON-01 | #138 |
-| TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Partial | TRG-01, TRG-02, AUTH-02 | new |
+| TRG-03 | Deliver topic and built-in events through scoped subscriptions with replay visibility | 4 | Partial | TRG-01, TRG-02, AUTH-02 | #139 |
 | DEV-01 | Provide a complete typed TypeScript author and automation SDK | 1+4 | Partial | — | new |
 | DEV-02 | Preview, sync and deploy author source with explicit dependency compatibility | 5 | Partial | DEV-01, SOL-01 | new |
 | AUTH-01 | Replace the single-org allowlist with Organization and user lifecycle management | 3 | Partial | — | new |
 | AUTH-02 | Enforce resource roles, claims and explicit delegated authorization end to end | 3 | Implemented | AUTH-01 | #143 |
 | AUTH-03 | Manage scoped machine credentials and verify delegated human identity parity | 3 | Partial | AUTH-01, AUTH-02 | #144 |
-| SEC-01 | Enforce execution-scoped secret registration and universal output scrubbing | 3 | Partial | — | new |
+| SEC-01 | Enforce execution-scoped secret registration and universal output scrubbing | 3 | Partial | — | #576 |
 | CON-01 | Manage Integration definitions and scoped Connection mappings through authorized APIs | 3 | Complete (pending review) | AUTH-02, SEC-01 | #146 |
 | CON-02 | Expose scoped configuration and secret-reference APIs to authors and operators | 3 | Implemented | AUTH-02, SEC-01, CON-01 | #147 |
 | SEC-02 | Support genuinely per-Organization credentials behind the accepted secret-storage tripwire | 3 | Gated | SEC-01, CON-01 | new |
@@ -35,7 +37,7 @@ Total: 47 capability rows — 5 Implemented, 1 Complete (pending review), 29 Par
 | TABLE-02 | Extend author Tables to policy-safe querying, batch mutations and realtime visibility | 4 | Partial | TABLE-01, AUTH-02, OBS-02 | #154 |
 | FORM-01 | Deliver the existing Forms-to-Saga input binding slice | 4 | Partial | — | #118 |
 | FORM-02 | Deliver usable dynamic forms with safe startup, providers and submissions | 4 | Partial | FORM-01, RUN-03, TRG-01, AUTH-02, FILE-01 | #155 |
-| EMBED-01 | Publish and embed forms/apps with revocable external capabilities | 4 | Missing | FORM-02, APP-01, AUTH-03, AUTH-02 | new |
+| EMBED-01 | Publish and embed forms/apps with revocable external capabilities | 4 | Partial | FORM-02, APP-01, AUTH-03, AUTH-02 | new |
 | FILE-01 | Deliver managed file locations with policy-checked upload, download and mutation | 4 | Implemented | AUTH-02, SEC-01 | #157 |
 | FILE-02 | Manage generated artifacts and attachment lifecycles with retention | 4+6 | Partial | FILE-01, AUTH-02 | #158 |
 | APP-01 | Deploy authored applications with explicit lifecycle, ownership and recovery | 4+5 | Partial | AUTH-02, DEV-02, SOL-01 | #159 |
@@ -51,10 +53,10 @@ Total: 47 capability rows — 5 Implemented, 1 Complete (pending review), 29 Par
 | AI-04 | Review, evaluate and tune agents without replaying real side effects | 6 | Missing | AI-02, AI-03, OPS-01 | new |
 | AI-05 | Store and retrieve permission-scoped knowledge with explicit reindex lifecycle | 6 | Missing | AI-01, AUTH-02, FILE-01 | new |
 | AI-06 | Provide consent-controlled personal memory and composed required instructions | 6 | Missing | AI-05, AUTH-02 | new |
-| TOOL-01 | Expose opt-in Saga tools and an authorized inbound MCP gateway | 6 | Missing | AUTH-03, DEV-01, SEC-01 | new |
+| TOOL-01 | Expose opt-in Saga tools and an authorized inbound MCP gateway | 6 | Partial (see detail; #170 closed) | AUTH-03, DEV-01, SEC-01 | #170 |
 | TOOL-02 | Connect external MCP servers with org tools and per-user consent | 6 | Missing | TOOL-01, OAUTH-01, AI-02 | new |
 | OPS-01 | Provide administrative audit trails and user-visible operational notifications | 4 | Partial | AUTH-02, SEC-01, OBS-02 | #172 |
-| OPS-02 | Expose Cloudflare-native diagnostics, operational jobs and repair workflows | 4 | Partial | OBS-01, OPS-01, TRG-01 | new |
+| OPS-02 | Expose Cloudflare-native diagnostics, operational jobs and repair workflows | 4 | Partial | OBS-01, OPS-01, TRG-01 | #173 |
 | OPS-03 | Export and restore operational data with explicit encrypted-backup boundaries | 5 | Missing | SOL-03, TABLE-02, FILE-02, CON-02, SEC-01 | new |
 | OPS-04 | Report scoped usage, model costs and automation ROI | 4+6 | Missing | AUTH-02, AI-01, OPS-01 | new |
 | UX-01 | Provide configurable branding, user profiles and discoverable platform administration | 4 | Partial | AUTH-01, FILE-01 | new |
@@ -65,6 +67,8 @@ Total: 47 capability rows — 5 Implemented, 1 Complete (pending review), 29 Par
 Phase 2; **Implemented**; existing issue: #135
 
 Local status: Per-Saga runtime policy persists as org-scoped rows (migration 0012) with applied-policy snapshots on every Execution (ADR 018). Operator inspect/change rides GET/PUT /api/sagas/:id/policy on the AUTH-01 membership gate (admin-only writes); the typed SDK (getSagaPolicy/updateSagaPolicy), the CLI (saga-policy/saga-policy-set), and ExecutionDetail all expose it. The behavioral matrix (timeout 0/default/custom, engine-loss-only retry ceilings, business-error non-retry, pause/admission, CompletedWithErrors-as-Failed, Stuck-as-Running-until-cancel, stale fencing, crash/recovery) is proven by test/runtime-policy.test.ts on local Workflows/D1. Slice C (issue #135) proves lost-runtime-history convergence there too: terminal Execution detail converges from authoritative D1 with advisory `runtimeStatus: null` when native Workflow history/status is missing, preserving idempotency, cancel, and stale-completion fences.
+
+Drift follow-through (2026-09-16, owner #135 reopened): upstream `ca669e8` / PR #771 keeps the execution-scoped engine credential alive for the engine's long-wait window so `timeout_seconds=0` means no workflow timeout; the local `vendorTimeoutMs=0 => Integration default` dimension is a different timeout dimension and does not by itself prove this execution-lifetime invariant. Tracked on the reopened owner; the shipped scope above stands, so the table status stays Implemented with this caveat (closure is not the authority — the evidence above is).
 
 Depends: AUTH-02
 
@@ -87,9 +91,9 @@ Related Wrangnarok issues: #15, #16, #75, #76
 
 ## RUN-02: Invoke child Sagas with explicit context, completion and failure semantics
 
-Phase 2; **Missing**; existing issue: new
+Phase 2; **Partial**; existing issue: #136
 
-Local status: SagaStep exposes do/sleep only. There is no public nested invocation SDK or parent-child execution contract.
+Local status: Nested invocation ships as the remote-registered shape only (issue #136, ADR 039, ADR 043, `src/children.ts`): a parent reserves a child Execution row with lineage, dispatches it through the standard submit protocol under the same Idempotency-Key, gets back a queued receipt, and polls the child D1 row to terminal for the typed JSON result. Context inherits org/user from the parent row (foreign-org children unconstructable); dispatch re-resolves the parent principal through AUTH-02 and requires the child execute grant; child Failed/TimedOut/Cancelled yields `CHILD_FAILED` (never fabricated parent success); deterministic child IDs converge step retries and duplicate dispatches. Proven by `test/child-invocation.test.ts` (duplicate dispatch, parent cancel, child timeout) on real local bindings. Explicitly deferred per ADR 039 (retain until verified): cross-org invocation, role-gated child visibility (AUTH-02), bounded synchronous HTTP submit (RUN-03), `CompletedWithErrors`. No inline function-import path and no process-pool infrastructure by design.
 
 Depends: AUTH-02, RUN-01
 
@@ -113,7 +117,7 @@ Phase 2; **Implemented (with follow-through tracked on #436 — see caveat below
 
 Local status: Schedules ship as persisted environment state (migration 0016, `src/schedules.ts`, ADR 012 accepted): one org-scoped row binds a name to a stable Saga UUID plus cadence, timezone, enablement, input, and run-as policy. A minute Cloudflare Cron Trigger (the only Cron trigger; `test/timeout-sweeper.test.ts` tripwire pins it) promotes due rows through the standard submit protocol with deterministic `sch-` schedule-window keys. Operator create/preview/disable/delete ride the AUTH-01 membership gate (writes admin-only); run-as always resolves to the creating caller, never caller-supplied identity. Pre-dispatch fence: `promoteWindow` re-reads the row by id immediately before submit (a post-scan disable/delete wins the race as a skip with zero dispatch) and revalidates the run-as owner through request-path lifecycle semantics (disabled org/user, non-active membership fail closed; an unattended tick never activates membership). Delivery visibility maps windows to Executions. `Scheduled` is removed as an Execution state by #436 (explicit adaptation recorded here): promotion writes Pending rows, and no union member, transition, history filter, badge, or SDK descriptor names a Scheduled state.
 
-Follow-through caveat (2026-09-17, issue #436 — parent #137 is closed): (1) store/tick failures are fail-silent — `loadSchedule`/`listSchedules`/due-scan catches convert D1 faults to not-found/empty/nothing-due, and `scheduled()` swallows promotion errors, so a due window can miss a tick with no failed-Cron signal; (2) the SDK contract advertises id-based schedule routes (`GET /api/schedules/:id`, `:id/preview`, `:id/disable|enable`, `DELETE /api/schedules/:id`, `POST /api/schedules/executions/:id/cancel`) the Worker router does not implement (shipped surface is name-based); (3) resolved by #436 — the dead public `Scheduled` execution status (union, transition, history filter, UI badge, SDK descriptor wording) is removed with no migration (the D1 CHECK never admitted it); (4) resolved by #436 — the LAB bootstrap reuses the canonical migration 0016 DDL verbatim (columns, enums, indexes, UNIQUE(org_id,name), plus schedule_deliveries), proven by `test/schedule-schema-converge.test.ts` on both the ordinary migrated D1 and the LAB-fixture path. Core create/promote/cancel/disable flows are proven (24/24 schedule suites plus the convergence regression); the gaps above are owned follow-through on #436.
+Follow-through caveat (2026-09-17, issue #436 — parent #137 is closed, #436 closed 2026-09-17): (1) store/tick failures are fail-silent — `loadSchedule`/`listSchedules`/due-scan catches convert D1 faults to not-found/empty/nothing-due, and `scheduled()` swallows promotion errors, so a due window can miss a tick with no failed-Cron signal; (2) the SDK contract advertises id-based schedule routes (`GET /api/schedules/:id`, `:id/preview`, `:id/disable|enable`, `DELETE /api/schedules/:id`, `POST /api/schedules/executions/:id/cancel`) the Worker router does not implement (shipped surface is name-based); (3) resolved by #436 — the dead public `Scheduled` execution status (union, transition, history filter, UI badge, SDK descriptor wording) is removed with no migration (the D1 CHECK never admitted it); (4) resolved by #436 — the LAB bootstrap reuses the canonical migration 0016 DDL verbatim (columns, enums, indexes, UNIQUE(org_id,name), plus schedule_deliveries), proven by `test/schedule-schema-converge.test.ts` on both the ordinary migrated D1 and the LAB-fixture path. Core create/promote/cancel/disable flows are proven (24/24 schedule suites plus the convergence regression); (1)(2) remain documented here as residual TRG-01 follow-through.
 
 Depends: AUTH-02, RUN-01
 
@@ -141,7 +145,7 @@ Related Wrangnarok issues: #76
 
 Phase 2; **Partial**; existing issue: #138
 
-Local status: Scoped api-key endpoints (`POST /api/endpoints/:name`) and HMAC webhook endpoints (`POST /hooks/:name`) bind a name to a deployed Saga (ADR 018, migration 0021). Deliveries verify per-endpoint keys (expiry, disable/rotate revocation) or HMAC signatures against deployment-store secrets, answer echo-param vendor challenges in plaintext, rate-limit per endpoint, and submit through the standard protocol with derived `wep-` keys (202 receipt, 200 replay, 409 mismatch). Operator create/list/read/update/rotate/history ride the AUTH-01 membership gate. Follow-through (2026-09-17): HMAC accepts canonical hex or standard padded base64 with the evidenced whitespace rules (base64url/unpadded/base64-of-hex/inner-whitespace rejected); rate-window read faults and endpoint-lookup faults fail closed to sanitized 5xx; concurrent redeliveries converge on the exact created event; unconfirmed dispatches record no event row and converge on caller redelivery with no automatic mutation retry; webhook rotate revocation pinned at route level. Upstream sync-mode inline results stay deferred to RUN-03; per-tenant webhook secrets stay deployment-scoped per ADR 005 v0 (SEC-02 tripwire).
+Local status: Scoped api-key endpoints (`POST /api/endpoints/:name`) and HMAC webhook endpoints (`POST /hooks/:name`) bind a name to a deployed Saga (ADR 037, migration 0021). Deliveries verify per-endpoint keys (expiry, disable/rotate revocation) or HMAC signatures against deployment-store secrets, answer echo-param vendor challenges in plaintext, rate-limit per endpoint, and submit through the standard protocol with derived `wep-` keys (202 receipt, 200 replay, 409 mismatch). Operator create/list/read/update/rotate/history ride the AUTH-01 membership gate. Follow-through (2026-09-17): HMAC accepts canonical hex or standard padded base64 with the evidenced whitespace rules (base64url/unpadded/base64-of-hex/inner-whitespace rejected); rate-window read faults and endpoint-lookup faults fail closed to sanitized 5xx; concurrent redeliveries converge on the exact created event; unconfirmed dispatches record no event row and converge on caller redelivery with no automatic mutation retry; webhook rotate revocation pinned at route level. Upstream sync-mode inline results stay deferred to RUN-03; per-tenant webhook secrets stay deployment-scoped per ADR 005 v0 (SEC-02 tripwire).
 
 Depends: AUTH-01, AUTH-03, CON-01 (both closed)
 
@@ -165,9 +169,9 @@ Related Wrangnarok issues: #76
 
 ## TRG-03: Deliver topic and built-in events through scoped subscriptions with replay visibility
 
-Phase 4; **Partial**; existing issue: new
+Phase 4; **Partial**; existing issue: #139
 
-Local status: S1 ships the org-scoped event-source registry plus the typed append-only event log (migration 0030, `src/events.ts`): deterministic (source, event) identity with same-content replay and 409 on mismatched content, operator emit/list, disable fencing, and best-effort delivery appends from schedule promotion and endpoint delivery. S2 (issue #139, migration 0033) adds scoped subscriptions binding topic filters (exact or trailing-`.*` namespace) to a target Saga with bounded fan-out through the standard submit protocol: exact-org rows in name order, stable `evt-` delivery keys, per-subscriber disable/delete fencing plus pre-dispatch authority revalidation through the canonical resolver/grant path, an explicit per-event admission bound (10 dispatches, overflow reported, never silently dropped), and per-subscription delivery receipts. S3a (issue #139) ships operator retry/replay over the same receipt rows with no new DDL: a derived failed set (log minus receipts) with `?outcome=delivered|failed|all` listing, single-event retry through the shared submit-protocol dispatch with identical `evt-` keys (first retry creates the Execution, duplicates converge), dispatch-time authority revalidation (disabled/deleted/revoked fail closed), cross-org 404 posture, and the per-event 10-dispatch bound honored on replay. Still missing: built-in platform emissions and retention/admission policy. Worker + Workflows + D1 only; no Queue/DO.
+Local status: S1 ships the org-scoped event-source registry plus the typed append-only event log (migration 0030, `src/events.ts`): deterministic (source, event) identity with same-content replay and 409 on mismatched content, operator emit/list, disable fencing, and best-effort delivery appends from schedule promotion and endpoint delivery. S2 (issue #139, migration 0033) adds scoped subscriptions binding topic filters (exact or trailing-`.*` namespace) to a target Saga with bounded fan-out through the standard submit protocol: exact-org rows in name order, stable `evt-` delivery keys, per-subscriber disable/delete fencing plus pre-dispatch authority revalidation through the canonical resolver/grant path, an explicit per-event admission bound (10 dispatches, overflow reported, never silently dropped), and per-subscription delivery receipts. S3a (issue #139) ships operator retry/replay over the same receipt rows with no new DDL: a derived failed set (log minus receipts) with `?outcome=delivered|failed|all` listing, single-event retry through the shared submit-protocol dispatch with identical `evt-` keys (first retry creates the Execution, duplicates converge), dispatch-time authority revalidation (disabled/deleted/revoked fail closed), cross-org 404 posture, and the per-event 10-dispatch bound honored on replay. S3b (issue #139) ships built-in platform emissions plus the retention/admission posture with no new DDL, route, or primitive: an operator-opt-in `platform` topic source receives `platform.schedule.delivered` per promotion and `platform.webhook.delivered` per endpoint delivery (deterministic `plat-` IDs, descriptive attribution payloads, same-path bounded fan-out, best-effort silence when unregistered/disabled), and ADR 012 records the admission bounds (10 dispatches/event, 50-row newest-first reads, 4 KiB payloads) with deliberate no-purge retention (operator DELETE reclaims; no sweeper by steward-gate design). Remaining deferral: execution-lifecycle topics (no fetch-context terminal hook; a polling emitter would be sweeper-shaped — see ADR 012 S3b). Worker + Workflows + D1 only; no Queue/DO.
 
 Depends: TRG-01, TRG-02, AUTH-02
 
@@ -220,7 +224,7 @@ Related Wrangnarok issues: #57, #119
 
 Phase 5; **Partial**; existing issue: new
 
-Local status: No-registration local preview (`POST /api/dev/preview`, ADR 016) plus explicit sync/Git/lock/deploy validation (`src/dev.ts`) and the Python-dependency compatibility inventory (`docs/dev-compatibility.md`). Preview is read-only by construction (no D1 writes, no dispatch; opt-in same-org Connection-presence check only). Hosted Git/package management stays out of scope.
+Local status: No-registration local preview (`POST /api/dev/preview`, ADR 035) plus explicit sync/Git/lock/deploy validation (`src/dev.ts`) and the Python-dependency compatibility inventory (`docs/dev-compatibility.md`). Preview is read-only by construction (no D1 writes, no dispatch; opt-in same-org Connection-presence check only). Hosted Git/package management stays out of scope.
 
 Depends: DEV-01, SOL-01
 
@@ -278,7 +282,7 @@ Related Wrangnarok issues: #78
 
 Phase 3; **Implemented**; existing issue: #143
 
-Local status: ADR 018 (resource roles, claims-as-subjects, policy rules, deny-by-absence) ships on Worker + D1 (migration 0013, `src/roles.ts`, `test/resource-roles.test.ts`): direct Saga execution (including the provider ingress), form/app delegation, caller matrices, next-request revocation, hidden-reference 404s, and role/policy administration with consumer inspection. Open follow-through lives on #143 (tables/files spine composition; live-subscription enforcement deferred to TRG-03/OBS-02). Closed since: shared non-request authority resolver plus schedule-dispatch saga-grant wiring (#459 and #143 S3), policy-rule store hardening per #430 (shipped via #444/#447), provider-route composition proof (shipped via #457).
+Local status: ADR 038 (resource roles, claims-as-subjects, policy rules, deny-by-absence) ships on Worker + D1 (migration 0013, `src/roles.ts`, `test/resource-roles.test.ts`): direct Saga execution (including the provider ingress), form/app delegation, caller matrices, next-request revocation, hidden-reference 404s, and role/policy administration with consumer inspection. Open follow-through lives on #143 (tables/files spine composition; live-subscription enforcement deferred to TRG-03/OBS-02). Closed since: shared non-request authority resolver plus schedule-dispatch saga-grant wiring (#459 and #143 S3), policy-rule store hardening per #430 (shipped via #444/#447), provider-route composition proof (shipped via #457).
 
 Depends: AUTH-01
 
@@ -329,9 +333,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## SEC-01: Enforce execution-scoped secret registration and universal output scrubbing
 
-Phase 3; **Partial**; existing issue: new
+Phase 3; **Partial**; existing issue: #576
 
-Local status: ADR 005 requires a mechanism. Existing sentinel tests and fixed error shaping must not be confused with a dynamic registry covering newly materialized tokens and all outputs.
+Local status: registry mechanism plus write-time/egress wiring proven (issue #145: `src/secrets.ts`, `test/secret-scrub.test.ts`, `test/secret-scrub-live.test.ts`); choke-point boundary fixed by ADR 046 (issue #576), including read-time egress scrub of table row payloads on rows/single-row/batch/`changes` routes with D1 truth unchanged (`test/table-changes-secrets.test.ts`). Remaining: downstream lanes (CON-01, CON-02, OBS-02 streaming, FILE-01/02, AI/TOOL) claim parity against this boundary as they land.
 
 Depends: none
 
@@ -426,7 +430,7 @@ Related Wrangnarok issues: #110, #411
 
 Phase 3; **Partial**; existing issue: new
 
-Local status: OAuth token mechanics are centralized in `src/oauth.ts` (issue #149): inline client-credentials fetch, auth-code/PKCE/state/callback contract, URL/entity templating, audience/scope replacement semantics (corrected attribution: replacement, never subset), rotating-refresh single-flight fencing with the cross-instance `OAuthRefreshFence` Durable Object (`src/oauth-refresh-fence.ts`, bound as `OAUTH_REFRESH_FENCE`; memory-only, no D1 — Cloudflare-native equivalent of the PR #741 row-lock serialization), and the non-secret health lifecycle (healthy/failed/revoked with failed/recovered transitions). Persistence slice 1 (post-#148, migration 0031, `src/oauth-tokens.ts`): per-Connection tokens persist as AES-GCM-256 envelopes reusing the ADR 005 KEK path (org+Connection-bound AAD), with a monotonic persisted generation wired to the fence, conditional replacement writes (superseded generations observe OAUTH_TOKEN_GENERATION_STALE), persisted failed/recovered/revoked health, and no D1 transaction across vendor HTTP. The 32-bit scope-hash collision pair is a permanent fence regression with the same-scope exactly-one-POST invariant preserved. NinjaOne rides the shared primitive with identical Fault codes/messages, proven by its unchanged regression suites. Operator consent slice (`src/oauth-consent.ts`): admin-only `POST /api/connections/:id/oauth/authorize` (PKCE S256 + state issuance, pure) and `POST /api/connections/:id/oauth/callback` (fixed-Fault validation, exactly one vendor exchange POST, initial-or-fenced-replacement persist, no secret readback), with the client secret resolved per-Organization-first then deployment. Integration-list health slice (`GET /api/integrations/health`, instance-admin-only): per-Integration Connected/Degraded/Failed/None plus mappingCount/connectedCount/needsReconnectionCount/connectionStatusCounts over persisted non-secret health only (upstream PR #762 semantics; no global/default token exists, so the effective set is per-Organization overrides only — an explicit narrowing recorded in ADR 005). Still deferred: scheduled refresh (needs its Cron/second-trigger justification). Mock only vendor OAuth HTTP in local acceptance tests (`test/oauth.test.ts`, `test/oauth-tokens.test.ts`, `test/oauth-consent.test.ts`).
+Local status: OAuth token mechanics are centralized in `src/oauth.ts` (issue #149): inline client-credentials fetch, auth-code/PKCE/state/callback contract, URL/entity templating, audience/scope replacement semantics (corrected attribution: replacement, never subset), rotating-refresh single-flight fencing with the cross-instance `OAuthRefreshFence` Durable Object (`src/oauth-refresh-fence.ts`, bound as `OAUTH_REFRESH_FENCE`; memory-only, no D1 — Cloudflare-native equivalent of the PR #741 row-lock serialization), and the non-secret health lifecycle (healthy/failed/revoked with failed/recovered transitions). Persistence slice 1 (post-#148, migration 0031, `src/oauth-tokens.ts`): per-Connection tokens persist as AES-GCM-256 envelopes reusing the ADR 005 KEK path (org+Connection-bound AAD), with a monotonic persisted generation wired to the fence, conditional replacement writes (superseded generations observe OAUTH_TOKEN_GENERATION_STALE), persisted failed/recovered/revoked health, and no D1 transaction across vendor HTTP. The 32-bit scope-hash collision pair is a permanent fence regression with the same-scope exactly-one-POST invariant preserved. NinjaOne rides the shared primitive with identical Fault codes/messages, proven by its unchanged regression suites. Operator consent slice (`src/oauth-consent.ts`): admin-only `POST /api/connections/:id/oauth/authorize` (PKCE S256 + state issuance, pure) and `POST /api/connections/:id/oauth/callback` (fixed-Fault validation, exactly one vendor exchange POST, initial-or-fenced-replacement persist, no secret readback), with the client secret resolved per-Organization-first then deployment. Integration-list health slice (`GET /api/integrations/health`, instance-admin-only): per-Integration Connected/Degraded/Failed/None plus mappingCount/connectedCount/needsReconnectionCount/connectionStatusCounts over persisted non-secret health only (upstream PR #762 semantics; no global/default token exists, so the effective set is per-Organization overrides only — an explicit narrowing recorded in ADR 005). Scheduled-path decision (issue #149): no scheduled refresh ships. Inline/on-demand rotation covers the scheduler's job — an expired-but-refreshable token recovers through `refreshPersistedOAuthToken` with one vendor POST, pinned by test — so a Cron Trigger plus ADR would add a second refresh path for no demonstrated need. A scheduled path is earned only by a concrete requirement (vendor refresh-token idle expiry, warm-token latency SLO). Mock only vendor OAuth HTTP in local acceptance tests (`test/oauth.test.ts`, `test/oauth-tokens.test.ts`, `test/oauth-consent.test.ts`).
 
 Depends: CON-01, SEC-02, AUTH-03
 
@@ -592,9 +596,20 @@ bodies read as insert and legacy `upsert:true` reads as merge_upsert;
 write and the caller never auto-chunks. The `rows/batch-update` and
 `rows/batch-delete` routes remain as compatibility aliases through the same
 canonical executor (no second batch semantics path). Realtime table-change
-subscriptions (visibility transitions, revocation push, reconnect
-reconciliation) remain missing per the multi-slice note; retained until
-verified. TABLE-01 (#117) is subsumed by this slice.
+subscriptions land as bounded revision polling (ADR 045, issue #154):
+`GET /api/tables/:name/changes` walks `(updated_at, doc_id)` keyset order
+with opaque sync tokens against D1 as the source of truth; every poll
+re-resolves the role ceiling plus read grant fresh (fail closed, the local
+answer to upstream #760), revoked callers 404 on the next poll, garbage
+tokens fail closed with RESYNC_REQUIRED, and deletes reconcile via an
+authoritative re-list (no tombstones, no push transport, no TRG-03 event-log
+writes). Sync tokens bind to their table instance (table id plus format
+version ride the marker), so a token from another table — or from a deleted
+and recreated instance under the same name — fails closed instead of
+silently filtering the wrong row set; write stamps are monotonic per table
+(maximum observed instant plus one millisecond) so same-millisecond bursts
+still sort in commit order behind an issued cursor. TABLE-01 (#117) is
+subsumed by this slice.
 
 Physical document-ID batch filter (issue #154, upstream `8af322ac` PR #730):
 repeated `document_ids` query keys constrain rows and counts to the named IDs
@@ -617,12 +632,14 @@ D1 bounds and blockers (explicit, Free-tier posture): 4 KB per document, 0
 through 25 documents per batch, 25 document_ids per query (255 chars each),
 1000-row scan caps, limit 1-50, 5 nested filters. The 25-document bound (not
 upstream's 1000) is the Cloudflare-driven adaptation, and it holds on Free
-by construction: one request costs at most 29 queries against the
+by construction: one request costs at most 30 queries against the
 50-queries-per-invocation Free cap, proven under the strictest plausible
 counting (every batched statement counts, including a rolled-back call) — 1
-declaration load, up to 2 grant checks, 1 preflight SELECT of at most 26
+declaration load, up to 2 grant checks, 1 revision SELECT (monotonic write
+stamps per ADR 045, so same-millisecond writes still sort in commit order
+for the poll cursor), 1 preflight SELECT of at most 26
 binds (far under the 100-bound-parameter cap), and 25 statements in a single
-batch() call, with 21 queries of margin. There is deliberately no row-by-row
+batch() call, with 20 queries of margin. There is deliberately no row-by-row
 fallback that could spend more: a write transaction that aborts past a clean
 preflight fails the whole request with TABLE_BATCH_RETRY (503, nothing
 persisted) for a full-batch retry, so persistence is all-or-denied on
@@ -650,6 +667,41 @@ cap (1000 statements + ~15 overhead > 1000), so a 1000-wide batch would need
 multi-invocation chaining (Queue/Workflow orchestration) — a deferred
 redesign, not this slice. Callers needing more than 25 documents issue
 several sequential batch requests; each request stays atomic on its own.
+Retention/partitioning policy (issue #154, decision with an explicit
+residual blocker): retention stays org-owned explicit deletion only — row
+deletes plus `deleteTable` cascade drop rows and grants, with no TTL
+columns, no auto-partitioning, and no background sweeper in this slice
+(pinned by `test/tables.test.ts` "TABLE-02 retention-posture pins": the
+applied DDL carries no ttl/expiry/partition/retention surface and the
+per-document bound answers to D1 itself via
+`CHECK(length(data_json) <= 4096)`). Concrete byte/row/query bounds behind
+the decision: 4096 UTF-8 bytes per document, 256 KB batch route body,
+1000-row scan cap per list/count query, page limit 1-50, at most 5 nested
+filters, at most 25 document_ids of 255 chars each; a scan window that
+fills the 1000-row cap answers total=-2 (bounded, never an invented exact
+total) while keyset pages stay continuous and bounded to page rows plus
+one lookahead. Capacity math against the D1 per-database cap (500 MB Free,
+10 GB Paid): worst-case 4096-byte documents yield on the order of 128,000
+documents per database on Free (~2.5 M on Paid) before the storage cap,
+minus row/index overhead — and no per-table quota is enforced, so one
+table can fill its database. Partitioning posture is manual: splitting
+across tables stays inside the same 500 MB envelope, and splitting across
+databases needs a future multi-DB routing decision because single-database
+batch atomicity ends at the batch() call boundary (a batch never spans
+databases). Residual blocker: large Tables approaching the per-database
+cap are not production-shaped until that sharding/retention policy lands;
+small Tables under org-owned explicit deletion are decided and shippable.
+Sparse-filter reachability limit (explicit blocker, same window): nested
+filters match inside one 1000-row scan window per list/count call, so a
+filter whose only matches sit past the first window answers an empty page
+with hasMore=false and total=-2 (bounded, never an invented exact total);
+keyset continuation past a filled window that yields fewer than limit
+matches is a query-semantics follow-up, pinned by the sparse-match
+regression in the slice's test block — list/count pagination semantics
+stay unchanged in this slice.
+Large-table bounded-memory regressions, filtered page continuity at scale,
+and retention-policy pins live in `test/tables.test.ts` "TABLE-02
+large-table retention-policy slice (issue #154)".
 Unsupported
 query operators fail closed (UNSUPPORTED_QUERY / INVALID_ORDER / INVALID_CURSOR
 for offset or custom sorts: no offset pagination, no custom sorts, no
@@ -676,9 +728,10 @@ through upsert, and vice versa. Merge and replace upsert share one wholesale
 effect because local documents are whole objects; both modes stay accepted
 for SDK portability. Idless rows take a server UUID before the preflight.
 Tables are never auto-created on write: the declaration must exist, so
-writes cannot bypass owner attribution. Post-commit table-change events stay
-with the retained realtime subcase (TRG-03 owns the event log); no event
-wiring in this slice. The response carries `{ results, count }` with
+writes cannot bypass owner attribution. Post-commit table-change delivery is
+the bounded-poll realtime slice above (ADR 045); TRG-03 owns the event log
+exclusively, so table polls write no events and create no duplicate wiring.
+The response carries `{ results, count }` with
 submission ordering; `return_documents:false` answers `{ results: [], count }`
 (the local results never embed documents, so the flag suppresses per-item
 detail). Whole-request order is deterministic: org isolation (404),
@@ -852,9 +905,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## EMBED-01: Publish and embed forms/apps with revocable external capabilities
 
-Phase 4; **Missing**; existing issue: new
+Phase 4; **Partial**; existing issue: new
 
-Local status: Neither authenticated embeds nor anonymous/public form publication exists. everyone access is not synonymous with anonymous access.
+Local status: Slices 1–2 shipped (issue #156). Slice 1: signed form-embed grants on Worker + D1 — per-org/form secrets with show-once issuance and no readback, exact-match origin allowlists (no wildcards), capability fingerprints that fail closed on form edits until rotation, bootstrap/submit sessions bound to the FORM-02 startup path (STALE_FORM_HANDLE throughout) with dispatch through the shared submit core, terminal revocation with no grace, and an admin-only console inventory on the form detail page. The embed principal holds no grants, so Tables deny by absence and caller file references are refused (no embed upload path in slice 1). Slice 2: signed app-embed grants as a distinct class (per-org/app secrets, exact-match origins, deployment fingerprints that fail closed on redeploy until rotation, pre-gate active-deployment asset reads, terminal revocation, per-app admin inventory) plus anonymous public-form publication (confirmation-only submit through the shared core with no execution/history disclosure, honeypot spam trap with the single-use startup handle as the submission nonce, file-ref refusal, capability-changing republish review, blocking, per-form admin publish/review UX). The three classes never cross-resolve (separate tables, principals, and failure codes). Slice 3: session-owned uploads for external form sessions on Worker + D1 + R2 — server-minted paths plus a per-session ownership claim table (migration 0040), pre-gate issuance/byte-PUT/finalize bound to the live startup session (revocation and capability drift kill outstanding finalizes with no grace), and a submit ownership check that keeps the slice-1/2 FILE_NOT_SESSION_OWNED traversal verdicts while letting a session submit exactly what it staged (per-session cap, field size/type bounds, standard finalize-after-upload verification). Remaining: authenticated external-user access (owner cost decision) and the Turnstile/CAPTCHA binding (explicitly deferred — honeypot + nonce + no-oracle disclosure close the cheap abuse shapes). everyone access is not synonymous with anonymous access.
 
 Depends: FORM-02, APP-01, AUTH-03, AUTH-02
 
@@ -882,7 +935,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase 4; **Implemented**; existing issue: #157
 
-Local status: ADR 018 earns the R2 primitive (FILES binding; D1 holds metadata only). Declared locations with minted read/write/delete policies, policy-checked proxy upload/download in Bearer and revocable-capability shapes, bounded batch issuance (100 entries, 1s to 7d expiry, per-path allow/deny), finalize-after-upload with server-side size/digest/type verification, version-fenced overwrite/delete (FILE_MISSING / VERSION_CONFLICT), policy admin plus access-test, Organization-scoped listing, and a bounded shared read-only fallback. Reads collapse missing/unfinalized/foreign to 404 (non-disclosure); revocation deletes outstanding tokens (no TTL grace). Single-PUT objects only (per-location max_bytes, at most 25 MiB); multipart/range/retention/content-search are explicit non-goals owned by FILE-02. Proven by 10 workerd tests on real local R2/D1 plus the Files UI read slice. R2 keys are org-namespaced; no Worker-local disk persistence.
+Local status: ADR 036 earns the R2 primitive (FILES binding; D1 holds metadata only). Declared locations with minted read/write/delete policies, policy-checked proxy upload/download in Bearer and revocable-capability shapes, bounded batch issuance (100 entries, 1s to 7d expiry, per-path allow/deny), finalize-after-upload with server-side size/digest/type verification, version-fenced overwrite/delete (FILE_MISSING / VERSION_CONFLICT), policy admin plus access-test, Organization-scoped listing, and a bounded shared read-only fallback. Reads collapse missing/unfinalized/foreign to 404 (non-disclosure); revocation deletes outstanding tokens (no TTL grace). Single-PUT objects only (per-location max_bytes, at most 25 MiB); multipart/range/retention/content-search are explicit non-goals owned by FILE-02. Proven by 10 workerd tests on real local R2/D1 plus the Files UI read slice. R2 keys are org-namespaced; no Worker-local disk persistence.
 
 Depends: AUTH-02, SEC-01
 
@@ -907,7 +960,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase 4+6; **Partial**; existing issue: #158
 
-Local status: ADR 019 accepts the identity/versioning/access/retention contract. Generated/uploaded Artifacts ship end to end on Worker + D1 + R2: upload with same-filename versioning (same stable UUID, current pointer advances, no optimistic version-conflict API), list/preview/download/rename/delete, execution/workspace/conversation attachment bindings with the canonical-versus-binding access split (creator-or-admin for bytes, triple-only for binding readers), configurable retention (default 90 days, range 1-3650, admin-only changes) with explicit preview/run cleanup (bounded batch, per-row outcomes, R2-first interrupted recovery), upload completion verification with failed-write cleanup, MIME/size limits (5 MiB per surface), deleted metadata surviving while bytes are removed, and metadata-only portable exports. Generated-output formats ride as deferred subcapabilities; no Python rendering on Workers. Remaining: AUTH-02 roles (finer than creator/org-admin), FILE-01 signed-URL parity (direct-to-R2 browser PUTs), AI-03 chat attachment surfacing. Composes with AUTH-01 membership gating and instance/org admin bypass.
+Local status: ADR 040 accepts the identity/versioning/access/retention contract. Generated/uploaded Artifacts ship end to end on Worker + D1 + R2: upload with same-filename versioning (same stable UUID, current pointer advances, no optimistic version-conflict API), list/preview/download/rename/delete, execution/workspace/conversation attachment bindings with the canonical-versus-binding access split (creator-or-admin for bytes, triple-only for binding readers), configurable retention (default 90 days, range 1-3650, admin-only changes) with explicit preview/run cleanup (bounded batch, per-row outcomes, R2-first interrupted recovery), upload completion verification with failed-write cleanup, MIME/size limits (5 MiB per surface), deleted metadata surviving while bytes are removed, and metadata-only portable exports. Generated-output formats ride as deferred subcapabilities; no Python rendering on Workers. Remaining: AUTH-02 roles (finer than creator/org-admin), FILE-01 signed-URL parity (direct-to-R2 browser PUTs), AI-03 chat attachment surfacing. Composes with AUTH-01 membership gating and instance/org admin bypass.
 
 Depends: FILE-01, AUTH-02
 
@@ -958,7 +1011,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase 4; **Partial**; existing issue: #160
 
-Local status: ADR 019 accepts the scoped runtime contract. Authored apps run invoke/result, filtered Table read/write/live poll, and signed file upload/download against the real local Worker through `client/src/lib/app-runtime.ts` (imperative) and `app-provider.tsx` (provider + hooks). Authorization is deny-by-absence grant rows checked per call: hidden Tables stay 404 on runtime paths, revoked grants fail immediately (including token redeem), and runtime file lists show read-granted files only. Live updates are bounded revision polling (no WebSocket/Durable Object/Queue); the handshake tripwire (`APP_SDK_VERSION` + `GET /api/apps/:id/sdk`) fails drift loud with `APP_SDK_MISMATCH`. Browser-safe APIs carry install/org/app context, loading/error state, method-shaped retry (GET bounded, mutations never blind), bounded one-401 refresh, reconnect re-list, and the flat-hook vs nested-imperative Table shape. Forms/config hooks stay in FORM-02/CON-02; batch/rich query stays in TABLE-02; artifact lifecycles stay in FILE-02; log streaming stays in OBS-02.
+Local status: ADR 019 accepts the scoped runtime contract. Authored apps run invoke/result, filtered Table read/write/live poll, and signed file upload/download against the real local Worker through `client/src/lib/app-runtime.ts` (imperative) and `app-provider.tsx` (provider + hooks). Authorization is deny-by-absence grant rows checked per call: hidden Tables stay 404 on runtime paths, revoked grants fail immediately (including token redeem), and runtime file lists show read-granted files only. Live updates are bounded revision polling (no WebSocket/Durable Object/Queue); the handshake tripwire (`APP_SDK_VERSION` + `GET /api/apps/:id/sdk`) fails drift loud with `APP_SDK_MISMATCH`. Browser-safe APIs carry install/org/app context, loading/error state, method-shaped retry (GET bounded, mutations never blind), bounded one-401 refresh, reconnect re-list, and the flat-hook vs nested-imperative Table shape. Remainder composition (`test/app-sdk-remainder-composition.test.ts`) drives the real browser client against the real local Worker: in-sync handshake gating, query-only 422 limits, post-subscribe live delivery with unsubscribe quiesce, scoped invoke/result with canonical replay, sha-verified file round-trip with revoke-at-redeem denial, hidden/revoked denial on granted-visible rows, and one-fault GET retry plus bounded one-401 refresh (replay 401 surfaces with auth-failure handling). Forms/config hooks stay in FORM-02/CON-02; batch/rich query stays in TABLE-02; artifact lifecycles stay in FILE-02; log streaming stays in OBS-02.
 
 Depends: APP-01, TABLE-02, FILE-01, OBS-02
 
@@ -1072,7 +1125,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase 1; **Partial**; existing issue: #119
 
-Local status: hello Saga and native local test are already present; #119 remains open and broader workspace migration is not proven.
+Local status: hello Saga and native local test are already present; #119 is closed (M4 pilot verified 2026-09-14) and broader workspace migration is not proven.
 
 Depends: none
 
@@ -1098,6 +1151,8 @@ AI-01 build slice 1 (issue #164, landed incrementally on main): five provider In
 AI-01 secret-scrub slice (issue #164): the five deployment-global AI API keys are registered in `deploymentSecretsFromEnv` (`src/secrets.ts`), so the shared write-time and Worker HTTP-layer scrubbing covers them like every other deployment secret (sentinel regressions in `test/secret-scrub.test.ts`). ADR 032 v0 unchanged: no per-tenant keys, no D1 persistence.
 
 AI-01 build slice 2 (issue #164): `src/ai-profiles.ts` entity plus admin-gated `/api/ai/*` routes reusing the CON-01 management boundary (reads ride the membership gate, mutations are admin-only); centralized fail-closed assignment resolver with a read-only resolve route; all four lifecycle guards (first-profile auto-assign of all six keys, `chat_default` disable rejection, referenced-delete block, merge reassign + OR chat flags); `primary`/`chat_default` un-clearable; 404-on-foreign plus Connection ownership/disabled checks; bounded key-authenticated verify-with-key and model discovery (5s, manual redirects, 64 KiB cap, mocked vendor HTTP only) answering availability booleans; identities-only browser surface (no provider model ids, no key material); ADR 013 egress rows per AI vendor; per-Connection vendor-paid cost copy on the AI defs. Reuses migration 0028, no new migration.
+
+AI-01 close-out slice (issue #164): read-only capability-conformance surface (`checkConformance` in `src/ai-profiles.ts`, admin-gated `GET /api/ai/profiles/:id/conformance`) comparing asserted capability overrides + capabilityState against the observed vendor list with the same bounded key-authenticated ladder as verify (presence check, endpoint re-parse, 5s, mocked vendor HTTP only); flags exactly the provable contradictions (`asserted-capabilities-unconfirmed`, `state-supported-but-model-absent`), never per-capability verification it cannot observe; negative pins for invalid/disabled assignments, foreign-org 404, and redaction extended to the new route; `AI_CONFORMANCE_FAILED` added to the SDK contract. No new migration, no new primitive, no `ResourceKind` change (per-role AI delegation stays a separate ADR-level decision). Slice adds ~3.1 KiB to the Worker bundle (975,852 B → 978,989 B measured); the 228+ KiB overage against the 747,520 B soft reference is pre-existing on `main` and advisory-only (issue #177), not owned by this slice.
 
 Depends: SEC-01, CON-01, AUTH-02
 
@@ -1240,9 +1295,9 @@ Upstream evidence (paths relative to upstream repo root):
 
 ## TOOL-01: Expose opt-in Saga tools and an authorized inbound MCP gateway
 
-Phase 6; **Missing**; existing issue: new
+Phase 6; **Partial**; existing issue: #170
 
-Local status: No tool registry or MCP server exists. The static Saga catalog does not imply tool exposure.
+Local status: Tool slices ship on Worker + D1 (issue #170, ADR 022): the opt-in tool registry (`src/tools.ts`, migration 0024 `tool_enrollments` — a Saga becomes a tool only through an explicit enrollment row, so the static Saga catalog never implies tool exposure, and discovery/execution share one gate); the authorized inbound MCP gateway (`src/mcp*.ts`); OpenAPI/Code Mode (`src/openapi.ts`, including the Halo host token-exchange contract below). Proven by `test/tool-01-tools.test.ts`, `test/tool-01-mcp.test.ts`, `test/tool-01-openapi.test.ts`, and `test/tool-01-halo-proof.test.ts` on real local bindings. Explicitly deferred (retain until verified): per-agent native tool surfaces and AI-02 agent composition over these tools, which is why the owner closure still reads Partial, not Implemented or complete.
 
 Halo Code Mode auth (issue #170, landed incrementally on main): the Halo host exchanges the deployment pair at the Connection endpoint origin's `/auth/token` (OAuth2 client-credentials via the shared OAUTH-01 primitive) and sends only the returned access token as the Bearer credential — never the `clientId:clientSecret` pseudo-Bearer. The shared generator emitter copies the same contract with explicit per-provider `tokenPath`/`scope`/`timeoutMs` options, and the vendor harness models the token endpoint (validates the pair, issues a sentinel token, rejects raw-pair resource calls).
 
@@ -1414,7 +1469,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase 4; **Partial**; existing issue: new
 
-Local status: Static Wrangnarok brand/Nav exists. There is no admin brand configuration, own profile/avatar or complete settings navigation.
+Local status: Slice 1 shipped (issue #176): per-Organization branding (admin-only name/color write, reset, logo upload over the FILES R2 bucket with D1 metadata, safe unauthenticated public read for pre-auth shells) plus caller-scoped own profile (display name, light/dark/system theme applied to the shell, avatar upload) at /profile and /admin/branding, with the shell header rendering loaded branding. Password/security settings stay IdP-owned (Access) with no local store. Nav IA corrected: the stale disabled Integrations entry (closed #160) is removed — the family is served by the enabled Connections page — and the remaining disabled entries (Triggers -> #139, Tables -> #154) name real open parity owners. Upload caps adopt the upstream pins (logos 5 MiB, avatars 2 MiB). Slice 2 shipped (issue #176): warn-only WCAG contrast safeguards on the branding admin preview (3:1 floor over button-text, header, and chip surfaces) plus full-shell document branding (title + theme-color from the loaded view); no API behavior change, no authz change. Slice 3 shipped (issue #176, PR #533): sanitized inline-SVG logos/avatars via the shared fail-closed validator (`src/svg-image.ts`, validate-and-reject inert-markup allowlist, no scrub-rewrite) served under the API `default-src 'none'` CSP. Slice 4 hardened the validator (issue #176): link elements, namespaced active elements, CSS `@import`, and a fragment-or-embedded-image allowlist on every href/src target. Remaining: cross-user avatar/directory reads (needs explicit #143 scope decisions) and any further settings families.
 
 Depends: AUTH-01, FILE-01
 
@@ -1437,7 +1492,7 @@ Upstream evidence (paths relative to upstream repo root):
 
 Phase Continuous; **Partial**; existing issue: #177
 
-Local status: The dated capability-versus-limit matrix ships as `docs/feasibility-envelope.md` (2026-09-17): Worker CPU/memory/bundle/egress, Workflows instances/steps/history, Durable Objects, D1 reads/writes/storage/per-database/transaction limits, R2 size/signing, Access users, and model/vector/build costs each carry a free / paid-adaptation / redesign / unresolved classification with the binding limit named. Provider-published allowances were re-checked against current Cloudflare docs on 2026-09-17 (correcting the Free per-database cap to 500 MB); locally measured usage (smoke budgets, usage blocks, 739,082-byte bundle per the 2026-09-17 `LIMITS-META` record) stays explicitly separated from provider meters; W1–W3 multi-org workload models are labeled estimates; what still requires an authorized dev measurement is listed, not assumed. Per owner decision (#177), the soft bundle budget is advisory, not a gate: 730 KiB plus an 8 KiB reserve as warn-only reference levels with advisory LIMITS-META reporting (`test/limits-envelope.test.ts` pins shape, not exact sync). Remaining: deployed D1-meta/Workers-analytics/DO-duration metering and multi-org load fixtures before any production accuracy claim.
+Local status: The dated capability-versus-limit matrix ships as `docs/feasibility-envelope.md` (2026-09-17): Worker CPU/memory/bundle/egress, Workflows instances/steps/history, Durable Objects, D1 reads/writes/storage/per-database/transaction limits, R2 size/signing, Access users, and model/vector/build costs each carry a free / paid-adaptation / redesign / unresolved classification with the binding limit named. Provider-published allowances were re-checked against current Cloudflare docs on 2026-09-17 (correcting the Free per-database cap to 500 MB); locally measured usage (smoke budgets, usage blocks, 975,852-byte bundle per the 2026-09-18 `LIMITS-META` record) stays explicitly separated from provider meters; W1–W3 multi-org workload models are labeled estimates; what still requires an authorized dev measurement is listed, not assumed. Per owner decision (#177), the soft bundle budget is advisory, not a gate: 730 KiB plus an 8 KiB reserve as warn-only reference levels with advisory LIMITS-META reporting (`test/limits-envelope.test.ts` pins shape, not exact sync). Remaining: deployed D1-meta/Workers-analytics/DO-duration metering and multi-org load fixtures before any production accuracy claim.
 
 Depends: none
 
@@ -1456,3 +1511,7 @@ Upstream evidence (paths relative to upstream repo root):
 - `api/src/routers/packages.py`
 
 Related Wrangnarok issues: #77, #78
+
+## Checkpoint outcomes
+
+Slot reserved per `docs/architecture/000-steward-checklist.md`: the steward records each simplicity-checkpoint verdict here (or as a comment on the umbrella issue #132). No outcome recorded on this repair lane — slot only.

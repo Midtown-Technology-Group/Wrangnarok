@@ -180,10 +180,11 @@ it("truncates large organization lists to a bounded persisted summary", async ()
   expect(body.result.organizationCount).toBe(100);
   expect(body.result.organizations).toHaveLength(25);
 });
-it("surfaces a slow NinjaOne vendor as TimedOut through the explicit timeout step", async () => {
+it("surfaces a slow NinjaOne vendor as TimedOut via failSagaExecution classification", async () => {
   // Timeout parity with the echo and digest legs: the Integration deadline
-  // fires first and the Saga routes NINJA_VENDOR_TIMEOUT to timeout-mark-v1.
-  // Token + orgs attempt only: no retry, no echo of anything.
+  // fires first and failSagaExecution classifies NINJA_VENDOR_TIMEOUT as
+  // TimedOut inside persist-failure-v1 (ADR-033-5, issue #416 — no explicit
+  // timeout step). Token + orgs attempt only: no retry, no echo of anything.
   mockNinja(
     { access_token: TOKEN_SENTINEL, expires_in: 3600, token_type: "Bearer" },
     [{ id: 1, name: "Acme" }],

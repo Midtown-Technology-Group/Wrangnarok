@@ -1,0 +1,9 @@
+# Preview env scope (issues #227 + #251 Slice A): ARTIFACTS R2 bucket in
+# the preview env with a smoke byte-path probe, plus docs + CI-only Slice A
+# (ADR 004 env delta, reset runbook, failure diagnostics artifact). No new
+# primitive, no new infra, no Slice B test env.
+scopes/227-251-preview.scope
+wrangler.jsonc
+scripts/smoke-preview.mjs
+.github/workflows/preview.yml
+docs/architecture/004-ci-cd.md

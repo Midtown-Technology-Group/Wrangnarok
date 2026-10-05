@@ -90,6 +90,74 @@ export async function runSmoke({
   }
 }
 
+// Issue #227: artifact byte-path probe. Uploads one small disposable blob
+// under a random per-run name (last-wins preview is shared across PRs, so
+// the name must never collide), reads it back byte-for-byte, then deletes
+// it. Runs as the same Bearer [REDACTED] caller that creates the row, so the
+// creator-or-admin canonical gate covers upload, download, and delete with
+// no admin grant. A 503 ARTIFACT_STORE_NOT_CONFIGURED surfaces as an
+// explicit metadata-only error naming the missing binding — never a silent
+// pass — so a preview without the ARTIFACTS bucket fails loudly here
+// instead of pretending byte routes were exercised.
+export async function runArtifactProbe({
+  baseUrl,
+  token,
+  fetchImpl = globalThis.fetch,
+  keyPrefix = "preview-artifact-probe",
+  bytes = null,
+}) {
+  const base = baseUrl.replace(/\/+$/, "");
+  const headers = { Authorization: `Bearer ${token}` };
+  const name = `${keyPrefix}-${crypto.randomUUID()}.txt`;
+  const payload = bytes ?? new TextEncoder().encode(`wrangnarok preview probe ${name}\n`);
+
+  const uploadRes = await fetchImpl(`${base}/api/artifacts?name=${encodeURIComponent(name)}&mime=text/plain`, {
+    method: "PUT",
+    redirect: "manual",
+    headers: { ...headers, "Content-Type": "application/octet-stream" },
+    body: payload,
+  });
+  if (uploadRes.status === 503) {
+    const detail = await uploadRes.text().catch(() => "");
+    if (detail.includes("ARTIFACT_STORE_NOT_CONFIGURED")) {
+      throw new Error("Artifact probe failed: preview is metadata-only (ARTIFACTS bucket not bound).");
+    }
+    throw new Error(`Artifact upload failed: HTTP 503`);
+  }
+  if (uploadRes.status !== 201 && uploadRes.status !== 200) {
+    throw new Error(`Artifact upload failed: HTTP ${uploadRes.status}`);
+  }
+  const uploaded = await readJson(uploadRes);
+  const artifactId = uploaded?.artifact?.id;
+  if (typeof artifactId !== "string" || artifactId.length === 0) {
+    throw new Error("Artifact upload returned no artifact id.");
+  }
+
+  // Cleanup always runs; a delete failure never masks a download failure.
+  let downloadError = null;
+  try {
+    const downloadRes = await fetchImpl(`${base}/api/artifacts/${artifactId}/download`, {
+      headers,
+      redirect: "manual",
+    });
+    if (!downloadRes.ok) throw new Error(`Artifact download failed: HTTP ${downloadRes.status}`);
+    const received = new Uint8Array(await downloadRes.arrayBuffer());
+    const expected = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
+    const same = received.length === expected.length && received.every((byte, i) => byte === expected[i]);
+    if (!same) throw new Error("Artifact download bytes differ from upload bytes.");
+  } catch (error) {
+    downloadError = error;
+  }
+  const deleteRes = await fetchImpl(`${base}/api/artifacts/${artifactId}`, {
+    method: "DELETE",
+    headers,
+    redirect: "manual",
+  });
+  if (!deleteRes.ok) throw new Error(`Artifact cleanup delete failed: HTTP ${deleteRes.status}`);
+  if (downloadError) throw downloadError;
+  return { artifactId, name };
+}
+
 function stubFetch(scenarios) {
   const calls = [];
   return {
@@ -259,6 +327,63 @@ async function selftest() {
     );
   }
 
+  // Issue #227: artifact probe happy path — upload, byte-identical
+  // download, cleanup delete.
+  {
+    const sent = new TextEncoder().encode("probe-bytes-123");
+    const stub = stubFetch([
+      jsonResponse({ artifact: { id: "11111111-1111-4111-8111-111111111111" } }, 201),
+      new Response(sent, { status: 200 }),
+      jsonResponse({ deleted: true }),
+    ]);
+    const result = await runArtifactProbe({
+      baseUrl: "https://preview.test",
+      token: "tok",
+      fetchImpl: stub.fetch,
+      bytes: sent,
+    });
+    check("probe artifact id", result.artifactId === "11111111-1111-4111-8111-111111111111");
+    check("probe three calls", stub.calls.length === 3);
+    check("probe upload octet-stream", stub.calls[0]?.init?.headers?.["Content-Type"] === "application/octet-stream");
+    check("probe delete method", stub.calls[2]?.init?.method === "DELETE");
+  }
+
+  // Issue #227: unbound ARTIFACTS bucket fails loudly as metadata-only —
+  // no silent pass, no further calls.
+  {
+    const stub = stubFetch([
+      new Response(JSON.stringify({ error: { code: "ARTIFACT_STORE_NOT_CONFIGURED" } }), { status: 503 }),
+    ]);
+    let error = null;
+    try {
+      await runArtifactProbe({ baseUrl: "https://preview.test", token: "tok", fetchImpl: stub.fetch });
+    } catch (e) {
+      error = e;
+    }
+    check("metadata-only throws", /metadata-only/.test(String(error)) && stub.calls.length === 1);
+  }
+
+  // Issue #227: byte mismatch fails, but the cleanup delete still runs.
+  {
+    const stub = stubFetch([
+      jsonResponse({ artifact: { id: "22222222-2222-4222-8222-222222222222" } }, 201),
+      new Response(new TextEncoder().encode("wrong-bytes"), { status: 200 }),
+      jsonResponse({ deleted: true }),
+    ]);
+    let error = null;
+    try {
+      await runArtifactProbe({
+        baseUrl: "https://preview.test",
+        token: "tok",
+        fetchImpl: stub.fetch,
+        bytes: new TextEncoder().encode("right-bytes"),
+      });
+    } catch (e) {
+      error = e;
+    }
+    check("byte mismatch throws", /differ/.test(String(error)) && stub.calls.length === 3);
+  }
+
   console.log(`preview smoke selftest: ${passed} passed.`);
 }
 
@@ -277,6 +402,11 @@ if (invokedAsCli) {
       try {
         const result = await runSmoke({ baseUrl, token });
         console.log(`preview smoke passed: ${result.executionId} (${result.operations} operations).`);
+        // Issue #227: exercise the preview ARTIFACTS byte path (upload →
+        // read back → delete) under a random per-run name, then report the
+        // disposable name so a failure can be correlated to leftover rows.
+        const probe = await runArtifactProbe({ baseUrl, token });
+        console.log(`preview artifact probe passed: ${probe.name} (${probe.artifactId}).`);
       } catch (error) {
         console.error(`preview smoke failed: ${error instanceof Error ? error.message : error}`);
         process.exitCode = 1;

@@ -1,0 +1,13 @@
+# Policy-rule administration UI lane scope (issue #560): usable org/global
+# policy-rule admin over the existing GET/POST/DELETE /api/orgs/:id/policy-rules
+# and /api/policy-rules routes. New PolicyRules page plus typed client
+# wrappers, route/nav wiring, and fixture-backed interaction tests. No Worker
+# route or authorization change, no edit or dry-run capability, no migration,
+# no new Cloudflare primitive.
+client/src/pages/PolicyRules.tsx
+client/src/lib/api-client.ts
+client/src/lib/client-types.ts
+client/src/App.tsx
+client/src/components/Nav.tsx
+test/policy-rules-ui.test.tsx
+scopes/560-policy-ui.scope

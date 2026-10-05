@@ -49,6 +49,9 @@ export interface SagaSummary {
   /** Stable Integration IDs this Saga requires in its Organization context
    * (ADR 010 section 3): discovery only, no endpoints or credentials. */
   requiredIntegrations: string[];
+  /** Semantic capability names this Saga requires (issue #262): discovery
+   * only. Absent on older payloads; the server always sends it. */
+  requiredCapabilities?: string[];
   inputSchema?: unknown;
   outputSchema?: unknown;
 }
@@ -118,6 +121,45 @@ export interface ConnectionTestResult {
 
 export interface ConnectionTestResponse {
   test: ConnectionTestResult;
+}
+
+/** Direct allow rule for GET/POST /api/orgs/:id/policy-rules and
+ * GET/POST /api/policy-rules (AUTH-02, issue #560): one (resource, action)
+ * grant for one subject. Rules only grant `allow`; anything without a
+ * matching rule denies by absence — there is no deny effect and no edit
+ * or dry-run shape on the API. `orgId` null marks a global rule. */
+export interface PolicyRule {
+  id: string;
+  orgId: string | null;
+  resourceKind: "saga" | "form" | "app";
+  resourceId: string;
+  action: "execute" | "read" | "submit" | "write" | "serve";
+  subjectType: "user" | "kind" | "all";
+  subjectRef: string;
+  createdAt: string;
+}
+
+export interface PolicyRulesResponse {
+  rules: PolicyRule[];
+}
+
+export interface PolicyRuleResponse {
+  id: string;
+  orgId: string | null;
+  resourceKind: PolicyRule["resourceKind"];
+  resourceId: string;
+  action: PolicyRule["action"];
+  subjectType: PolicyRule["subjectType"];
+  subjectRef: string;
+  createdAt: string;
+}
+
+export interface PolicyRuleWrite {
+  resourceKind: string;
+  resourceId: string;
+  action: string;
+  subjectType: string;
+  subjectRef: string;
 }
 
 /** Model profile identity for GET /api/ai/profiles (AI-01, issue #164):
@@ -578,4 +620,612 @@ export interface FormSubmitResponse {
   statusUrl: string;
   scheduled?: boolean;
   scheduleAt?: string;
+}
+
+// Signed form embeds (EMBED-01 slice 1, issue #156). Summaries carry
+// identity, policy, and binding state only — never secret material. The
+// raw secret rides the create/rotate response once and is never read back.
+
+export interface EmbedGrantSummary {
+  id: string;
+  formName: string;
+  allowedOrigins: string[];
+  fingerprint: string;
+  enabled: boolean;
+  expiresAt: string | null;
+  createdAt: string;
+  rotatedAt: string | null;
+  lastUsedAt: string | null;
+}
+
+export interface EmbedGrantsResponse {
+  embeds: EmbedGrantSummary[];
+}
+
+export interface EmbedGrantIssuedResponse {
+  grant: EmbedGrantSummary;
+  secret: string;
+}
+
+export interface EmbedGrantResponse {
+  grant: EmbedGrantSummary;
+}
+
+// Signed app embeds + anonymous public forms (EMBED-01 slice 2, issue
+// #156). App summaries carry identity, policy, and binding state only —
+// never secret material. Publications carry no secrets at all: the
+// publication ID is a public link identifier, and the summary adds the
+// live staleness bit the review UX keys on.
+
+export interface AppEmbedGrantSummary {
+  id: string;
+  appSlug: string;
+  allowedOrigins: string[];
+  fingerprint: string;
+  enabled: boolean;
+  expiresAt: string | null;
+  createdAt: string;
+  rotatedAt: string | null;
+  lastUsedAt: string | null;
+}
+
+export interface AppEmbedGrantsResponse {
+  embeds: AppEmbedGrantSummary[];
+}
+
+export interface AppEmbedGrantIssuedResponse {
+  grant: AppEmbedGrantSummary;
+  secret: string;
+}
+
+export interface AppEmbedGrantResponse {
+  grant: AppEmbedGrantSummary;
+}
+
+export interface FormPublicationSummary {
+  id: string;
+  formName: string;
+  honeypotField: string;
+  fingerprint: string;
+  enabled: boolean;
+  stale: boolean;
+  createdAt: string;
+  reviewedAt: string | null;
+  lastUsedAt: string | null;
+}
+
+export interface FormPublicationResponse {
+  publication: FormPublicationSummary | null;
+}
+
+// Organization branding + own profile (UX-01 slice 1, issue #176). The
+// branding view is the safe public shape (name, colors, logo metadata);
+// the profile view is caller-scoped. Neither carries credentials.
+
+export interface BrandingLogo {
+  contentType: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
+export interface BrandingView {
+  orgId: string;
+  appName: string;
+  primaryColor: string;
+  accentColor: string;
+  logo: BrandingLogo | null;
+  updatedAt: string | null;
+}
+
+export interface BrandingResponse {
+  branding: BrandingView;
+}
+
+export type ProfileTheme = "light" | "dark" | "system";
+
+export interface ProfileAvatar {
+  contentType: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
+export interface ProfileView {
+  orgId: string;
+  userId: string;
+  displayName: string;
+  theme: ProfileTheme;
+  avatar: ProfileAvatar | null;
+  updatedAt: string | null;
+}
+
+export interface ProfileResponse {
+  profile: ProfileView;
+}
+
+// Tool and external MCP administration (issue #559): discovery, catalog,
+// connection health, and safe management over the existing Worker routes.
+// Every view below is secret-free by server construction: tool views carry
+// identity + description only; MCP server templates carry no secret columns;
+// MCP Connection views carry provisioned flags (names/booleans), never
+// credential values. Consent views carry scope + health, never tokens.
+
+/** One enrolled Saga tool (GET /api/tools; TOOL-01, issue #170). */
+export interface ToolSummary {
+  name: string;
+  sagaId: string;
+  sagaRevision: string;
+  description: string;
+  inputSchema: { type: "object" };
+  enabled: boolean;
+}
+
+export interface ToolsResponse {
+  tools: ToolSummary[];
+}
+
+export interface ToolResponse {
+  tool: ToolSummary;
+}
+
+/** One searchable HaloPSA contract operation (GET /api/openapi/search). */
+export interface OpenapiOperation {
+  operationId: string;
+  method: string;
+  path: string;
+  summary: string;
+  risk: string;
+  deprecated: boolean;
+}
+
+export interface OpenapiSearchResponse {
+  integration: string;
+  operations: OpenapiOperation[];
+}
+
+export interface OpenapiOperationResponse {
+  operation: OpenapiOperation;
+}
+
+/** One portable MCP server template (GET /api/mcp-servers; TOOL-02). */
+export interface McpServerSummary {
+  id: string;
+  name: string;
+  serverUrl: string;
+  orgId: string | null;
+  providerFlow: string;
+  discoveryMetadata: unknown;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface McpServersResponse {
+  servers: McpServerSummary[];
+}
+
+export interface McpServerResponse {
+  server: McpServerSummary;
+}
+
+/** One per-Organization MCP Connection (GET /api/mcp-connections). */
+export interface McpConnectionSummary {
+  id: string;
+  orgId: string;
+  serverId: string;
+  serverName: string;
+  effectiveServerUrl: string;
+  serverUrlOverride: string | null;
+  tokenPath: string | null;
+  clientId: string | null;
+  clientSecretProvisioned: boolean;
+  providerFlow: string;
+  availableInChat: boolean;
+  availableToAutonomous: boolean;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface McpConnectionsResponse {
+  connections: McpConnectionSummary[];
+}
+
+export interface McpConnectionResponse {
+  connection: McpConnectionSummary;
+}
+
+/** One per-Connection catalog tool (GET /api/mcp-connections/:id/tools). */
+export interface McpCatalogTool {
+  connectionId: string;
+  toolName: string;
+  qualifiedName: string;
+  description: string;
+  inputSchema: unknown;
+  enabled: boolean;
+  autoDisabledReason: string | null;
+  syncedAt: string;
+  updatedAt: string;
+}
+
+export interface McpCatalogResponse {
+  tools: McpCatalogTool[];
+}
+
+export interface McpCatalogToolResponse {
+  tool: McpCatalogTool;
+}
+
+/** Catalog refresh summary (POST /api/mcp-connections/:id/refresh-tools). */
+export interface McpRefreshSummary {
+  total: number;
+  enabled: number;
+  disabled: number;
+}
+
+export interface McpRefreshResponse {
+  catalog: McpRefreshSummary;
+}
+
+/** Non-secret per-user consent state (GET /api/mcp-connections/:id/consent). */
+export interface McpConsentState {
+  connectionId: string;
+  userId: string;
+  orgId: string;
+  scope: string;
+  consentGrantedAt: string;
+  consentExpiresAt: string | null;
+  generation: number;
+  health: unknown;
+}
+
+export interface McpConsentResponse {
+  consent: McpConsentState | null;
+}
+
+export interface CallerResponse {
+  caller: {
+    userId: string;
+    orgId: string;
+    credentialClass: string;
+    viaAccess: boolean;
+    fixture: boolean;
+  };
+  role: "member" | "admin" | null;
+  kind: "ordinary" | "external" | null;
+}
+
+// Trigger and schedule management (issue #557): summaries mirror the Worker
+// route shapes over /api/schedules, /api/event-sources, and /api/endpoints.
+// Raw credentials (apiKey, webhookSecret) appear only on the create/rotate
+// responses, never on list/detail summaries.
+
+/** One schedule row: persisted environment state binding a name to a Saga. */
+export interface ScheduleSummary {
+  id: string;
+  name: string;
+  sagaId: string;
+  sagaName: string;
+  kind: "recurring" | "one-off";
+  cron: string;
+  timezone: string;
+  enabled: boolean;
+  input: unknown;
+  runAt: string | null;
+  nextDueAt: string | null;
+  lastWindow: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SchedulesResponse {
+  schedules: ScheduleSummary[];
+}
+
+export interface ScheduleResponse {
+  schedule: ScheduleSummary;
+}
+
+export interface ScheduleDelivery {
+  schedule: string;
+  window: string;
+  executionId: string;
+}
+
+export interface ScheduleDeliveryResponse {
+  delivery: ScheduleDelivery;
+}
+
+/** One event-source row: the registry entry owning an append-only log. */
+export interface EventSourceSummary {
+  id: string;
+  name: string;
+  kind: "schedule" | "webhook" | "topic";
+  refId: string | null;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface EventSourcesResponse {
+  sources: EventSourceSummary[];
+}
+
+export interface EventSourceResponse {
+  source: EventSourceSummary;
+}
+
+export interface SourceEvent {
+  eventId: string;
+  topic: string;
+  payload: unknown;
+  executionId: string | null;
+  createdAt: string;
+}
+
+export interface SourceEventsResponse {
+  events: SourceEvent[];
+}
+
+export interface EmitEventResponse {
+  event: SourceEvent;
+  replayed: boolean;
+  deliveries: unknown[];
+  overflowSkipped: number;
+}
+
+/** One subscription: a topic filter binding a source to a target Saga. */
+export interface SubscriptionSummary {
+  id: string;
+  name: string;
+  sagaId: string;
+  topicFilter: string;
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface SubscriptionsResponse {
+  subscriptions: SubscriptionSummary[];
+}
+
+export interface SubscriptionResponse {
+  subscription: SubscriptionSummary;
+}
+
+export interface SubscriptionDelivery {
+  eventId: string;
+  topic: string;
+  executionId: string | null;
+  outcome: "delivered" | "failed";
+  createdAt: string;
+}
+
+export interface SubscriptionDeliveriesResponse {
+  deliveries: SubscriptionDelivery[];
+}
+
+export interface RetryDeliveryResponse {
+  delivery: {
+    subscription: string;
+    eventId: string;
+    executionId: string;
+    replayed: boolean;
+  };
+}
+
+/** One endpoint row: identity and policy only, never digests or secrets. */
+export interface EndpointSummary {
+  id: string;
+  name: string;
+  sagaId: string;
+  kind: "api-key" | "webhook";
+  enabled: boolean;
+  keyExpiresAt: string | null;
+  challenge: "none" | "echo-param";
+  rateLimitPerMinute: number | null;
+  createdAt: string;
+}
+
+export interface EndpointsResponse {
+  endpoints: EndpointSummary[];
+}
+
+export interface EndpointResponse {
+  endpoint: EndpointSummary;
+}
+
+/** Create/rotate answers carry the raw credential exactly once. */
+export interface EndpointIssuedResponse {
+  endpoint: EndpointSummary;
+  apiKey?: string;
+  webhookSecret?: string;
+}
+
+export interface EndpointEvent {
+  eventId: string;
+  executionId: string;
+  createdAt: string;
+}
+
+export interface EndpointEventsResponse {
+  events: EndpointEvent[];
+}
+
+// Operations console (issue #558): typed mirrors of the served /api/ops/*,
+// /api/usage/summary, and /api/logs shapes. Counts/IDs/statuses only: no
+// inputs, results, secret values, or Cloudflare metering ride these
+// payloads. Guards in lib/api-client.ts fail loud on drift.
+
+/** Product version contract (GET /api/ops/version). */
+export interface OpsVersion {
+  sdkVersion: string;
+  sagaCatalog: { count: number; revision: string };
+  migrationsApplied: string[];
+}
+
+export interface OpsVersionResponse {
+  version: OpsVersion;
+}
+
+/** Worker/D1 liveness (GET /api/ops/health). */
+export interface OpsHealth {
+  status: string;
+  database: string;
+  worker: string;
+  checkedAt: string;
+}
+
+/** Per-status Execution counters shared by metrics and jobs. */
+export interface OpsExecutionCounters {
+  total: number;
+  pending: number;
+  pendingUndispatched: number;
+  running: number;
+  cancelling: number;
+  succeeded: number;
+  failed: number;
+  timedOut: number;
+  cancelled: number;
+}
+
+/** Recent failure tail entry: IDs/statuses/codes only, never bodies. */
+export interface OpsRecentFailure {
+  executionId: string;
+  sagaName: string;
+  status: string;
+  code: string | null;
+  completedAt: string | null;
+}
+
+/** Execution metrics (GET /api/ops/metrics). */
+export interface OpsMetrics {
+  generatedAt: string;
+  executions: OpsExecutionCounters;
+  recentFailures: OpsRecentFailure[];
+}
+
+export interface OpsMetricsResponse {
+  metrics: OpsMetrics;
+}
+
+/** One scheduled task: trigger inventory that can actually run work. */
+export interface OpsScheduledTask {
+  id: string;
+  name: string;
+  kind: string;
+  enabled: boolean;
+  cadence: string | null;
+  detail: string;
+}
+
+export interface OpsScheduledTasksResponse {
+  tasks: OpsScheduledTask[];
+}
+
+/** Platform job progress (GET /api/ops/jobs). */
+export interface OpsJobs {
+  generatedAt: string;
+  executions: OpsExecutionCounters;
+  appBuilds: {
+    queued: number;
+    running: number;
+    succeeded: number;
+    failed: number;
+    interrupted: { appId: string; appName: string }[];
+  };
+}
+
+export interface OpsJobsResponse {
+  jobs: OpsJobs;
+}
+
+/** Dependency preflight (GET /api/ops/preflight): mapping/credential
+ * presence only, no vendor HTTP, no secret values. */
+export interface OpsPreflightEntry {
+  integrationId: string;
+  integrationName: string;
+  connected: boolean;
+  enabled: boolean;
+  missingSecrets: string[];
+  ready: boolean;
+}
+
+export interface OpsPreflightResponse {
+  checkedAt: string;
+  integrations: OpsPreflightEntry[];
+}
+
+/** Connection health (GET /api/ops/connections): per-Integration health
+ * with registry test hints; live probes stay on the per-Connection test. */
+export interface OpsConnectionHealthEntry {
+  integrationId: string;
+  integrationName: string;
+  connected: boolean;
+  enabled: boolean;
+  testHint: string;
+  remediation: string;
+}
+
+export interface OpsConnectionHealthResponse {
+  connections: OpsConnectionHealthEntry[];
+}
+
+/** Repair operations the console can inspect and, with explicit
+ * confirmation, execute (POST /api/ops/repairs). */
+export type OpsRepairKind =
+  "retry-execution" | "cancel-execution" | "cleanup-pending-uploads" | "cleanup-expired-tokens" | "repair-stuck-build";
+
+export interface OpsRepairRequest {
+  kind: OpsRepairKind;
+  targetId?: string;
+  idempotencyKey?: string;
+  /** Defaults to true: inspect without mutating. Pass false to execute
+   * behind the admin gate with an explicit confirmation. */
+  dryRun?: boolean;
+}
+
+export interface OpsRepairOutcome {
+  kind: string;
+  dryRun: boolean;
+  targetId: string | null;
+  action: string;
+  result: unknown;
+}
+
+export interface OpsRepairResponse {
+  repair: OpsRepairOutcome;
+}
+
+/** Attributed usage summary (GET /api/usage/summary): application-observed
+ * counters only, never Cloudflare metering and never money (S2 no-build:
+ * model costs stay "unpriced", provider billing "unavailable"). */
+export interface UsageSagaTotals {
+  saga: string;
+  executions: number;
+  d1Reads: number;
+  d1Writes: number;
+  operationRows: number;
+  stepsExecuted: number;
+  durationMs: number;
+}
+
+export interface UsageSummary {
+  orgId: string;
+  window: { start: string | null; end: string | null };
+  totals: Omit<UsageSagaTotals, "saga">;
+  bySaga: UsageSagaTotals[];
+  byStatus: Record<string, number>;
+  cancelledExecutions: number;
+  matchedExecutions: number;
+  truncated: boolean;
+  gaps: {
+    modelTokenCosts: string;
+    providerBilling: string;
+    estimates: string;
+    currency: null;
+    unreadableBlocks: number;
+  };
+  note: string;
+}
+
+export interface UsageSummaryResponse {
+  usage: UsageSummary;
 }

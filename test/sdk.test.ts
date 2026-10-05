@@ -574,13 +574,21 @@ describe("SDK client branches over stub fetch (issue #140)", () => {
     expect(() =>
       inspectSaga(
         [
-          { id: helloSaga.id, name: "dup", revision: "v1", description: "a", requiredIntegrations: [] },
+          {
+            id: helloSaga.id,
+            name: "dup",
+            revision: "v1",
+            description: "a",
+            requiredIntegrations: [],
+            requiredCapabilities: [],
+          },
           {
             id: "395e15f0-3627-41f6-8922-008ce37e3b98",
             name: "dup",
             revision: "v1",
             description: "b",
             requiredIntegrations: [],
+            requiredCapabilities: [],
           },
         ],
         "dup",

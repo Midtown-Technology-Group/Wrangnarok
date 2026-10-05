@@ -13,3 +13,10 @@ scripts/seed-local.override.sql
 .agents/ 
 .claude/ 
 skills-lock.json
+
+# OpenCode regenerates its plugin manifest for the project on every run; keep it
+# out of git so worktrees stay clean (the tracked source of truth is
+# .opencode/opencode.json).
+.opencode/package.json
+.opencode/package-lock.json
+.opencode/bun.lock

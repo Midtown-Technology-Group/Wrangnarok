@@ -1,5 +1,5 @@
 // Migration-chain fidelity (issue #302, Slice C): applies every migration
-// 0001->0033 in order against a scratch database and proves table rebuilds
+// 0001->0036 in order against a scratch database and proves table rebuilds
 // carry all previously added columns. Guards the 0026 regression, which
 // rebuilt executions without policy_json (0012) and parent_execution_id /
 // parent_step (0015), breaking child lineage statements on fully migrated
@@ -40,6 +40,11 @@ import migration30 from "../migrations/0030_events.sql?raw";
 import migration31 from "../migrations/0031_oauth_tokens.sql?raw";
 import migration32 from "../migrations/0032_executions_column_restore.sql?raw";
 import migration33 from "../migrations/0033_event_subscriptions.sql?raw";
+import migration34 from "../migrations/0034_branding_profile.sql?raw";
+import migration35 from "../migrations/0035_embeds.sql?raw";
+import migration36 from "../migrations/0036_anon_app_embeds.sql?raw";
+import migration37 from "../migrations/0037_executions_org_fk_drop.sql?raw";
+import migration38 from "../migrations/0038_capability_resolution.sql?raw";
 
 const bindings = env as unknown as Bindings;
 
@@ -76,7 +81,18 @@ const CHAIN = [
   migration31,
   migration32,
   migration33,
+  migration34,
+  migration35,
+  migration36,
+  migration38,
 ];
+
+// Issue #493: the 0037 repair is applied explicitly per test (after optional
+// seeding on the 0001->0036 shape) to model the real upgrade path: a populated
+// database where DROP TABLE executions must preserve child-table rows.
+async function applyRepairMigration() {
+  await bindings.DB.exec(migration37);
+}
 
 beforeEach(async () => {
   for (const migration of CHAIN) {
@@ -100,6 +116,92 @@ it("rebuilds carry every previously added executions column", async () => {
   expect(index?.name).toBe("executions_parent");
 });
 
+it("executions carries no organizations foreign key after the 0037 repair", async () => {
+  await applyRepairMigration();
+  const ddl = await bindings.DB.prepare("SELECT sql FROM sqlite_master WHERE name='executions'").first<{
+    sql: string;
+  }>();
+  expect(ddl?.sql).not.toMatch(/REFERENCES organizations/);
+});
+
+it("0037 preserves populated child tables across the executions rebuild", async () => {
+  const now = new Date().toISOString();
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "org").run();
+  await bindings.DB.prepare(
+    "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,status,created_at,policy_json,parent_execution_id,parent_step) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind("exec-1", "smoke", "smoke", "r1", "org-1", "user-1", "{}", "Succeeded", now, '{"v":1}', "parent-1", "step")
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO operations(execution_id,name,position,status,started_at,completed_at,result_json) VALUES (?,?,?,?,?,?,?)",
+  )
+    .bind("exec-1", "prepare", 0, "Succeeded", now, now, '{"ok":true}')
+    .run();
+  await bindings.DB.prepare("INSERT INTO usage_blocks(execution_id,usage_json,created_at) VALUES (?,?,?)")
+    .bind("exec-1", '{"tokens":7}', now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO execution_logs(execution_id,org_id,user_id,saga_id,saga_name,level,message,created_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("exec-1", "org-1", "user-1", "smoke", "smoke", "INFO", "hello", now)
+    .run();
+
+  await applyRepairMigration();
+
+  const exec = await bindings.DB.prepare(
+    "SELECT id,status,policy_json,parent_execution_id,parent_step FROM executions WHERE id=?",
+  )
+    .bind("exec-1")
+    .first<{ id: string; status: string; policy_json: string; parent_execution_id: string; parent_step: string }>();
+  expect(exec).toMatchObject({ id: "exec-1", status: "Succeeded", policy_json: '{"v":1}' });
+  expect(exec?.parent_execution_id).toBe("parent-1");
+  expect(exec?.parent_step).toBe("step");
+  const op = await bindings.DB.prepare(
+    "SELECT execution_id,name,position,status,result_json FROM operations WHERE execution_id=? AND name=?",
+  )
+    .bind("exec-1", "prepare")
+    .first<{ execution_id: string; position: number; status: string; result_json: string }>();
+  expect(op).toMatchObject({ execution_id: "exec-1", position: 0, status: "Succeeded", result_json: '{"ok":true}' });
+  const usage = await bindings.DB.prepare("SELECT usage_json FROM usage_blocks WHERE execution_id=?")
+    .bind("exec-1")
+    .first<{ usage_json: string }>();
+  expect(usage?.usage_json).toBe('{"tokens":7}');
+  const log = await bindings.DB.prepare(
+    "SELECT execution_id,org_id,level,message FROM execution_logs WHERE execution_id=?",
+  )
+    .bind("exec-1")
+    .first<{ execution_id: string; org_id: string; level: string; message: string }>();
+  expect(log).toMatchObject({ execution_id: "exec-1", org_id: "org-1", level: "INFO", message: "hello" });
+  const ddl = await bindings.DB.prepare("SELECT sql FROM sqlite_master WHERE name='executions'").first<{
+    sql: string;
+  }>();
+  expect(ddl?.sql).not.toMatch(/REFERENCES organizations/);
+  for (const name of ["executions_history", "executions_parent", "execution_logs_tail", "execution_logs_search"]) {
+    const index = await bindings.DB.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?")
+      .bind(name)
+      .first<{ name: string }>();
+    expect(index?.name).toBe(name);
+  }
+});
+
+it("org delete retains execution history on the fully migrated schema", async () => {
+  await applyRepairMigration();
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "org").run();
+  await bindings.DB.prepare(
+    "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("exec-1", "smoke", "smoke", "r1", "org-1", "user-1", "{}", new Date().toISOString())
+    .run();
+  await bindings.DB.prepare("DELETE FROM organizations WHERE id=?").bind("org-1").run();
+  const org = await bindings.DB.prepare("SELECT id FROM organizations WHERE id=?").bind("org-1").first();
+  expect(org).toBeNull();
+  const exec = await bindings.DB.prepare("SELECT id,org_id FROM executions WHERE id=?")
+    .bind("exec-1")
+    .first<{ id: string; org_id: string }>();
+  expect(exec?.id).toBe("exec-1");
+  expect(exec?.org_id).toBe("org-1");
+});
+
 it("child lineage statements run on the fully migrated schema", async () => {
   await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "org").run();
   await bindings.DB.prepare(
@@ -113,4 +215,78 @@ it("child lineage statements run on the fully migrated schema", async () => {
     .bind("parent-1", "org-1", "user-1")
     .first<{ id: string }>();
   expect(row?.id).toBe("exec-1");
+});
+
+it("0038 lands capability assignments, entity mappings, and frozen resolutions", async () => {
+  // Deleting a Connection cascades its assignments and mappings (ADR TBD
+  // §2); frozen Execution bindings survive as audit.
+  const now = new Date().toISOString();
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "org").run();
+  await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
+    .bind("conn-1", "org-1", "0606e237-137b-4629-8346-85468e1c2df6", "https://ninja-in-test.invalid/api")
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO capability_assignments(org_id,capability,connection_id,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+  )
+    .bind("org-1", "identity.primary", "conn-1", 1, now, now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO external_entity_mappings(id,org_id,connection_id,entity_id,is_primary,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("map-1", "org-1", "conn-1", "vendor-7", 1, "manual", now, now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("exec-1", "saga", "saga", "r1", "org-1", "user-1", "{}", now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO capability_resolutions(execution_id,capability,connection_id,endpoint,integration_id,integration_revision,adapter_id,adapter_revision,transport,operation,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      "exec-1",
+      "identity.primary",
+      "conn-1",
+      "https://ninja-in-test.invalid/api",
+      "0606e237-137b-4629-8346-85468e1c2df6",
+      "ninjaone",
+      "ad-identity-v1",
+      "ad-identity-v1",
+      "ninjaone",
+      "identity-provision-v1",
+      now,
+    )
+    .run();
+  // The child tables cascade off connections in DDL (verified below);
+  // the module additionally deletes explicitly — belt beside the FK
+  // cascade, same posture as connection_secrets/oauth_tokens. This test
+  // deletes through the parent only, so the cascade itself is what the
+  // assertions observe. Frozen Execution bindings survive either way.
+  for (const table of ["capability_assignments", "external_entity_mappings"]) {
+    const ddl = await bindings.DB.prepare("SELECT sql FROM sqlite_master WHERE name=?")
+      .bind(table)
+      .first<{ sql: string }>();
+    expect(ddl?.sql).toMatch(/REFERENCES connections\(id\) ON DELETE CASCADE/);
+  }
+  const identity = await bindings.DB.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='index' AND name='external_entity_mappings_identity'",
+  )
+    .bind()
+    .first<{ sql: string }>();
+  expect(identity?.sql).toMatch(/UNIQUE/);
+  await bindings.DB.prepare("DELETE FROM connections WHERE id=?").bind("conn-1").run();
+  const assignment = await bindings.DB.prepare("SELECT capability FROM capability_assignments WHERE org_id=?")
+    .bind("org-1")
+    .first();
+  expect(assignment).toBeNull();
+  const mapping = await bindings.DB.prepare("SELECT id FROM external_entity_mappings WHERE org_id=?")
+    .bind("org-1")
+    .first();
+  expect(mapping).toBeNull();
+  const frozen = await bindings.DB.prepare(
+    "SELECT adapter_id,transport FROM capability_resolutions WHERE execution_id=?",
+  )
+    .bind("exec-1")
+    .first<{ adapter_id: string; transport: string }>();
+  expect(frozen).toMatchObject({ adapter_id: "ad-identity-v1", transport: "ninjaone" });
 });

@@ -466,6 +466,7 @@ it("keeps the SDK contract covering every served app-runtime code and route", as
     "GET /api/apps/:id/sdk",
     "GET /api/apps/:id/runtime/tables",
     "GET /api/apps/:id/runtime/tables/:name/rows",
+    "GET /api/apps/:id/runtime/tables/:name/changes",
     "POST /api/apps/:id/runtime/tables/:name/rows",
     "PATCH /api/apps/:id/runtime/tables/:name/rows/:rowId",
     "DELETE /api/apps/:id/runtime/tables/:name/rows/:rowId",

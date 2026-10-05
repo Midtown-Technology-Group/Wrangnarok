@@ -5,9 +5,13 @@
 // origin, and secret-bearing vendor output never reaches outward shapes.
 // A transient pin proves 429 with/without Retry-After and 503-transient map
 // to the fixed fault with exactly one request and no fabricated retry promise.
+// Ambiguous-outcome pins prove a lost response after a remote side effect and
+// 429/500 after partial processing record exactly one attempt each with no
+// silent retry, oversized bodies stop at the transport byte bound, and a hung
+// connection or truncated body surfaces timeout/transport faults.
 // Test-only fixture at test/helpers/hostile-provider.ts; no production code.
 import { afterEach, expect, it, vi } from "vitest";
-import { DEFAULT_SAGA_POLICY, Fault, stepRetryLimit, vendorRetryLimit } from "../src/domain";
+import { BODY_LIMIT, DEFAULT_SAGA_POLICY, Fault, stepRetryLimit, vendorRetryLimit } from "../src/domain";
 import { echo } from "../src/integrations/echo";
 import { scrubExecutionError } from "../src/secrets";
 import { HOSTILE_ECHO_URL, installHostileEcho } from "./helpers/hostile-provider";
@@ -139,6 +143,75 @@ it("maps 429 with/without Retry-After and 503-transient to the fixed fault with 
   // With- and without-header 429 share one fault class and one message: the
   // platform invents no backoff for the bare case.
   expect(new Set(messages).size).toBe(1);
+});
+
+it("represents a lost response after a remote side effect as one ambiguous attempt, never a silent retry", async () => {
+  // The vendor applied the effect, then the response was lost. The platform
+  // must surface failure with exactly the one attempt recorded — a blind
+  // retry here would duplicate the remote side effect.
+  const handle = installHostileEcho([{ kind: "timeout", sideEffect: true }, { kind: "ok" }]);
+  const lost = await faultOf(echo(CONNECTION, INPUT, "op-hostile-lost-1"));
+  expect(lost).toMatchObject({ status: 504, code: "ECHO_VENDOR_TIMEOUT" });
+  expect(handle.requests).toHaveLength(1);
+  expect(handle.sideEffects.count).toBe(1);
+
+  // Explicit caller redelivery reuses the same operation key, so a
+  // destination-side dedup key stays stable; the recording proves the second
+  // side effect came from the explicit call, not platform invention.
+  const result = await echo(CONNECTION, INPUT, "op-hostile-lost-1");
+  expect(result).toEqual(INPUT);
+  expect(handle.requests).toHaveLength(2);
+  expect(handle.requests[0]?.idempotencyKey).toBe("op-hostile-lost-1");
+  expect(handle.requests[1]?.idempotencyKey).toBe("op-hostile-lost-1");
+});
+
+it("maps 429/500 after partial processing to the fixed fault with one recorded side effect each", async () => {
+  // Rate-limit and server failure AFTER the vendor partially processed the
+  // call: each explicit attempt records exactly one request and one effect,
+  // and the outward fault never claims a retry will happen.
+  const handle = installHostileEcho([
+    { kind: "status", status: 429, headers: { "Retry-After": RETRY_AFTER_SECONDS }, sideEffect: true },
+    { kind: "status", status: 500, sideEffect: true },
+  ]);
+  const limited = await faultOf(echo(CONNECTION, INPUT, "op-hostile-partial-429"));
+  expect(limited).toMatchObject({ status: 502, code: "ECHO_INTEGRATION_FAILED" });
+  const failed = await faultOf(echo(CONNECTION, INPUT, "op-hostile-partial-500"));
+  expect(failed).toMatchObject({ status: 502, code: "ECHO_INTEGRATION_FAILED" });
+  expect(handle.requests).toHaveLength(2);
+  expect(handle.sideEffects.count).toBe(2);
+  for (const request of handle.requests) {
+    expect(request).toMatchObject({ url: HOSTILE_ECHO_URL, method: "POST" });
+  }
+});
+
+it("rejects oversized vendor bodies at the transport byte bound", async () => {
+  // Valid echo-shaped JSON padded past BODY_LIMIT: the bound fires before
+  // any shaping, and the fixed fault carries no vendor bytes.
+  const handle = installHostileEcho({ kind: "oversized", bytes: BODY_LIMIT + 1024 });
+  const fault = await faultOf(echo(CONNECTION, INPUT, "op-hostile-oversized-1"));
+  expect(fault).toMatchObject({ status: 413, code: "BODY_TOO_LARGE" });
+  expect(handle.requests).toHaveLength(1);
+  expect(fault.message).toContain(String(BODY_LIMIT));
+});
+
+it("maps a hung connection and a truncated body to timeout/transport faults with no second attempt", async () => {
+  // Hang: the connection never settles, so the caller's abort signal ends
+  // it. A small explicit deadline keeps this deterministic and fast; the
+  // vendor is scripted as having applied the effect before losing contact.
+  const hanging = installHostileEcho({ kind: "hang", sideEffect: true });
+  const timedOut = await faultOf(echo(CONNECTION, INPUT, "op-hostile-hang-1", 50));
+  expect(timedOut).toMatchObject({ status: 504, code: "ECHO_VENDOR_TIMEOUT" });
+  expect(hanging.requests).toHaveLength(1);
+  expect(hanging.sideEffects.count).toBe(1);
+  vi.restoreAllMocks();
+
+  // Truncated: bytes arrive, then the transport fails mid-stream. This is a
+  // transport fault, never a parse shape and never a silent partial result.
+  const truncated = installHostileEcho({ kind: "truncated" });
+  const cut = await faultOf(echo(CONNECTION, INPUT, "op-hostile-truncated-1"));
+  expect(cut).toMatchObject({ status: 502, code: "ECHO_INTEGRATION_FAILED" });
+  expect(truncated.requests).toHaveLength(1);
+  expect(truncated.sideEffects.count).toBe(0);
 });
 
 it("keeps the harness credential-free and echo-origin-only: off-origin fetch throws, recordings carry no bodies or headers", async () => {

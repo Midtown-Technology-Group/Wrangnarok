@@ -5,9 +5,12 @@
 // Pure unit tests — no D1, no Workflow bindings.
 import { describe, expect, it } from "vitest";
 import {
+  adIntegrationDef,
   cloudflareIntegrationDef,
   defineIntegration,
   echoIntegrationDef,
+  googleworkspaceIntegrationDef,
+  graphIntegrationDef,
   haloIntegrationDef,
   INTEGRATION_DEFINITIONS,
   integrationById,
@@ -18,7 +21,14 @@ import {
   openaiIntegrationDef,
   validateConnectionConfig,
 } from "../src/integrations";
-import { CLOUDFLARE_API_BASE, ECHO_INTEGRATION_ID, NINJA_INTEGRATION_ID } from "../src/domain";
+import {
+  AD_INTEGRATION_ID,
+  CLOUDFLARE_API_BASE,
+  ECHO_INTEGRATION_ID,
+  GOOGLEWORKSPACE_INTEGRATION_ID,
+  GRAPH_INTEGRATION_ID,
+  NINJA_INTEGRATION_ID,
+} from "../src/domain";
 import { HALO_ALLOWED_ORIGIN } from "../src/integrations/halo";
 
 const BASE = {
@@ -34,14 +44,22 @@ const BASE = {
 
 describe("Integration registry (ADR 003)", () => {
   it("registers the built-in Integrations with stable identity", () => {
-    // 3 base Integrations plus the 5 AI-01 provider kinds (issue #164) plus Cloudflare.
-    expect(INTEGRATION_DEFINITIONS).toHaveLength(9);
+    // 3 base Integrations plus the 5 AI-01 provider kinds (issue #164) plus
+    // Cloudflare plus the 3 capability-proof identity Integrations (#262).
+    expect(INTEGRATION_DEFINITIONS).toHaveLength(12);
     expect(echoIntegrationDef).toMatchObject({ id: ECHO_INTEGRATION_ID, name: "echo", secretFields: [] });
     expect(ninjaIntegrationDef).toMatchObject({
       id: NINJA_INTEGRATION_ID,
       name: "ninjaone",
       secretFields: ["clientSecret"],
     });
+    expect(graphIntegrationDef).toMatchObject({ id: GRAPH_INTEGRATION_ID, name: "graph", secretFields: [] });
+    expect(googleworkspaceIntegrationDef).toMatchObject({
+      id: GOOGLEWORKSPACE_INTEGRATION_ID,
+      name: "googleworkspace",
+      secretFields: [],
+    });
+    expect(adIntegrationDef).toMatchObject({ id: AD_INTEGRATION_ID, name: "ad", secretFields: [] });
     expect(integrationById(ECHO_INTEGRATION_ID)).toBe(echoIntegrationDef);
     expect(integrationById(NINJA_INTEGRATION_ID)).toBe(ninjaIntegrationDef);
     expect(integrationById("00000000-0000-4000-8000-000000000000")).toBeUndefined();
@@ -424,6 +442,50 @@ describe("Connection config validation (CON-01)", () => {
         validateConnectionConfig(cloudflareIntegrationDef, { endpoint: "https://evil.example.com/v4" }),
       )?.[0],
     ).toMatchObject({ field: "endpoint", code: "ENDPOINT_NOT_ALLOWED" });
+    // Capability-proof identity Integrations (issue #262): fixture HTTPS
+    // origins only — public vendor hosts plus the never-routable seam, no
+    // loopback, no cleartext, no foreign hosts.
+    expect(validateConnectionConfig(graphIntegrationDef, { endpoint: "https://graph-in-test.invalid" })).toEqual({
+      endpoint: "https://graph-in-test.invalid",
+    });
+    expect(validateConnectionConfig(graphIntegrationDef, { endpoint: "https://graph.microsoft.com" })).toEqual({
+      endpoint: "https://graph.microsoft.com",
+    });
+    expect(
+      validateConnectionConfig(googleworkspaceIntegrationDef, { endpoint: "https://admin.googleapis.com" }),
+    ).toEqual({ endpoint: "https://admin.googleapis.com" });
+    expect(
+      validateConnectionConfig(googleworkspaceIntegrationDef, { endpoint: "https://google-in-test.invalid" }),
+    ).toEqual({ endpoint: "https://google-in-test.invalid" });
+    // Bare-host suffixes admit lookalike hosts; the proof policies pin
+    // exact or dot-prefixed matches instead.
+    for (const evil of [
+      "https://evilgraph.microsoft.com",
+      "https://graph.microsoft.com.evil.example.com",
+      "https://evilgoogleapis.com",
+      "https://googleapis.com.evil.example.com",
+    ]) {
+      const def = evil.includes("graph") ? graphIntegrationDef : googleworkspaceIntegrationDef;
+      expect(detailsOf(() => validateConnectionConfig(def, { endpoint: evil }))?.[0]).toMatchObject({
+        field: "endpoint",
+        code: "ENDPOINT_NOT_ALLOWED",
+      });
+    }
+    expect(validateConnectionConfig(adIntegrationDef, { endpoint: "https://ad-in-test.invalid/directory" })).toEqual({
+      endpoint: "https://ad-in-test.invalid/directory",
+    });
+    for (const def of [graphIntegrationDef, googleworkspaceIntegrationDef, adIntegrationDef]) {
+      for (const [endpoint, code] of [
+        ["http://127.0.0.1:8788/echo", "ENDPOINT_NOT_ALLOWED"],
+        ["https://evil.example.com/api", "ENDPOINT_NOT_ALLOWED"],
+        ["http://graph-in-test.invalid/api", "INVALID_SCHEME"],
+      ] as const) {
+        expect(detailsOf(() => validateConnectionConfig(def, { endpoint }))?.[0]).toMatchObject({
+          field: "endpoint",
+          code,
+        });
+      }
+    }
     const newVendor = defineIntegration({ ...BASE, name: "newvendor" });
     expect(
       detailsOf(() => validateConnectionConfig(newVendor, { endpoint: "https://api.example.com/" }))?.[0],

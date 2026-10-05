@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "note": "Canonical recorded baseline for the Cloudflare account posture slice (issue #252). recordedAt null means no baseline is recorded yet: S2 stays advisory and S3 compares against the documented defaults. Changes are reviewed like code (steward + security PR review). Validate with: npm run posture:baseline",
+  "recordedAt": null,
+  "acknowledgedCriticalIds": [],
+  "suppressions": [],
+  "zoneExpectations": {
+    "ssl": ["strict"],
+    "minTlsVersionMin": "1.2",
+    "alwaysUseHttps": "on",
+    "automaticHttpsRewrites": "on",
+    "securityHeaderEnabled": true
+  }
+}

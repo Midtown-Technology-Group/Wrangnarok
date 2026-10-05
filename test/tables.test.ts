@@ -24,17 +24,22 @@ import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
 import migration9 from "../migrations/0009_tables.sql?raw";
 import {
   createTable as declareTable,
+  decodeChangesToken,
   insertRow,
   loadTable,
   lookupPath,
   parseBatchRequest,
+  parseChangesQuery,
   parseDocument,
   parseTableQuery,
   readRow,
   TABLE_BATCH_BODY_LIMIT,
   TABLE_BATCH_MAX,
+  TABLE_DOC_MAX_BYTES,
   TABLE_DOCUMENT_IDS_MAX,
   TABLE_DOCUMENT_ID_QUERY_MAX,
+  TABLE_FILTER_MAX,
+  TABLE_QUERY_LIMIT_MAX,
   TABLE_QUERY_ROW_CAP,
   updateRow,
 } from "../src/tables";
@@ -1202,6 +1207,368 @@ describe("TABLE-02 retention-posture pins (explicit deletion only, issue #154)",
       error: { code: "BODY_TOO_LARGE", message: `The body exceeds ${TABLE_BATCH_BODY_LIMIT} bytes.` },
     });
     expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 0 });
+  });
+});
+
+describe("TABLE-02 large-table retention-policy slice (issue #154)", () => {
+  // One scan window plus margin: over-cap by construction, small enough to
+  // seed through a few direct D1 batch() calls.
+  const LARGE_ROWS = TABLE_QUERY_ROW_CAP + 100;
+
+  interface ListBody {
+    rows: { id: string }[];
+    hasMore: boolean;
+    nextCursor: string | null;
+    total: number;
+  }
+
+  function docId(i: number): string {
+    return `d${String(i).padStart(5, "0")}`;
+  }
+
+  async function seedLarge(name: string, rows = LARGE_ROWS): Promise<void> {
+    await createTable(name);
+    const table = (await loadTable(bindings.DB, ORG, name))!;
+    const stamp = new Date().toISOString();
+    const statements = [];
+    for (let i = 0; i < rows; i += 1) {
+      statements.push(
+        bindings.DB.prepare(
+          "INSERT INTO table_rows(table_id, org_id, doc_id, owner_user_id, data_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ).bind(table.id, ORG, docId(i), OWNER, JSON.stringify({ grp: i % 10, n: i }), stamp, stamp),
+      );
+    }
+    for (let start = 0; start < statements.length; start += 100) {
+      await bindings.DB.batch(statements.slice(start, start + 100));
+    }
+  }
+
+  it("pages an over-cap table bounded with total=-2 and walks gap-free", async () => {
+    await seedLarge("big");
+    expect(await call("/api/tables/big/count").then((r) => r.json())).toEqual({ total: -2 });
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 40; page += 1) {
+      const query = cursor === null ? "?limit=50" : `?limit=50&cursor=${cursor}`;
+      const res = await call(`/api/tables/big/rows${query}`, "GET");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as ListBody;
+      // Bounded memory: one page plus lookahead, never the whole table.
+      expect(body.rows.length).toBeLessThanOrEqual(50);
+      expect(body.total).toBe(-2);
+      seen.push(...body.rows.map((row) => row.id));
+      cursor = body.nextCursor;
+      if (!body.hasMore) break;
+    }
+    expect(seen).toHaveLength(LARGE_ROWS);
+    expect(new Set(seen).size).toBe(LARGE_ROWS);
+    // Zero-padded ids sort lexicographically, so an in-order walk is sorted.
+    expect([...seen].sort()).toEqual(seen);
+    expect(seen[0]).toBe(docId(0));
+    expect(seen[seen.length - 1]).toBe(docId(LARGE_ROWS - 1));
+  });
+
+  it("keeps filtered pages continuous across the full keyset at scale", async () => {
+    await seedLarge("bigf");
+    // grp=3 matches every tenth row across the whole keyset, so every page
+    // boundary lands mid-span and any gap or dupe shows in the walk.
+    const expected = Array.from({ length: LARGE_ROWS }, (_, i) => i)
+      .filter((i) => i % 10 === 3)
+      .map(docId);
+    expect(expected.length).toBeGreaterThan(100);
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 20; page += 1) {
+      const query = cursor === null ? "?limit=25&filter=grp%3D3" : `?limit=25&cursor=${cursor}&filter=grp%3D3`;
+      const res = await call(`/api/tables/bigf/rows${query}`, "GET");
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as ListBody;
+      expect(body.rows.length).toBeLessThanOrEqual(25);
+      seen.push(...body.rows.map((row) => row.id));
+      cursor = body.nextCursor;
+      if (!body.hasMore) break;
+    }
+    expect(seen).toEqual(expected);
+    // The filtered count over an over-cap table stays honest: bounded, not
+    // an invented exact total.
+    expect(await call("/api/tables/bigf/count?filter=grp%3D3").then((r) => r.json())).toEqual({ total: -2 });
+  });
+
+  it("bounds sparse matches to the scan window and reports total=-2", async () => {
+    await seedLarge("sparse");
+    // A filter whose only match sits past the 1000-row scan window (n=1099
+    // lives in row d01099, outside the first window): the bounded walk
+    // answers what the window holds and reports total=-2 instead of an
+    // invented exact total. Full sparse-match continuation past a filled
+    // window is an explicit blocker (docs/upstream-parity.md TABLE-02
+    // retention/partitioning policy), not silent success: the -2 says
+    // bounded, and list/count pagination semantics stay unchanged.
+    const res = await call(`/api/tables/sparse/rows?limit=50&filter=n%3D${LARGE_ROWS - 1}`, "GET");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListBody;
+    expect(body.rows).toEqual([]);
+    expect(body.hasMore).toBe(false);
+    expect(body.nextCursor).toBeNull();
+    expect(body.total).toBe(-2);
+    // Control: an in-window match stays reachable, so the pin targets the
+    // window edge, not filtering itself.
+    const near = await call("/api/tables/sparse/rows?limit=50&filter=n%3D5", "GET");
+    expect(near.status).toBe(200);
+    expect(((await near.json()) as ListBody).rows.map((row) => row.id)).toEqual([docId(5)]);
+  });
+
+  it("pins the retention-policy bounds behind the recorded decision", async () => {
+    // Concrete byte/row/query bounds from the TABLE-02 retention/
+    // partitioning policy (docs/upstream-parity.md): any change reopens the
+    // recorded decision, so the pins fail closed here first.
+    expect(TABLE_DOC_MAX_BYTES).toBe(4096);
+    expect(TABLE_QUERY_ROW_CAP).toBe(1000);
+    expect(TABLE_BATCH_MAX).toBe(25);
+    expect(TABLE_BATCH_BODY_LIMIT).toBe(256_000);
+    expect(TABLE_QUERY_LIMIT_MAX).toBe(50);
+    expect(TABLE_FILTER_MAX).toBe(5);
+    expect(TABLE_DOCUMENT_IDS_MAX).toBe(25);
+    expect(TABLE_DOCUMENT_ID_QUERY_MAX).toBe(255);
+  });
+
+  it("retains rows without expiry and reclaims only through explicit deletion", async () => {
+    await createTable("ledger");
+    const first = await call("/api/tables/ledger/rows/batch", "POST", {
+      write_mode: "insert",
+      items: Array.from({ length: 25 }, (_, i) => ({ id: `k${i}`, data: { n: i } })),
+    });
+    expect(first.status).toBe(201);
+    // Unrelated writes never sweep earlier rows: no TTL, no background purge.
+    const second = await call("/api/tables/ledger/rows/batch", "POST", {
+      write_mode: "insert",
+      items: Array.from({ length: 25 }, (_, i) => ({ id: `j${i}`, data: { n: i } })),
+    });
+    expect(second.status).toBe(201);
+    expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 50 });
+    expect(await call("/api/tables/ledger/rows/k0").then((r) => r.status)).toBe(200);
+    // Explicit row deletion reclaims: counts drop and the ids stay gone.
+    const removed = await call("/api/tables/ledger/rows/batch-delete", "POST", {
+      ids: Array.from({ length: 25 }, (_, i) => `k${i}`),
+    });
+    expect(await removed.json()).toMatchObject({ count: 25 });
+    expect(await call("/api/tables/ledger/count").then((r) => r.json())).toEqual({ total: 25 });
+    expect(await call("/api/tables/ledger/rows/k0").then((r) => r.status)).toBe(404);
+  });
+
+  it("deleteTable drops every row of an over-cap table", async () => {
+    await seedLarge("bulk");
+    expect(await call("/api/tables/bulk/count").then((r) => r.json())).toEqual({ total: -2 });
+    const table = (await loadTable(bindings.DB, ORG, "bulk"))!;
+    expect((await call("/api/tables/bulk", "DELETE")).status).toBe(200);
+    const rows = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM table_rows WHERE table_id=?")
+      .bind(table.id)
+      .first<{ n: number }>();
+    expect(rows?.n).toBe(0);
+    expect((await call("/api/tables/bulk/count")).status).toBe(404);
+  });
+});
+
+describe("TABLE-02 realtime bounded-poll subscriptions (issue #154, ADR 045)", () => {
+  interface ChangesBody {
+    changes: { id: string; data: Record<string, unknown>; createdAt: string; updatedAt: string; change: string }[];
+    hasMore: boolean;
+    syncToken: string | null;
+  }
+
+  async function poll(query = "", orgId = ORG, userId = OWNER) {
+    return call(`/api/tables/live/changes${query}`, "GET", undefined, orgId, userId);
+  }
+
+  async function grant(action: string) {
+    const res = await call("/api/tables/live/grants", "POST", { action, granteeUserId: OTHER_USER });
+    expect(res.status).toBe(200);
+  }
+
+  async function revoke(action: string) {
+    const res = await call("/api/tables/live/grants", "DELETE", { action, granteeUserId: OTHER_USER });
+    expect(res.status).toBe(200);
+  }
+
+  async function setRole(role: string) {
+    await bindings.DB.prepare("UPDATE org_memberships SET role=? WHERE org_id=? AND user_id=?")
+      .bind(role, ORG, OTHER_USER)
+      .run();
+  }
+
+  beforeEach(async () => {
+    await createTable("live");
+    for (const id of ["a", "b", "c"]) {
+      expect((await putDoc("live", id, { v: id })).status).toBe(201);
+    }
+  });
+
+  it("walks the revision order across reconnects with no gaps or dupes", async () => {
+    // Bounded pages in (updated_at, doc_id) order: ties share a millisecond
+    // but the keyset stays exact, so three rows walk 2 + 1 with no overlap.
+    const seen: string[] = [];
+    let token: string | null = null;
+    for (let page = 0; page < 5; page += 1) {
+      const suffix = token === null ? "?limit=2" : `?sync_token=${encodeURIComponent(token)}&limit=2`;
+      const res = await poll(suffix);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as ChangesBody;
+      expect(body.changes.every((change) => change.change === "upsert")).toBe(true);
+      seen.push(...body.changes.map((change) => change.id));
+      token = body.syncToken;
+      if (!body.hasMore) break;
+    }
+    expect(new Set(seen).size).toBe(3);
+    expect([...seen].sort()).toEqual(["a", "b", "c"]);
+    expect(token).not.toBeNull();
+    // Reconnecting on the final token is quiet but stays resumable: the
+    // empty page echoes the request token instead of null.
+    const quiet = await poll(`?sync_token=${encodeURIComponent(token!)}`);
+    expect(quiet.status).toBe(200);
+    const quietBody = (await quiet.json()) as ChangesBody;
+    expect(quietBody.changes).toEqual([]);
+    expect(quietBody.hasMore).toBe(false);
+    expect(quietBody.syncToken).toBe(token);
+    // A write after the quiet poll arrives on the next resume, exactly once.
+    expect((await putDoc("live", "d", { v: "d" })).status).toBe(201);
+    const resumed = await poll(`?sync_token=${encodeURIComponent(token!)}`);
+    expect(((await resumed.json()) as ChangesBody).changes.map((change) => change.id)).toEqual(["d"]);
+    // Garbage tokens fail closed: resync from authoritative state, never an
+    // invented position.
+    const garbage = await poll("?sync_token=not-a-token");
+    expect(garbage.status).toBe(400);
+    expect(await garbage.json()).toMatchObject({ error: { code: "RESYNC_REQUIRED" } });
+    expect(faultCode(() => decodeChangesToken("!!!"))).toBe("RESYNC_REQUIRED");
+  });
+
+  it("stamps writes monotonically so no post-cursor write falls behind", async () => {
+    // Rapid sequential writes share clock milliseconds but must still sort
+    // in commit order: updatedAt strictly increases down the poll order.
+    for (const id of ["m1", "m2", "m3", "m4", "m5"]) {
+      expect((await putDoc("live", id, { v: id })).status).toBe(201);
+    }
+    const walked = await poll("?limit=50");
+    expect(walked.status).toBe(200);
+    const walkedBody = (await walked.json()) as ChangesBody;
+    expect(walkedBody.changes).toHaveLength(8);
+    const stamps = walkedBody.changes.map((change) => change.updatedAt);
+    expect(stamps.every((stamp, i) => i === 0 || stamps[i - 1]! < stamp)).toBe(true);
+    // The reported shape: a later single write with a smaller doc_id than
+    // the cursor ("late" < "m5") still surfaces on resume — same-millisecond
+    // ties can no longer hide it behind the cursor.
+    expect((await putDoc("live", "late", { v: "late" })).status).toBe(201);
+    const resumed = await poll(`?sync_token=${encodeURIComponent(walkedBody.syncToken!)}`);
+    expect(((await resumed.json()) as ChangesBody).changes.map((change) => change.id)).toEqual(["late"]);
+  });
+
+  it("binds sync tokens to their table instance", async () => {
+    const first = await poll("");
+    expect(first.status).toBe(200);
+    const token = ((await first.json()) as ChangesBody).syncToken!;
+    // Another table rejects the foreign token instead of silently filtering
+    // its own rows through a borrowed position.
+    await createTable("other");
+    expect((await putDoc("other", "z", { v: 1 })).status).toBe(201);
+    const foreign = await call(`/api/tables/other/changes?sync_token=${encodeURIComponent(token)}`, "GET");
+    expect(foreign.status).toBe(400);
+    expect(await foreign.json()).toMatchObject({ error: { code: "RESYNC_REQUIRED" } });
+    // Delete-and-recreate under the same name mints a new table id, so the
+    // old token fails closed instead of skipping the fresh rows.
+    expect((await call("/api/tables/live", "DELETE")).status).toBe(200);
+    await createTable("live");
+    const stale = await poll(`?sync_token=${encodeURIComponent(token)}`);
+    expect(stale.status).toBe(400);
+    expect(await stale.json()).toMatchObject({ error: { code: "RESYNC_REQUIRED" } });
+    // A pre-binding marker shape (no version/table) fails closed as well.
+    const legacy = btoa(JSON.stringify({ updatedAt: new Date().toISOString(), docId: "a" }))
+      .replaceAll("+", "-")
+      .replaceAll("/", "_")
+      .replaceAll("=", "");
+    const legacyRes = await poll(`?sync_token=${encodeURIComponent(legacy)}`);
+    expect(legacyRes.status).toBe(400);
+    expect(await legacyRes.json()).toMatchObject({ error: { code: "RESYNC_REQUIRED" } });
+  });
+
+  it("subscribes from since and fails closed on bad poll strings", async () => {
+    const since = new Date(Date.now() - 60_000).toISOString();
+    const res = await poll(`?since=${encodeURIComponent(since)}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ChangesBody;
+    // Inclusive of the instant: every row written after T-60s arrives.
+    expect(body.changes.map((change) => change.id).sort()).toEqual(["a", "b", "c"]);
+    expect(body.syncToken).not.toBeNull();
+    const badSince = await poll("?since=not-a-date");
+    expect(badSince.status).toBe(400);
+    expect(await badSince.json()).toMatchObject({ error: { code: "INVALID_SINCE" } });
+    expect(faultCode(() => parseChangesQuery(new URLSearchParams("since=not-a-date")))).toBe("INVALID_SINCE");
+    const both = await poll(`?since=${encodeURIComponent(since)}&sync_token=${encodeURIComponent(body.syncToken!)}`);
+    expect(both.status).toBe(400);
+    expect(await both.json()).toMatchObject({ error: { code: "INVALID_POLL" } });
+    const unknown = await poll("?order=asc");
+    expect(unknown.status).toBe(400);
+    expect(await unknown.json()).toMatchObject({ error: { code: "UNSUPPORTED_QUERY" } });
+    const badLimit = await poll("?limit=0");
+    expect(badLimit.status).toBe(400);
+    expect(await badLimit.json()).toMatchObject({ error: { code: "INVALID_LIMIT" } });
+    const emptyToken = await poll("?sync_token=");
+    expect(emptyToken.status).toBe(400);
+    expect(await emptyToken.json()).toMatchObject({ error: { code: "RESYNC_REQUIRED" } });
+  });
+
+  it("revokes on the very next poll and re-enters as current state", async () => {
+    await grant("read");
+    const first = await poll("", ORG, OTHER_USER);
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as ChangesBody;
+    expect(firstBody.changes).toHaveLength(3);
+    const token = firstBody.syncToken!;
+    // Leave: revocation denies the next poll like a missing table (404),
+    // never an empty feed that confirms the table exists.
+    await revoke("read");
+    const denied = await poll(`?sync_token=${encodeURIComponent(token)}`, ORG, OTHER_USER);
+    expect(denied.status).toBe(404);
+    expect(await denied.json()).toMatchObject({ error: { code: "TABLE_NOT_FOUND" } });
+    // Enter: a fresh grant returns current state as upserts on resubscribe.
+    await grant("read");
+    const reentered = await poll("", ORG, OTHER_USER);
+    expect(reentered.status).toBe(200);
+    expect(((await reentered.json()) as ChangesBody).changes.map((change) => change.id).sort()).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+  });
+
+  it("never broadcasts hidden rows to strangers or other orgs", async () => {
+    // Same-org stranger: 404 with the table code, never an empty feed.
+    const stranger = await poll("", ORG, OTHER_USER);
+    expect(stranger.status).toBe(404);
+    expect(await stranger.json()).toMatchObject({ error: { code: "TABLE_NOT_FOUND" } });
+    // Cross-Organization names never resolve: the generic 404, never a leak.
+    const foreign = await poll("", OTHER_ORG, OWNER);
+    expect(foreign.status).toBe(404);
+    expect(await foreign.json()).toEqual({ error: { code: "NOT_FOUND", message: "Not found." } });
+    // Unknown tables answer the same 404 as hidden ones: no existence oracle.
+    expect((await call("/api/tables/missing/changes", "GET")).status).toBe(404);
+  });
+
+  it("re-resolves claims every poll: role and grant flips land immediately", async () => {
+    await grant("read");
+    await grant("insert");
+    // Member with grants: writes land and polls read.
+    expect((await call("/api/tables/live/rows/fresh", "PUT", { data: { v: 1 } }, ORG, OTHER_USER)).status).toBe(201);
+    // Flip to viewer: the ceiling re-resolves on the next evaluation, so no
+    // stale member claim permits the write — while the read poll still holds
+    // on the intact read grant.
+    await setRole("viewer");
+    const write = await call("/api/tables/live/rows/fresh2", "PUT", { data: { v: 2 } }, ORG, OTHER_USER);
+    expect(write.status).toBe(403);
+    expect(await write.json()).toMatchObject({ error: { code: "TABLE_FORBIDDEN" } });
+    expect((await poll("", ORG, OTHER_USER)).status).toBe(200);
+    // Back to member but with the read grant revoked: the next poll denies
+    // on the missing grant — fail closed, no stale read claim.
+    await setRole("member");
+    await revoke("read");
+    expect((await poll("", ORG, OTHER_USER)).status).toBe(404);
   });
 });
 

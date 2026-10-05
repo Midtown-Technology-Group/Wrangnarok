@@ -244,7 +244,7 @@ describe("GET /api/auth/me over the LAB fixture", () => {
     expect(live.status).toBe(200);
     expect(await live.json()).toMatchObject({
       caller: { userId: MEMBER, credentialClass: "fixture" },
-      role: "member",
+      role: "operator",
     });
 
     // Revoked membership denies on the next request (no redeploy, no sessions).
@@ -312,7 +312,7 @@ describe("Access human and service identity over the Worker", () => {
         viaAccess: true,
         fixture: false,
       },
-      role: "member",
+      role: "operator",
       kind: "ordinary",
     });
   });
@@ -345,7 +345,7 @@ describe("Access human and service identity over the Worker", () => {
     expect(after.status).toBe(200);
     expect(await after.json()).toMatchObject({
       caller: { userId: `service:${SERVICE}`, credentialClass: "service", viaAccess: true, fixture: false },
-      role: "member",
+      role: "operator",
     });
     const row = await bindings.DB.prepare("SELECT status FROM org_memberships WHERE org_id=? AND user_id=?")
       .bind(ACCESS_ORG.toLowerCase(), `service:${SERVICE}`)
