@@ -261,23 +261,30 @@ describe("client-credentials token acquisition", () => {
     expect(resolveTokenUrl(ENDPOINT, TOKEN_PATH)).toBe("https://oauth-in-test.invalid/oauth/token");
   });
 
-  it.each(["//attacker.invalid/token", "///attacker.invalid/token", "/\\\\attacker.invalid/token"])(
-    "rejects cross-origin token reference %s before any fetch",
-    async (tokenPath) => {
-      const { calls, fetchImpl } = stubVendor([]);
-      await expect(
-        requestClientCredentialsToken({
-          endpoint: ENDPOINT,
-          tokenPath,
-          scope: "monitoring",
-          credentials: { clientId: CLIENT_ID, clientSecret: SECRET_SENTINEL },
-          faults: FAULTS,
-          fetchImpl,
-        }),
-      ).rejects.toMatchObject({ code: "INVALID_OAUTH_ENDPOINT" });
-      expect(calls).toHaveLength(0);
-    },
-  );
+  it.each([
+    "//attacker.invalid/token",
+    "///attacker.invalid/token",
+    "/\\\\attacker.invalid/token",
+    "/\t/attacker.invalid/token",
+    "/\n/attacker.invalid/token",
+    "/\r/attacker.invalid/token",
+    "https://attacker.invalid/token",
+    "http://oauth-in-test.invalid/oauth/token",
+    "https://oauth-in-test.invalid:444/oauth/token",
+  ])("rejects cross-origin token reference %s before any fetch", async (tokenPath) => {
+    const { calls, fetchImpl } = stubVendor([]);
+    await expect(
+      requestClientCredentialsToken({
+        endpoint: ENDPOINT,
+        tokenPath,
+        scope: "monitoring",
+        credentials: { clientId: CLIENT_ID, clientSecret: SECRET_SENTINEL },
+        faults: FAULTS,
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_OAUTH_ENDPOINT" });
+    expect(calls).toHaveLength(0);
+  });
 });
 
 describe("single-flight concurrency fencing (upstream PR #741 equivalent)", () => {
