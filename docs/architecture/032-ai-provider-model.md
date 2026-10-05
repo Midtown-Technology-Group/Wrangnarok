@@ -84,7 +84,7 @@ rejection. Capability state never rides the nominal provider kind alone.
 
 ### Verification is bounded and mocked
 
-Verify/test/discovery follow the `testConnection` ladder:
+Verify/test/discovery/conformance follow the `testConnection` ladder:
 presence-check declared secrets, re-parse the persisted endpoint, 5s
 vendor probe, read-only by construction, every outward detail scrubbed.
 Because these keys are deployment-global, credentialed probes pin OpenAI,
@@ -105,3 +105,15 @@ Connection; inference is classified paid-adaptation under LIMITS-01.
   verify/test/discovery probes, browser profile-identity surface.
 - The SEC-02 tripwire stays shut; per-tenant keys need their own firing.
 - No new runtime primitives; bundle budget respected.
+
+### Security origin enforcement checkpoint (issue #164)
+
+All three credentialed model-list probes (verification, discovery, and
+capability conformance) use the same credential-origin guard before the
+shared vendor HTTP helper. A tenant-selected endpoint cannot redirect a
+deployment-global credential. The deployment operator owns the compatible
+origin allowlist; it grants no new Organization permissions or secret store.
+Authentication, execution, persistence, secret registration, deployment,
+and recovery retain their existing authoritative paths. No schema or new
+Cloudflare primitive is introduced. Worker route regressions exercise both
+unapproved origins (zero vendor requests) and explicitly approved origins.

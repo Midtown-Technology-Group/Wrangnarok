@@ -1157,6 +1157,75 @@ describe("AI verify-with-key (issue #164)", () => {
   });
 });
 
+describe("AI deployment credential origins", () => {
+  it.each(["verify", "discover", "conformance"])("blocks an unapproved compatible origin during %s", async (probe) => {
+    const connection = await createConnection(OPENAI_COMPATIBLE_INTEGRATION_ID, "https://llm.example.com/v1");
+    const profile = await createProfile(connection.id, { modelId: "llama-local" }, "local");
+    const calls = remockVendor(() => Response.json({ data: [{ id: "llama-local" }] }));
+    const path =
+      probe === "discover"
+        ? `/api/ai/discover/${OPENAI_COMPATIBLE_INTEGRATION_ID}`
+        : `/api/ai/profiles/${profile.id}/${probe}`;
+    const response = await worker.fetch(call(path, probe === "verify" ? "POST" : "GET"), {
+      ...bindings,
+      OPENAI_COMPATIBLE_API_KEY: KEY_SENTINEL,
+      OPENAI_COMPATIBLE_ALLOWED_ORIGINS: "https://operator-approved.example",
+    });
+    expect(response.status).toBe(502);
+    const field = probe === "verify" ? "verification" : probe === "discover" ? "discovery" : "conformance";
+    const body = await response.json();
+    expect(body).toMatchObject({ [field]: { ok: false, code: "INVALID_CONNECTION" } });
+    expect(JSON.stringify(body)).not.toContain(KEY_SENTINEL);
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([
+    undefined,
+    "",
+    "not-a-url",
+    "http://llm.example.com",
+    "https://llm.example.com/path",
+    "https://llm.example.com?query=1",
+    "https://user@llm.example.com",
+    "https://llm.example.com.attacker.example",
+  ])("fails closed for compatible origin configuration %j", async (allowedOrigins) => {
+    const connection = await createConnection(OPENAI_COMPATIBLE_INTEGRATION_ID, "https://llm.example.com/v1");
+    const profile = await createProfile(connection.id, { modelId: "llama-local" }, "local");
+    const calls = remockVendor(() => Response.json({ data: [{ id: "llama-local" }] }));
+    const response = await worker.fetch(call(`/api/ai/profiles/${profile.id}/conformance`), {
+      ...bindings,
+      OPENAI_COMPATIBLE_API_KEY: KEY_SENTINEL,
+      OPENAI_COMPATIBLE_ALLOWED_ORIGINS: allowedOrigins,
+    });
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({ conformance: { ok: false, code: "INVALID_CONNECTION" } });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("allows an operator-approved compatible origin for all credentialed probes", async () => {
+    const connection = await createConnection(OPENAI_COMPATIBLE_INTEGRATION_ID, "https://llm.example.com/v1");
+    const profile = await createProfile(connection.id, { modelId: "llama-local" }, "local");
+    const calls = remockVendor(() => Response.json({ data: [{ id: "llama-local" }] }));
+    const approved = {
+      ...bindings,
+      OPENAI_COMPATIBLE_API_KEY: KEY_SENTINEL,
+      OPENAI_COMPATIBLE_ALLOWED_ORIGINS: "https://other.example, https://llm.example.com/",
+    };
+    for (const [path, method] of [
+      [`/api/ai/profiles/${profile.id}/verify`, "POST"],
+      [`/api/ai/discover/${OPENAI_COMPATIBLE_INTEGRATION_ID}`, "GET"],
+      [`/api/ai/profiles/${profile.id}/conformance`, "GET"],
+    ] as const) {
+      expect((await worker.fetch(call(path, method), approved)).status).toBe(200);
+    }
+    expect(calls).toHaveLength(3);
+    for (const request of calls) {
+      expect(request.url).toBe("https://llm.example.com/v1/models");
+      expect(request.headers["authorization"]).toBe(`Bearer ${KEY_SENTINEL}`);
+    }
+  });
+});
+
 describe("AI capability conformance (issue #164)", () => {
   const keyed = () => ({ ...bindings, OPENAI_API_KEY: KEY_SENTINEL });
 

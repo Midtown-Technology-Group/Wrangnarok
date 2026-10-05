@@ -1111,6 +1111,7 @@ export async function checkConformance(
   }
   try {
     assertSafeEndpoint(def.name, connection.endpoint);
+    assertCredentialOrigin(def.name, connection.endpoint, env);
   } catch {
     return failed("INVALID_CONNECTION", "This Connection endpoint is not a safe URL: update it before checking.");
   }
