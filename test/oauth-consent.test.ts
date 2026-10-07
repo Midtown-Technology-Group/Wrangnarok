@@ -600,6 +600,27 @@ describe("consent callback (single-use exchange plus fenced persist)", () => {
     expect(vendorCalls).toHaveLength(0);
   });
 
+  it.each(["/\t/evil-in-test.invalid/token", "/\n/evil-in-test.invalid/token", "/\r/evil-in-test.invalid/token"])(
+    "rejects a normalized cross-origin callback path %j before sending the deployment secret",
+    async (tokenPath) => {
+      await seedMapping(ORG_A, USER_ADMIN);
+      const issued = authorizationOf((await authorize()).body);
+      const { status, body } = await callback(NINJA_INTEGRATION_ID, {
+        code: "test-auth-code-alpha",
+        state: issued.state,
+        expectedState: issued.state,
+        codeVerifier: issued.codeVerifier,
+        redirectUri: REDIRECT_URI,
+        tokenPath,
+        clientId: CLIENT_ID,
+      });
+      expect(status).toBe(500);
+      expect(body).toMatchObject({ error: { code: "INVALID_OAUTH_ENDPOINT" } });
+      expect(vendorCalls).toHaveLength(0);
+      expect(JSON.stringify(body)).not.toContain(DEPLOYMENT_SECRET);
+    },
+  );
+
   it("exposes the vendor seam directly for handler-level tests", async () => {
     const mapping = await seedMapping(ORG_A, USER_ADMIN);
     const issued = authorizationOf((await authorize()).body);
