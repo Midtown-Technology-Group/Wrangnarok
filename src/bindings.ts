@@ -23,6 +23,9 @@ export interface AiProviderCredentials {
   GOOGLE_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
   OPENAI_COMPATIBLE_API_KEY?: string;
+  /** Exact comma-separated HTTPS origins allowed to receive the shared
+   * OpenAI-compatible key. Empty/unset disables credentialed probes. */
+  OPENAI_COMPATIBLE_ALLOWED_ORIGINS?: string;
 }
 /** Zone Inventory migration (issues #116 MIG-01, #119 MIG-02): deployment
  * credential surface for the Cloudflare bearer Connection. The account-owned

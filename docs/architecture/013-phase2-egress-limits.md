@@ -60,7 +60,7 @@ verify/discovery authenticate with the deployment-global key server-side.
 
 | Bound | Value (source) |
 | --- | --- |
-| Allowed hosts | Derived from the Connection endpoint origin plus the per-provider list path below (`src/ai-profiles.ts`, `joinVendorListPath`). Endpoints re-parse through `assertSafeEndpoint` before every probe; rows rewritten outside validation fail closed as `INVALID_CONNECTION`. |
+| Allowed hosts | Exact canonical HTTPS origins for OpenAI, Anthropic, Google, and OpenRouter. OpenAI-compatible requires an exact origin in the deployment-owned comma-separated `OPENAI_COMPATIBLE_ALLOWED_ORIGINS` binding. Endpoints re-parse through `assertSafeEndpoint` and the credential-origin guard before every probe; rows rewritten outside validation fail closed as `INVALID_CONNECTION` before `fetch`. |
 | Method/shape | `GET` model list; OpenAI-shaped `{data:[{id}]}` for openai/openai-compatible/openrouter/anthropic, Google-shaped `{models:[{name}]}` for google. Unknown shapes fail closed (`AI_VERIFY_FAILED` / `AI_DISCOVERY_FAILED`); vendor text never flows outward. |
 | Redirects | `manual`; any 3xx fails the probe (workerd has no `redirect:error`). |
 | Timeout | `AI_VENDOR_TIMEOUT_MS` (5000ms) via `AbortSignal.timeout` (`src/ai-profiles.ts`). |
