@@ -15,9 +15,8 @@
 // L1. Table grant administration is owner-only: org admins and instance
 //     admins hold no implicit table scope and there is no break-glass. An
 //     owner who leaves strands their tables; recovery is out of scope here.
-// L2. File policy rows are org-wide toggles administered by any active
-//     member (ADR 036 v1: no separate author role). The ceiling narrows use,
-//     not administration; a viewer toggling a policy row stays inert at use.
+// L2. File policy rows are org-wide toggles administered by org admins.
+//     Operators and viewers may use grants but cannot change the policy rows.
 // L3. The tables/files legs do not consult membership kind: external members
 //     with a grant/policy read and write exactly like operators. External
 //     callers can never be admins (outer gate), and viewers stay read-only.
@@ -466,6 +465,16 @@ it("files allowed/denied matrix: issuance, delivery, policy, and listing", async
   const viewerDenied = await issuance("/api/files/uploads", USER_VIEWER, [{ location: "mx", path: "v.txt" }]);
   expect(viewerDenied.status).toBe(207);
   expect(viewerDenied.entries).toEqual([{ path: "v.txt", allowed: false, code: "FORBIDDEN", message: "Forbidden." }]);
+  for (const user of [USER_VIEWER, USER_OP]) {
+    expect(await call("/api/file-policies", "DELETE", user, { location: "mx", action: "read" })).toMatchObject({
+      status: 403,
+      body: { error: { code: "ADMIN_ONLY" } },
+    });
+    expect(await call("/api/file-policies", "POST", user, { location: "mx", action: "read" })).toMatchObject({
+      status: 403,
+      body: { error: { code: "ADMIN_ONLY" } },
+    });
+  }
   // Unknown locations answer 404 before policy evaluation on both issuance
   // legs, and strangers deny at the outer membership gate.
   const unknownUp = await issuance("/api/files/uploads", USER_OP, [{ location: "no-such-place", path: "a.txt" }]);
@@ -493,11 +502,11 @@ it("files allowed/denied matrix: issuance, delivery, policy, and listing", async
   // Structural listing serves under the read policy and stays org-scoped:
   // revoking read hides the listing as 404, re-granting restores it.
   expect(await call("/api/files?location=mx", "GET", USER_OP)).toMatchObject({ status: 200 });
-  expect(await call("/api/file-policies", "DELETE", USER_OP, { location: "mx", action: "read" })).toMatchObject({
+  expect(await call("/api/file-policies", "DELETE", USER_ADMIN, { location: "mx", action: "read" })).toMatchObject({
     status: 200,
   });
   expect(await call("/api/files?location=mx", "GET", USER_OP)).toMatchObject({ status: 404 });
-  expect(await call("/api/file-policies", "POST", USER_OP, { location: "mx", action: "read" })).toMatchObject({
+  expect(await call("/api/file-policies", "POST", USER_ADMIN, { location: "mx", action: "read" })).toMatchObject({
     status: 201,
   });
   expect(await call("/api/files?location=mx", "GET", USER_OP)).toMatchObject({ status: 200 });
@@ -548,7 +557,7 @@ it("files revocation stops outstanding capabilities at use time, then re-grant r
   // Revoking write deletes the matching capability rows, so the
   // outstanding upload token is unknown at use time (401) — and new
   // issuance closes with 403 per entry.
-  expect(await call("/api/file-policies", "DELETE", USER_OP, { location: "rk", action: "write" })).toMatchObject({
+  expect(await call("/api/file-policies", "DELETE", USER_ADMIN, { location: "rk", action: "write" })).toMatchObject({
     status: 200,
   });
   const usedPut = await worker.fetch(
@@ -566,7 +575,7 @@ it("files revocation stops outstanding capabilities at use time, then re-grant r
   // Revoking read deletes the download capability the same way (401 at use,
   // 404 non-disclosure on new issuance); the policy access-test agrees
   // without issuing.
-  expect(await call("/api/file-policies", "DELETE", USER_OP, { location: "rk", action: "read" })).toMatchObject({
+  expect(await call("/api/file-policies", "DELETE", USER_ADMIN, { location: "rk", action: "read" })).toMatchObject({
     status: 200,
   });
   const usedGet = await worker.fetch(
@@ -592,10 +601,10 @@ it("files revocation stops outstanding capabilities at use time, then re-grant r
   // Defense in depth: a capability row that survives policy loss still
   // re-checks policy on every use. Remove the policy rows directly (no
   // capability cleanup) and prove the surviving tokens stop closed.
-  expect(await call("/api/file-policies", "POST", USER_OP, { location: "rk", action: "write" })).toMatchObject({
+  expect(await call("/api/file-policies", "POST", USER_ADMIN, { location: "rk", action: "write" })).toMatchObject({
     status: 201,
   });
-  expect(await call("/api/file-policies", "POST", USER_OP, { location: "rk", action: "read" })).toMatchObject({
+  expect(await call("/api/file-policies", "POST", USER_ADMIN, { location: "rk", action: "read" })).toMatchObject({
     status: 201,
   });
   const survivingUp = await issuance("/api/files/uploads", USER_OP, [{ location: "rk", path: "survive.txt" }]);
@@ -625,10 +634,10 @@ it("files revocation stops outstanding capabilities at use time, then re-grant r
   );
   expect(stoppedGet.status).toBe(404);
   // Re-granting recovers both legs on fresh slots.
-  expect(await call("/api/file-policies", "POST", USER_OP, { location: "rk", action: "write" })).toMatchObject({
+  expect(await call("/api/file-policies", "POST", USER_ADMIN, { location: "rk", action: "write" })).toMatchObject({
     status: 201,
   });
-  expect(await call("/api/file-policies", "POST", USER_OP, { location: "rk", action: "read" })).toMatchObject({
+  expect(await call("/api/file-policies", "POST", USER_ADMIN, { location: "rk", action: "read" })).toMatchObject({
     status: 201,
   });
   expect((await issuance("/api/files/uploads", USER_OP, [{ location: "rk", path: "next.txt" }])).status).toBe(200);
