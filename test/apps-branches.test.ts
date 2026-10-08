@@ -295,11 +295,18 @@ it("denies secrets, build, VCS, and vendor paths from retained source (#484 A1)"
   // HTTP-level: the edit-source route surfaces the exclusion fail-closed.
   const id = await createApp("sanitized", "sanitized");
   const denied = await call(`/api/apps/${id}/source`, "PUT", {
-    files: [{ path: "node_modules/evil.js", content: "x" }],
+    files: [
+      { path: "index.html", content: "<h1>safe</h1>" },
+      { path: "config/.env", content: "rejected-secret-canary" },
+    ],
     dependencies: [],
   });
   expect(denied.status).toBe(422);
   const body = (await denied.json()) as { error: { code: string; details: { code: string }[] } };
   expect(body.error.code).toBe("APP_VALIDATION_FAILED");
   expect(body.error.details.some((failure) => failure.code === "EXCLUDED_PATH")).toBe(true);
+  const retained = await bindings.DB.prepare("SELECT files_json FROM app_revisions WHERE app_id=?").bind(id).all();
+  expect(retained.results).toEqual([]);
+  const detail = await call(`/api/apps/${id}`);
+  expect(JSON.stringify(await detail.json())).not.toContain("rejected-secret-canary");
 });
