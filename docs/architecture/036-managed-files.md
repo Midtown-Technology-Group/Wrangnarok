@@ -41,7 +41,7 @@ Writes require a declared location in the caller's own Organization plus an expl
 
 - `file_policies(org_id, location, action, created_at)` with `action` in (`read`, `write`, `delete`) and `UNIQUE(org_id, location, action)`. Absence of a row is denial.
 - Creating a location mints `read`, `write`, and `delete` allow rows for the owning Organization, so declaration is usable immediately; revocation is deleting the row.
-- The trusted author (the authenticated Organization caller; no separate author role in v1, same posture as ADR 017 apps) administers policies: list, add, remove. Foreign-Organization rows answer 404, never a leak.
+- Organization admins administer policy changes; an ordinary member or viewer cannot add or revoke Organization-wide access. This tightens the original v1 trusted-author rule after viewer roles were introduced. Foreign-Organization rows answer 404, never a leak.
 - `POST /api/file-policies/test` evaluates a hypothetical `(location, path, action)` triple to allow/deny with a reason, issuing nothing. The evaluator is a pure function shared by the test endpoint and every issuance path, so the tested behavior is the enforced behavior.
 
 Per-surface byte caps are explicit, never inherited: each location declares `max_bytes` (1 byte to 25 MiB; default 5 MiB, the upstream logo-surface cap) and an optional content-type allowlist (default `application/octet-stream` plus common text/image types are not assumed; the allowlist is explicit per location, empty means any type up to the byte cap). The Worker PUT path additionally buffers at most `max_bytes + 1` bytes and answers `413` past the cap: single-PUT objects only (section 7).
