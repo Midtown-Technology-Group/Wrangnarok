@@ -128,12 +128,16 @@ function tryValidate(
     return { parsed: validateAppSource(files, deps), failures: null };
   } catch (error) {
     if (error instanceof Fault && error.code === "APP_VALIDATION_FAILED") {
+      const failures = error.details as FieldFailure[];
+      // Excluded paths can contain secrets. Do not retain the raw request as
+      // an invalid revision for later inspection or backup.
+      if (failures.some((failure) => failure.code === "EXCLUDED_PATH")) throw error;
       return {
         parsed: {
           files: Array.isArray(files) ? (files as AppFile[]) : [],
           deps: Array.isArray(deps) ? (deps as AppDependency[]) : [],
         },
-        failures: error.details as FieldFailure[],
+        failures,
       };
     }
     throw error;
