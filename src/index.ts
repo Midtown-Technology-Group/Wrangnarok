@@ -542,6 +542,18 @@ function json(body: unknown, status = 200, extra: Record<string, string> = {}) {
     headers: { ...SECURITY_HEADERS, "Cache-Control": "no-store", ...extra },
   });
 }
+
+function externalNotFound(): Fault {
+  return new Fault(404, "NOT_FOUND", "Not found.");
+}
+
+function formNotPublished(): Fault {
+  return new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
+}
+
+function staleFormHandle(): Fault {
+  return new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+}
 /** Log route for the access log: raw /api/* pathname or "static". Query
  * strings never leave the URL object. */
 function routeOf(request: Request): string {
@@ -1304,7 +1316,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         if (!grant) throw new Fault(404, "NOT_FOUND", "Not found.");
         const principal = await verifyEmbedSecret(grant, request.headers.get("X-Embed-Secret"));
         checkEmbedOrigin(grant, request.headers.get("Origin"));
-        await requireActiveOrganization(env.DB, grant.org_id, new Fault(404, "NOT_FOUND", "Not found."));
+        await requireActiveOrganization(env.DB, grant.org_id, externalNotFound());
         const def = await loadForm(env.DB, grant.org_id, grant.form_name);
         if (!def) throw new Fault(404, "FORM_NOT_FOUND", "Form not found.");
         checkEmbedBinding(grant, { formId: def.id, fingerprint: await fingerprintFormDef(def) });
@@ -1367,11 +1379,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         if (!bound || !grant || grant.org_id !== bound.orgId || grant.form_name !== bound.formName) {
           throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
         }
-        await requireActiveOrganization(
-          env.DB,
-          grant.org_id,
-          new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form."),
-        );
+        await requireActiveOrganization(env.DB, grant.org_id, staleFormHandle());
         if (grant.enabled !== 1 || (grant.expires_at !== null && Date.parse(grant.expires_at) <= Date.now())) {
           throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
         }
@@ -1424,7 +1432,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         if (!grant) throw new Fault(404, "NOT_FOUND", "Not found.");
         await verifyAppEmbedSecret(grant, request.headers.get("X-Embed-Secret"));
         checkAppEmbedOrigin(grant, request.headers.get("Origin"));
-        await requireActiveOrganization(env.DB, grant.org_id, new Fault(404, "NOT_FOUND", "Not found."));
+        await requireActiveOrganization(env.DB, grant.org_id, externalNotFound());
         const live = await loadLiveDeployment(env.DB, grant.org_id, grant.app_id);
         if (!live) throw new Fault(404, "APP_NOT_FOUND", "App not found.");
         await checkAppEmbedBinding(grant, live);
@@ -1471,11 +1479,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         const pubId = parsePublicationId(publicStartup[1]);
         const pub = await loadPublication(env.DB, pubId).catch(() => null);
         if (!pub) throw new Fault(404, "NOT_FOUND", "Not found.");
-        await requireActiveOrganization(
-          env.DB,
-          pub.org_id,
-          new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published."),
-        );
+        await requireActiveOrganization(env.DB, pub.org_id, formNotPublished());
         if (pub.enabled !== 1) throw new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
         const def = await loadForm(env.DB, pub.org_id, pub.form_name);
         if (!def) throw new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
@@ -1538,11 +1542,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         if (!bound || !pub || pub.org_id !== bound.orgId || pub.form_name !== bound.formName) {
           throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
         }
-        await requireActiveOrganization(
-          env.DB,
-          pub.org_id,
-          new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form."),
-        );
+        await requireActiveOrganization(env.DB, pub.org_id, staleFormHandle());
         if (pub.enabled !== 1) {
           throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
         }
@@ -1608,7 +1608,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         if (!grant) throw new Fault(404, "NOT_FOUND", "Not found.");
         const principal = await verifyEmbedSecret(grant, request.headers.get("X-Embed-Secret"));
         checkEmbedOrigin(grant, request.headers.get("Origin"));
-        await requireActiveOrganization(env.DB, grant.org_id, new Fault(404, "NOT_FOUND", "Not found."));
+        await requireActiveOrganization(env.DB, grant.org_id, externalNotFound());
         const def = await loadForm(env.DB, grant.org_id, grant.form_name);
         if (!def) throw new Fault(404, "FORM_NOT_FOUND", "Form not found.");
         checkEmbedBinding(grant, { formId: def.id, fingerprint: await fingerprintFormDef(def) });
@@ -1634,11 +1634,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         const pubId = parsePublicationId(publicUploadIssue[1]);
         const pub = await loadPublication(env.DB, pubId).catch(() => null);
         if (!pub) throw new Fault(404, "NOT_FOUND", "Not found.");
-        await requireActiveOrganization(
-          env.DB,
-          pub.org_id,
-          new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published."),
-        );
+        await requireActiveOrganization(env.DB, pub.org_id, formNotPublished());
         if (pub.enabled !== 1) throw new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
         const def = await loadForm(env.DB, pub.org_id, pub.form_name);
         if (!def) throw new Fault(404, "FORM_NOT_PUBLISHED", "This form is not published.");
@@ -1672,7 +1668,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         if (token === null || extra.length > 0)
           throw new Fault(400, "UNSUPPORTED_QUERY", "Uploads need exactly ?token= from an issued slot.");
         const consumed = await consumeUploadToken(env.DB, token);
-        await requireActiveOrganization(env.DB, consumed.orgId, new Fault(404, "NOT_FOUND", "Not found."));
+        await requireActiveOrganization(env.DB, consumed.orgId, externalNotFound());
         const declared = await loadLocation(env.DB, consumed.orgId, consumed.location);
         if (!declared) throw new Fault(404, "NOT_FOUND", "Not found.");
         if (!request.body) throw new Fault(400, "EMPTY_UPLOAD", "The upload body must not be empty.");
