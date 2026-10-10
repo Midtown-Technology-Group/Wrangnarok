@@ -87,6 +87,12 @@ remainder against the live FILE-01 rows unchanged — staged-only refs
 still answer `FILE_NOT_READY`, over-bound or mistyped files still answer
 `FILE_TOO_LARGE` / `FILE_TYPE_REJECTED`.
 
+Issuance, token-backed byte staging, and finalize each re-resolve the owning
+Organization. Shutdown is immediate: signed issuance and byte staging use
+404 `NOT_FOUND`, public issuance uses 404 `FORM_NOT_PUBLISHED`, and finalize
+uses 422 `STALE_FORM_HANDLE`. These are the routes' existing hidden/stale
+shapes, so lifecycle enforcement does not expose Organization status.
+
 ### 3. Traversal verdicts keep their shape
 
 A reference staged by another session, by an operator, or by a sibling
@@ -135,3 +141,8 @@ past the raw-values check exactly as before.
 
 Verdict: PASS — no second authoritative path appears; fan-out continues.
 Free-tier posture unchanged (Worker + D1 + R2 only, all already in use).
+
+2026-10-10 lifecycle follow-through: PASS. The same Organization store now
+gates each external upload phase; the token, ownership, FILE-01, execution,
+deployment, and recovery paths above are unchanged. No primitive or migration
+was added.

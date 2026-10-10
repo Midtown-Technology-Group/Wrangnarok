@@ -436,6 +436,25 @@ it("revokes terminally: bootstrap 410s and outstanding sessions go stale", async
   expect(unknown.status).toBe(404);
 });
 
+it("hides disabled Organizations at bootstrap and stales existing sessions", async () => {
+  await createForm();
+  const grant = await createGrant("contact");
+  const live = await bootstrapOk(grant);
+  const before = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM executions").first<{ n: number }>();
+
+  await bindings.DB.prepare("UPDATE organizations SET status='disabled' WHERE id=?").bind(ORG).run();
+
+  const hidden = await bootstrap(grant.id, grant.secret, ORIGIN);
+  expect(hidden.status).toBe(404);
+  expect(await hidden.json()).toMatchObject({ error: { code: "NOT_FOUND" } });
+
+  const stale = await embedSubmit({ handle: live.handle, values: { name: "Ada" } }, ORIGIN, keyFor("disabled-org"));
+  expect(stale.status).toBe(422);
+  expect(await stale.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+  const after = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM executions").first<{ n: number }>();
+  expect(after?.n).toBe(before?.n);
+});
+
 it("bootstraps sessions for the grant secret plus an exact-match origin", async () => {
   await createForm();
   const grant = await createGrant("contact");

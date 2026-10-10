@@ -112,6 +112,11 @@ The app-embed principal holds no membership, no roles, and no grants:
 asset path resolves Tables, Sagas, or other tenants, so a grant can
 never traverse beyond its bound app's bundle bytes.
 
+Every asset read also re-resolves the owning Organization. Disabled or
+missing Organizations answer the route's existing 404 `NOT_FOUND`, so an
+otherwise-live grant cannot serve bytes after tenant shutdown and cannot
+reveal Organization state.
+
 ### 2. Anonymous publication is a separate class with no secrets
 
 One row in `form_publications` (migration 0036) per (org, form) binds
@@ -145,6 +150,11 @@ still admits through the standard protocol (one execution path), but
 the receipt discloses no execution/history. Anonymous callers hold no
 session, so the authenticated execution/history routes stay unreachable
 to them.
+
+Publication liveness includes a fresh Organization lifecycle check on every
+startup and submit. Disabled or missing Organizations look unpublished at
+startup (404 `FORM_NOT_PUBLISHED`); already-issued sessions go stale at
+submit (422 `STALE_FORM_HANDLE`) and dispatch nothing.
 
 The honeypot spam trap answers the identical confirmation without
 dispatching and without consuming the session (same posture as a
@@ -238,6 +248,11 @@ deciding it.
 6. **Recovery:** existing replay/fence mechanics (`STALE_FORM_HANDLE`
    everywhere, consume-after-admission, same-key idempotent replay with
    confirmation-only receipts).
+
+2026-10-10 lifecycle follow-through: PASS. The external routes now consult
+the existing Organization store per request while retaining their hidden or
+stale response shapes. No new authority, execution path, persistence model,
+secret, deployment primitive, or recovery mechanism was introduced.
 
 Stop conditions re-checked: no second auth path (no parallel credential
 store or session), no second execution path (shared core + standard
