@@ -45,6 +45,7 @@ import migration35 from "../migrations/0035_embeds.sql?raw";
 import migration36 from "../migrations/0036_anon_app_embeds.sql?raw";
 import migration37 from "../migrations/0037_executions_org_fk_drop.sql?raw";
 import migration38 from "../migrations/0038_capability_resolution.sql?raw";
+import migration42 from "../migrations/0042_table_row_revision_index.sql?raw";
 
 const bindings = env as unknown as Bindings;
 
@@ -85,6 +86,7 @@ const CHAIN = [
   migration35,
   migration36,
   migration38,
+  migration42,
 ];
 
 // Issue #493: the 0037 repair is applied explicitly per test (after optional

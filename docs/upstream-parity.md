@@ -598,7 +598,8 @@ write and the caller never auto-chunks. The `rows/batch-update` and
 canonical executor (no second batch semantics path). Realtime table-change
 subscriptions land as bounded revision polling (ADR 045, issue #154):
 `GET /api/tables/:name/changes` walks `(updated_at, doc_id)` keyset order
-with opaque sync tokens against D1 as the source of truth; every poll
+through the migration-0042 composite revision index, with tuple-seek
+continuations and opaque sync tokens against D1 as the source of truth; every poll
 re-resolves the role ceiling plus read grant fresh (fail closed, the local
 answer to upstream #760), revoked callers 404 on the next poll, garbage
 tokens fail closed with RESYNC_REQUIRED, and deletes reconcile via an

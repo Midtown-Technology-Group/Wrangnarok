@@ -38,7 +38,7 @@ Table realtime is **bounded revision polling over D1**, no push transport:
   instant is never a cross-table position; the route already loaded the
   table).
 - **Monotonic write stamps:** row writes stamp `max(now, max(updated_at)+1ms)`
-  per table (one revision SELECT per write request), so same-millisecond
+  per table (one index-backed revision SELECT per write request), so same-millisecond
   bursts still sort in commit order and no post-cursor write can fall behind
   an issued cursor. Residual: concurrent same-ms writers can still tie; that
   miss reconciles via re-list, same as deletes.
@@ -93,17 +93,28 @@ TRG-03 as the single event path, not a parallel table feed.
 Unchanged from the TABLE-02 parity row: retention is org-owned explicit
 deletion (`deleteTable` drops rows and grants; no TTL, no partitioning, no
 sweeper). The 500 MB Free per-database cap (10 GB Paid) stays a recorded
-blocker for large Tables, shared with OPS-03. This slice adds no stored
-bytes per poll (no subscription rows, no tombstones, no new migration), so
-it does not move the retention gate.
+blocker for large Tables, shared with OPS-03. Polls add no stored rows (no
+subscription rows or tombstones). Migration 0042 adds one
+`(table_id, updated_at, doc_id)` index entry per document so write stamps and
+both initial and resumed polls stay index-backed. That index is a real per-row
+storage cost and must be included in the same 500 MB capacity budget; it
+changes no logical retention or partitioning policy.
+
+A representative local SQLite measurement (10,000 rows across 10 tables,
+UUID table IDs, 16-character document IDs, ISO timestamps, and 256-byte
+payload values) added 880,640 bytes: about 88 bytes per row and 16.7% over
+that fixture's table-plus-primary-index footprint. Actual D1 growth varies
+with identifier and payload sizes; capacity planning must use deployed data.
 
 ## Free-tier query budget (no stop-condition break)
 
 One poll costs at most 4 queries against the 50-query Free invocation cap:
 1 declaration load, up to 2 policy checks (`isViewer` + grant row), 1
-bounded scan of at most `limit + 1` rows (`limit` 1–50, no `QUERY_ROW_CAP`
-scan needed — the page window is the scan). No `batch()` statements, no
-bind-list pressure (3 binds). The full-size batch budget moves 29 to 30
+index-backed page of at most `limit + 1` rows (`limit` 1–50, no
+`QUERY_ROW_CAP` scan needed). Continuation uses a native tuple comparison,
+`(updated_at, doc_id) > (?, ?)`, so the composite index supplies both the
+seek and order without a temporary sort. No `batch()` statements and at
+most four binds. The full-size batch budget moves 29 to 30
 queries (the revision SELECT above) with 20 of margin; the 25 doc_ids pin,
 the 25-doc batch pin, and the 50-query Free cap are otherwise untouched.
 
@@ -121,3 +132,14 @@ the 25-doc batch pin, and the 50-query Free cap are otherwise untouched.
   realtime posture with the push alternatives rejected above.
 - The single-diagram steward posture holds: one delivery path (Worker +
   Workflows + D1, polling reads), one event log owner (TRG-03).
+
+## 2026-10-10 bounded-plan follow-through
+
+Security findings 121/122 identified that the logical page limit did not
+bound SQLite work: `MAX(updated_at)` and ordered polling could scan or sort
+every row. Migration 0042 adds the composite revision index, and continuation
+now uses the tuple comparison the index keys directly. Workerd tests inspect
+`EXPLAIN QUERY PLAN` for the write stamp, initial poll, and resumed poll,
+requiring `table_rows_revision` and rejecting table scans or temporary
+B-trees. Authentication, execution, persistence ownership, secrets,
+deployment primitives, and recovery paths are otherwise unchanged.

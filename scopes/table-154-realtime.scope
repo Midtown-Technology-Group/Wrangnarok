@@ -1,10 +1,15 @@
-# TABLE-02 realtime bounded-poll lane scope (issue #154, ADR 045).
-# Authorized revision polling over D1; no migration, no new primitive,
-# no push transport, no TRG-03 event-log writes, no SDK surface.
+# TABLE-02 realtime bounded-poll lane scope (issue #154, ADR 045;
+# security findings 121/122).
+# Authorized revision polling over D1 with its composite revision index;
+# no new primitive, push transport, TRG-03 event-log writes, or SDK surface.
+migrations/0042_table_row_revision_index.sql
 src/tables.ts
 src/index.ts
 test/tables.test.ts
+test/migrations-chain.test.ts
+test/helpers/workflow-harness.ts
 docs/upstream-parity.md
+docs/migration-ledger.md
 docs/architecture/045-table-realtime-polling.md
 docs/architecture/adr-index.md
 scopes/table-154-realtime.scope
