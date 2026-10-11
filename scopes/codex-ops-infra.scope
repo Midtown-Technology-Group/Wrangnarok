@@ -1,5 +1,6 @@
 # Lane scope: codex/ops-infra-trust
-# Covers codex security findings: #357, #363, #362, #373, #375, #359, #379, #376
+# Covers codex security findings: #357, #363, #362, #373, #375, #359, #379, #376,
+# plus security review finding 142's wrapper/prefix follow-through.
 scopes/codex-ops-infra.scope
 scripts/wrangnarok.mjs
 scripts/wrangnarok.d.mts
