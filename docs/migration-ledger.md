@@ -57,6 +57,7 @@ Reservation workflow (enforced by `scripts/check-migration-numbers.mjs`):
 | 0039   | 0039_org_roles.sql                  | AUTH-02  | narrow org-role profile, member rows migrate to operator (issue #143; grandfathered per #528, no renumber) |
 | 0040   | 0040_session_uploads.sql            | EMBED-01 | form_session_uploads: session-owned upload claims (session hash, org, location, path, field, size/type bounds) for external form sessions (issue #156, slice 3) |
 | 0041   | 0041_mcp_external.sql               | TOOL-02  | external MCP servers, org tools, per-user consent, secret envelopes (issue #171, PR #534; grandfathered per #528, no renumber) |
+| 0042   | 0042_table_row_revision_index.sql   | TABLE-02 | composite revision index for bounded writes and change polling (security findings 121/122) |
 
 ## Stuck-database recovery (codex findings #381, #367-371)
 
@@ -117,7 +118,6 @@ repair, not from re-applying the renamed files.
 | Number | Lane    | Issue | Planned content              |
 | ------ | ------- | ----- | ---------------------------- |
 | 0017   | SOL-03  | #163  | solution export (if DDL needed) |
-| 0042   | TABLE-02 | security findings 121/122 | table-row revision index |
 
 Rule: a lane renames its migration file to the reserved number, updates its
 test imports, and runs the full gate before opening its PR. The ledger is

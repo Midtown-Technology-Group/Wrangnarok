@@ -837,7 +837,8 @@ export async function countRows(
  * cursor orders by (updated_at, doc_id), so writes sharing a millisecond
  * must still sort in commit order — otherwise a same-ms late write with a
  * smaller doc_id sorts behind an issued cursor and never surfaces. Reads
- * the table's current max(updated_at) and stamps max(now, max+1ms):
+ * the table's current max(updated_at) through the composite revision index
+ * and stamps max(now, max+1ms):
  * strictly increasing per table short of concurrent same-ms writers (that
  * residual still reconciles via re-list). Costs one SELECT per write
  * request; the full-size batch worst case moves 29 to 30 queries against
@@ -1232,9 +1233,10 @@ export function parseChangesQuery(params: URLSearchParams): TableChangesQuery {
  * polls to go stale (the upstream #760 rule, satisfied by holding no
  * snapshot at all). Denied callers answer like a missing Table (404), never
  * an empty feed. D1 is the source of truth: the scan walks at most
- * limit+1 rows in (updated_at, doc_id) keyset order, so one poll costs at
+ * limit+1 rows through the composite revision index in
+ * (updated_at, doc_id) keyset order, so one poll costs at
  * most 4 queries against the 50-query Free cap (1 declaration load, up to 2
- * policy checks, 1 scan) with 3 binds. */
+ * policy checks, 1 scan) with at most 4 binds. */
 export async function pollRowChanges(
   db: D1Database,
   caller: Principal,
@@ -1253,8 +1255,8 @@ export async function pollRowChanges(
   const clauses = ["table_id=?"];
   const binds: (string | number)[] = [table.id];
   if (query.position !== undefined) {
-    clauses.push("(updated_at>? OR (updated_at=? AND doc_id>?))");
-    binds.push(query.position.updatedAt, query.position.updatedAt, query.position.docId);
+    clauses.push("(updated_at, doc_id) > (?, ?)");
+    binds.push(query.position.updatedAt, query.position.docId);
   }
   const scanned = await db
     .prepare(

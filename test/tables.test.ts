@@ -22,6 +22,7 @@ import migration1 from "../migrations/0001_initial.sql?raw";
 import migration7 from "../migrations/0007_org_membership.sql?raw";
 import migration8 from "../migrations/0008_executions_org_fk.sql?raw";
 import migration9 from "../migrations/0009_tables.sql?raw";
+import migration42 from "../migrations/0042_table_row_revision_index.sql?raw";
 import {
   createTable as declareTable,
   decodeChangesToken,
@@ -119,6 +120,7 @@ beforeEach(async () => {
   await bindings.DB.exec(migration7);
   await bindings.DB.exec(migration8);
   await bindings.DB.exec(migration9);
+  await bindings.DB.exec(migration42);
   // AUTH-01 membership gate: the LAB fixture identity (OWNER) bootstraps to
   // admin of ORG inside authenticate on first use. OTHER_USER holds an
   // ordinary membership so table-grant denials prove table policy, not org
@@ -1399,6 +1401,36 @@ describe("TABLE-02 realtime bounded-poll subscriptions (issue #154, ADR 045)", (
     await createTable("live");
     for (const id of ["a", "b", "c"]) {
       expect((await putDoc("live", id, { v: id })).status).toBe(201);
+    }
+  });
+
+  it("uses the composite revision index for write stamps and both poll positions", async () => {
+    const table = (await loadTable(bindings.DB, ORG, "live"))!;
+    const index = await bindings.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name='table_rows_revision'",
+    ).first<{ name: string }>();
+    expect(index?.name).toBe("table_rows_revision");
+
+    const plans = await Promise.all([
+      bindings.DB.prepare("EXPLAIN QUERY PLAN SELECT MAX(updated_at) FROM table_rows WHERE table_id=?")
+        .bind(table.id)
+        .all<{ detail: string }>(),
+      bindings.DB.prepare(
+        "EXPLAIN QUERY PLAN SELECT doc_id,data_json,created_at,updated_at FROM table_rows WHERE table_id=? ORDER BY updated_at ASC, doc_id ASC LIMIT ?",
+      )
+        .bind(table.id, 21)
+        .all<{ detail: string }>(),
+      bindings.DB.prepare(
+        "EXPLAIN QUERY PLAN SELECT doc_id,data_json,created_at,updated_at FROM table_rows WHERE table_id=? AND (updated_at, doc_id) > (?, ?) ORDER BY updated_at ASC, doc_id ASC LIMIT ?",
+      )
+        .bind(table.id, "2026-01-01T00:00:00.000Z", "a", 21)
+        .all<{ detail: string }>(),
+    ]);
+
+    for (const plan of plans) {
+      const detail = plan.results.map((row) => row.detail).join("\n");
+      expect(detail).toContain("table_rows_revision");
+      expect(detail).not.toMatch(/SCAN table_rows|USE TEMP B-TREE/);
     }
   });
 
