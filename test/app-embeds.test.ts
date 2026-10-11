@@ -253,6 +253,18 @@ it("serves active-deployment assets to allowed origins with CORS", async () => {
   expect(preflight.status).toBe(204);
 });
 
+it("stops serving app-embed assets when the owning Organization is disabled", async () => {
+  const id = await createLiveApp();
+  const grant = await createGrant(id);
+  expect((await readAsset(grant.id, "index.html", grant.secret, ORIGIN)).status).toBe(200);
+
+  await bindings.DB.prepare("UPDATE organizations SET status='disabled' WHERE id=?").bind(ORG).run();
+
+  const hidden = await readAsset(grant.id, "index.html", grant.secret, ORIGIN);
+  expect(hidden.status).toBe(404);
+  expect(await hidden.json()).toMatchObject({ error: { code: "NOT_FOUND" } });
+});
+
 it("denies reads without a valid secret, for foreign origins, and after expiry", async () => {
   const id = await createLiveApp();
   const grant = await createGrant(id);

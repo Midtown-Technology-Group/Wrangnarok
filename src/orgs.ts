@@ -165,6 +165,15 @@ async function getOrg(db: D1Database, orgId: string): Promise<OrgRow | null> {
   }
 }
 
+/** Enforce the Organization lifecycle for pre-authenticated capability
+ * routes. The caller supplies the route's existing hidden/stale fault so an
+ * external grant never becomes an Organization-status oracle. Store faults
+ * still propagate and fail closed. */
+export async function requireActiveOrganization(db: D1Database, orgId: string, inactive: Fault): Promise<void> {
+  const org = await getOrg(db, orgId);
+  if (!org || org.status !== "active") throw inactive;
+}
+
 /**
  * Membership gate for every /api/* request. Resolves the effective
  * Organization (explicit X-Organization-Id selection or the auth-context org),

@@ -482,6 +482,24 @@ it("kills outstanding sessions when the publication or form dies after startup",
   expect(gone.status).toBe(422);
 });
 
+it("hides disabled Organizations at public startup and stales existing sessions", async () => {
+  await createForm("shutdown");
+  const pub = await publish("shutdown");
+  const started = await startupOk(pub.id);
+  const before = await executionCount();
+
+  await bindings.DB.prepare("UPDATE organizations SET status='disabled' WHERE id=?").bind(ORG).run();
+
+  const hidden = await publicStartup(pub.id);
+  expect(hidden.status).toBe(404);
+  expect(await hidden.json()).toMatchObject({ error: { code: "FORM_NOT_PUBLISHED" } });
+
+  const stale = await publicSubmit({ handle: started.handle, values: { name: "Ada" } }, keyFor("disabled-org"));
+  expect(stale.status).toBe(422);
+  expect(await stale.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+  expect(await executionCount()).toBe(before);
+});
+
 it("denies external callers any dependency traversal", async () => {
   // A table-backed select exists with live rows, readable by operators.
   expect((await call("/api/tables", "POST", { name: "teams" })).status).toBe(201);

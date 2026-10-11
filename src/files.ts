@@ -630,10 +630,15 @@ export interface UploadConsumption {
 }
 
 /** Validate and single-use-consume an upload token. The consumption write is
- * fenced on used_at IS NULL so a replayed PUT fails closed. Returns the
- * staging target; policy is re-checked so revocation stops outstanding
- * tokens (ADR 018 section 4). */
-export async function consumeUploadToken(db: D1Database, token: string): Promise<UploadConsumption> {
+ * fenced on used_at IS NULL so a replayed PUT fails closed. The optional
+ * pre-consumption gate runs after token and policy validation but before the
+ * irreversible write. Returns the staging target; policy is re-checked so
+ * revocation stops outstanding tokens (ADR 018 section 4). */
+export async function consumeUploadToken(
+  db: D1Database,
+  token: string,
+  beforeConsume?: (candidate: UploadConsumption) => Promise<void>,
+): Promise<UploadConsumption> {
   if (!/^[a-f0-9]{64}$/.test(token)) throw fail(401, "UNAUTHORIZED", "Unauthorized.");
   const cap = await loadCapability(db, token);
   if (!cap || cap.action !== "upload" || cap.staging_key === null) {
@@ -645,18 +650,20 @@ export async function consumeUploadToken(db: D1Database, token: string): Promise
   if (!(await hasPolicy(db, cap.org_id, cap.location, "write"))) {
     throw fail(403, "FORBIDDEN", "Forbidden.");
   }
-  const consumed = await db
-    .prepare("UPDATE file_capabilities SET used_at=? WHERE id=? AND used_at IS NULL")
-    .bind(new Date().toISOString(), cap.id)
-    .run();
-  if (consumed.meta.changes === 0) throw fail(401, "UNAUTHORIZED", "Unauthorized.");
-  return {
+  const candidate: UploadConsumption = {
     orgId: cap.org_id,
     location: cap.location,
     path: cap.path,
     staging: cap.staging_key,
     capabilityId: cap.id,
   };
+  await beforeConsume?.(candidate);
+  const consumed = await db
+    .prepare("UPDATE file_capabilities SET used_at=? WHERE id=? AND used_at IS NULL")
+    .bind(new Date().toISOString(), cap.id)
+    .run();
+  if (consumed.meta.changes === 0) throw fail(401, "UNAUTHORIZED", "Unauthorized.");
+  return candidate;
 }
 
 export interface DownloadResolution {

@@ -655,6 +655,50 @@ it("revocation kills issuance and finalize with no grace", async () => {
   expect(revokedSubmit.status).toBe(422);
 });
 
+it("stops external upload issuance, staging, and finalize for a disabled Organization", async () => {
+  expect((await call("/api/file-locations", "POST", { name: "uploads" })).status).toBe(201);
+  await createForm("shutdown");
+  const grant = await createGrant("shutdown");
+  const publication = await publish("shutdown");
+  const signed = await bootstrapOk(grant);
+  const publicStart = await publicStartup(publication.id);
+  expect(publicStart.status).toBe(201);
+  const { handle: publicHandle } = (await publicStart.json()) as { handle: string };
+  const signedSlot = await issueOk("embed", grant.id, grant.secret, signed.handle);
+  const publicSlot = await issueOk("public", publication.id, null, publicHandle);
+
+  await bindings.DB.prepare("UPDATE organizations SET status='disabled' WHERE id=?").bind(ORG).run();
+
+  const signedIssue = await issueEmbedUpload(grant.id, grant.secret, ORIGIN, {
+    handle: signed.handle,
+    field: "doc",
+  });
+  expect(signedIssue.status).toBe(404);
+  expect(await signedIssue.json()).toMatchObject({ error: { code: "NOT_FOUND" } });
+  const publicIssue = await issuePublicUpload(publication.id, { handle: publicHandle, field: "doc" });
+  expect(publicIssue.status).toBe(404);
+  expect(await publicIssue.json()).toMatchObject({ error: { code: "FORM_NOT_PUBLISHED" } });
+
+  const staged = await sessionPut(signedSlot.token, new TextEncoder().encode("blocked"), "text/plain");
+  expect(staged.status).toBe(404);
+  expect(await staged.json()).toMatchObject({ error: { code: "NOT_FOUND" } });
+  const finalized = await sessionFinalize({
+    handle: publicHandle,
+    location: publicSlot.location,
+    path: publicSlot.path,
+    contentType: "text/plain",
+    size: 7,
+    sha256: "0".repeat(64),
+  });
+  expect(finalized.status).toBe(422);
+  expect(await finalized.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+
+  // Organization denial must not burn the single-use capability. Once an
+  // operator restores the tenant, the exact token remains usable once.
+  await bindings.DB.prepare("UPDATE organizations SET status='active' WHERE id=?").bind(ORG).run();
+  expect((await sessionPut(signedSlot.token, new TextEncoder().encode("allowed"), "text/plain")).status).toBe(200);
+});
+
 it("fails replayed tokens, mismatched assertions, and field bounds closed", async () => {
   expect((await call("/api/file-locations", "POST", { name: "uploads" })).status).toBe(201);
   await createForm("resume");

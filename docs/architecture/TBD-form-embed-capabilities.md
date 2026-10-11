@@ -148,6 +148,14 @@ sessions die with `STALE_FORM_HANDLE` — no TTL grace (the FILE-01
 posture). Revoke is idempotent. Expiry behaves the same (401 at
 bootstrap, `STALE` at submit).
 
+Organization lifecycle is re-resolved on every external request, not only
+when the grant is issued. A disabled or missing Organization is hidden at
+bootstrap with 404 `NOT_FOUND`; a session minted before shutdown answers 422
+`STALE_FORM_HANDLE` at submit and dispatches nothing. This uses the same
+Organization store as authenticated membership resolution, so the embed
+credential cannot outlive tenant shutdown or turn status into an existence
+oracle.
+
 ### 6. Signed grants are not anonymous publication
 
 The signed bearer-secret grant class and any future anonymous/public-form
@@ -211,6 +219,11 @@ confirmation-only disclosure applies to the future anonymous class only.
 6. **Recovery:** the existing mechanism. Same-key replay convergence,
    `STALE_FORM_HANDLE` fencing, revocation with no grace, idempotent
    revoke, rotate-to-heal after capability changes.
+
+2026-10-10 lifecycle follow-through: PASS. Fresh Organization checks were
+added to the existing external route path; authentication, execution,
+persistence, secrets, deployment, and recovery remain on the paths above.
+No primitive, binding, or migration was added.
 
 Stop conditions re-checked at lane start and at PR time: no second
 authoritative path (one credential-store shape, one submit core); the
