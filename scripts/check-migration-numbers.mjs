@@ -12,8 +12,9 @@
 // - a newly added migration must consume a Reserved row that already existed
 //   on merge-base/main for the same issue/lane (the consuming PR moves it to
 //   Landed); unreserved, mismatched-owner, or already-consumed numbers fail;
-// - narrow break-glass: an Overrides row (number + reason + steward sign-off)
-//   in the head ledger. "Next free" prose is not an override.
+// - narrow break-glass: an unchanged Overrides row (number + issue + reason +
+//   steward sign-off) must already exist on merge-base/main, and the consuming
+//   commit repeats its number and exact reason in trailers.
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -115,17 +116,70 @@ function ownershipMatches(baseReserved, headLanded) {
   return lane.length > 0 && haystack.toLowerCase().includes(lane.toLowerCase());
 }
 
-function checkProvenance(addedFiles, baseLedgerText, headLedgerText) {
+function overrideIssueMatches(override, headLanded) {
+  if (!/^#\d+$/.test(override.issue)) return false;
+  const landedTokens = new Set(`${headLanded.owner} ${headLanded.content}`.match(/#\d+/g) ?? []);
+  return landedTokens.has(override.issue);
+}
+
+function commitTrailers(message) {
+  const lines = message.trimEnd().split("\n");
+  let start = lines.length;
+  while (start > 0 && /^[A-Za-z0-9-]+:\s+\S.*$/.test(lines[start - 1].trim())) start -= 1;
+  if (start === lines.length || (start > 0 && lines[start - 1].trim() !== "")) return new Set();
+  return new Set(lines.slice(start).map((line) => line.trim()));
+}
+
+function hasOverrideTrailer(commitMessages, override) {
+  return commitMessages.some((message) => {
+    const trailers = commitTrailers(message);
+    return (
+      trailers.has(`Migration-Override: ${override.number}`) &&
+      trailers.has(`Migration-Override-Reason: ${override.reason}`)
+    );
+  });
+}
+
+function checkProvenance(addedFiles, baseLedgerText, headLedgerText, commitMessages = []) {
   const errors = [];
   const base = parseLedger(baseLedgerText);
   const head = parseLedger(headLedgerText);
   const added = addedFiles.map((f) => basename(f)).filter((f) => /^\d{4}_.+\.sql$/.test(f));
   for (const f of added) {
     const number = f.slice(0, 4);
-    const override = head.overrides.find((r) => r.number === number);
-    if (override) {
+    const overrides = head.overrides.filter((r) => r.number === number);
+    if (overrides.length > 0) {
+      if (overrides.length !== 1) {
+        errors.push(`migration ${f}: duplicate Override rows for number ${number} (see issue #528)`);
+        continue;
+      }
+      const override = overrides[0];
+      const trusted = base.overrides.filter(
+        (r) =>
+          r.number === override.number &&
+          r.issue === override.issue &&
+          r.reason === override.reason &&
+          r.signoff === override.signoff,
+      );
+      if (trusted.length !== 1) {
+        errors.push(
+          `migration ${f}: Override authorization must already exist unchanged on merge-base/main (see issue #528)`,
+        );
+        continue;
+      }
       if (!override.reason || override.reason === "-" || !override.signoff || override.signoff === "-") {
-        errors.push(`migration ${f}: Override row lacks reason or steward sign-off (see issue #528)`);
+        errors.push(`migration ${f}: trusted Override row lacks reason or steward sign-off (see issue #528)`);
+      }
+      const headLanded = head.landed.find((r) => r.number === number);
+      if (!headLanded || headLanded.file !== f) {
+        errors.push(`migration ${f}: Override authorization is not bound to its Landed row`);
+      } else if (!overrideIssueMatches(override, headLanded)) {
+        errors.push(`migration ${f}: Override issue ${override.issue} is not cited by its Landed row`);
+      }
+      if (!hasOverrideTrailer(commitMessages, override)) {
+        errors.push(
+          `migration ${f}: consuming commit lacks exact Migration-Override and Migration-Override-Reason trailers`,
+        );
       }
       continue;
     }
@@ -151,6 +205,23 @@ function checkProvenance(addedFiles, baseLedgerText, headLedgerText) {
     }
   }
   return errors;
+}
+
+function branchCommitMessages() {
+  try {
+    const out = execFileSync("git", ["log", "--format=%B%x00", "origin/main..HEAD"], {
+      encoding: "utf8",
+    });
+    return out
+      .split("\0")
+      .map((message) => message.trim())
+      .filter(Boolean);
+  } catch {
+    console.error(
+      "check-migration-numbers: cannot read branch commits from origin/main..HEAD (missing base ref? run `git fetch origin main`).",
+    );
+    process.exit(2);
+  }
 }
 
 function branchAddedMigrations() {
@@ -274,19 +345,71 @@ if (process.argv.includes("--selftest")) {
       e.includes("already consumed"),
     ),
   );
-  const glassHead = ledger(landed, reserved, [
-    ["0047", "#903", "prod FK repair, no spare Reserved", "steward #528-signoff"],
-  ]);
-  check(
-    "break-glass override passes",
-    checkProvenance(["migrations/0047_repair.sql"], baseLedger, glassHead).length === 0,
+  const glassOverride = ["0047", "#903", "prod FK repair, no spare Reserved", "@steward in #904"];
+  const glassBase = ledger(landed, reserved, [glassOverride]);
+  const glassHead = ledger(
+    [...landed, ["0047", "0047_repair.sql", "REPAIR-01", "prod FK repair (issue #903)"]],
+    reserved,
+    [glassOverride],
   );
-  const bareGlassHead = ledger(landed, reserved, [["0047", "#903", "-", "-"]]);
+  const glassTrailer = [
+    "repair production foreign key\n\nMigration-Override: 0047\nMigration-Override-Reason: prod FK repair, no spare Reserved",
+  ];
   check(
-    "override without reason fails",
-    checkProvenance(["migrations/0047_repair.sql"], baseLedger, bareGlassHead).some((e) =>
-      e.includes("lacks reason or steward sign-off"),
+    "trusted break-glass override with exact trailers passes",
+    checkProvenance(["migrations/0047_repair.sql"], glassBase, glassHead, glassTrailer).length === 0,
+  );
+  check(
+    "self-attested head-only override fails",
+    checkProvenance(["migrations/0047_repair.sql"], baseLedger, glassHead, glassTrailer).some((e) =>
+      e.includes("must already exist unchanged on merge-base/main"),
     ),
+  );
+  const changedGlassHead = ledger(
+    [...landed, ["0047", "0047_repair.sql", "REPAIR-01", "prod FK repair (issue #903)"]],
+    reserved,
+    [["0047", "#903", "contributor changed reason", "@steward in #904"]],
+  );
+  check(
+    "modified trusted override fails",
+    checkProvenance(["migrations/0047_repair.sql"], glassBase, changedGlassHead, glassTrailer).some((e) =>
+      e.includes("must already exist unchanged on merge-base/main"),
+    ),
+  );
+  check(
+    "override without consuming commit trailers fails",
+    checkProvenance(["migrations/0047_repair.sql"], glassBase, glassHead).some((e) =>
+      e.includes("lacks exact Migration-Override"),
+    ),
+  );
+  check(
+    "trailer-like body text does not authorize an override",
+    checkProvenance(["migrations/0047_repair.sql"], glassBase, glassHead, [
+      `${glassTrailer[0]}\n\nordinary final paragraph`,
+    ]).some((e) => e.includes("lacks exact Migration-Override")),
+  );
+  const wrongIssueHead = ledger(
+    [...landed, ["0047", "0047_repair.sql", "REPAIR-01", "different work (issue #999)"]],
+    reserved,
+    [glassOverride],
+  );
+  check(
+    "override issue not cited by Landed row fails",
+    checkProvenance(["migrations/0047_repair.sql"], glassBase, wrongIssueHead, glassTrailer).some((e) =>
+      e.includes("is not cited by its Landed row"),
+    ),
+  );
+  const bareGlassBase = ledger(landed, reserved, [["0047", "#903", "-", "-"]]);
+  const bareGlassHead = ledger(
+    [...landed, ["0047", "0047_repair.sql", "REPAIR-01", "prod FK repair (issue #903)"]],
+    reserved,
+    [["0047", "#903", "-", "-"]],
+  );
+  check(
+    "trusted override without reason fails",
+    checkProvenance(["migrations/0047_repair.sql"], bareGlassBase, bareGlassHead, [
+      "Migration-Override: 0047\nMigration-Override-Reason: -",
+    ]).some((e) => e.includes("trusted Override row lacks reason or steward sign-off")),
   );
   console.log(`check-migration-numbers selftest: ${passed} passed.`);
   process.exit(0);
@@ -294,7 +417,7 @@ if (process.argv.includes("--selftest")) {
 
 const treeErrors = checkTree(MIGRATIONS_DIR, readFileSync(LEDGER_PATH, "utf8"));
 const headLedger = readFileSync(LEDGER_PATH, "utf8");
-const provErrors = checkProvenance(branchAddedMigrations(), baseLedgerText(), headLedger);
+const provErrors = checkProvenance(branchAddedMigrations(), baseLedgerText(), headLedger, branchCommitMessages());
 const errors = [...treeErrors, ...provErrors];
 if (errors.length > 0) {
   for (const e of errors) console.error(`migration-numbers: ${e}`);
