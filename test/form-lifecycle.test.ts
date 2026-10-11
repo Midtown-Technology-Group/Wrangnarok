@@ -31,14 +31,34 @@ function headers(extra: Record<string, string> = {}): Record<string, string> {
 }
 
 function call(path: string, method = "GET", body?: unknown, orgId = ORG, userId = OWNER, key?: string) {
+  return callWithBindings(bindings, path, method, body, orgId, userId, key);
+}
+
+function callWithBindings(
+  customBindings: Bindings,
+  path: string,
+  method = "GET",
+  body?: unknown,
+  orgId = ORG,
+  userId = OWNER,
+  key?: string,
+) {
   return worker.fetch(
     new Request(`https://local.test${path}`, {
       method,
       headers: headers(key ? { "Idempotency-Key": key } : {}),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     }),
-    { ...bindings, LAB_ORG_ID: orgId, LAB_USER_ID: userId },
+    { ...customBindings, LAB_ORG_ID: orgId, LAB_USER_ID: userId },
   );
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 const CONTACT_FIELDS = [
@@ -902,6 +922,143 @@ describe("FORM-02 submit: handle-bound delegated dispatch with merge semantics",
 
 describe("FORM-02 recovery fence: consume-after-admission arms (#155)", () => {
   const owner = { orgId: ORG, userId: OWNER };
+
+  it("reserves an immediate handle before dispatch so a concurrent different key cannot execute", async () => {
+    await createForm("greet", [{ name: "name", type: "text", required: true }]);
+    const started = await startup("greet");
+    const body = { handle: started.handle, values: { name: "Ada" } };
+    const enteredDispatch = deferred();
+    const releaseDispatch = deferred();
+    let dispatches = 0;
+    const delayed = {
+      ...bindings,
+      HELLO_WORKFLOW: {
+        createBatch: async () => {
+          dispatches += 1;
+          enteredDispatch.resolve();
+          await releaseDispatch.promise;
+        },
+      },
+    } as unknown as Bindings;
+
+    const firstPromise = callWithBindings(
+      delayed,
+      "/api/forms/greet/submit",
+      "POST",
+      body,
+      ORG,
+      OWNER,
+      "form-02-reserve-immediate-a",
+    );
+    await enteredDispatch.promise;
+    const second = await call("/api/forms/greet/submit", "POST", body, ORG, OWNER, "form-02-reserve-immediate-b");
+    expect(second.status).toBe(422);
+    expect(await second.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+    expect(dispatches).toBe(1);
+    expect(
+      await bindings.DB.prepare("SELECT id FROM executions WHERE id=?")
+        .bind(await executionId(owner, "form-02-reserve-immediate-b"))
+        .first(),
+    ).toBeNull();
+    releaseDispatch.resolve();
+    expect((await firstPromise).status).toBe(202);
+  });
+
+  it("reserves a scheduled handle before insertion so a concurrent different key cannot admit", async () => {
+    await createForm("greet", [{ name: "name", type: "text", required: true }]);
+    const started = await startup("greet");
+    const body = {
+      handle: started.handle,
+      values: { name: "Ada" },
+      scheduleAt: new Date(Date.now() + 3600 * 1000).toISOString(),
+    };
+    const enteredInsert = deferred();
+    const releaseInsert = deferred();
+    const insertPrefix =
+      "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched";
+    const delayedDb = new Proxy(bindings.DB, {
+      get(target, property) {
+        if (property !== "prepare") {
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string) => {
+          const statement = target.prepare(sql);
+          if (!sql.startsWith(insertPrefix)) return statement;
+          return new Proxy(statement, {
+            get(statementTarget, statementProperty) {
+              if (statementProperty !== "bind") {
+                const value = Reflect.get(statementTarget, statementProperty, statementTarget) as unknown;
+                return typeof value === "function" ? value.bind(statementTarget) : value;
+              }
+              return (...values: unknown[]) => {
+                const bound = statementTarget.bind(...values);
+                return new Proxy(bound, {
+                  get(boundTarget, boundProperty) {
+                    if (boundProperty !== "run") {
+                      const value = Reflect.get(boundTarget, boundProperty, boundTarget) as unknown;
+                      return typeof value === "function" ? value.bind(boundTarget) : value;
+                    }
+                    return async () => {
+                      enteredInsert.resolve();
+                      await releaseInsert.promise;
+                      return boundTarget.run();
+                    };
+                  },
+                });
+              };
+            },
+          });
+        };
+      },
+    });
+    const delayed = { ...bindings, DB: delayedDb } as Bindings;
+
+    const firstPromise = callWithBindings(
+      delayed,
+      "/api/forms/greet/submit",
+      "POST",
+      body,
+      ORG,
+      OWNER,
+      "form-02-reserve-scheduled-a",
+    );
+    await enteredInsert.promise;
+    const second = await call("/api/forms/greet/submit", "POST", body, ORG, OWNER, "form-02-reserve-scheduled-b");
+    expect(second.status).toBe(422);
+    expect(await second.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+    expect(
+      await bindings.DB.prepare("SELECT id FROM executions WHERE id=?")
+        .bind(await executionId(owner, "form-02-reserve-scheduled-b"))
+        .first(),
+    ).toBeNull();
+    releaseInsert.resolve();
+    expect((await firstPromise).status).toBe(202);
+  });
+
+  it("does not re-admit a legacy consumed handle without a key binding", async () => {
+    await createForm("greet", [{ name: "name", type: "text", required: true }]);
+    const started = await startup("greet");
+    await bindings.DB.prepare("UPDATE form_startups SET used_at=?,claimed_key=NULL")
+      .bind(new Date().toISOString())
+      .run();
+    const key = "form-02-reserve-legacy-consumed";
+    const response = await call(
+      "/api/forms/greet/submit",
+      "POST",
+      { handle: started.handle, values: { name: "Ada" } },
+      ORG,
+      OWNER,
+      key,
+    );
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+    expect(
+      await bindings.DB.prepare("SELECT id FROM executions WHERE id=?")
+        .bind(await executionId(owner, key))
+        .first(),
+    ).toBeNull();
+  });
 
   it("tolerates a lost consume race when the caller owns the admission", async () => {
     // The handle is already spent by the successful submit below, so the

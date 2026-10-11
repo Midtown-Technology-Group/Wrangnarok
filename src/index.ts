@@ -268,6 +268,7 @@ import {
   parseStartupHandle,
   peekStartupHandle,
   peekStartupIdentity,
+  reserveStartupHandle,
   resolveFormProviders,
   saveForm,
   startFormSession,
@@ -1029,9 +1030,10 @@ async function finalizeSessionUpload(
  * options, run the declaration gate (422 + per-field details, handle left
  * live for a corrected retry), apply the file posture, run the Saga parse
  * gate, then schedule or dispatch down the standard Execution path and
- * consume the handle only after durable admission
- * (consume-after-admission keeps 503 DISPATCH_UNCONFIRMED retries on the
- * idempotent recovery path).
+ * atomically reserve the handle to the idempotency key before durable
+ * admission, then consume it only after admission succeeds. The reservation
+ * prevents concurrent different-key dispatches while preserving same-key
+ * 503 DISPATCH_UNCONFIRMED recovery.
  *
  * File posture is the single deliberate fork: operator submissions
  * re-validate merged file references against the live FILE-01 rows, while
@@ -1094,17 +1096,14 @@ async function runFormSubmit(
   }
   await checkFormFiles(env.DB, caller, def, merged);
   const { saga, input } = parseSubmission({ sagaId: def.sagaId, input: merged });
-  // FORM-02 recovery (#155): consume AFTER durable admission, not
-  // before. The old consume-then-dispatch order burned the one-time
-  // handle when submit answered 503 DISPATCH_UNCONFIRMED, making the
-  // documented same-request retry impossible (STALE_FORM_HANDLE instead
-  // of the idempotent recovery path). The flow below:
-  // 1. peek the fence (unused + live + same form id),
-  // 2. dispatch (or durable schedule insert) first,
-  // 3. consume only on success, tolerating a lost consume race only
-  //    when the Execution row proves OUR submission admitted (same
-  //    deterministic execution id + same input). A lost race over a
-  //    foreign admission still answers stale, never a replay of ours.
+  // FORM-02 recovery (#155): reserve the validated handle to this
+  // idempotency key before durable admission, then consume it only after
+  // admission succeeds. Reservation closes the different-key dispatch
+  // race without burning the handle on validation failures. A 503
+  // DISPATCH_UNCONFIRMED leaves the reservation recoverable only by the
+  // same key, which reaches the standard idempotent execution path; every
+  // different key fails stale before an Execution row or Workflow exists.
+  await reserveStartupHandle(env.DB, caller, name, handle, def.id, key);
   if (scheduleAt !== null) {
     const scheduled = await scheduleFormExecution(env.DB, caller, key, name, saga, input, scheduleAt);
     // Consume on every confirmed admission, including idempotent
