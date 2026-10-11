@@ -1844,6 +1844,32 @@ export async function peekStartupHandle(
   return { snapshot, options, handleHash };
 }
 
+/** Reserve a validated startup handle to one idempotency key before durable
+ * admission. The conditional write is the dispatch fence: concurrent
+ * different-key submissions cannot both pass it, while a same-key retry
+ * remains recoverable after an uncertain dispatch. Validation runs before
+ * reservation, so correctable form errors leave the handle unclaimed. */
+export async function reserveStartupHandle(
+  db: D1Database,
+  caller: Principal,
+  formName: string,
+  handle: string,
+  expectedFormId: string,
+  key: string,
+): Promise<void> {
+  const { handleHash } = await peekStartupHandle(db, caller, formName, handle, expectedFormId, key);
+  const reserved = await db
+    .prepare(
+      "UPDATE form_startups SET claimed_key=? WHERE handle_hash=? AND (used_at IS NULL OR claimed_key=?) AND (claimed_key IS NULL OR claimed_key=?)",
+    )
+    .bind(key, handleHash, key, key)
+    .run()
+    .catch(() => null);
+  if (!reserved || reserved.meta.changes === 0) {
+    throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+  }
+}
+
 /** Consume a startup handle for (org, user, form): peek first (same 422
  * contract), then win the single-use fence while binding the handle to the
  * caller's idempotency key. Unknown, expired, foreign, already-used,
@@ -1860,13 +1886,22 @@ export async function consumeStartupHandle(
   expectedFormId?: string,
   claimKey?: string,
 ): Promise<{ snapshot: Record<string, unknown>; options: Record<string, readonly string[]> }> {
-  const { snapshot, options, handleHash } = await peekStartupHandle(db, caller, formName, handle, expectedFormId);
+  const { snapshot, options, handleHash } = await peekStartupHandle(
+    db,
+    caller,
+    formName,
+    handle,
+    expectedFormId,
+    claimKey,
+  );
   // The conditional UPDATE is the single-use fence: exactly one consumer
   // wins the row and binds it to its idempotency key; a lost race
   // (changes === 0) answers stale rather than dispatching twice.
   const consumed = await db
-    .prepare("UPDATE form_startups SET used_at=?,claimed_key=? WHERE handle_hash=? AND used_at IS NULL")
-    .bind(new Date().toISOString(), claimKey ?? null, handleHash)
+    .prepare(
+      "UPDATE form_startups SET used_at=?,claimed_key=? WHERE handle_hash=? AND used_at IS NULL AND (claimed_key IS NULL OR claimed_key=?)",
+    )
+    .bind(new Date().toISOString(), claimKey ?? null, handleHash, claimKey ?? null)
     .run()
     .catch(() => null);
   if (!consumed || consumed.meta.changes === 0) {
