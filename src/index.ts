@@ -1667,8 +1667,9 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
         const extra = [...url.searchParams.keys()].filter((key) => key !== "token");
         if (token === null || extra.length > 0)
           throw new Fault(400, "UNSUPPORTED_QUERY", "Uploads need exactly ?token= from an issued slot.");
-        const consumed = await consumeUploadToken(env.DB, token);
-        await requireActiveOrganization(env.DB, consumed.orgId, externalNotFound());
+        const consumed = await consumeUploadToken(env.DB, token, async (candidate) => {
+          await requireActiveOrganization(env.DB, candidate.orgId, externalNotFound());
+        });
         const declared = await loadLocation(env.DB, consumed.orgId, consumed.location);
         if (!declared) throw new Fault(404, "NOT_FOUND", "Not found.");
         if (!request.body) throw new Fault(400, "EMPTY_UPLOAD", "The upload body must not be empty.");

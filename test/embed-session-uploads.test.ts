@@ -692,6 +692,11 @@ it("stops external upload issuance, staging, and finalize for a disabled Organiz
   });
   expect(finalized.status).toBe(422);
   expect(await finalized.json()).toMatchObject({ error: { code: "STALE_FORM_HANDLE" } });
+
+  // Organization denial must not burn the single-use capability. Once an
+  // operator restores the tenant, the exact token remains usable once.
+  await bindings.DB.prepare("UPDATE organizations SET status='active' WHERE id=?").bind(ORG).run();
+  expect((await sessionPut(signedSlot.token, new TextEncoder().encode("allowed"), "text/plain")).status).toBe(200);
 });
 
 it("fails replayed tokens, mismatched assertions, and field bounds closed", async () => {
