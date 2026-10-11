@@ -34,9 +34,17 @@
 
 # command on shell operators and validates EVERY wrangler invocation own
 
-# argv. Selftest: node .jcode/hooks/pre-tool-guard.mjs --selftest.
+# argv, including leading assignments plus command and env prefixes.
 
-# Also blocks agent writes to local secret files.
+# Unsupported wrappers around a literal Wrangler binary fail closed.
+
+# Selftest: node .jcode/hooks/pre-tool-guard.mjs --selftest.
+
+# Also blocks agent writes to local secret files. This hook is defense in
+
+# depth, not deployment authorization: scoped credentials, protected
+
+# workflows/environments, and human approval remain authoritative.
 
 #
 

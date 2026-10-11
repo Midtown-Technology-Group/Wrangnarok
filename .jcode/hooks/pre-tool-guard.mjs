@@ -91,7 +91,7 @@ export function splitSegments(cmd) {
 // Returns null on unbalanced quotes or dynamic constructs the guard cannot
 // see through (backticks, $() subshells, ${} expansions, glob stars).
 export function tokenize(segment) {
-  if (/`/.test(segment) || /\$\(/.test(segment) || /\$\{/.test(segment) || /(^|\s)\*/.test(segment)) return null;
+  if (/`/.test(segment) || /\$/.test(segment) || /(^|\s)\*/.test(segment)) return null;
   const tokens = [];
   let current = "";
   let quote = null;
@@ -111,6 +111,12 @@ export function tokenize(segment) {
       inToken = true;
       continue;
     }
+    if (ch === "\\" && i + 1 < segment.length) {
+      current += segment[i + 1];
+      inToken = true;
+      i += 1;
+      continue;
+    }
     if (/\s/.test(ch)) {
       if (inToken) {
         tokens.push(current);
@@ -127,25 +133,56 @@ export function tokenize(segment) {
   return tokens;
 }
 
-// Locate the wrangler argv inside one segment's tokens: an optional runner
-// prefix (npx/pnpm/yarn/bun, with runner flags skipped), then `wrangler` or
-// `wranglerjs`, then the subcommand argv. Returns null when the segment is
-// not a wrangler invocation.
+function assignment(token) {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(String(token));
+}
+
+function wranglerBinary(token) {
+  const bin = String(token ?? "").toLowerCase();
+  return bin === "wrangler" || bin === "wranglerjs" || bin.endsWith("/wrangler") || bin.endsWith("/wranglerjs");
+}
+
+function quotedShellWrapper(tokens, segment) {
+  const command = String(tokens[0] ?? "")
+    .toLowerCase()
+    .split(/[\\/]/)
+    .at(-1);
+  const shell = ["bash", "dash", "ksh", "sh", "zsh"].includes(command ?? "");
+  const commandString = shell && tokens.slice(1).some((token) => /^-[a-z]*c[a-z]*$/i.test(String(token)));
+  return (command === "eval" || commandString) && /\bwrangler(js)?\b/i.test(segment);
+}
+
+// Locate the wrangler argv inside one segment's tokens: leading shell
+// assignments, an optional `command` or `env` prefix, and an optional
+// package-manager runner precede the Wrangler binary. Unsupported wrappers
+// are rejected by checkBash when they still contain a literal Wrangler
+// binary, rather than silently falling outside this parser.
 export function wranglerArgv(tokens) {
   let i = 0;
-  const runner = String(tokens[0] ?? "").toLowerCase();
+  while (i < tokens.length && assignment(tokens[i])) i += 1;
+
+  if (String(tokens[i] ?? "").toLowerCase() === "command") {
+    i += 1;
+    while (tokens[i] === "-p" || tokens[i] === "--") i += 1;
+  }
+
+  const env = String(tokens[i] ?? "").toLowerCase();
+  if (env === "env" || env.endsWith("/env")) {
+    i += 1;
+    while (tokens[i] === "-i" || tokens[i] === "--ignore-environment" || tokens[i] === "--") i += 1;
+    while (i < tokens.length && assignment(tokens[i])) i += 1;
+  }
+
+  const runner = String(tokens[i] ?? "").toLowerCase();
   if (["npx", "pnpx", "pnpm", "yarn", "bun"].includes(runner)) {
-    i = 1;
+    i += 1;
     // Skip runner flags and their values (-y, --yes, -p PKG, --package PKG).
     while (i < tokens.length && tokens[i].startsWith("-")) {
       if ((tokens[i] === "-p" || tokens[i] === "--package") && i + 1 < tokens.length) i += 2;
       else i += 1;
     }
   }
-  const bin = String(tokens[i] ?? "").toLowerCase();
-  if (bin !== "wrangler" && bin !== "wranglerjs" && !bin.endsWith("/wrangler") && !bin.endsWith("/wranglerjs")) {
-    return null;
-  }
+  if (!wranglerBinary(tokens[i])) return null;
   return tokens.slice(i + 1);
 }
 
@@ -221,7 +258,13 @@ function checkBash(cmd) {
       continue;
     }
     const argv = wranglerArgv(tokens);
-    if (argv !== null) checkWranglerArgv(argv);
+    if (argv !== null) {
+      checkWranglerArgv(argv);
+    } else if (tokens.some(wranglerBinary) || quotedShellWrapper(tokens, segment)) {
+      block(
+        "unsupported wrapper around a wrangler invocation (fail closed; use literal assignments, command, env, or a package runner).",
+      );
+    }
   }
 }
 
@@ -289,6 +332,16 @@ if (process.argv[2] === "--selftest") {
   blocked("pages deploy", "wrangler pages deploy dist --branch main");
   allowed("pages list", "wrangler pages project list");
   allowed("multiline dry-run", "echo hi\nwrangler deploy --dry-run --env dev");
+  allowed("command dry-run", "command wrangler deploy --dry-run --env dev");
+  allowed("assignment local d1", "CF_ACCOUNT_ID=x wrangler d1 execute DB --local --command 'select 1'");
+  allowed("env local d1", "env CF_ACCOUNT_ID=x wrangler d1 execute DB --local --command 'select 1'");
+  blocked("command deploy", "command wrangler deploy --env dev");
+  blocked("command path deploy", "command /usr/local/bin/wrangler deploy --env dev");
+  blocked("assignment remote d1", "CF_ACCOUNT_ID=x wrangler d1 execute DB --remote --command 'DELETE FROM users'");
+  blocked("env deploy", "/usr/bin/env CF_ACCOUNT_ID=x wrangler deploy --env dev");
+  blocked("unsupported wrapper", "nice wrangler deploy --env dev");
+  blocked("escaped binary", "wran\\gler deploy --env dev");
+  blocked("quoted shell wrapper", "bash -lc 'wrangler deploy --env dev'");
   console.log(`guard selftest: ${passed} passed.`);
   process.exit(0);
 }
