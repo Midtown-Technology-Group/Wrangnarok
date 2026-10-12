@@ -1,8 +1,7 @@
 name: Preview
 
-# PR preview: deploy the branch to the shared disposable preview Worker and
-# smoke system.smoke against it. Skips gracefully without secrets (forks):
-# credential-free CI on the PR itself stays the merge gate.
+# Manually approved PR preview: deploy an explicitly selected, immutable PR
+# merge revision to the shared disposable preview Worker and smoke it.
 #
 # Issue #376 (trust boundary): every step below runs the PR's checked-out
 # code (checkout takes the merge revision; npm ci / npx execute the PR's
@@ -12,18 +11,27 @@ name: Preview
 # (b) the minted token defaults to a 30-day expiry and least-privilege
 # groups (see mint-preview-token.mjs), bounding theft blast radius;
 # (c) the token must live in a DEDICATED preview-only Cloudflare account
-# (documented in the mint script). A manual approval gate before deploy
-# remains a steward follow-up.
+# (documented in the mint script); (d) workflow_dispatch is the approval
+# boundary. GitHub restricts manual dispatch to users with write access, and
+# the validation step binds the request to the exact reviewed head SHA.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open same-repository pull request to preview
+        required: true
+        type: number
+      head_sha:
+        description: Exact reviewed 40-character PR head SHA
+        required: true
+        type: string
 
 permissions:
   contents: read
   pull-requests: write
 
 concurrency:
-  group: preview-${{ github.event.pull_request.number }}
+  group: preview-${{ inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
@@ -31,27 +39,49 @@ jobs:
     name: Preview deploy and smoke
     # NOTE (issue #225): GitHub rejects `secrets.*` in job-level `if:`
     # (zero-job failed runs), so the job always evaluates and each
-    # credential-needing step gates on the probe below instead. Without
-    # secrets (forks) the workflow completes as a normal skip.
+    # credential-needing step gates on the probe below instead. Before token
+    # enrollment, an authorized manual dispatch completes as a normal skip.
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Issue #376: credential-bearing steps run under the `preview`
-    # environment, so the token is an environment secret (not a repo
-    # secret): stewards can add required reviewers on the environment as a
-    # manual approval gate, and PR code that runs before approval never
-    # sees the token. Move CLOUDFLARE_PREVIEW_TOKEN from a repo secret to
-    # the `preview` environment secret when enabling the gate.
+    # Issue #376: credential-bearing steps run only after a write-authorized
+    # steward manually dispatches an exact reviewed SHA. The `preview`
+    # environment remains a second optional approval boundary.
     environment: preview
 
     steps:
+      - name: Validate requested PR revision
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          PERMISSION="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$GITHUB_ACTOR/permission" --jq .permission)"
+          case "$PERMISSION" in
+            admin|maintain|write) ;;
+            *) echo "::error::Actor lacks write permission"; exit 1 ;;
+          esac
+          PR="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          [[ "$(jq -r .state <<<"$PR")" == "open" ]]
+          [[ "$(jq -r .head.repo.full_name <<<"$PR")" == "$GITHUB_REPOSITORY" ]]
+          ACTUAL_HEAD_SHA="$(jq -r .head.sha <<<"$PR")"
+          [[ "$ACTUAL_HEAD_SHA" == "$EXPECTED_HEAD_SHA" ]] || {
+            echo "::error::PR head moved; review the new SHA before dispatching again"
+            exit 1
+          }
+          MERGE_SHA="$(jq -r .merge_commit_sha <<<"$PR")"
+          [[ "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          # Explicit merge revision (issue #376): no ref ambiguity about
-          # which code runs alongside the preview token below. Credentials
-          # are not persisted: no later step uses authenticated git, and
-          # PR-controlled commands must not read the checkout credential.
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          # The API-resolved merge commit is immutable and was accepted only
+          # when its same-repository PR head matched the reviewed input SHA.
+          ref: ${{ steps.pr.outputs.merge_sha }}
           persist-credentials: false
 
       - name: Setup Node
@@ -168,4 +198,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr comment "${{ github.event.pull_request.number }}" --body "Preview smoke failed — see the Preview workflow run."
+          gh pr comment "${{ inputs.pr_number }}" --body "Preview smoke failed — see the manually approved Preview workflow run."

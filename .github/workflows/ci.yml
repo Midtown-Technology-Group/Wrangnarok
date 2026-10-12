@@ -150,7 +150,7 @@ jobs:
       # Stub-fetch selftests for the preview helpers (smoke probe, token
       # payload). No credentials, no network, no live store.
       - name: Preview helper selftests
-        run: npm run preview:smoke:selftest && npm run preview:token:selftest
+        run: npm run preview:smoke:selftest && npm run preview:token:selftest && npm run preview:workflow:check && npm run preview:workflow:selftest
 
       # Security selftests for the ops-infra trust slice (issues #357, #363,
       # #373, #375): CLI base/redirect gates plus argv wiring, scope prefix

@@ -5,8 +5,9 @@
 // child can never exceed its parent) mints a scoped child via
 // POST /user/tokens. Human-run, once per rotation: the parent lives only on
 // the operator's machine and is never printed, logged, or committed. The
-// child value prints ONCE — store it as the CLOUDFLARE_PREVIEW_TOKEN GitHub
-// secret, then delete the parent token (or keep it offline for rotation).
+// child value prints ONCE — store it as the CLOUDFLARE_PREVIEW_TOKEN secret
+// in the GitHub `preview` environment, then delete the parent token (or keep
+// it offline for rotation).
 //
 // Issue #376 (trust boundary): the preview workflow runs PR-controlled code
 // (merge revision + PR dependency tree) with this token in the environment,
@@ -16,8 +17,8 @@
 //      account tokens. Theft from that account cannot reach production.
 //   2. Keep the default 30-day expiry (override with --expires-days only
 //      for a documented reason): rotation bounds the theft window.
-//   3. A manual approval gate before preview deploy remains a steward
-//      follow-up; until then, review same-repo PRs before CI runs them.
+//   3. The preview workflow is manual-only and requires the exact reviewed PR
+//      head SHA. Never dispatch it for an unreviewed revision.
 //
 // Permission group IDs resolve by name at runtime (no opaque IDs baked in).
 // `selftest` exercises payload construction with fixtures and touches no
@@ -138,7 +139,9 @@ if (invokedAsCli) {
         } else {
           const created = await api(parent, "/user/tokens", { method: "POST", body: JSON.stringify(payload) });
           console.log(`Created token "${created.name}" (id ${created.id}), expires ${created.expires_on}.`);
-          console.log("Store the value below as the CLOUDFLARE_PREVIEW_TOKEN GitHub secret. It prints ONCE:");
+          console.log(
+            "Store the value below as the CLOUDFLARE_PREVIEW_TOKEN secret in the GitHub preview environment. It prints ONCE:",
+          );
           console.log(created.value);
           console.log("Then delete the parent token unless you keep it offline for rotation.");
         }
