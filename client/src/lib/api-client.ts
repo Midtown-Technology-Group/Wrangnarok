@@ -2734,6 +2734,7 @@ function isUsageSummary(value: unknown): value is UsageSummaryResponse["usage"] 
     }) &&
     typeof v["cancelledExecutions"] === "number" &&
     typeof v["matchedExecutions"] === "number" &&
+    typeof v["matchedExecutionsExact"] === "boolean" &&
     typeof v["truncated"] === "boolean" &&
     typeof gaps === "object" &&
     gaps !== null &&

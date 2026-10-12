@@ -10,7 +10,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { buildUsage, persistUsage } from "../src/usage";
-import { getUsageSummary, parseUsageSummaryQuery } from "../src/usage-reports";
+import { getUsageSummary, parseUsageSummaryQuery, USAGE_SUMMARY_ROW_LIMIT } from "../src/usage-reports";
 import migration1 from "../migrations/0001_initial.sql?raw";
 import migration2 from "../migrations/0002_cancelling.sql?raw";
 import migration3 from "../migrations/0003_usage_blocks.sql?raw";
@@ -48,6 +48,7 @@ async function summary(path = "/api/usage/summary", orgId = ORG, userId?: string
       byStatus: Record<string, number>;
       cancelledExecutions: number;
       matchedExecutions: number;
+      matchedExecutionsExact: boolean;
       truncated: boolean;
       gaps: Record<string, unknown>;
       note: string;
@@ -160,15 +161,43 @@ it("reports the truncation contract instead of a silent prefix", async () => {
   await seedExecution({ usageCreatedAt: "2026-09-01T00:00:00.000Z" });
   await seedExecution({ usageCreatedAt: "2026-09-02T00:00:00.000Z" });
   await seedExecution({ usageCreatedAt: "2026-09-03T00:00:00.000Z" });
+  await seedExecution({ usageCreatedAt: "2026-09-04T00:00:00.000Z" });
   const query = { saga: null, startAt: null, endAt: null };
   const full = await getUsageSummary(bindings.DB, ORG, query);
-  expect(full).toMatchObject({ matchedExecutions: 3, truncated: false });
-  // Oldest rows win the cap, and the response says it is a prefix.
+  expect(full).toMatchObject({ matchedExecutions: 4, matchedExecutionsExact: true, truncated: false });
+  // Oldest rows win the cap. The sentinel proves at least one more match,
+  // without scanning history for an exact total.
   const capped = await getUsageSummary(bindings.DB, ORG, query, 2);
-  expect(capped).toMatchObject({ matchedExecutions: 3, truncated: true });
+  expect(capped).toMatchObject({ matchedExecutions: 3, matchedExecutionsExact: false, truncated: true });
   expect(capped.totals.executions).toBe(2);
   const overHttp = await summary();
-  expect(overHttp.usage).toMatchObject({ matchedExecutions: 3, truncated: false });
+  expect(overHttp.usage).toMatchObject({ matchedExecutions: 4, matchedExecutionsExact: true, truncated: false });
+});
+
+it("uses one capped result query and never performs an exact history count", async () => {
+  const statements: { sql: string; binds: unknown[] }[] = [];
+  const fake = {
+    prepare(sql: string) {
+      const statement = { sql, binds: [] as unknown[] };
+      statements.push(statement);
+      return {
+        bind(...binds: unknown[]) {
+          statement.binds = binds;
+          return { all: async () => ({ results: [] }) };
+        },
+      };
+    },
+  } as unknown as D1Database;
+  const result = await getUsageSummary(fake, ORG, { saga: null, startAt: null, endAt: null }, 7);
+  expect(result).toMatchObject({ matchedExecutions: 0, matchedExecutionsExact: true, truncated: false });
+  expect(statements).toHaveLength(1);
+  expect(statements[0]?.sql).not.toMatch(/COUNT\s*\(/i);
+  expect(statements[0]?.sql).toMatch(/LIMIT \?/);
+  expect(statements[0]?.binds.at(-1)).toBe(8);
+
+  statements.length = 0;
+  await getUsageSummary(fake, ORG, { saga: null, startAt: null, endAt: null }, Number.MAX_SAFE_INTEGER);
+  expect(statements[0]?.binds.at(-1)).toBe(USAGE_SUMMARY_ROW_LIMIT + 1);
 });
 
 it("counts a duplicate persist once per execution_id", async () => {

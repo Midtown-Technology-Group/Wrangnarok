@@ -1214,7 +1214,9 @@ export interface UsageSummary {
   bySaga: UsageSagaTotals[];
   byStatus: Record<string, number>;
   cancelledExecutions: number;
+  /** Exact when matchedExecutionsExact is true; otherwise a lower bound. */
   matchedExecutions: number;
+  matchedExecutionsExact: boolean;
   truncated: boolean;
   gaps: {
     modelTokenCosts: string;
