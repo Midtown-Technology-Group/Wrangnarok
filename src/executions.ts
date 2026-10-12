@@ -195,7 +195,19 @@ async function consumeAdmissionToken(
 ): Promise<boolean> {
   try {
     return (await limiter.limit({ key })).success === true;
-  } catch {
+  } catch (error) {
+    // Stable diagnosis without the principal/provider key or exception
+    // message: binding errors may contain request context that must not enter
+    // logs. Keep the small class vocabulary safe for metrics aggregation.
+    const exceptionClass =
+      error instanceof DOMException
+        ? "DOMException"
+        : error instanceof TypeError
+          ? "TypeError"
+          : error instanceof Error
+            ? "Error"
+            : "Unknown";
+    console.warn(`WRANGNAROK_ADMISSION_LIMITER_FAILED exception=${exceptionClass}`);
     throw new Fault(
       503,
       "ADMISSION_UNAVAILABLE",

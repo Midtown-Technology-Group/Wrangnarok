@@ -235,15 +235,18 @@ it("rejects a NinjaOne execution when the shared provider budget is exhausted", 
 });
 
 it("fails closed when native admission control is unavailable", async () => {
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
   const unavailable: RequestRateLimiter = {
     limit: vi.fn(async () => {
-      throw new Error("binding unavailable");
+      throw new TypeError("binding unavailable for secret principal key");
     }),
   };
 
   await expect(
     enforceNinjaOneExecutionBudget(withLimiters(unavailable, limiter(true)), PRINCIPAL, ninjaSaga.id, "fa".repeat(32)),
   ).rejects.toMatchObject({ status: 503, code: "ADMISSION_UNAVAILABLE" });
+  expect(warning).toHaveBeenCalledWith("WRANGNAROK_ADMISSION_LIMITER_FAILED exception=TypeError");
+  expect(warning.mock.calls.flat().join(" ")).not.toContain("secret principal key");
 });
 
 it("fences async and inline NinjaOne routes before persistence or vendor work", async () => {
