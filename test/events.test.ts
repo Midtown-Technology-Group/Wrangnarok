@@ -90,6 +90,26 @@ it("registers, lists, reads, disables, and deletes sources with exact-org isolat
     await worker.fetch(authed("/api/event-sources/orders", "GET"), strangerBindings).then((res) => res.status),
   ).toBe(404);
 
+  // Access sessions are ambient browser credentials. Both toggle actions
+  // reject HTML-form simple content types before changing source state;
+  // the ordinary JSON client path below remains authoritative.
+  for (const action of ["disable", "enable"] as const) {
+    for (const contentType of ["application/x-www-form-urlencoded", "text/plain"]) {
+      const formPost = await worker.fetch(
+        new Request(`https://local.test/api/event-sources/orders/${action}`, {
+          method: "POST",
+          headers: { ...LAB, "Content-Type": contentType },
+          body: "enabled=false",
+        }),
+        bindings,
+      );
+      expect([action, contentType, formPost.status]).toEqual([action, contentType, 415]);
+      expect(await formPost.json()).toMatchObject({ error: { code: "JSON_REQUIRED" } });
+    }
+  }
+  const unchanged = await worker.fetch(authed("/api/event-sources/orders", "GET"), bindings);
+  expect(await unchanged.json()).toMatchObject({ source: { enabled: true } });
+
   const disabled = await worker.fetch(authed("/api/event-sources/orders/disable", "POST", {}), bindings);
   expect(await disabled.json()).toMatchObject({ source: { name: "orders", enabled: false } });
   const enabled = await worker.fetch(authed("/api/event-sources/orders/enable", "POST", {}), bindings);

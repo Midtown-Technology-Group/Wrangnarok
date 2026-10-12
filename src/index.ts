@@ -2025,6 +2025,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // Enablement fences future emits and delivery appends while logged
       // events keep their rows and history.
       await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
       rejectQuery(url);
       const name = parseEventSourceName(eventSourceEnable[1]);
       return json({
