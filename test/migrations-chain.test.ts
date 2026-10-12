@@ -49,6 +49,13 @@ import migration42 from "../migrations/0042_table_row_revision_index.sql?raw";
 
 const bindings = env as unknown as Bindings;
 
+const LEGACY_EXECUTION_RESTORE = `
+ALTER TABLE executions ADD COLUMN policy_json TEXT;
+ALTER TABLE executions ADD COLUMN parent_execution_id TEXT;
+ALTER TABLE executions ADD COLUMN parent_step TEXT;
+CREATE INDEX IF NOT EXISTS executions_parent ON executions(parent_execution_id);
+`;
+
 const CHAIN = [
   migration01,
   migration02,
@@ -116,6 +123,77 @@ it("rebuilds carry every previously added executions column", async () => {
     "SELECT name FROM sqlite_master WHERE type='index' AND name='executions_parent'",
   ).first<{ name: string }>();
   expect(index?.name).toBe("executions_parent");
+});
+
+it("replays the renamed execution restore without losing existing values or child rows", async () => {
+  await reset();
+  const restoreIndex = CHAIN.indexOf(migration32);
+  for (const migration of CHAIN.slice(0, restoreIndex)) {
+    await bindings.DB.exec(migration);
+  }
+  await bindings.DB.exec(LEGACY_EXECUTION_RESTORE);
+
+  const now = new Date().toISOString();
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-replay", "org").run();
+  await bindings.DB.prepare(
+    "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,status,created_at,policy_json,parent_execution_id,parent_step) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      "exec-replay",
+      "smoke",
+      "smoke",
+      "r1",
+      "org-replay",
+      "user-1",
+      "{}",
+      "Succeeded",
+      now,
+      '{"retained":true}',
+      "parent-replay",
+      "step-replay",
+    )
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO operations(execution_id,name,position,status,started_at,completed_at,result_json) VALUES (?,?,?,?,?,?,?)",
+  )
+    .bind("exec-replay", "run", 0, "Succeeded", now, now, '{"ok":true}')
+    .run();
+  await bindings.DB.prepare("INSERT INTO usage_blocks(execution_id,usage_json,created_at) VALUES (?,?,?)")
+    .bind("exec-replay", '{"tokens":11}', now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO execution_logs(execution_id,org_id,user_id,saga_id,saga_name,level,message,created_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("exec-replay", "org-replay", "user-1", "smoke", "smoke", "INFO", "retained", now)
+    .run();
+
+  await bindings.DB.exec(migration32);
+
+  const execution = await bindings.DB.prepare(
+    "SELECT policy_json,parent_execution_id,parent_step FROM executions WHERE id=?",
+  )
+    .bind("exec-replay")
+    .first<{ policy_json: string; parent_execution_id: string; parent_step: string }>();
+  expect(execution).toEqual({
+    policy_json: '{"retained":true}',
+    parent_execution_id: "parent-replay",
+    parent_step: "step-replay",
+  });
+  expect(
+    await bindings.DB.prepare("SELECT result_json FROM operations WHERE execution_id=?")
+      .bind("exec-replay")
+      .first<{ result_json: string }>(),
+  ).toEqual({ result_json: '{"ok":true}' });
+  expect(
+    await bindings.DB.prepare("SELECT usage_json FROM usage_blocks WHERE execution_id=?")
+      .bind("exec-replay")
+      .first<{ usage_json: string }>(),
+  ).toEqual({ usage_json: '{"tokens":11}' });
+  expect(
+    await bindings.DB.prepare("SELECT message FROM execution_logs WHERE execution_id=?")
+      .bind("exec-replay")
+      .first<{ message: string }>(),
+  ).toEqual({ message: "retained" });
 });
 
 it("executions carries no organizations foreign key after the 0037 repair", async () => {

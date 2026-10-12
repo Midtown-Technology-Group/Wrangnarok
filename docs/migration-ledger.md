@@ -47,7 +47,7 @@ Reservation workflow (enforced by `scripts/check-migration-numbers.mjs`):
 | 0029   | 0029_connection_secrets.sql       | SEC-02 #411 | per-Organization envelope ciphertext (ciphertext/nonce/wrapped_dek/key_version/algorithm), FK-cascaded off connections |
 | 0030   | 0030_events.sql                 | TRG-03  | event-source registry + org-scoped event log (issue #139, S1) |
 | 0031   | 0031_oauth_tokens.sql           | OAUTH-01 #149 | per-Connection encrypted OAuth tokens + health (envelope columns, monotonic generation, FK-cascaded off connections) |
-| 0032   | 0032_executions_column_restore.sql | #302 | restore execution policy and child-lineage columns after rebuild |
+| 0032   | 0032_executions_column_restore.sql | #302 | convergently restore execution policy and child-lineage columns after rebuild or legacy filename replay |
 | 0033   | 0033_event_subscriptions.sql      | TRG-03  | org-scoped event subscriptions + per-subscription delivery receipts (issue #139, S2) |
 | 0034   | 0034_branding_profile.sql         | UX-01   | org_branding + user_profiles: branding metadata, profile/theme, logo/avatar metadata with R2 bytes (issue #176, slice 1) |
 | 0035   | 0035_embeds.sql                   | EMBED-01 | form_embeds: signed form-embed grants (secret digest, exact-match origins, capability fingerprint, enable/expiry) (issue #156, slice 1) |
@@ -97,6 +97,12 @@ Correction to the 2026-09-11 collision notes above: the "converge on
 re-application" claims were wrong for filename-tracked journals. Renamed files
 are never recognized as already applied; convergence now comes from the 0027
 repair, not from re-applying the renamed files.
+
+The same filename rule applies to the execution-column restore that briefly
+landed as `0028_executions_column_restore.sql` before becoming 0032. Migration
+0032 rebuilds the affected table shape and its foreign-key children so it is
+safe both when those three columns are absent and when the legacy filename
+already added them. Existing policy and lineage values are retained.
 
 ## Resolved collisions
 
