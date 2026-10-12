@@ -34,14 +34,11 @@ import { resolveDispatchConnection, resolveMcpConnectionClientSecret } from "./m
 import {
   loadMcpServiceToken,
   loadMcpUserConsent,
-  readMcpServiceTokenState,
-  readMcpUserConsent,
   recordMcpServiceTokenOutcome,
   recordMcpUserConsentOutcome,
   replaceMcpServiceToken,
   replaceMcpUserConsentToken,
 } from "./mcp-tokens";
-import type { McpConsentView } from "./mcp-tokens";
 import type { McpTokenState } from "./mcp-tokens";
 import { parseMcpServerUrl } from "./mcp-servers";
 
@@ -171,6 +168,9 @@ interface McpRpcRequest extends McpVendorOptions {
  * messages; JSON-RPC error members become MCP_VENDOR_ERROR without
  * copying vendor prose. */
 export async function postMcpRpc(request: McpRpcRequest): Promise<unknown> {
+  if (typeof request.token !== "string" || request.token.length === 0) {
+    throw invalid("MCP_MISCONFIGURED", "The MCP credential is unavailable.", 424);
+  }
   const fetchImpl = request.fetchImpl ?? globalThis.fetch;
   const timeoutMs = request.timeoutMs ?? MCP_DISPATCH_TIMEOUT_MS;
   let response: Response;
@@ -370,12 +370,10 @@ async function refreshServiceCredential(
     return { state: persisted, accessToken: token.accessToken, ...(next === undefined ? {} : { refreshToken: next }) };
   } catch (error) {
     if (!(error instanceof Fault) || error.code !== "MCP_TOKEN_GENERATION_STALE") throw error;
-    const winner = await readMcpServiceTokenState(db, orgId, target.connectionId);
-    if (!winner) throw invalid("MCP_TOKEN_NOT_FOUND", "No service credential is stored for this Connection.", 404);
     const loaded = await loadMcpServiceToken(db, orgId, target.connectionId, keksFor(kekMaterial));
     if (!loaded) throw invalid("MCP_TOKEN_NOT_FOUND", "No service credential is stored for this Connection.", 404);
     return {
-      state: winner,
+      state: loaded,
       accessToken: loaded.accessToken,
       ...(loaded.refreshToken === undefined ? {} : { refreshToken: loaded.refreshToken }),
     };
@@ -461,17 +459,10 @@ async function refreshUserCredential(
     };
   } catch (error) {
     if (!(error instanceof Fault) || error.code !== "MCP_TOKEN_GENERATION_STALE") throw error;
-    const winner = await readMcpUserConsent(db, orgId, target.connectionId, userId);
-    if (!winner) throw invalid("MCP_CONSENT_NOT_FOUND", "This user has not consented to this Connection.", 404);
     const loaded = await loadMcpUserConsent(db, orgId, target.connectionId, userId, keksFor(kekMaterial));
     if (!loaded) throw invalid("MCP_CONSENT_NOT_FOUND", "This user has not consented to this Connection.", 404);
     return {
-      state: {
-        generation: winner.generation,
-        scope: winner.scope,
-        ...(winner.expiresAtMs === undefined ? {} : { expiresAtMs: winner.expiresAtMs }),
-        health: winner.health,
-      },
+      state: loaded,
       accessToken: loaded.accessToken,
       ...(loaded.refreshToken === undefined ? {} : { refreshToken: loaded.refreshToken }),
     };
@@ -483,16 +474,6 @@ function callerPrincipal(caller: McpCaller, orgId: string): Principal {
     orgId,
     userId:
       caller.kind === "user" ? caller.userId : `service:mcp-connection:${caller.serviceConnectionId.toLowerCase()}`,
-  };
-}
-
-function consentStateOf(view: McpConsentView | null): McpTokenState | null {
-  if (!view) return null;
-  return {
-    generation: view.generation,
-    scope: view.scope,
-    ...(view.expiresAtMs === undefined ? {} : { expiresAtMs: view.expiresAtMs }),
-    health: view.health,
   };
 }
 
@@ -531,18 +512,15 @@ export async function dispatchMcpTool(request: McpDispatchRequest): Promise<McpD
   };
   const target: RefreshTarget = { connectionId: row.id, tokenPath: row.token_path, clientId: row.client_id, scope: "" };
   const callerUserId = request.caller.kind === "user" ? request.caller.userId : null;
-  let serviceState = await readMcpServiceTokenState(db, orgId, row.id);
-  let userState = callerUserId ? consentStateOf(await readMcpUserConsent(db, orgId, row.id, callerUserId)) : null;
-  const serviceLoaded = serviceState
-    ? await loadMcpServiceToken(db, orgId, row.id, keksFor(kek), request.executionId)
+  // State and plaintext come from one row read/decrypt. A concurrent
+  // disconnect can therefore produce either a complete snapshot or null,
+  // never a healthy state paired with missing material.
+  const serviceLoaded = await loadMcpServiceToken(db, orgId, row.id, keksFor(kek), request.executionId);
+  const userLoaded = callerUserId
+    ? await loadMcpUserConsent(db, orgId, row.id, callerUserId, keksFor(kek), request.executionId)
     : null;
-  const userLoaded =
-    callerUserId && userState
-      ? await loadMcpUserConsent(db, orgId, row.id, callerUserId, keksFor(kek), request.executionId)
-      : null;
-  // A state row whose material no longer loads (concurrent disconnect or
-  // unreadable ciphertext) surfaces below as a missing token: needs-reauth
-  // for user identity, misconfigured for service — never a partial call.
+  let serviceState: McpTokenState | null = serviceLoaded;
+  let userState: McpTokenState | null = userLoaded;
   let serviceAccess: string | null = serviceLoaded?.accessToken ?? null;
   let serviceRefresh: string | undefined = serviceLoaded?.refreshToken;
   let userAccess: string | null = userLoaded?.accessToken ?? null;
@@ -632,14 +610,21 @@ export async function dispatchMcpTool(request: McpDispatchRequest): Promise<McpD
     throw mcpResolutionFault(resolution, request.reauthUrl);
   }
   const identity = resolution.kind;
-  // Resolution returns an identity only for a freshly usable state, and the
-  // material loads above ran for both identities — so the chosen identity
-  // always carries state plus plaintext here. The only way these null is a
-  // row deleted between the read and the load, and that fails closed
-  // downstream: the vendor rejects the empty bearer, the single retry is
-  // spent, and the denial names re-auth or misconfiguration, never success.
-  const liveState = (identity === "user" ? userState : serviceState) as McpTokenState;
-  const liveToken = (identity === "user" ? userAccess : serviceAccess) as string;
+  // Resolution can select only a complete state/material snapshot. Keep the
+  // wire-level runtime guard in postMcpRpc as a second invariant; TypeScript
+  // assertions alone must never authorize a vendor call.
+  const resolvedState = identity === "user" ? userState : serviceState;
+  const resolvedToken = identity === "user" ? userAccess : serviceAccess;
+  if (resolvedState === null || typeof resolvedToken !== "string" || resolvedToken.length === 0) {
+    throw mcpResolutionFault(
+      identity === "user"
+        ? { kind: "needs-reauth", providerFlow: "authorization_code" }
+        : { kind: "misconfigured", reason: "The service credential is unavailable; reconnect it before retrying." },
+      request.reauthUrl,
+    );
+  }
+  const liveState: McpTokenState = resolvedState;
+  const liveToken: string = resolvedToken;
   const liveRefresh = identity === "user" ? userRefresh : serviceRefresh;
 
   async function recordOutcome(
@@ -776,14 +761,11 @@ export async function refreshMcpTools(
   const kek = requireKek(kekMaterial);
   const principal: Principal = { orgId, userId: "" };
   const { row, view } = await resolveDispatchConnection(db, principal, connectionId);
-  const state = await readMcpServiceTokenState(db, orgId, row.id);
-  if (!state) {
-    throw invalid("MCP_SERVICE_NOT_CONNECTED", "Connect a service credential before refreshing tools.", 400);
-  }
   const loaded = await loadMcpServiceToken(db, orgId, row.id, keksFor(kek));
   if (!loaded) {
     throw invalid("MCP_SERVICE_NOT_CONNECTED", "Connect a service credential before refreshing tools.", 400);
   }
+  const state: McpTokenState = loaded;
   const serverUrl = view.effectiveServerUrl;
   assertMcpEndpoint(serverUrl);
   let token = loaded.accessToken;
