@@ -1,0 +1,11 @@
+# UX-01 SVG form-action hardening lane scope (issue #176): preserve the
+# merged namespace/resource-target SVG validator, pin the reported
+# namespaced foreignObject + XHTML form payload on both upload surfaces,
+# and prevent all API/file responses (including public SVG logos) from
+# submitting forms on direct navigation. No Static Assets CSP change, no
+# storage or authorization change, no parser rewrite, no migration.
+src/index.ts
+src/svg-image.ts
+test/branding-profile.test.ts
+test/response-headers.test.ts
+scopes/ux-176-svg-form-action.scope
