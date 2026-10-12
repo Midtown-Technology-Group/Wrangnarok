@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Local helper: triage Codex Security CSV export into GitHub issues.
-// Usage: node scripts/triage-codex-findings.mjs "<csv path>" [--dry-run]
+// Local helper: publish already-fixed Codex Security CSV findings as GitHub
+// issues. Suspected/unresolved findings stay private per SECURITY.md.
+// Usage: node scripts/triage-codex-findings.mjs "<csv path>" (--dry-run|--publish-fixed)
 // No prod runtime, no Saga logic. Idempotent: skips titles already present.
 import fs from "node:fs";
 import os from "node:os";
@@ -9,8 +10,9 @@ import { execFileSync } from "node:child_process";
 
 const [, , csvPath, flag] = process.argv;
 const DRY = flag === "--dry-run";
-if (!csvPath || (flag !== undefined && !DRY)) {
-  console.error('USAGE: node scripts/triage-codex-findings.mjs "<csv path>" [--dry-run]');
+const PUBLISH_FIXED = flag === "--publish-fixed";
+if (!csvPath || (!DRY && !PUBLISH_FIXED)) {
+  console.error('USAGE: node scripts/triage-codex-findings.mjs "<csv path>" (--dry-run|--publish-fixed)');
   process.exit(2);
 }
 
@@ -111,9 +113,15 @@ if (header.length === 0 || missing.length > 0) {
   process.exit(2);
 }
 const idx = Object.fromEntries(header.map((h, i) => [h, i]));
-const findings = rows.slice(1).filter((r) => r.length > 1 && r[idx.title]);
+const candidates = rows.slice(1).filter((r) => r.length > 1 && r[idx.title]);
+const findings = candidates.filter((r) => (r[idx.status] ?? "").trim().toLowerCase() === "fixed");
+const withheld = candidates.length - findings.length;
 
-console.log(`findings=${findings.length}`);
+console.log(`findings=${findings.length} withheld=${withheld}`);
+if (findings.length === 0) {
+  console.log("done: created=0 skipped=0 failed=0");
+  process.exit(0);
+}
 
 // Existing codex issues for dedupe.
 let existing = [];

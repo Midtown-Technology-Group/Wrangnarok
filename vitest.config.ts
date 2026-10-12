@@ -13,7 +13,7 @@ export default defineConfig({
       thresholds: { lines: 95, functions: 95, branches: 95, statements: 95 },
     },
     // Three projects, disjoint file sets (issue #249 plus #416): the
-    // existing workerd suite, one Node-based production-harness file, and
+    // existing workerd suite, Node-based production/CLI harness files, and
     // the ADR-033-5 native-entrypoint proof (its own test-only workerd
     // worker + wrangler config, so the app config gains no proof binding).
     // `npm test` and `npm run test:coverage` run all three; explicit file
@@ -41,7 +41,11 @@ export default defineConfig({
         test: {
           name: "workers",
           include: ["test/**/*.test.{ts,tsx}"],
-          exclude: ["test/production-harness.test.ts", "test/entrypoint-proof/**/*.test.ts"],
+          exclude: [
+            "test/production-harness.test.ts",
+            "test/triage-codex-findings.test.ts",
+            "test/entrypoint-proof/**/*.test.ts",
+          ],
           // Degraded-runner headroom (PR #516): 134 workerd files share one
           // CI runner, and a slow runner stretched cumulative test time ~3x
           // (357s on main vs 1195s on the bump run) with timeouts scattering
@@ -64,7 +68,7 @@ export default defineConfig({
         // (locally ~3s; shared runners spike).
         test: {
           name: "harness",
-          include: ["test/production-harness.test.ts"],
+          include: ["test/production-harness.test.ts", "test/triage-codex-findings.test.ts"],
           environment: "node",
           hookTimeout: 60000,
           testTimeout: 30000,
