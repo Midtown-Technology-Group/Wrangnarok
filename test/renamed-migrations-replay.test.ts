@@ -7,6 +7,7 @@ import migration01 from "../migrations/0001_initial.sql?raw";
 import migration04 from "../migrations/0004_solutions_install.sql?raw";
 import migration10 from "../migrations/0010_solutions_activation.sql?raw";
 import migration18 from "../migrations/0018_ops.sql?raw";
+import migration19 from "../migrations/0019_files.sql?raw";
 import migration20 from "../migrations/0020_artifacts.sql?raw";
 import migration21 from "../migrations/0021_endpoints.sql?raw";
 
@@ -91,6 +92,41 @@ it("replays the renamed artifact migration without replacing existing rows", asy
   ).toMatchObject({
     ref_id: "row-1",
   });
+});
+
+it("replays the renamed file migration without replacing existing rows", async () => {
+  await bindings.DB.exec(legacyDefinition(migration19));
+  const now = new Date().toISOString();
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "Example").run();
+  await bindings.DB.prepare("INSERT INTO file_locations(org_id,name,max_bytes,created_at) VALUES (?,?,?,?)")
+    .bind("org-1", "uploads", 1024, now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO files(org_id,location,path,version,size,content_type,sha256,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind("org-1", "uploads", "evidence.txt", 1, 8, "text/plain", "", "ready", now, now)
+    .run();
+  await bindings.DB.prepare("INSERT INTO file_policies(org_id,location,action,created_at) VALUES (?,?,?,?)")
+    .bind("org-1", "uploads", "read", now)
+    .run();
+
+  await bindings.DB.exec(migration19);
+
+  expect(
+    await bindings.DB.prepare("SELECT max_bytes FROM file_locations WHERE org_id=? AND name=?")
+      .bind("org-1", "uploads")
+      .first(),
+  ).toMatchObject({ max_bytes: 1024 });
+  expect(
+    await bindings.DB.prepare("SELECT status FROM files WHERE org_id=? AND location=? AND path=?")
+      .bind("org-1", "uploads", "evidence.txt")
+      .first(),
+  ).toMatchObject({ status: "ready" });
+  expect(
+    await bindings.DB.prepare("SELECT action FROM file_policies WHERE org_id=? AND location=?")
+      .bind("org-1", "uploads")
+      .first(),
+  ).toMatchObject({ action: "read" });
 });
 
 it("replays the renamed endpoint migration without replacing existing rows", async () => {

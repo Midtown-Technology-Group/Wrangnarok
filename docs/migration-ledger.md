@@ -132,3 +132,8 @@ in the PR body is not an override. No override rows are currently active.
 
 | Number | Issue | Reason | Steward sign-off |
 | ------ | ----- | ------ | ---------------- |
+| 0010 | security findings 647/648 | renamed filename replay blocks upgrades before later repair migrations; make the historical carrier convergent | Thomas / signed PR #623 |
+| 0018 | security findings 647/648 | renamed filename replay blocks upgrades before later repair migrations; make the historical carrier convergent | Thomas / signed PR #623 |
+| 0019 | security findings 647/648 | renamed filename replay blocks upgrades before later repair migrations; make the historical carrier convergent | Thomas / signed PR #623 |
+| 0020 | security findings 647/648 | renamed filename replay blocks upgrades before later repair migrations; make the historical carrier convergent | Thomas / signed PR #623 |
+| 0021 | security findings 647/648 | renamed filename replay blocks upgrades before later repair migrations; make the historical carrier convergent | Thomas / signed PR #623 |
