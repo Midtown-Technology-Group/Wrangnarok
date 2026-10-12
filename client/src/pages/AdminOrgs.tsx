@@ -180,9 +180,10 @@ export function AdminOrgs(): React.JSX.Element {
             {preview.appsManaged} Solution-owned), {preview.tables} tables with {preview.tableRows} rows,{" "}
             {preview.fileLocations} file locations with {preview.files} files, {preview.artifacts} artifacts,{" "}
             {preview.endpoints} endpoints, {preview.configsLoose} loose configs ({preview.configsManaged} managed),{" "}
-            {preview.auditEvents} audit events (retained), {preview.notifications} notifications, {preview.bundleActive}{" "}
-            active bundle pointers with {preview.bundleOwnedRows} owned rows. Retained: {preview.retained.join(", ")}.{" "}
-            {preview.canDelete ? "Deletable." : preview.blockedBy.join(" ")}
+            {preview.branding} branding rows ({preview.brandingLogos} logos), {preview.profiles} profiles ({" "}
+            {preview.profileAvatars} avatars), {preview.auditEvents} audit events (retained), {preview.notifications}{" "}
+            notifications, {preview.bundleActive} active bundle pointers with {preview.bundleOwnedRows} owned rows.
+            Retained: {preview.retained.join(", ")}. {preview.canDelete ? "Deletable." : preview.blockedBy.join(" ")}
           </p>
           {preview.canDelete ? (
             <button
