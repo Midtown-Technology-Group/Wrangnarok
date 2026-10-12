@@ -158,7 +158,7 @@ it("replays verify-active-token: one ordered GET, exact healthy result", async (
   // Invariants: org-scoped resolution, no secret in output/logs, one read call.
   expect(payload.operations).toMatchObject([
     { name: "prepare-input-v1", status: "Succeeded" },
-    { name: "cloudflare-verify-v1", status: "Succeeded" },
+    { name: "cloudflare-verify-v2", status: "Succeeded" },
   ]);
   expect(mock).toHaveBeenCalledTimes(1);
   expect(JSON.stringify(payload)).not.toContain(TOKEN_SENTINEL);
