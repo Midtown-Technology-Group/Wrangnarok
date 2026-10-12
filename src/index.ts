@@ -2210,6 +2210,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // fails closed with no Execution. Operator-managed like every
       // dispatching write; foreign rows answer 404.
       await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
       rejectQuery(url);
       const source = await loadEventSource(env.DB, caller.orgId, parseEventSourceName(subscriptionRetry[1]));
       if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");
