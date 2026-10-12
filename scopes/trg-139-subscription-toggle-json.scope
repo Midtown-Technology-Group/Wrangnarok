@@ -1,0 +1,7 @@
+# TRG-03 subscription-toggle CSRF hardening (issue #139): apply the shared
+# unencoded-JSON browser-session guard to enable/disable and prove both HTML
+# form simple content types fail without changing state. No authorization,
+# fan-out, subscription model, event, or legitimate JSON-client change.
+src/index.ts
+test/event-subscriptions.test.ts
+scopes/trg-139-subscription-toggle-json.scope
