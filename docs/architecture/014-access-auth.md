@@ -26,6 +26,19 @@ Access (Zero Trust)**, verified in-Worker:
   `Cf-Access-Jwt-Assertion` header. The Worker independently verifies it:
   RS256 signature against the team certs endpoint, `aud` match, expiry with
   60s leeway. Never trust the header unverified.
+- Certificate discovery is isolated by Access team domain and bounded before
+  signature verification: assertions and key IDs have fixed input limits; a
+  successful JWKS response is authoritative for 60 seconds; repeated and
+  rotating unknown key IDs cannot force another fetch during that window;
+  concurrent refreshes share the complete fetch/import operation; endpoint
+  failures back off for five seconds; and every fetch has a five-second
+  deadline. Imported keys, negative entries, team caches, and accepted JWKS
+  response cardinality are all capped in isolate memory. Genuine rotation
+  converges on the first lookup after the freshness window.
+- These caches are isolate-local, matching the Worker execution model. A cold
+  isolate or another Cloudflare location performs its own bounded refresh;
+  this prevents per-request amplification inside an isolate but is not a
+  globally exact request counter.
 - Verified email becomes `Principal.userId` (lowercased); `Principal.orgId`
   comes from `ACCESS_ORG_ID`. Owner-scoping, 404-on-foreign, and all
   downstream authorization logic are unchanged — authentication moves to the
