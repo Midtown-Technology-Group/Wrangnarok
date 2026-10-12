@@ -4,11 +4,22 @@ import { reset } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import type { Bindings } from "../src/bindings";
 import migration01 from "../migrations/0001_initial.sql?raw";
+import migration04 from "../migrations/0004_solutions_install.sql?raw";
+import migration10 from "../migrations/0010_solutions_activation.sql?raw";
 import migration18 from "../migrations/0018_ops.sql?raw";
 import migration20 from "../migrations/0020_artifacts.sql?raw";
+import migration21 from "../migrations/0021_endpoints.sql?raw";
 
 const bindings = env as unknown as Bindings;
 const legacyDefinition = (migration: string) => migration.replaceAll("IF NOT EXISTS ", "");
+const legacyActivation = `
+CREATE TABLE IF NOT EXISTS bundle_active(bundle_id TEXT NOT NULL, org_id TEXT NOT NULL REFERENCES organizations(id), version TEXT NOT NULL, manifest_hash TEXT NOT NULL, install_id INTEGER NOT NULL REFERENCES bundle_installs(id), activated_at TEXT NOT NULL, PRIMARY KEY(bundle_id, org_id));
+CREATE TABLE IF NOT EXISTS bundle_config(bundle_id TEXT NOT NULL, org_id TEXT NOT NULL REFERENCES organizations(id), config_key TEXT NOT NULL, config_value TEXT NOT NULL, managed_by TEXT NOT NULL, PRIMARY KEY(bundle_id, org_id, config_key));
+CREATE TABLE IF NOT EXISTS bundle_sagas(bundle_id TEXT NOT NULL, org_id TEXT NOT NULL REFERENCES organizations(id), saga_id TEXT NOT NULL, revision TEXT NOT NULL, managed_by TEXT NOT NULL, PRIMARY KEY(bundle_id, org_id, saga_id));
+ALTER TABLE connections ADD COLUMN config_json TEXT;
+CREATE TRIGGER IF NOT EXISTS bundle_installs_no_update BEFORE UPDATE ON bundle_installs BEGIN SELECT RAISE(ABORT, 'bundle_installs is immutable install evidence'); END;
+CREATE TRIGGER IF NOT EXISTS bundle_installs_no_delete BEFORE DELETE ON bundle_installs BEGIN SELECT RAISE(ABORT, 'bundle_installs is immutable install evidence'); END;
+`;
 
 beforeEach(async () => {
   await bindings.DB.exec(migration01);
@@ -80,4 +91,44 @@ it("replays the renamed artifact migration without replacing existing rows", asy
   ).toMatchObject({
     ref_id: "row-1",
   });
+});
+
+it("replays the renamed endpoint migration without replacing existing rows", async () => {
+  await bindings.DB.exec(legacyDefinition(migration21));
+  const now = new Date().toISOString();
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "Example").run();
+  await bindings.DB.prepare("INSERT INTO endpoints(id,org_id,name,saga_id,kind,created_at) VALUES (?,?,?,?,?,?)")
+    .bind("endpoint-1", "org-1", "hook", "saga-1", "webhook", now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO endpoint_events(endpoint_id,event_id,input_json,execution_id,created_at) VALUES (?,?,?,?,?)",
+  )
+    .bind("endpoint-1", "event-1", "{}", "execution-1", now)
+    .run();
+
+  await bindings.DB.exec(migration21);
+
+  expect(await bindings.DB.prepare("SELECT name FROM endpoints WHERE id=?").bind("endpoint-1").first()).toMatchObject({
+    name: "hook",
+  });
+  expect(
+    await bindings.DB.prepare("SELECT execution_id FROM endpoint_events WHERE event_id=?").bind("event-1").first(),
+  ).toMatchObject({ execution_id: "execution-1" });
+});
+
+it("converges the renamed activation migration with an existing config column", async () => {
+  await bindings.DB.exec(migration04);
+  await bindings.DB.exec(legacyActivation);
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "Example").run();
+  await bindings.DB.prepare(
+    "INSERT INTO connections(id,org_id,integration_id,endpoint,managed_by,config_json) VALUES (?,?,?,?,?,?)",
+  )
+    .bind("connection-1", "org-1", "integration-1", "https://example.invalid", "bundle-1", '{"region":"us"}')
+    .run();
+
+  await bindings.DB.exec(migration10);
+
+  expect(
+    await bindings.DB.prepare("SELECT managed_by,config_json FROM connections WHERE id=?").bind("connection-1").first(),
+  ).toMatchObject({ managed_by: "bundle-1", config_json: '{"region":"us"}' });
 });
