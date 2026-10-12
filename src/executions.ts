@@ -186,6 +186,54 @@ export interface AdmissionDecision {
   /** Non-null when admission refuses: 409 SAGA_PAUSED or 429 ADMISSION_LIMITED. */
   readonly refusal: Fault | null;
 }
+
+const NINJAONE_BUDGETED_SAGAS: ReadonlySet<string> = new Set([ninjaSaga.id, ninjaLookupSaga.id, digestSaga.id]);
+
+async function consumeAdmissionToken(
+  limiter: Bindings["NINJAONE_PRINCIPAL_RATE_LIMITER"],
+  key: string,
+): Promise<boolean> {
+  try {
+    return (await limiter.limit({ key })).success === true;
+  } catch {
+    throw new Fault(
+      503,
+      "ADMISSION_UNAVAILABLE",
+      "Execution admission control is unavailable; no work was dispatched.",
+    );
+  }
+}
+
+/** Protect provider-global NinjaOne credentials before a new Execution row
+ * or Workflow exists. Cloudflare's limiter is intentionally approximate and
+ * location-local, so it is abuse protection rather than accounting. Exact
+ * idempotent replays bypass it: they cannot create a second Workflow/vendor
+ * call and must remain available for ambiguous dispatch recovery. */
+export async function enforceNinjaOneExecutionBudget(
+  env: Bindings,
+  caller: Principal,
+  sagaId: string,
+  executionId: string,
+): Promise<void> {
+  if (!NINJAONE_BUDGETED_SAGAS.has(sagaId)) return;
+  const existing = await env.DB.prepare("SELECT 1 AS present FROM executions WHERE id=? AND org_id=? AND user_id=?")
+    .bind(executionId, caller.orgId, caller.userId)
+    .first<{ present: number }>();
+  if (existing) return;
+
+  const principalAllowed = await consumeAdmissionToken(
+    env.NINJAONE_PRINCIPAL_RATE_LIMITER,
+    `environment:${env.ENVIRONMENT ?? "local"}:org:${caller.orgId}:user:${caller.userId}`,
+  );
+  if (!principalAllowed) {
+    throw new Fault(429, "ADMISSION_LIMITED", "This caller reached the NinjaOne Execution request budget.");
+  }
+  const providerAllowed = await consumeAdmissionToken(env.NINJAONE_PROVIDER_RATE_LIMITER, "ninjaone:provider");
+  if (!providerAllowed) {
+    throw new Fault(429, "ADMISSION_LIMITED", "The shared NinjaOne Execution request budget was reached.");
+  }
+}
+
 export async function admitExecution(
   db: D1Database,
   orgId: string,
@@ -275,6 +323,7 @@ export async function submit(env: Bindings, caller: Principal, key: string, saga
   // onto the Execution row so applied behavior stays inspectable.
   const id = await executionId(caller, key);
   const inputJson = JSON.stringify(input);
+  await enforceNinjaOneExecutionBudget(env, caller, saga.id, id);
   // Canonical RUN-01 admission (ADR 018): one shared decision with child
   // dispatch, computed up front so the row stamps the applied snapshot. The
   // refusal (when non-null) is enforced at the dispatch gate below, so a

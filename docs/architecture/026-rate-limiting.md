@@ -1,6 +1,6 @@
 # ADR 026: Native Workers Rate Limiting
 
-- **Status:** Proposed
+- **Status:** Partially implemented (NinjaOne Execution admission); ADR 037 migration remains proposed
 - **Date:** 2026-09-12
 - **Extends:** ADR 037 (Endpoint and webhook Triggers)
 
@@ -26,6 +26,36 @@ Namespace IDs and configured limits are deployment/runtime policy. Sharing a nam
 
 The limiter must not be used for exact billing/licensing counts, exact concurrency control, idempotency, or authorization. Its permissive/eventually consistent behavior is acceptable because the current ADR 037 limit is likewise protective rather than correctness-critical.
 
+### NinjaOne Execution admission
+
+All three Sagas that can use the provider-global NinjaOne credential are
+protected before a new Execution row or Workflow exists:
+
+- `ninjaone-orgs`, `ninjaone-org-lookup`, and `ninjaone-echo-digest` consume a
+  principal budget of 5 requests per 60 seconds, keyed by environment,
+  Organization, and authenticated user;
+- the same requests then consume a shared provider budget of 30 requests per
+  60 seconds, keyed by the constant `ninjaone:provider`;
+- the principal check runs first so a caller already over its own budget does
+  not consume shared provider capacity;
+- a denial returns `429 ADMISSION_LIMITED`; a binding failure fails closed with
+  `503 ADMISSION_UNAVAILABLE`, before persistence or dispatch;
+- an exact existing Execution replay bypasses both checks. The existing row and
+  retained Workflow ID prevent a second vendor call, while the replay remains
+  available to recover an ambiguous dispatch response.
+
+`submit` and `runProvider` share one `enforceNinjaOneExecutionBudget` gate, so
+asynchronous and inline-provider entry points cannot drift. The engine retry
+ceiling remains separately bounded at 2 and vendor retries default to 0.
+Concurrent same-key requests can conservatively consume more than one token,
+but Execution uniqueness still prevents duplicate work.
+
+The deployed `dev` and `preview` bindings deliberately share stable namespace
+IDs because they can share provider credentials and quota. Principal keys
+include the environment; the provider key intentionally does not. Local/test
+configuration keeps the binding shape with a high ceiling, while tests inject
+deterministic limiter outcomes.
+
 ### Migration from ADR 037
 
 When implemented:
@@ -49,6 +79,9 @@ Emit stable allowed/denied telemetry without logging limiter keys. Request diagn
 - Keeps rate limiting separate from product truth and idempotency.
 - Requires policy-tier design where endpoint limits vary dynamically.
 - Distributed limits remain intentionally approximate.
+- Bounds one caller and shared NinjaOne credential pressure per Cloudflare
+  location; it is not a global exact quota and distributed callers can consume
+  capacity in more than one location.
 
 ## Invariants
 

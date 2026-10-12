@@ -6,10 +6,10 @@ import { env } from "cloudflare:workers";
 import { reset } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
-import type { Bindings } from "../src/bindings";
+import type { Bindings, RequestRateLimiter } from "../src/bindings";
 import { authenticate } from "../src/auth";
 import { boundedJson, echoSaga, ninjaSaga, parseInput, parseKey, parseNinjaOrgsInput } from "../src/domain";
-import { prepareExecution } from "../src/executions";
+import { enforceNinjaOneExecutionBudget, prepareExecution } from "../src/executions";
 import migration from "../migrations/0001_initial.sql?raw";
 import migration2 from "../migrations/0002_cancelling.sql?raw";
 import seed from "../scripts/seed-local.sql?raw";
@@ -32,6 +32,19 @@ function postExecutions(body: unknown, headers: Record<string, string> = {}) {
     },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
+}
+
+function limiter(success: boolean): RequestRateLimiter {
+  return { limit: vi.fn(async () => ({ success })) };
+}
+
+function withLimiters(principal: RequestRateLimiter, provider: RequestRateLimiter): Bindings {
+  return {
+    ...bindings,
+    ENVIRONMENT: "dev",
+    NINJAONE_PRINCIPAL_RATE_LIMITER: principal,
+    NINJAONE_PROVIDER_RATE_LIMITER: provider,
+  };
 }
 
 beforeEach(async () => {
@@ -151,6 +164,117 @@ it("reports dispatch confirmation failures as retryable 503s", async () => {
   );
   expect(response.status).toBe(503);
   expect(await response.json()).toMatchObject({ error: { code: "DISPATCH_UNCONFIRMED" } });
+});
+
+it("budgets new NinjaOne executions by principal before shared provider", async () => {
+  const principal = limiter(true);
+  const provider = limiter(true);
+  await enforceNinjaOneExecutionBudget(withLimiters(principal, provider), PRINCIPAL, ninjaSaga.id, "ab".repeat(32));
+
+  expect(principal.limit).toHaveBeenCalledWith({
+    key: `environment:dev:org:${PRINCIPAL.orgId}:user:${PRINCIPAL.userId}`,
+  });
+  expect(provider.limit).toHaveBeenCalledWith({ key: "ninjaone:provider" });
+});
+
+it("does not budget Sagas that cannot call NinjaOne", async () => {
+  const principal = limiter(false);
+  const provider = limiter(false);
+  await enforceNinjaOneExecutionBudget(withLimiters(principal, provider), PRINCIPAL, echoSaga.id, "bc".repeat(32));
+
+  expect(principal.limit).not.toHaveBeenCalled();
+  expect(provider.limit).not.toHaveBeenCalled();
+});
+
+it("keeps exact NinjaOne execution replays available without consuming budget", async () => {
+  const id = "ca".repeat(32);
+  await bindings.DB.prepare(
+    "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,dispatched,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      id,
+      ninjaSaga.id,
+      ninjaSaga.name,
+      ninjaSaga.revision,
+      PRINCIPAL.orgId,
+      PRINCIPAL.userId,
+      "{}",
+      1,
+      "Pending",
+      new Date().toISOString(),
+    )
+    .run();
+  const principal = limiter(false);
+  const provider = limiter(false);
+
+  await enforceNinjaOneExecutionBudget(withLimiters(principal, provider), PRINCIPAL, ninjaSaga.id, id);
+
+  expect(principal.limit).not.toHaveBeenCalled();
+  expect(provider.limit).not.toHaveBeenCalled();
+});
+
+it("rejects a principal over budget without consuming shared provider budget", async () => {
+  const principal = limiter(false);
+  const provider = limiter(true);
+
+  await expect(
+    enforceNinjaOneExecutionBudget(withLimiters(principal, provider), PRINCIPAL, ninjaSaga.id, "de".repeat(32)),
+  ).rejects.toMatchObject({ status: 429, code: "ADMISSION_LIMITED" });
+  expect(provider.limit).not.toHaveBeenCalled();
+});
+
+it("rejects a NinjaOne execution when the shared provider budget is exhausted", async () => {
+  await expect(
+    enforceNinjaOneExecutionBudget(
+      withLimiters(limiter(true), limiter(false)),
+      PRINCIPAL,
+      ninjaSaga.id,
+      "ef".repeat(32),
+    ),
+  ).rejects.toMatchObject({ status: 429, code: "ADMISSION_LIMITED" });
+});
+
+it("fails closed when native admission control is unavailable", async () => {
+  const unavailable: RequestRateLimiter = {
+    limit: vi.fn(async () => {
+      throw new Error("binding unavailable");
+    }),
+  };
+
+  await expect(
+    enforceNinjaOneExecutionBudget(withLimiters(unavailable, limiter(true)), PRINCIPAL, ninjaSaga.id, "fa".repeat(32)),
+  ).rejects.toMatchObject({ status: 503, code: "ADMISSION_UNAVAILABLE" });
+});
+
+it("fences async and inline NinjaOne routes before persistence or vendor work", async () => {
+  const fenced = withLimiters(limiter(false), limiter(true));
+  const vendorFetch = vi.spyOn(globalThis, "fetch");
+  const asyncResponse = await worker.fetch(
+    postExecutions({ sagaId: ninjaSaga.id, input: {} }, { "Idempotency-Key": "budget-async-fenced-001" }),
+    fenced,
+  );
+  const providerResponse = await worker.fetch(
+    new Request("https://local.test/api/executions/provider", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": "budget-provider-fenced-001",
+      },
+      body: JSON.stringify({ sagaId: ninjaSaga.id, input: {} }),
+    }),
+    fenced,
+  );
+
+  expect(asyncResponse.status).toBe(429);
+  expect(providerResponse.status).toBe(429);
+  expect(await asyncResponse.json()).toMatchObject({ error: { code: "ADMISSION_LIMITED" } });
+  expect(await providerResponse.json()).toMatchObject({ error: { code: "ADMISSION_LIMITED" } });
+  expect(vendorFetch).not.toHaveBeenCalled();
+  const receipts = await bindings.DB.prepare("SELECT COUNT(*) AS count FROM executions WHERE saga_id=?")
+    .bind(ninjaSaga.id)
+    .first<{ count: number }>();
+  expect(receipts?.count).toBe(0);
 });
 
 it("refuses to prepare unknown revisions and cancelled executions", async () => {

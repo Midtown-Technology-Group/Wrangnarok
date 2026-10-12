@@ -36,6 +36,7 @@ import type { Bindings } from "./bindings";
 import {
   admitExecution,
   beginOperation,
+  enforceNinjaOneExecutionBudget,
   executionIdForProvider,
   failExecution,
   finishOperation,
@@ -139,6 +140,7 @@ export async function runProvider(
   const started = Date.now();
   const id = await executionIdForProvider(caller, key);
   const inputJson = JSON.stringify(input);
+  await enforceNinjaOneExecutionBudget(env, caller, saga.id, id);
   const effective = await loadSagaPolicy(env.DB, caller.orgId, saga.id);
   const policyJson = policySnapshot(effective.policy);
   const inserted = (
