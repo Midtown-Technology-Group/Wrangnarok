@@ -28,6 +28,7 @@ const LEDGER_PATH = join(root, "docs", "migration-ledger.md");
 const LANDED_HEADING = "## Landed on main";
 const RESERVED_HEADING = "## Reserved";
 const OVERRIDES_HEADING = "## Overrides";
+const GIT_BINARY = process.platform === "win32" ? String.raw`C:\Program Files\Git\cmd\git.exe` : "/usr/bin/git";
 
 function parseLedger(text) {
   const landed = [];
@@ -209,7 +210,7 @@ function checkProvenance(addedFiles, baseLedgerText, headLedgerText, commitMessa
 
 function branchCommitMessages() {
   try {
-    const out = execFileSync("git", ["log", "--format=%B%x00", "origin/main..HEAD"], {
+    const out = execFileSync(GIT_BINARY, ["log", "--format=%B%x00", "origin/main..HEAD"], {
       encoding: "utf8",
     });
     return out
@@ -228,7 +229,7 @@ function branchAddedMigrations() {
   // Issue #373 pattern (see scripts/lane-scope.mjs): fail CLOSED when the
   // base ref is unavailable rather than reporting an unchecked tree clean.
   try {
-    const out = execFileSync("git", ["diff", "--name-only", "origin/main...HEAD", "--", "migrations/"], {
+    const out = execFileSync(GIT_BINARY, ["diff", "--name-only", "origin/main...HEAD", "--", "migrations/"], {
       encoding: "utf8",
     });
     return out
@@ -245,7 +246,9 @@ function branchAddedMigrations() {
 
 function baseLedgerText() {
   try {
-    return execFileSync("git", ["show", "origin/main:docs/migration-ledger.md"], { encoding: "utf8" });
+    return execFileSync(GIT_BINARY, ["show", "origin/main:docs/migration-ledger.md"], {
+      encoding: "utf8",
+    });
   } catch {
     console.error(
       "check-migration-numbers: cannot read origin/main:docs/migration-ledger.md (run `git fetch origin main`).",
