@@ -36,7 +36,9 @@
     "preview:smoke": "node scripts/smoke-preview.mjs",
     "preview:smoke:selftest": "node scripts/smoke-preview.mjs selftest",
     "preview:token": "node scripts/mint-preview-token.mjs",
-    "preview:token:selftest": "node scripts/mint-preview-token.mjs selftest"
+    "preview:token:selftest": "node scripts/mint-preview-token.mjs selftest",
+    "preview:workflow:check": "node scripts/preview-workflow-trust.mjs --check",
+    "preview:workflow:selftest": "node scripts/preview-workflow-trust.mjs --selftest"
   },
   "dependencies": {
     "react": "19.3.0",
