@@ -3,7 +3,7 @@ DROP TABLE IF EXISTS _executions_restore_source;
 DROP TABLE IF EXISTS _operations_restore_backup;
 DROP TABLE IF EXISTS _usage_blocks_restore_backup;
 DROP TABLE IF EXISTS _execution_logs_restore_backup;
-CREATE TABLE _executions_restore_source AS SELECT * FROM executions;
+CREATE TABLE _executions_restore_source AS SELECT id, saga_id, saga_name, saga_revision, org_id, user_id, input_json, dispatched, status, created_at, started_at, completed_at, result_json, error_json, policy_json, parent_execution_id, parent_step FROM executions;
 CREATE TABLE _operations_restore_backup (execution_id TEXT NOT NULL, name TEXT NOT NULL, position INTEGER NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT, result_json TEXT, error_json TEXT, PRIMARY KEY(execution_id, name));
 INSERT OR IGNORE INTO _operations_restore_backup (execution_id, name, position, status, started_at, completed_at, result_json, error_json) SELECT execution_id, name, position, status, started_at, completed_at, result_json, error_json FROM operations;
 CREATE TABLE _usage_blocks_restore_backup (execution_id TEXT PRIMARY KEY, usage_json TEXT NOT NULL, created_at TEXT NOT NULL);
