@@ -115,9 +115,10 @@ repair, not from re-applying the renamed files.
 
 ## Reserved (assigned, not yet merged — do not reuse)
 
-| Number | Lane    | Issue | Planned content              |
-| ------ | ------- | ----- | ---------------------------- |
-| 0017   | SOL-03  | #163  | solution export (if DDL needed) |
+| Number | Lane                           | Issue                | Planned content                       |
+| ------ | ------------------------------ | -------------------- | ------------------------------------- |
+| 0017   | SOL-03                         | #163                 | solution export (if DDL needed)       |
+| 0043   | codex-execution-restore-repair | security finding 635 | renamed execution restore convergence |
 
 Rule: a lane renames its migration file to the reserved number, updates its
 test imports, and runs the full gate before opening its PR. The ledger is
