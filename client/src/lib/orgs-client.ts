@@ -43,6 +43,10 @@ export interface DeletePreview {
   configsManaged: number;
   auditEvents: number;
   notifications: number;
+  branding: number;
+  brandingLogos: number;
+  profiles: number;
+  profileAvatars: number;
   bundleActive: number;
   bundleOwnedRows: number;
   retained: string[];
