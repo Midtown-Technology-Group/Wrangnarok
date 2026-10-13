@@ -93,14 +93,16 @@ const CHAIN = [
   migration34,
   migration35,
   migration36,
+  migration37,
   migration38,
   migration42,
   migration43,
 ];
 
-// Issue #493: the 0037 repair is applied explicitly per test (after optional
-// seeding on the 0001->0036 shape) to model the real upgrade path: a populated
-// database where DROP TABLE executions must preserve child-table rows.
+// Issue #493: selected tests apply the 0037 repair explicitly after seeding on
+// the 0001->0036 shape to model a populated upgrade. The default chain includes
+// 0037 in order so later migrations are always tested against the production
+// schema they actually follow.
 async function applyRepairMigration() {
   await bindings.DB.exec(migration37);
 }
@@ -204,7 +206,6 @@ it("recovers the renamed execution restore without losing existing values or chi
 });
 
 it("executions carries no organizations foreign key after the 0037 repair", async () => {
-  await applyRepairMigration();
   const ddl = await bindings.DB.prepare("SELECT sql FROM sqlite_master WHERE name='executions'").first<{
     sql: string;
   }>();
@@ -212,6 +213,11 @@ it("executions carries no organizations foreign key after the 0037 repair", asyn
 });
 
 it("0037 preserves populated child tables across the executions rebuild", async () => {
+  await reset();
+  const repairIndex = CHAIN.indexOf(migration37);
+  for (const migration of CHAIN.slice(0, repairIndex)) {
+    await bindings.DB.exec(migration);
+  }
   const now = new Date().toISOString();
   await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "org").run();
   await bindings.DB.prepare(
@@ -272,7 +278,6 @@ it("0037 preserves populated child tables across the executions rebuild", async 
 });
 
 it("org delete retains execution history on the fully migrated schema", async () => {
-  await applyRepairMigration();
   await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "org").run();
   await bindings.DB.prepare(
     "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
