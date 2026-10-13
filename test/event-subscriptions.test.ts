@@ -593,6 +593,22 @@ it("retries a failed delivery with the identical key and converges duplicates", 
   // Members cannot retry; operators can.
   expect((await retry("s3a-retry", "retry-sub", "evt-r1", asUser(MEMBER_USER))).status).toBe(403);
   await worker.fetch(authed("/api/event-sources/s3a-retry/subscriptions/retry-sub/enable", "POST", {}), bindings);
+  // Access sessions are ambient browser credentials. Cross-origin HTML
+  // forms can send these simple content types, so the shared JSON gate must
+  // reject them before the retry creates an Execution or receipt.
+  for (const contentType of ["application/x-www-form-urlencoded", "text/plain"]) {
+    const formPost = await worker.fetch(
+      new Request("https://local.test/api/event-sources/s3a-retry/subscriptions/retry-sub/deliveries/evt-r1/retry", {
+        method: "POST",
+        headers: { ...LAB, "Content-Type": contentType },
+        body: "retry=1",
+      }),
+      bindings,
+    );
+    expect([contentType, formPost.status]).toEqual([contentType, 415]);
+    expect((await formPost.json()) as RetryBody).toMatchObject({ error: { code: "JSON_REQUIRED" } });
+    expect(await executionCount()).toBe(before);
+  }
   const first = await retry("s3a-retry", "retry-sub", "evt-r1");
   expect(first.status).toBe(201);
   const execId = first.body.delivery?.executionId ?? "";

@@ -1,0 +1,7 @@
+# TRG-03 retry CSRF hardening (issue #139): apply the shared unencoded-JSON
+# browser-session guard to the bodyless retry write and prove both HTML-form
+# simple content types fail before Execution or receipt creation. No retry
+# authorization, replay, idempotency, subscription, or event-model change.
+src/index.ts
+test/event-subscriptions.test.ts
+scopes/trg-139-retry-json-csrf.scope
