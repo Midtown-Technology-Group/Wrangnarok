@@ -510,7 +510,7 @@ export { OAuthRefreshFence } from "./oauth-refresh-fence";
 /** Content-Security-Policy per surface: the JSON/file API carries no active
  * content, so default-src 'none'; the Static Assets UI shell needs its own
  * scripts, styles, and images, so self-only. */
-const API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
+const API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 const ASSET_CSP = "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'";
 const SECURITY_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",

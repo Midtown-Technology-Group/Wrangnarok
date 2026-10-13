@@ -26,9 +26,9 @@
 // raster image data.
 //
 // Serving stays safe by construction: SVG bytes ride the existing apiBytes
-// path whose Content-Security-Policy is `default-src 'none'`
-// (src/index.ts), so even a direct navigation cannot run script; <img>
-// embeds (the only in-app consumer) never run SVG script at all. SVG is
+// path whose Content-Security-Policy is `default-src 'none'; form-action
+// 'none'` (src/index.ts), so even a direct navigation cannot run script or
+// submit a form; <img> embeds (the only in-app consumer) never run SVG script at all. SVG is
 // text, so the same byte caps as raster apply unchanged (5 MiB logos,
 // 2 MiB avatars — enforced by the callers, not here).
 export const SVG_CONTENT_TYPE = "image/svg+xml";
