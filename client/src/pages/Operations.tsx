@@ -653,7 +653,9 @@ export function OperationsView(props: { initial?: OperationsInitial }): React.JS
             {usage.usage.totals.executions} Executions · {usage.usage.totals.d1Reads} D1 reads ·{" "}
             {usage.usage.totals.d1Writes} D1 writes · {usage.usage.cancelledExecutions} cancelled
             {usage.usage.truncated
-              ? ` (truncated: totals cover ${usage.usage.matchedExecutions} matches as a prefix)`
+              ? ` (truncated: totals cover the oldest ${
+                  usage.usage.totals.executions + usage.usage.gaps.unreadableBlocks
+                } of ${usage.usage.matchedExecutionsExact ? "" : "at least "}${usage.usage.matchedExecutions} matches)`
               : ""}
           </p>
           <div className="table-scroll">

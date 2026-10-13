@@ -181,6 +181,7 @@ const usagePayload: UsageSummaryResponse = {
     byStatus: { Succeeded: 3 },
     cancelledExecutions: 0,
     matchedExecutions: 3,
+    matchedExecutionsExact: true,
     truncated: false,
     gaps: {
       modelTokenCosts: "unpriced",
@@ -291,6 +292,28 @@ it("renders the operations console sections from fixtures", async () => {
   expect(html).toContain("Hello Saga greeted Ada");
   expect(html).toContain("More logs available server-side.");
   expect(html).toContain("Inspect");
+});
+
+it("labels truncated usage counts as a lower bound", () => {
+  const html = renderToStaticMarkup(
+    <MemoryRouter>
+      <OperationsView
+        initial={{
+          ...initial,
+          usage: {
+            usage: {
+              ...usagePayload.usage,
+              totals: { ...usagePayload.usage.totals, executions: 2 },
+              matchedExecutions: 3,
+              matchedExecutionsExact: false,
+              truncated: true,
+            },
+          },
+        }}
+      />
+    </MemoryRouter>,
+  );
+  expect(html).toContain("totals cover the oldest 2 of at least 3 matches");
 });
 
 it("keeps repair execution behind an explicit confirmation", async () => {
