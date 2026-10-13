@@ -134,10 +134,10 @@ export const cloudflareVerifySagaDef = defineSaga<CloudflareVerifyResult>({
       // parser and persisted through submit): read it from the prepared
       // input, never from Workflow params. The Integration boundary owns
       // the strict account-ID check.
-      const outcome = await step.do("cloudflare-verify-v1", () => {
+      const outcome = await step.do("cloudflare-verify-v2", () => {
         const binding = prepared.input.account ?? { id: null, name: null };
         return integrationOperation(ctx, cloudflareVerifySagaDef, prepared, {
-          op: "cloudflare-verify-v1",
+          op: "cloudflare-verify-v2",
           position: 1,
           integrationId: CLOUDFLARE_INTEGRATION_ID,
           vendorDefaultMs: CLOUDFLARE_TIMEOUT_MS,
@@ -157,7 +157,7 @@ export const cloudflareVerifySagaDef = defineSaga<CloudflareVerifyResult>({
         throw new NonRetryableError(expectedFailure.code);
       }
       const output = outcome.result;
-      await step.do("persist-success-v1", () => persistRunSuccess(ctx.db, id, output));
+      await step.do("persist-success-v2", () => persistRunSuccess(ctx.db, id, output));
       return output;
     } catch {
       return persistRunFailure(ctx, step, id, expectedFailure, timedOut);

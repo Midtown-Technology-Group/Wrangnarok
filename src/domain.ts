@@ -96,7 +96,7 @@ export const helloParentSaga = Object.freeze({
 export const cloudflareVerifySaga = Object.freeze({
   id: "9d2f4a6c-3b1e-4f5a-9c2d-6e8f0a1b2c3d",
   name: "cloudflare-verify-connection",
-  revision: "cloudflare-verify-connection-v1",
+  revision: "cloudflare-verify-connection-v2",
   description: "Zone Inventory migration: verify the Cloudflare API credential and account mapping read-only",
 });
 export const cloudflareInventorySaga = Object.freeze({
@@ -337,7 +337,12 @@ export type ExecutionStatus = "Pending" | "Running" | "Succeeded" | "Failed" | "
 // still emitting the name (see the #416 migration order in ADR 033) resolves
 // 0 until its migration lands; unknown names fail closed to 0, which the
 // domain suite pins so the drift is loud, not silent.
-const CHECKPOINT_STEPS: ReadonlySet<string> = new Set(["prepare-input-v1", "persist-success-v1", "persist-failure-v1"]);
+const CHECKPOINT_STEPS: ReadonlySet<string> = new Set([
+  "prepare-input-v1",
+  "persist-success-v1",
+  "persist-success-v2",
+  "persist-failure-v1",
+]);
 /** Child-dispatch Operations (`child-dispatch-<step>`) converge on one
  * deterministic child row, so they retry like other idempotent D1
  * checkpoints. Matched by prefix: each parent step dispatches under its own

@@ -292,7 +292,7 @@ describe("timeout-mark-v1 retirement (fail-closed-0)", () => {
     expect(retryLimitForStep("timeout-mark-v1", parseSagaPolicy({ retry: { vendorRetries: 1 } }))).toBe(1);
   });
   it("keeps the surviving checkpoint set at the ceiling (no over-retirement)", () => {
-    for (const step of ["prepare-input-v1", "persist-success-v1", "persist-failure-v1"]) {
+    for (const step of ["prepare-input-v1", "persist-success-v1", "persist-success-v2", "persist-failure-v1"]) {
       expect(stepRetryLimit(step)).toBe(2);
       expect(retryLimitForStep(step, DEFAULT_SAGA_POLICY)).toBe(2);
     }
