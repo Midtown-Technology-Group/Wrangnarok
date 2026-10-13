@@ -46,6 +46,7 @@ import migration36 from "../migrations/0036_anon_app_embeds.sql?raw";
 import migration37 from "../migrations/0037_executions_org_fk_drop.sql?raw";
 import migration38 from "../migrations/0038_capability_resolution.sql?raw";
 import migration42 from "../migrations/0042_table_row_revision_index.sql?raw";
+import migration43 from "../migrations/0043_execution_restore_convergence.sql?raw";
 
 const bindings = env as unknown as Bindings;
 
@@ -94,6 +95,7 @@ const CHAIN = [
   migration36,
   migration38,
   migration42,
+  migration43,
 ];
 
 // Issue #493: the 0037 repair is applied explicitly per test (after optional
@@ -125,13 +127,14 @@ it("rebuilds carry every previously added executions column", async () => {
   expect(index?.name).toBe("executions_parent");
 });
 
-it("replays the renamed execution restore without losing existing values or child rows", async () => {
+it("recovers the renamed execution restore without losing existing values or child rows", async () => {
   await reset();
   const restoreIndex = CHAIN.indexOf(migration32);
   for (const migration of CHAIN.slice(0, restoreIndex)) {
     await bindings.DB.exec(migration);
   }
   await bindings.DB.exec(LEGACY_EXECUTION_RESTORE);
+  await expect(bindings.DB.exec(migration32)).rejects.toThrow(/duplicate column name: policy_json/);
 
   const now = new Date().toISOString();
   await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-replay", "org").run();
@@ -167,7 +170,11 @@ it("replays the renamed execution restore without losing existing values or chil
     .bind("exec-replay", "org-replay", "user-1", "smoke", "smoke", "INFO", "retained", now)
     .run();
 
-  await bindings.DB.exec(migration32);
+  // The old filename already applied the same DDL. Marking 0032 in Wrangler's
+  // journal is represented here by skipping its SQL, then applying 0033-0043.
+  for (const migration of CHAIN.slice(restoreIndex + 1)) {
+    await bindings.DB.exec(migration);
+  }
 
   const execution = await bindings.DB.prepare(
     "SELECT policy_json,parent_execution_id,parent_step FROM executions WHERE id=?",

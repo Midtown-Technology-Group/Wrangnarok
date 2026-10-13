@@ -47,7 +47,7 @@ Reservation workflow (enforced by `scripts/check-migration-numbers.mjs`):
 | 0029   | 0029_connection_secrets.sql       | SEC-02 #411 | per-Organization envelope ciphertext (ciphertext/nonce/wrapped_dek/key_version/algorithm), FK-cascaded off connections |
 | 0030   | 0030_events.sql                 | TRG-03  | event-source registry + org-scoped event log (issue #139, S1) |
 | 0031   | 0031_oauth_tokens.sql           | OAUTH-01 #149 | per-Connection encrypted OAuth tokens + health (envelope columns, monotonic generation, FK-cascaded off connections) |
-| 0032   | 0032_executions_column_restore.sql | #302 | convergently restore execution policy and child-lineage columns after rebuild or legacy filename replay |
+| 0032   | 0032_executions_column_restore.sql | #302 | restore execution policy and child-lineage columns after rebuild |
 | 0033   | 0033_event_subscriptions.sql      | TRG-03  | org-scoped event subscriptions + per-subscription delivery receipts (issue #139, S2) |
 | 0034   | 0034_branding_profile.sql         | UX-01   | org_branding + user_profiles: branding metadata, profile/theme, logo/avatar metadata with R2 bytes (issue #176, slice 1) |
 | 0035   | 0035_embeds.sql                   | EMBED-01 | form_embeds: signed form-embed grants (secret digest, exact-match origins, capability fingerprint, enable/expiry) (issue #156, slice 1) |
@@ -58,6 +58,7 @@ Reservation workflow (enforced by `scripts/check-migration-numbers.mjs`):
 | 0040   | 0040_session_uploads.sql            | EMBED-01 | form_session_uploads: session-owned upload claims (session hash, org, location, path, field, size/type bounds) for external form sessions (issue #156, slice 3) |
 | 0041   | 0041_mcp_external.sql               | TOOL-02  | external MCP servers, org tools, per-user consent, secret envelopes (issue #171, PR #534; grandfathered per #528, no renumber) |
 | 0042   | 0042_table_row_revision_index.sql   | TABLE-02 | composite revision index for bounded writes and change polling (security findings 121/122) |
+| 0043   | 0043_execution_restore_convergence.sql | codex-execution-restore-repair | converge renamed execution restore after journal recovery (security finding 635) |
 
 ## Stuck-database recovery (codex findings #381, #367-371)
 
@@ -99,10 +100,14 @@ are never recognized as already applied; convergence now comes from the 0027
 repair, not from re-applying the renamed files.
 
 The same filename rule applies to the execution-column restore that briefly
-landed as `0028_executions_column_restore.sql` before becoming 0032. Migration
-0032 rebuilds the affected table shape and its foreign-key children so it is
-safe both when those three columns are absent and when the legacy filename
-already added them. Existing policy and lineage values are retained.
+landed as `0028_executions_column_restore.sql` before becoming 0032. A database
+that journaled the old name already has the three columns, so operators must
+record `0032_executions_column_restore.sql` as applied without running its
+duplicate `ALTER TABLE` statements. The next normal migration, 0043, then
+rebuilds the affected table shape and its foreign-key children, preserving
+existing policy and lineage values and converging with fresh databases. Do not
+mark 0032 applied until `PRAGMA table_info(executions)` confirms all three of
+`policy_json`, `parent_execution_id`, and `parent_step` are present.
 
 ## Resolved collisions
 
@@ -124,7 +129,6 @@ already added them. Existing policy and lineage values are retained.
 | Number | Lane                           | Issue                | Planned content                       |
 | ------ | ------------------------------ | -------------------- | ------------------------------------- |
 | 0017   | SOL-03                         | #163                 | solution export (if DDL needed)       |
-| 0043   | codex-execution-restore-repair | security finding 635 | renamed execution restore convergence |
 
 Rule: a lane renames its migration file to the reserved number, updates its
 test imports, and runs the full gate before opening its PR. The ledger is
