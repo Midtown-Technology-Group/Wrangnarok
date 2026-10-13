@@ -246,12 +246,18 @@ function branchAddedMigrations() {
 
 function baseLedgerText() {
   try {
-    return execFileSync(GIT_BINARY, ["show", "origin/main:docs/migration-ledger.md"], {
+    const mergeBase = execFileSync(GIT_BINARY, ["merge-base", "origin/main", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    if (!/^[0-9a-f]{40,64}$/.test(mergeBase)) {
+      throw new Error("git merge-base returned an invalid commit ID");
+    }
+    return execFileSync(GIT_BINARY, ["show", `${mergeBase}:docs/migration-ledger.md`], {
       encoding: "utf8",
     });
   } catch {
     console.error(
-      "check-migration-numbers: cannot read origin/main:docs/migration-ledger.md (run `git fetch origin main`).",
+      "check-migration-numbers: cannot read docs/migration-ledger.md from the origin/main merge base (run `git fetch origin main`).",
     );
     process.exit(2);
   }
