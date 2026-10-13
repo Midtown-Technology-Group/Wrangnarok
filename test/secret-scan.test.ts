@@ -38,7 +38,7 @@ describe("secret scanning (#247)", () => {
   it("CI workflow fails closed on leaks, uploads SARIF, and adds no dependency scanning", () => {
     expect(workflow).toContain("GITLEAKS_VERSION: 8.30.1");
     expect(workflow).toContain("GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb");
-    const downloadAt = workflow.indexOf("curl --fail --silent --show-error --location");
+    const downloadAt = workflow.indexOf("curl --fail --silent --show-error --proto '=https' --proto-redir '=https'");
     const verifyAt = workflow.indexOf("sha256sum --check --strict");
     const extractAt = workflow.indexOf('tar -xzf "$archive"');
     expect(downloadAt).toBeGreaterThan(-1);
