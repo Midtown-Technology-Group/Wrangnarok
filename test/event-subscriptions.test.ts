@@ -259,6 +259,29 @@ it("gates subscription lifecycle on operators and hides foreign rows", async () 
       .then((r) => r.status),
   ).toBe(404);
 
+  // Access sessions are ambient browser credentials. Both toggle actions
+  // reject HTML-form simple content types before changing subscription
+  // state; the ordinary JSON client path below remains authoritative.
+  for (const action of ["disable", "enable"] as const) {
+    for (const contentType of ["application/x-www-form-urlencoded", "text/plain"]) {
+      const formPost = await worker.fetch(
+        new Request(`https://local.test/api/event-sources/s2-crud/subscriptions/orders-created/${action}`, {
+          method: "POST",
+          headers: { ...LAB, "Content-Type": contentType },
+          body: "enabled=false",
+        }),
+        bindings,
+      );
+      expect([action, contentType, formPost.status]).toEqual([action, contentType, 415]);
+      expect(await formPost.json()).toMatchObject({ error: { code: "JSON_REQUIRED" } });
+    }
+  }
+  const unchanged = await worker.fetch(
+    authed("/api/event-sources/s2-crud/subscriptions/orders-created", "GET"),
+    bindings,
+  );
+  expect(await unchanged.json()).toMatchObject({ subscription: { enabled: true } });
+
   // Disable fencing preserves receipts; member writes stay fenced too.
   const disabled = await worker.fetch(
     authed("/api/event-sources/s2-crud/subscriptions/orders-created/disable", "POST", {}),

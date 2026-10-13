@@ -2153,6 +2153,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // Enablement fences future fan-out while dispatched Executions run
       // to terminal and delivery receipts keep history.
       await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
       rejectQuery(url);
       const source = await loadEventSource(env.DB, caller.orgId, parseEventSourceName(subscriptionEnable[1]));
       if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");
