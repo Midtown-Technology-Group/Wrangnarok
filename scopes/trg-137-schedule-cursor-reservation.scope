@@ -1,5 +1,5 @@
 # TRG-01 schedule tick cursor migration reservation (issue #137): reserve
-# 0043 on main before the security remediation consumes it. No DDL, runtime,
+# 0044 on main before the security remediation consumes it. No DDL, runtime,
 # workflow, or existing migration change.
 docs/migration-ledger.md
 scopes/trg-137-schedule-cursor-reservation.scope
