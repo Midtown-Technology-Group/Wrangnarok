@@ -394,6 +394,24 @@ it("composes the file leg under the ceiling: policy narrows, never widens", asyn
   expect(await call("/api/file-locations", "POST", USER_OPERATOR, { name: "ceil" }, ORG_A)).toMatchObject({
     status: 201,
   });
+  // Policy administration changes Organization-wide authority. Neither an
+  // operator nor a viewer may grant or revoke it, and denied revocation must
+  // leave the existing allow row intact.
+  for (const user of [USER_OPERATOR, USER_VIEWER]) {
+    expect(await call("/api/file-policies", "DELETE", user, { location: "ceil", action: "read" }, ORG_A)).toMatchObject(
+      { status: 403, body: { error: { code: "ADMIN_ONLY" } } },
+    );
+    expect(await call("/api/file-policies", "POST", user, { location: "ceil", action: "read" }, ORG_A)).toMatchObject({
+      status: 403,
+      body: { error: { code: "ADMIN_ONLY" } },
+    });
+  }
+  const readPolicy = await bindings.DB.prepare(
+    "SELECT COUNT(*) AS n FROM file_policies WHERE org_id=? AND location='ceil' AND action='read'",
+  )
+    .bind(ORG_A)
+    .first<{ n: number }>();
+  expect(readPolicy?.n ?? -1).toBe(1);
   // Viewers cannot mint upload slots even with a write policy row present,
   // and no capability row escapes with the denial.
   const denied = await call(
