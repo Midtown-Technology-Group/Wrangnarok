@@ -204,9 +204,18 @@ function main(argv) {
     return;
   }
 
-  // The merged config carries the operator's secrets in plaintext. It is
-  // gitignored, owner-only where the filesystem honors modes, and deleted
-  // on success; on failure it stays for diagnosis and this script says so.
+  try {
+    runPlan(config, plan, migrateOnly);
+  } catch (error) {
+    return fail(error instanceof Error ? error.message : String(error));
+  }
+}
+
+/** Write the merged secret-bearing config, run the plan, clean up.
+ * The config is gitignored and owner-only where the filesystem honors
+ * modes; it is deleted on success and kept (with a printed warning)
+ * after a failure, for diagnosis. */
+function runPlan(config, plan, migrateOnly) {
   writeFileSync(DEPLOY_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   console.log(`Wrote merged deploy config (gitignored, contains secrets): ${DEPLOY_CONFIG_PATH}`);
   const migrated = plan.some((step) => step.args.includes("migrations"));
@@ -219,7 +228,7 @@ function main(argv) {
         "If migrations already applied, the schema may be ahead of the deployed code (ADR 004 forward-compatibility covers this); retry with a plain deploy (no --migrate).",
       );
     }
-    return fail(error instanceof Error ? error.message : String(error));
+    throw error;
   }
   rmSync(DEPLOY_CONFIG_PATH, { force: true });
   if (migrateOnly) {

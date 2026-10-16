@@ -66,28 +66,31 @@ export function parseJsonc(text) {
   let out = "";
   let inString = false;
   let escaped = false;
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i] ?? "";
     if (inString) {
       out += ch;
       if (escaped) escaped = false;
       else if (ch === "\\") escaped = true;
       else if (ch === '"') inString = false;
+      i += 1;
       continue;
     }
     if (ch === '"') {
       inString = true;
       out += ch;
+      i += 1;
       continue;
     }
     const afterComment = skipComment(text, i);
     if (afterComment !== i) {
-      i = afterComment;
       out += "\n";
+      i = afterComment + 1;
       continue;
     }
-    if (ch === "," && isTrailingComma(text, i)) continue;
-    out += ch;
+    if (ch !== "," || !isTrailingComma(text, i)) out += ch;
+    i += 1;
   }
   return JSON.parse(out);
 }
@@ -190,12 +193,7 @@ function requireBindings(entries, required, label) {
   }
 }
 
-/** Project the parsed hosted config onto the celld-accepted shape.
- * Pure: throws on anything that would make the projection invalid. */
-export function buildCelldConfig(source) {
-  if (source === null || typeof source !== "object" || Array.isArray(source)) {
-    throw new Error("wrangler.jsonc must contain a JSON object.");
-  }
+function projectTopLevel(source) {
   const config = {};
   for (const [key, value] of Object.entries(source)) {
     if (HOSTED_ONLY_KEYS.has(key)) continue;
@@ -206,12 +204,10 @@ export function buildCelldConfig(source) {
     }
     config[key] = value;
   }
-  if (typeof config.name !== "string" || !CELLD_NAME.test(config.name)) {
-    throw new Error(`celld requires a 1-63 char lowercase name, got ${JSON.stringify(config.name)}.`);
-  }
-  if (typeof config.main !== "string" || config.main.length === 0) {
-    throw new Error("celld config requires a `main` Worker entrypoint.");
-  }
+  return config;
+}
+
+function validateBindingLists(config) {
   for (const [listKey, required] of Object.entries(REQUIRED_BINDINGS)) {
     if (!Array.isArray(config[listKey])) throw new Error(`celld config requires a \`${listKey}\` binding list.`);
     config[listKey] = filterEntries(config[listKey], NESTED_KEYS[listKey], listKey);
@@ -221,30 +217,51 @@ export function buildCelldConfig(source) {
   if (!Array.isArray(durableBindings) || durableBindings.length === 0) {
     throw new Error("celld config requires a non-empty `durable_objects.bindings` list.");
   }
-  const hasFence = durableBindings.some(
-    (entry) => entry !== null && typeof entry === "object" && entry.name === "OAUTH_REFRESH_FENCE",
-  );
+  const hasFence = durableBindings.some((entry) => isRecord(entry) && entry.name === "OAUTH_REFRESH_FENCE");
   if (!hasFence) throw new Error("durable_objects.bindings is missing OAUTH_REFRESH_FENCE (src/bindings.ts).");
-  if (config.vars !== undefined) {
-    for (const key of Object.keys(config.vars)) {
-      if (!COMMITTED_VAR_ALLOWLIST.has(key)) {
-        throw new Error(
-          `Committed celld vars are allowlisted and \`${key}\` is not on it; secrets and deployment values belong in the operator vars file, and a genuinely non-secret key extends COMMITTED_VAR_ALLOWLIST deliberately.`,
-        );
-      }
-    }
+}
+
+function validateCommittedVars(config) {
+  if (config.vars === undefined) return;
+  for (const key of Object.keys(config.vars)) {
+    if (COMMITTED_VAR_ALLOWLIST.has(key)) continue;
+    throw new Error(
+      `Committed celld vars are allowlisted and \`${key}\` is not on it; secrets and deployment values belong in the operator vars file, and a genuinely non-secret key extends COMMITTED_VAR_ALLOWLIST deliberately.`,
+    );
   }
-  if (config.assets !== undefined) {
-    if (config.assets === null || typeof config.assets !== "object" || config.assets.binding !== "ASSETS") {
-      throw new Error("celld assets require binding ASSETS (src/bindings.ts).");
-    }
-    const assets = {};
-    for (const [key, value] of Object.entries(config.assets)) {
-      if (CELLD_ASSET_KEYS.has(key)) assets[key] = value;
-    }
-    if (typeof assets.directory !== "string") throw new Error("celld assets require a `directory`.");
-    config.assets = assets;
+}
+
+function projectAssets(config) {
+  if (config.assets === undefined) return;
+  if (!isRecord(config.assets) || config.assets.binding !== "ASSETS") {
+    throw new Error("celld assets require binding ASSETS (src/bindings.ts).");
   }
+  const assets = {};
+  for (const [key, value] of Object.entries(config.assets)) {
+    if (CELLD_ASSET_KEYS.has(key)) assets[key] = value;
+  }
+  if (typeof assets.directory !== "string") throw new Error("celld assets require a `directory`.");
+  config.assets = assets;
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Project the parsed hosted config onto the celld-accepted shape.
+ * Pure: throws on anything that would make the projection invalid. */
+export function buildCelldConfig(source) {
+  if (!isRecord(source)) throw new Error("wrangler.jsonc must contain a JSON object.");
+  const config = projectTopLevel(source);
+  if (typeof config.name !== "string" || !CELLD_NAME.test(config.name)) {
+    throw new Error(`celld requires a 1-63 char lowercase name, got ${JSON.stringify(config.name)}.`);
+  }
+  if (typeof config.main !== "string" || config.main.length === 0) {
+    throw new Error("celld config requires a `main` Worker entrypoint.");
+  }
+  validateBindingLists(config);
+  validateCommittedVars(config);
+  projectAssets(config);
   return config;
 }
 
