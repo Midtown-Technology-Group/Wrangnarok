@@ -152,7 +152,7 @@ describe("MCP Connections (TOOL-02 S1)", () => {
     expect(JSON.stringify(listed)).not.toContain(CLIENT_SECRET);
   });
 
-  it("updates flags and override; the bound template never moves; delete cascades", async () => {
+  it("updates flags, requires rebinding for endpoint changes, and cascades delete", async () => {
     const first = await seedTemplate("conn-first");
     const second = await seedTemplate("conn-second");
     const id = ((await seedConnection(first)).body.connection as { id: string }).id;
@@ -165,16 +165,22 @@ describe("MCP Connections (TOOL-02 S1)", () => {
       bindings,
     );
     expect(updated.status).toBe(400);
-    const flags = await worker.fetch(
+    const rebound = await worker.fetch(
       call(`/api/mcp-connections/${id}`, "POST", {
         serverUrlOverride: "https://mcp-override.invalid/mcp",
         availableToAutonomous: true,
       }),
       bindings,
     );
+    expect(rebound.status).toBe(409);
+    expect(await jsonOf(rebound)).toMatchObject({ error: { code: "MCP_CONNECTION_REBIND_REQUIRED" } });
+    const flags = await worker.fetch(
+      call(`/api/mcp-connections/${id}`, "POST", { availableToAutonomous: true }),
+      bindings,
+    );
     expect(flags.status).toBe(200);
     const view = (await jsonOf(flags)).connection as Record<string, unknown>;
-    expect(view.effectiveServerUrl).toBe("https://mcp-override.invalid/mcp");
+    expect(view.effectiveServerUrl).toBe(SERVER_URL);
     expect(view.availableToAutonomous).toBe(true);
     expect(view.serverId).toBe(first);
 

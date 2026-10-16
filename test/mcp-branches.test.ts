@@ -96,6 +96,7 @@ const REDIRECT_URI = "http://localhost:3000/callback";
 const CLIENT_ID = "test-mcp-client-id";
 const CLIENT_SECRET = "test-mcp-client-secret";
 const PRINCIPAL = { orgId: ORG_A, userId: USER_ADMIN };
+const PRINCIPAL_B = { orgId: ORG_B, userId: "00000000-0000-4000-8000-000000000006" };
 const ADMIN = { isInstanceAdmin: true };
 const AT = "2026-09-18T00:00:00.000Z";
 
@@ -1877,6 +1878,130 @@ describe("MCP remaining deterministic arms", () => {
     return { serverId, id };
   }
 
+  async function seedBoundCredentialState(caller: typeof PRINCIPAL, id: string): Promise<void> {
+    await putMcpConnectionClientSecret(bindings.DB, caller, id, `${CLIENT_SECRET}-${caller.orgId}`, KEK);
+    await storeInitialMcpServiceToken(bindings.DB, {
+      orgId: caller.orgId,
+      connectionId: id,
+      accessToken: `service-access-${caller.orgId}`,
+      refreshToken: `service-refresh-${caller.orgId}`,
+      kekMaterial: KEK,
+      checkedAt: AT,
+    });
+    await storeInitialMcpUserConsent(bindings.DB, {
+      orgId: caller.orgId,
+      connectionId: id,
+      userId: caller.userId,
+      accessToken: `user-access-${caller.orgId}`,
+      refreshToken: `user-refresh-${caller.orgId}`,
+      kekMaterial: KEK,
+      checkedAt: AT,
+    });
+    await syncMcpCatalog(bindings.DB, caller, id, { tools: [{ name: "search" }] });
+  }
+
+  async function expectBoundCredentialState(caller: typeof PRINCIPAL, id: string, present: boolean): Promise<void> {
+    expect((await getMcpConnection(bindings.DB, caller, id)).clientSecretProvisioned).toBe(present);
+    expect(await loadMcpServiceToken(bindings.DB, caller.orgId, id, { [ENVELOPE_KEY_VERSION]: KEK })).toEqual(
+      present ? expect.objectContaining({ accessToken: `service-access-${caller.orgId}` }) : null,
+    );
+    expect(
+      await loadMcpUserConsent(bindings.DB, caller.orgId, id, caller.userId, { [ENVELOPE_KEY_VERSION]: KEK }),
+    ).toEqual(present ? expect.objectContaining({ accessToken: `user-access-${caller.orgId}` }) : null);
+    expect((await listMcpCatalog(bindings.DB, caller, id)).map((tool) => tool.toolName)).toEqual(
+      present ? ["search"] : [],
+    );
+  }
+
+  it("preserves bound credentials by rejecting Connection trust-anchor edits", async () => {
+    const { id } = await seedTriple();
+    await seedBoundCredentialState(PRINCIPAL, id);
+
+    const flagsOnly = await updateMcpConnection(bindings.DB, PRINCIPAL, id, {
+      serverUrlOverride: null,
+      tokenPath: TOKEN_PATH,
+      clientId: CLIENT_ID,
+      availableInChat: true,
+    });
+    expect(flagsOnly.availableInChat).toBe(true);
+    await expectBoundCredentialState(PRINCIPAL, id, true);
+
+    const changes: readonly McpConnectionWrite[] = [
+      { serverUrlOverride: "https://mcp-override.invalid/mcp" },
+      { tokenPath: "/oauth/rotated" },
+      { clientId: "rotated-client" },
+    ];
+    for (const change of changes) {
+      await expect(updateMcpConnection(bindings.DB, PRINCIPAL, id, change)).rejects.toMatchObject({
+        status: 409,
+        code: "MCP_CONNECTION_REBIND_REQUIRED",
+      });
+      expect(await getMcpConnection(bindings.DB, PRINCIPAL, id)).toMatchObject({
+        serverUrlOverride: null,
+        tokenPath: TOKEN_PATH,
+        clientId: CLIENT_ID,
+      });
+      await expectBoundCredentialState(PRINCIPAL, id, true);
+    }
+  });
+
+  it("requires every Organization to unbind before template endpoint identity changes", async () => {
+    const serverId = (
+      await createMcpServerTemplate(bindings.DB, PRINCIPAL, ADMIN, {
+        name: `branch-binding-${Math.random().toString(36).slice(2, 8)}`,
+        serverUrl: SERVER_URL,
+        providerFlow: "authorization_code",
+      })
+    ).id;
+    const idA = (
+      await createMcpConnection(bindings.DB, PRINCIPAL, { serverId, clientId: CLIENT_ID, tokenPath: TOKEN_PATH })
+    ).id;
+    const idB = (
+      await createMcpConnection(bindings.DB, PRINCIPAL_B, {
+        serverId,
+        serverUrlOverride: "https://org-b-override.invalid/mcp",
+        clientId: CLIENT_ID,
+        tokenPath: TOKEN_PATH,
+      })
+    ).id;
+    await seedBoundCredentialState(PRINCIPAL, idA);
+    await seedBoundCredentialState(PRINCIPAL_B, idB);
+
+    await updateMcpServerTemplate(bindings.DB, PRINCIPAL, ADMIN, serverId, {
+      discoveryMetadata: { authorization_endpoint: AUTHORIZE_ENDPOINT },
+    });
+    await expectBoundCredentialState(PRINCIPAL, idA, true);
+    await expectBoundCredentialState(PRINCIPAL_B, idB, true);
+
+    for (const change of [
+      { serverUrl: "https://mcp-template-rotated.invalid/mcp" },
+      { providerFlow: "client_credentials" },
+    ] satisfies readonly McpTemplateWrite[]) {
+      await expect(updateMcpServerTemplate(bindings.DB, PRINCIPAL, ADMIN, serverId, change)).rejects.toMatchObject({
+        status: 409,
+        code: "MCP_SERVER_REBIND_REQUIRED",
+      });
+      expect(await getMcpServerTemplate(bindings.DB, PRINCIPAL, serverId)).toMatchObject({
+        serverUrl: SERVER_URL,
+        providerFlow: "authorization_code",
+      });
+      await expectBoundCredentialState(PRINCIPAL, idA, true);
+      await expectBoundCredentialState(PRINCIPAL_B, idB, true);
+    }
+
+    await deleteMcpConnection(bindings.DB, PRINCIPAL, idA);
+    await deleteMcpConnection(bindings.DB, PRINCIPAL_B, idB);
+    expect(
+      await updateMcpServerTemplate(bindings.DB, PRINCIPAL, ADMIN, serverId, {
+        serverUrl: "https://mcp-template-rotated.invalid/mcp",
+        providerFlow: "client_credentials",
+      }),
+    ).toMatchObject({
+      serverUrl: "https://mcp-template-rotated.invalid/mcp",
+      providerFlow: "client_credentials",
+    });
+  });
+
   it("catalog null-description views, malformed lists, foreign writes, null-reason denials", async () => {
     const { id } = await seedTriple();
     await syncMcpCatalog(bindings.DB, PRINCIPAL, id, { tools: [{ name: "nodesc" }] });
@@ -1921,11 +2046,9 @@ describe("MCP remaining deterministic arms", () => {
     const disabled = await createMcpConnection(bindings.DB, PRINCIPAL, { serverId: otherServer, enabled: false });
     expect(disabled.enabled).toBe(false);
     const flagged = await updateMcpConnection(bindings.DB, PRINCIPAL, id, {
-      tokenPath: "/oauth/other",
-      clientId: "other-client",
       availableInChat: true,
     });
-    expect(flagged).toMatchObject({ tokenPath: "/oauth/other", clientId: "other-client", availableInChat: true });
+    expect(flagged).toMatchObject({ tokenPath: TOKEN_PATH, clientId: CLIENT_ID, availableInChat: true });
     await expect(
       deleteMcpConnection(bindings.DB, PRINCIPAL, "00000000-0000-4000-8000-00000000ffff"),
     ).rejects.toMatchObject({
@@ -2100,7 +2223,8 @@ describe("MCP coverage-gap arms", () => {
   }
 
   it("template updates apply every field; discovery metadata rejects non-objects", async () => {
-    const { serverId } = await seedConn();
+    const { serverId, id } = await seedConn();
+    await deleteMcpConnection(bindings.DB, PRINCIPAL, id);
     const updated = await updateMcpServerTemplate(bindings.DB, PRINCIPAL, ADMIN, serverId, {
       serverUrl: "https://mcp-fixture.invalid/rotated",
       providerFlow: "client_credentials",
