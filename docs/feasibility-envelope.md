@@ -1,6 +1,6 @@
 # Cloudflare feasibility envelope (LIMITS-01, issue #177)
 
-Dated: 2026-09-18. Baseline: upstream `gobifrost/bifrost@3543c7ebee0e1bd9a2cab6dfba080a30621b1c5f` vs Wrangnarok `origin/main@9cc00ed` (lane `lane/177-sync-slice`; provider allowances re-checked 2026-09-17, unchanged; Worker script-size row corrected 2026-09-19 on `lane/177-limits-reconcile`, measured bytes unchanged).
+Dated: 2026-10-11. Baseline: upstream `gobifrost/bifrost@3543c7ebee0e1bd9a2cab6dfba080a30621b1c5f` vs Wrangnarok `origin/main@cac61efe266b9164c0c40259e44acfc145c0d993` (provider allowances re-checked 2026-09-17; Worker script-size row corrected 2026-09-19; native Rate Limiting binding status re-checked 2026-10-11; measured bytes unchanged).
 
 <!-- LIMITS-META {"budgetKiB":730,"measuredBytes":975852,"measuredDate":"2026-09-18","minHeadroomBytes":8192} -->
 
@@ -39,6 +39,7 @@ Every number in this matrix carries one of four labels. They are not interchange
 | D1 per-invocation queries | 50 (Free subrequest cap) | [D1 limits](https://developers.cloudflare.com/d1/platform/limits/) |
 | D1 row / statement caps | 2 MB max row; 100 KB max statement; 100 bound params | [D1 limits](https://developers.cloudflare.com/d1/platform/limits/) |
 | Durable Objects compute | 100,000 requests / day; 13,000 GB-s / day; SQLite-backed only on Free; over-limit fails with error, resets 00:00 UTC | [DO pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/) |
+| Workers Rate Limiting binding | Generally available; Wrangler >=4.36; periods are 10 or 60 seconds; limits are approximate per Cloudflare location. Cloudflare publishes no separate usage allowance or charge on the binding page, so plan-cost classification remains unresolved pending an authorized deployment/account check. | [Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) and [GA notice](https://developers.cloudflare.com/changelog/post/2025-09-19-ratelimit-workers-ga/) |
 | R2 (Standard) | 10 GB-month storage / mo; 1M class-A + 10M class-B ops / mo; egress free | [R2 pricing](https://developers.cloudflare.com/r2/pricing/) |
 | Vectorize | 30M queried dims / mo; 5M stored dims / mo (NOT adopted — no binding) | [Vectorize pricing](https://developers.cloudflare.com/vectorize/platform/pricing/) |
 | Workers Paid base | $5 / mo: 10M requests + 30M CPU-ms included | [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) |
@@ -70,6 +71,7 @@ Per the owner-approved policy decision (issue #177), the repository Worker bundl
 | Workflows steps | 3,000 steps/day (billing allowance) | 4 per smoke run | Bounded Operations per Saga (serial, fanout cap 8). ~750 smoke-runs/day is the first Free ceiling (see workloads). |
 | Workflows history retention | Completed state retained 3 days | Not archived by local/CI tests | The 15-minute same-revision refusal window plus retained D1 receipts carry recovery; native history older than retention surfaces as unavailable, never invented success (ADR 001). |
 | Durable Objects | 100k req/day; 13,000 GB-s/day; SQLite-only on Free | Fence is memory-only: ~1 RPC per refresh round, ms-scale duration, zero storage | OAUTH-01 fence only (no storage, no D1). Fits with large margin at refresh-round frequency; deployed duration metering is still requires-deployment-authority. |
+| Workers Rate Limiting binding | No separate allowance is published; GA and supported by Wrangler >=4.36 | Two `limit()` calls for an admitted NinjaOne request, one for a principal denial, zero for exact-id replay | Approximate per-location protection with no D1 counter traffic. Availability and pricing must be verified on the target account before a Free-tier claim; the deployment fails closed if the binding is unavailable. |
 | D1 stored data | 5 GB / account; 500 MB per database (Free) | 3 application Operation rows observed; storage not metered locally | 500 MB per-database cap (corrected 2026-09-17) bounds Execution/Operation history retention: retention/partitioning policy is a pre-production gate (ADR 001 open question). |
 | D1 rows read/written | 5,000,000 read/day; 100,000 written/day | 4 reads / 8 writes per smoke run (application-observed) | Bounded scans per route (history pages ≤ 50, tick scan ≤ 50, repairs inspect-then-act). Fits small deployments. |
 | D1 transactions | Single-statement plus explicit batch discipline | `createBatch` retained-ID dedup; no multi-statement transactions | No cross-row atomicity beyond PRIMARY KEY/UNIQUE fencing. Complex multi-entity writes need explicit design. |
@@ -96,6 +98,7 @@ All workload math is **estimate**: smoke actuals (4 steps, 4 reads, 8 writes, ~2
 | Schedules (TRG-01: minute Cron tick + D1 due rows) | free | 1,440 Cron invocations/day plus one bounded scan (≤ 50 rows) per tick. No Queue/DO adopted. |
 | Webhook/API-key endpoints (TRG-02) | free | Worker fetch plus D1 only; per-endpoint rate windows bound writes. |
 | Runtime policy, child Sagas, sync/data-provider execution (RUN-01..03) | free | D1 rows plus existing Workflow bindings; no new primitives. |
+| NinjaOne provider request budgets (ADR 026) | unresolved | Native Rate Limiting is GA, but its current official page publishes no plan-specific allowance or separate price. Security behavior is source-complete and fail-closed; confirm the target account accepts both bindings before deployment and reclassify from deployed evidence. |
 | OAuth refresh fence (OAUTH-01 DO) | free | Memory-only SQLite-backed DO: ~1 RPC per refresh round, no storage. Earned by the distributed-execution requirement (Workers gives no single-instance guarantee); classified here explicitly — no silent inheritance. |
 | Tables over D1 (TABLE-01/02) | free | Bounded keyset queries; subject to the 500 MB Free per-database retention gate at scale. |
 | Forms, file locations, artifacts over R2 (FORM-01/02, FILE-01/02) | free | R2 earned by ADR 036/040; per-surface size caps bound bytes. |
@@ -130,5 +133,6 @@ All workload math is **estimate**: smoke actuals (4 steps, 4 reads, 8 writes, ~2
 - Deployed D1 `meta.rows_read`/`meta.rows_written` vs application-observed counters.
 - Deployed Workers request counts and CPU-ms per route (null in workerd).
 - Deployed Durable Object request/duration metering for the OAuth fence vs the ms-scale local assumption.
+- Target-account acceptance and billing classification for the two native Rate Limiting bindings; official docs publish behavior and GA status but no plan-specific allowance.
 - Multi-org load fixtures proving the daily caps hold under representative schedules, webhooks, and history querying (W1–W3 are estimates until then).
 - R2 signing latency and byte throughput under browser upload/download.
