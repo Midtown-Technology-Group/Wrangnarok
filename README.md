@@ -10,7 +10,7 @@ Wrangnarök asks a deliberately constrained question:
 
 **How much of Bifrost's code-first integration-orchestration model can be reproduced using only Cloudflare-native primitives, while remaining useful on Cloudflare's free tier?**
 
-Wrangnarök is a full-stack app: one Cloudflare Worker serves both the browser UI (Workers Static Assets) and the JSON API, backed by Workflows + D1. See ADR 008.
+Wrangnarök is a full-stack app: one Cloudflare Worker serves both the browser UI (Workers Static Assets) and the JSON API, backed by Workflows + D1. See ADR 008. The same bundle also runs self-hosted on [celld](https://celld.dev) with no code changes; see `docs/self-hosting-celld.md` and ADR 047.
 
 This is a greenfield experiment, not a line-by-line port. Upstream Bifrost is treated primarily as a behavioral and product specification. Wrangnarök should preserve useful ideas while allowing Cloudflare's execution model to reshape the implementation.
 

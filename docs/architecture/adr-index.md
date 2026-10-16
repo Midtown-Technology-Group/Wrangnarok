@@ -15,7 +15,7 @@ Machine-checkable ledger of Architecture Decision Record numbers. Enforced by
   earliest-landed keeps the number, later-landed moves to the next free
   numbers in landing order, with a renumber note in each moved file.
 
-Next free ADR number: 047.
+Next free ADR number: 048.
 
 ## Index
 
@@ -67,6 +67,7 @@ Next free ADR number: 047.
 | 044 | 044-external-mcp-servers.md | External MCP servers — templates, Connections, catalog, consent, dispatch |
 | 045 | 045-table-realtime-polling.md | Table realtime stays on bounded revision polling (TABLE-02) |
 | 046 | 046-sec01-scrub-chokepoints.md | SEC-01 scrub choke points and reference-vs-value discipline |
+| 047 | 047-celld-self-hosting.md | Self-hosting on celld alongside Cloudflare |
 
 ## Renumber history (issue #225)
 

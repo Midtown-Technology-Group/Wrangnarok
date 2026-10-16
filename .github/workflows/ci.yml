@@ -296,6 +296,31 @@ jobs:
       - name: D1 migrations (local)
         run: npm run db:migrate:local
 
+  # celld self-host config (ADR 047): deliberately NOT part of the
+  # required Validate aggregation -- a stale celld projection must never
+  # block the hosted Cloudflare path. This job reports celld drift on its
+  # own; the celld runtime smoke is operator-run per docs.
+  celld-config:
+    name: celld config (non-gating)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: celld config and deploy-helper checks
+        run: npm run check:celld && node scripts/build-celld-config.mjs selftest && node scripts/deploy-celld.mjs selftest
+
   validate:
     name: Validate
     needs: [static, runtime-test, runtime-build]
