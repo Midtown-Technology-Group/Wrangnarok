@@ -6,7 +6,7 @@ import { env } from "cloudflare:workers";
 import { reset } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
-import type { Bindings, RequestRateLimiter } from "../src/bindings";
+import type { Bindings } from "../src/bindings";
 import { authenticate } from "../src/auth";
 import { boundedJson, echoSaga, ninjaSaga, parseInput, parseKey, parseNinjaOrgsInput } from "../src/domain";
 import { enforceNinjaOneExecutionBudget, prepareExecution } from "../src/executions";
@@ -34,11 +34,11 @@ function postExecutions(body: unknown, headers: Record<string, string> = {}) {
   });
 }
 
-function limiter(success: boolean): RequestRateLimiter {
+function limiter(success: boolean): RateLimit {
   return { limit: vi.fn(async () => ({ success })) };
 }
 
-function withLimiters(principal: RequestRateLimiter, provider: RequestRateLimiter): Bindings {
+function withLimiters(principal: RateLimit, provider: RateLimit): Bindings {
   return {
     ...bindings,
     ENVIRONMENT: "dev",
@@ -236,7 +236,7 @@ it("rejects a NinjaOne execution when the shared provider budget is exhausted", 
 
 it("fails closed when native admission control is unavailable", async () => {
   const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-  const unavailable: RequestRateLimiter = {
+  const unavailable: RateLimit = {
     limit: vi.fn(async () => {
       throw new TypeError("binding unavailable for secret principal key");
     }),

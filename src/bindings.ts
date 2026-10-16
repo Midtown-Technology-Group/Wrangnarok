@@ -7,12 +7,6 @@ export interface NinjaCredentials {
   NINJA_CLIENT_ID?: string;
   NINJA_CLIENT_SECRET?: string;
 }
-/** Cloudflare's native, approximate request limiter. Kept structural so
- * unit tests can inject deterministic allow/deny outcomes without replacing
- * the Worker runtime. */
-export interface RequestRateLimiter {
-  limit(input: { key: string }): Promise<{ success: boolean }>;
-}
 /** TOOL-01 HaloPSA Code Mode provider (issue #170): deployment credential
  * surface for the lab proof Connection. Presence-checked at execution, never
  * persisted, never returned through discovery. */
@@ -64,8 +58,8 @@ export interface Bindings
   /** Provider-global NinjaOne admission fences (ADR 026). The principal
    * limiter contains per-(Organization,user) abuse; the provider limiter
    * protects the shared credential/quota across all callers. */
-  NINJAONE_PRINCIPAL_RATE_LIMITER: RequestRateLimiter;
-  NINJAONE_PROVIDER_RATE_LIMITER: RequestRateLimiter;
+  NINJAONE_PRINCIPAL_RATE_LIMITER: RateLimit;
+  NINJAONE_PROVIDER_RATE_LIMITER: RateLimit;
   /** OAUTH-01 follow-up (issue #149): cross-instance rotating-refresh fence.
    * The `OAuthRefreshFence` object behind each (tenant, generation) key runs
    * one volatile vendor POST per rotation round. Memory-only: no storage, no
