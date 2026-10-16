@@ -9,8 +9,10 @@ import { env } from "cloudflare:workers";
 import { reset } from "cloudflare:test";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import worker from "../src/index";
+import { brandingLogoKey } from "../src/branding";
 import type { Bindings } from "../src/bindings";
 import { echoSaga } from "../src/domain";
+import { profileAvatarKey } from "../src/profile";
 import {
   deleteOrg,
   deletePreview,
@@ -50,6 +52,7 @@ import migration29 from "../migrations/0029_connection_secrets.sql?raw";
 import migration30 from "../migrations/0030_events.sql?raw";
 import migration31 from "../migrations/0031_oauth_tokens.sql?raw";
 import migration33 from "../migrations/0033_event_subscriptions.sql?raw";
+import migration34 from "../migrations/0034_branding_profile.sql?raw";
 import seed from "../scripts/seed-local.sql?raw";
 
 const bindings = env as unknown as Bindings;
@@ -151,6 +154,7 @@ beforeEach(async () => {
   await bindings.DB.exec(migration30);
   await bindings.DB.exec(migration31);
   await bindings.DB.exec(migration33);
+  await bindings.DB.exec(migration34);
   // Fixture caller bootstraps to admin of org A inside authenticate; the
   // ordinary identity holds org-A membership too (member), so collection
   // routes gate cleanly. External/stranger stay strangers until invited.
@@ -461,6 +465,67 @@ it("deletes an org with retained audit events intact (issue #350)", async () => 
   expect(kept?.n ?? 0).toBeGreaterThan(0);
   const gone = await bindings.DB.prepare("SELECT id FROM organizations WHERE id=?").bind(orgA).first<{ id: string }>();
   expect(gone).toBeNull();
+});
+
+it("deletes branding, profiles, and their reserved FILES objects with the org", async () => {
+  const stamp = new Date().toISOString();
+  const created = await call("/api/orgs", "POST", USER_ADMIN, { name: "customized" });
+  expect(created.status).toBe(201);
+  const org = created.body.id as string;
+  await bindings.DB.prepare(
+    "INSERT INTO org_branding(org_id,app_name,primary_color,accent_color,logo_content_type,logo_size,logo_sha256,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind(org, "Custom", "#112233", "#445566", "image/png", 3, "a".repeat(64), stamp)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO user_profiles(org_id,user_id,display_name,theme,avatar_content_type,avatar_size,avatar_sha256,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind(org, USER_ORDINARY, "Member", "dark", "image/png", 3, "b".repeat(64), stamp)
+    .run();
+  await bindings.FILES.put(brandingLogoKey(org), new TextEncoder().encode("logo"));
+  await bindings.FILES.put(profileAvatarKey(org, USER_ORDINARY), new TextEncoder().encode("avatar"));
+
+  const preview = await call(`/api/orgs/${org}/delete-preview`, "GET", USER_ADMIN);
+  expect(preview.status).toBe(200);
+  expect(preview.body).toMatchObject({
+    canDelete: true,
+    branding: 1,
+    brandingLogos: 1,
+    profiles: 1,
+    profileAvatars: 1,
+  });
+
+  const storeless = await worker.fetch(
+    new Request(`https://local.test/api/orgs/${org}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    }),
+    {
+      ...bindings,
+      FILES: undefined as unknown as R2Bucket,
+      LAB_USER_ID: USER_ADMIN,
+      LAB_FIXTURE_USER_ID: USER_ADMIN,
+      ADMIN_USER_IDS: USER_ADMIN,
+    },
+  );
+  expect(storeless.status).toBe(503);
+  expect(await bindings.DB.prepare("SELECT id FROM organizations WHERE id=?").bind(org).first()).not.toBeNull();
+  expect(await bindings.FILES.get(brandingLogoKey(org))).not.toBeNull();
+  expect(await bindings.FILES.get(profileAvatarKey(org, USER_ORDINARY))).not.toBeNull();
+
+  const deleted = await call(`/api/orgs/${org}`, "DELETE", USER_ADMIN);
+  expect(deleted.status).toBe(200);
+  expect(deleted.body).toMatchObject({
+    orgId: org,
+    deletedBranding: 1,
+    deletedProfiles: 1,
+    deletedFileObjects: 2,
+  });
+  expect(await bindings.DB.prepare("SELECT org_id FROM org_branding WHERE org_id=?").bind(org).first()).toBeNull();
+  expect(await bindings.DB.prepare("SELECT org_id FROM user_profiles WHERE org_id=?").bind(org).first()).toBeNull();
+  expect(await bindings.DB.prepare("SELECT id FROM organizations WHERE id=?").bind(org).first()).toBeNull();
+  expect(await bindings.FILES.get(brandingLogoKey(org))).toBeNull();
+  expect(await bindings.FILES.get(profileAvatarKey(org, USER_ORDINARY))).toBeNull();
 });
 
 it("refuses managed rows on delete", async () => {
@@ -1366,6 +1431,7 @@ it("owns every REFERENCES organizations(id) table on the delete path (issue #226
     "files",
     "forms",
     "notifications",
+    "org_branding",
     "org_memberships",
     "policy_rules",
     "resource_roles",
@@ -1374,6 +1440,7 @@ it("owns every REFERENCES organizations(id) table on the delete path (issue #226
     "schedules",
     "tables",
     "tool_enrollments",
+    "user_profiles",
   ]);
   // Secret rows ride their parent Connection via ON DELETE CASCADE (no
   // org-delete SQL of their own); the DDL pin below keeps that honest.

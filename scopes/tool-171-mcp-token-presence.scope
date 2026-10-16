@@ -1,0 +1,6 @@
+# TOOL-02 credential presence hardening (issue #171): resolve state and
+# decrypted material from one row snapshot and reject missing Bearers at the
+# final MCP wire boundary. No auth-resolution policy or schema change.
+src/mcp-dispatch.ts
+test/mcp-branches.test.ts
+scopes/tool-171-mcp-token-presence.scope

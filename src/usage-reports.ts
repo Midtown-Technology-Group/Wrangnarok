@@ -49,9 +49,10 @@ export interface UsageSummary {
   readonly byStatus: Readonly<Record<string, number>>;
   readonly cancelledExecutions: number;
   /** Truncation contract: rows are the oldest matches up to the row limit.
-   * matchedExecutions counts every match; truncated is true when totals
-   * cover only a prefix, so a capped summary can never read as complete. */
+   * matchedExecutions is exact only when matchedExecutionsExact is true;
+   * otherwise it is a lower bound discovered by the limit+1 sentinel row. */
   readonly matchedExecutions: number;
+  readonly matchedExecutionsExact: boolean;
   readonly truncated: boolean;
   readonly gaps: UsageGaps;
   readonly note: string;
@@ -59,8 +60,9 @@ export interface UsageSummary {
 
 /** Maximum usage_blocks rows aggregated per summary read. Worker + D1 only:
  * the cap keeps one read inside Free-tier time/row budgets; the response
- * says when it applied (truncated/matchedExecutions) instead of silently
- * reporting a prefix as the total. */
+ * says when it applied instead of silently reporting a prefix as the total.
+ * Match detection uses the same bounded query, never an exact COUNT(*) over
+ * Organization history. */
 export const USAGE_SUMMARY_ROW_LIMIT = 5000;
 
 const SUMMARY_NOTE =
@@ -195,6 +197,7 @@ export async function getUsageSummary(
     byStatus: {},
     cancelledExecutions: 0,
     matchedExecutions: 0,
+    matchedExecutionsExact: true,
     truncated: false,
     gaps: {
       modelTokenCosts: "unpriced",
@@ -205,23 +208,25 @@ export async function getUsageSummary(
     },
     note: SUMMARY_NOTE,
   };
+  const requestedLimit = Math.floor(rowLimit);
+  const boundedLimit = Number.isFinite(requestedLimit)
+    ? Math.min(USAGE_SUMMARY_ROW_LIMIT, Math.max(1, requestedLimit))
+    : USAGE_SUMMARY_ROW_LIMIT;
   let rows: UsageJoinRow[];
   let matchedExecutions: number;
+  let truncated: boolean;
   try {
-    const counted = await db
-      .prepare(`SELECT COUNT(*) AS n FROM usage_blocks u JOIN executions e ON e.id=u.execution_id WHERE ${where}`)
-      .bind(...binds)
-      .first<{ n: number }>();
-    matchedExecutions = counted?.n ?? 0;
     const result = await db
       .prepare(
         `SELECT u.execution_id,u.usage_json,u.created_at,e.saga_name,e.status FROM usage_blocks u ` +
           `JOIN executions e ON e.id=u.execution_id WHERE ${where} ` +
           `ORDER BY u.created_at ASC,u.execution_id ASC LIMIT ?`,
       )
-      .bind(...binds, Math.max(1, Math.floor(rowLimit)))
+      .bind(...binds, boundedLimit + 1)
       .all<UsageJoinRow>();
-    rows = result.results;
+    matchedExecutions = result.results.length;
+    truncated = matchedExecutions > boundedLimit;
+    rows = truncated ? result.results.slice(0, boundedLimit) : result.results;
   } catch (error) {
     if (error instanceof Error && /no such table/i.test(error.message)) {
       return degraded;
@@ -268,7 +273,8 @@ export async function getUsageSummary(
     byStatus,
     cancelledExecutions,
     matchedExecutions,
-    truncated: totals.executions + unreadableBlocks < matchedExecutions,
+    matchedExecutionsExact: !truncated,
+    truncated,
     gaps: {
       modelTokenCosts: "unpriced",
       providerBilling: "unavailable",

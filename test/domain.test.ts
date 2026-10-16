@@ -76,6 +76,7 @@ describe("MVP slice contracts", () => {
     expect(stepRetryLimit("smoke-verify-v1")).toBe(0);
     expect(stepRetryLimit("prepare-input-v1")).toBe(STEP_RETRY_CEILING);
     expect(stepRetryLimit("persist-success-v1")).toBe(STEP_RETRY_CEILING);
+    expect(stepRetryLimit("persist-success-v2")).toBe(STEP_RETRY_CEILING);
     expect(stepRetryLimit("persist-failure-v1")).toBe(STEP_RETRY_CEILING);
     // ADR-033-3 (issue #414): timeout-mark-v1 retired from the checkpoint
     // set — failSagaExecution classifies inside persist-failure-v1, so no

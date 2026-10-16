@@ -1,0 +1,10 @@
+# OPS-04 usage-summary row-read cap hardening (issue #175): replace the
+# exact full-history match count with a limit+1 sentinel, expose exact versus
+# lower-bound count semantics, and render truncation honestly in the console.
+src/usage-reports.ts
+test/usage-summary.test.ts
+client/src/lib/client-types.ts
+client/src/lib/api-client.ts
+client/src/pages/Operations.tsx
+test/operations-ui.test.tsx
+scopes/ops-175-usage-cap.scope

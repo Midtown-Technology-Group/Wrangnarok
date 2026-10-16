@@ -135,7 +135,7 @@ function referencedSchemeNames(raw) {
     if (!Array.isArray(value)) return;
     for (const requirement of value) {
       if (requirement === null || typeof requirement !== "object" || Array.isArray(requirement)) continue;
-      for (const name of Object.keys(requirement)) names.add(name.toLowerCase());
+      for (const name of Object.keys(requirement)) names.add(name);
     }
   };
   collect(raw.security);
@@ -167,12 +167,10 @@ function detectAuthKind(doc) {
   const schemes = schemesRaw !== null && typeof schemesRaw === "object" && !Array.isArray(schemesRaw) ? schemesRaw : {};
   const referenced = referencedSchemeNames(raw);
   if (referenced.size === 0) return "unknown";
-  const lowered = {};
-  for (const [key, value] of Object.entries(schemes)) lowered[key.toLowerCase()] = value;
   let sawBearer = false;
   let sawOAuth = false;
   for (const name of referenced) {
-    const scheme = lowered[name];
+    const scheme = schemes[name];
     if (scheme === null || typeof scheme !== "object" || Array.isArray(scheme)) return "unknown";
     const type = typeof scheme.type === "string" ? scheme.type.toLowerCase() : "";
     if (type === "oauth2") {

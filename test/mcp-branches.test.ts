@@ -1073,6 +1073,31 @@ describe("MCP dispatch transport and refresh branches", () => {
   });
 
   it("single RPC faults speak fixed codes without retries", async () => {
+    let missingCredentialCalls = 0;
+    const acceptsMissingCredential = (async () => {
+      missingCredentialCalls += 1;
+      return Response.json({ jsonrpc: "2.0", id: 1, result: { mutated: true } });
+    }) as typeof fetch;
+    await expect(
+      postMcpRpc({
+        url: SERVER_URL,
+        token: null as unknown as string,
+        method: "tools/call",
+        params: {},
+        fetchImpl: acceptsMissingCredential,
+      }),
+    ).rejects.toMatchObject({ code: "MCP_MISCONFIGURED" });
+    await expect(
+      postMcpRpc({
+        url: SERVER_URL,
+        token: "",
+        method: "tools/call",
+        params: {},
+        fetchImpl: acceptsMissingCredential,
+      }),
+    ).rejects.toMatchObject({ code: "MCP_MISCONFIGURED" });
+    expect(missingCredentialCalls).toBe(0);
+
     const down: typeof fetch = (() => {
       throw new Error("socket hang up");
     }) as unknown as typeof fetch;
@@ -1189,6 +1214,77 @@ describe("MCP dispatch transport and refresh branches", () => {
     await expect(dispatchMcpTool({ ...base, args: {}, connectionId: evil })).rejects.toMatchObject({
       code: "MCP_INVALID_CONNECTION",
     });
+  });
+
+  it("resolves consent state and material from one row snapshot", async () => {
+    const id = await seedDispatch("authorization_code");
+    await storeInitialMcpUserConsent(bindings.DB, {
+      orgId: ORG_A,
+      connectionId: id,
+      userId: MEMBER_USER,
+      accessToken: "one-read-user",
+      kekMaterial: KEK,
+      checkedAt: AT,
+    });
+    let consentRowReads = 0;
+    const countedDb = {
+      prepare(sql: string) {
+        if (sql.includes("access_ciphertext") && sql.includes("FROM mcp_user_consents WHERE")) {
+          consentRowReads += 1;
+        }
+        return bindings.DB.prepare(sql);
+      },
+    } as unknown as D1Database;
+    const seen: (string | null)[] = [];
+    rpcHandler = (auth) => {
+      seen.push(auth);
+      return Response.json({ jsonrpc: "2.0", id: 1, result: { ok: true } });
+    };
+    const dispatched = await dispatchMcpTool({
+      db: countedDb,
+      orgId: ORG_A,
+      caller: { kind: "user", userId: MEMBER_USER },
+      connectionId: id,
+      toolName: "search",
+      args: {},
+      kekMaterial: KEK,
+      fetchImpl,
+    });
+    expect(dispatched.provenance.identity).toBe("user");
+    expect(consentRowReads).toBe(1);
+    expect(seen).toEqual(["Bearer one-read-user"]);
+
+    const serviceId = await seedDispatch("client_credentials", { availableInChat: true });
+    await storeInitialMcpServiceToken(bindings.DB, {
+      orgId: ORG_A,
+      connectionId: serviceId,
+      accessToken: "one-read-service",
+      kekMaterial: KEK,
+      checkedAt: AT,
+    });
+    let serviceRowReads = 0;
+    const countedServiceDb = {
+      prepare(sql: string) {
+        if (sql.includes("access_ciphertext") && sql.includes("FROM mcp_service_tokens WHERE")) {
+          serviceRowReads += 1;
+        }
+        return bindings.DB.prepare(sql);
+      },
+    } as unknown as D1Database;
+    seen.length = 0;
+    const serviceDispatched = await dispatchMcpTool({
+      db: countedServiceDb,
+      orgId: ORG_A,
+      caller: { kind: "user", userId: MEMBER_USER },
+      connectionId: serviceId,
+      toolName: "search",
+      args: {},
+      kekMaterial: KEK,
+      fetchImpl,
+    });
+    expect(serviceDispatched.provenance.identity).toBe("service");
+    expect(serviceRowReads).toBe(1);
+    expect(seen).toEqual(["Bearer one-read-service"]);
   });
 
   it("expired user consent refreshes inline, then falls through to service on failure", async () => {

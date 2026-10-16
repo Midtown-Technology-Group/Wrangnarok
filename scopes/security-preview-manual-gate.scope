@@ -1,0 +1,12 @@
+# Finding 654: remove automatic credentialed execution of same-repository PR
+# code. Preview deployment is manual-only, validates write authority, rejects
+# forks and moved heads, and checks out the API-resolved immutable merge SHA.
+# The token remains scoped to the preview environment/account and expires in
+# 30 days. Static contract tests keep this trust boundary fail-closed.
+.github/workflows/preview.yml
+.github/workflows/ci.yml
+scripts/mint-preview-token.mjs
+scripts/preview-workflow-trust.mjs
+docs/architecture/004-ci-cd.md
+package.json
+scopes/security-preview-manual-gate.scope

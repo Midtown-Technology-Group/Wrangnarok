@@ -710,6 +710,10 @@ export interface DeletePreview {
   readonly configsManaged: number;
   readonly auditEvents: number;
   readonly notifications: number;
+  readonly branding: number;
+  readonly brandingLogos: number;
+  readonly profiles: number;
+  readonly profileAvatars: number;
   readonly bundleActive: number;
   readonly bundleOwnedRows: number;
   /** ExecutionHistory (executions + operations) is always retained. */
@@ -791,6 +795,16 @@ function artifactObjectKey(artifactId: string, version: number): string {
   return `artifacts/${artifactId}/v${version}`;
 }
 
+/** Reserved UX-01 image keys. Kept beside the other lifecycle-owned key
+ * builders so org deletion cannot drift from branding/profile storage. */
+function brandingLogoObjectKey(orgId: string): string {
+  return `${orgId}/__branding__/logo`;
+}
+
+function profileAvatarObjectKey(orgId: string, userId: string): string {
+  return `${orgId}/__avatars__/${userId}`;
+}
+
 export interface OrgDeleteStores {
   readonly files?: R2Bucket | null;
   readonly artifacts?: R2Bucket | null;
@@ -806,8 +820,8 @@ export interface OrgDeleteStores {
  * (solution-owned apps, managed bundle rows) block deletion until the owning
  * bundle is uninstalled. Every other org-owned row (forms, loose apps,
  * tables, files, artifacts, endpoints, schedules, event sources and
- * subscriptions, AI profiles/assignments/embedding/behavior, runtime policies,
- * tool enrollments, configs) is counted and removed with the org; the
+ * subscriptions, AI profiles/assignments/embedding/behavior, branding, user
+ * profiles, runtime policies, tool enrollments, configs) is counted and removed with the org; the
  * empty-tables fallback (`.catch(() => 0)`) keeps old databases previewing
  * cleanly.
  *
@@ -878,6 +892,18 @@ export async function deletePreview(db: D1Database, orgId: string): Promise<Dele
   );
   const auditEvents = await optionalCount(db, "SELECT COUNT(*) AS n FROM audit_events WHERE org_id=?", id);
   const notifications = await optionalCount(db, "SELECT COUNT(*) AS n FROM notifications WHERE org_id=?", id);
+  const branding = await optionalCount(db, "SELECT COUNT(*) AS n FROM org_branding WHERE org_id=?", id);
+  const brandingLogos = await optionalCount(
+    db,
+    "SELECT COUNT(*) AS n FROM org_branding WHERE org_id=? AND logo_content_type<>''",
+    id,
+  );
+  const profiles = await optionalCount(db, "SELECT COUNT(*) AS n FROM user_profiles WHERE org_id=?", id);
+  const profileAvatars = await optionalCount(
+    db,
+    "SELECT COUNT(*) AS n FROM user_profiles WHERE org_id=? AND avatar_content_type<>''",
+    id,
+  );
   const bundleActive = await optionalCount(db, "SELECT COUNT(*) AS n FROM bundle_active WHERE org_id=?", id);
   const bundleConfig = await optionalCount(db, "SELECT COUNT(*) AS n FROM bundle_config WHERE org_id=?", id);
   const bundleSagas = await optionalCount(db, "SELECT COUNT(*) AS n FROM bundle_sagas WHERE org_id=?", id);
@@ -923,6 +949,10 @@ export async function deletePreview(db: D1Database, orgId: string): Promise<Dele
     configsManaged,
     auditEvents,
     notifications,
+    branding,
+    brandingLogos,
+    profiles,
+    profileAvatars,
     bundleActive,
     bundleOwnedRows,
     retained: ["executions", "operations", "audit_events"],
@@ -955,6 +985,8 @@ export interface OrgDeleteResult {
   readonly deletedToolEnrollments: number;
   readonly deletedConfigs: number;
   readonly deletedNotifications: number;
+  readonly deletedBranding: number;
+  readonly deletedProfiles: number;
   readonly deletedFileObjects: number;
   readonly deletedArtifactObjects: number;
 }
@@ -969,7 +1001,8 @@ export interface OrgDeleteResult {
  * FK so retention never blocks the delete); notifications are org-scoped
  * inbox rows and are removed.
  *
- * R2 bytes go first (FILES/FINAL objects, then artifact versions): an
+ * R2 bytes go first (managed FILES objects, reserved branding/profile
+ * images, then artifact versions): an
  * interruption between the byte deletes and the D1 batch leaves D1 rows the
  * next delete (or artifact retention cleanup) picks up, never a deleted org
  * over surviving bytes. R2 deletes are idempotent. Missing buckets are a
@@ -1020,6 +1053,41 @@ export async function deleteOrg(db: D1Database, orgId: string, stores?: OrgDelet
     for (const row of staging) {
       if (row.staging_key) {
         await files.delete(row.staging_key);
+        deletedFileObjects += 1;
+      }
+    }
+  }
+  const brandingRows = await selectAll<{ logo_content_type: string }>(
+    db,
+    "SELECT logo_content_type FROM org_branding WHERE org_id=?",
+    id,
+  );
+  const profileRows = await selectAll<{ user_id: string; avatar_content_type: string }>(
+    db,
+    "SELECT user_id,avatar_content_type FROM user_profiles WHERE org_id=?",
+    id,
+  );
+  const hasReservedImages =
+    brandingRows.some((row) => row.logo_content_type !== "") ||
+    profileRows.some((row) => row.avatar_content_type !== "");
+  if (hasReservedImages) {
+    const files = stores?.files ?? null;
+    if (!files) {
+      throw new Fault(
+        503,
+        "ORG_DELETE_STORE_MISSING",
+        "Profile and branding bytes cannot be removed: FILES is unavailable.",
+      );
+    }
+    for (const row of brandingRows) {
+      if (row.logo_content_type !== "") {
+        await files.delete(brandingLogoObjectKey(id));
+        deletedFileObjects += 1;
+      }
+    }
+    for (const row of profileRows) {
+      if (row.avatar_content_type !== "") {
+        await files.delete(profileAvatarObjectKey(id, row.user_id));
         deletedFileObjects += 1;
       }
     }
@@ -1116,6 +1184,11 @@ export async function deleteOrg(db: D1Database, orgId: string, stores?: OrgDelet
   await optionalExec(db, "DELETE FROM saga_policies WHERE org_id=?", id);
   await optionalExec(db, "DELETE FROM tool_enrollments WHERE org_id=?", id);
   await optionalExec(db, "DELETE FROM notifications WHERE org_id=?", id);
+  // UX-01 metadata has restrictive Organization foreign keys. Its reserved
+  // FILES objects were removed above; delete rows before the org so a member
+  // profile can never strand a partially purged tenant.
+  await optionalExec(db, "DELETE FROM user_profiles WHERE org_id=?", id);
+  await optionalExec(db, "DELETE FROM org_branding WHERE org_id=?", id);
   await optionalExec(db, "DELETE FROM table_grants WHERE table_id IN (SELECT id FROM tables WHERE org_id=?)", id);
   await optionalExec(db, "DELETE FROM table_rows WHERE org_id=?", id);
   await optionalExec(db, "DELETE FROM tables WHERE org_id=?", id);
@@ -1192,6 +1265,8 @@ export async function deleteOrg(db: D1Database, orgId: string, stores?: OrgDelet
     deletedToolEnrollments: preview.toolEnrollments,
     deletedConfigs: preview.configsLoose,
     deletedNotifications: preview.notifications,
+    deletedBranding: preview.branding,
+    deletedProfiles: preview.profiles,
     deletedFileObjects,
     deletedArtifactObjects,
   };

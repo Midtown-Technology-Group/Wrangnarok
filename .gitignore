@@ -5,6 +5,9 @@ coverage/
 worker-configuration.d.ts
 .dev.vars
 .dev.vars.*
+.celld/
+.celld.vars*
+wrangler.celld.deploy.jsonc
 scripts/seed-local.override.sql
 .env
 .env.*

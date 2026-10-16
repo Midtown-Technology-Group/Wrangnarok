@@ -540,6 +540,7 @@ it("accepts inert SVG logos and avatars, rejects active SVG abuse", async () => 
   const publicLogo = await worker.fetch(new Request(`https://local.test/api/branding/public/${ORG}/logo`), bindings);
   expect(publicLogo.status).toBe(200);
   expect(publicLogo.headers.get("Content-Type")).toBe("image/svg+xml");
+  expect(publicLogo.headers.get("Content-Security-Policy")).toContain("form-action 'none'");
   expect(new Uint8Array(await publicLogo.arrayBuffer())).toEqual(cleanBytes);
   // Prolog-prefixed SVG also passes; members still cannot write any logo type.
   expect((await putBytes("/api/branding/logo", prologBytes, "image/svg+xml")).status).toBe(200);
@@ -584,8 +585,8 @@ it("accepts inert SVG logos and avatars, rejects active SVG abuse", async () => 
       `<svg xmlns="http://www.w3.org/2000/svg" xmlns:svg="http://www.w3.org/2000/svg"><svg:script>alert(1)</svg:script></svg>`,
     ],
     [
-      "namespaced-foreign",
-      `<svg xmlns="http://www.w3.org/2000/svg" xmlns:f="http://www.w3.org/2000/svg"><f:foreignObject><p>x</p></f:foreignObject></svg>`,
+      "namespaced-foreign-form",
+      `<svg xmlns="http://www.w3.org/2000/svg" xmlns:s="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml"><s:foreignObject><h:form action="/api/executions/${"a".repeat(64)}/cancel" method="post"><h:button>Cancel</h:button></h:form></s:foreignObject></svg>`,
     ],
     [
       "css-protocol-import",

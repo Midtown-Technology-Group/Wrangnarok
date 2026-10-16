@@ -905,6 +905,21 @@ describe("solution source export and import (SOL-03)", () => {
       requiredIntegrations: [],
     };
     await expect(importSourcePackage(ghostModule)).rejects.toMatchObject({ code: "MISSING_MODULE" });
+    // A caller-provided catalog may be narrower than the static inventory
+    // used by parseBundleManifest. A statically valid second pin with no
+    // module and no custom-catalog entry must produce a stable Fault, not a
+    // TypeError while interpolating the absent catalog name.
+    const customCatalogMissingPin = JSON.parse(JSON.stringify(memoPkg)) as Record<string, unknown>;
+    const customManifest = (customCatalogMissingPin.manifest as { sagas: Array<{ id: string; revision: string }> })
+      .sagas;
+    customManifest.push({ id: helloSaga.id, revision: helloSaga.revision });
+    const customCatalog = staticSourceCatalogs();
+    await expect(
+      importSourcePackage(customCatalogMissingPin, {
+        sagas: customCatalog.sagas.filter((entry) => entry.id !== helloSaga.id),
+        integrations: customCatalog.integrations,
+      }),
+    ).rejects.toMatchObject({ code: "MISSING_MODULE", status: 400 });
     // validatePackage SOURCE_MANIFEST_MISMATCH: a module for a catalog saga
     // the manifest never pins. The memo manifest parses (digest pin matches
     // code), the hello module passes every identity check, then the pin

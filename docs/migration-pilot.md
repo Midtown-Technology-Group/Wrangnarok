@@ -131,7 +131,8 @@ operator sagaMap records the mapping explicitly.
 
 - `2fcb2d31-091a-583f-a980-38c4de3da9ab` (`verify_cloudflare_connection`)
   → registered Saga UUID `9d2f4a6c-3b1e-4f5a-9c2d-6e8f0a1b2c3d`
-  (`cloudflare-verify-connection`, `cloudflare-verify-connection-v1`).
+  (`cloudflare-verify-connection`, `cloudflare-verify-connection-v2`; v2
+  advertises the credential-status output contract).
 - `a5160896-d1de-55cc-b1af-71e57b670f44` (`inventory_cloudflare_zones`)
   → registered Saga UUID `7c1e3b5a-2d4f-4e6b-8a1c-5d7f9e0a1b2c`
   (`cloudflare-inventory-zones`, `cloudflare-inventory-zones-v1`).

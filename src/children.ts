@@ -136,15 +136,13 @@ export interface ChildEnv {
 export const CHILD_POLL_INTERVAL = "1 second";
 
 /** Ampersand-free step names for child dispatch Operations, so position
- * ordering stays greppable in ExecutionHistory. Idempotent: callers may pass
- * either the owning Operation name ("child-dispatch-invoke-v1") or its
- * already-prefixed form; an already-prefixed name passes through unchanged
- * so ambient resolution (which sees the full step.do name) never
- * double-prefixes. */
+ * ordering stays greppable in ExecutionHistory. Prefixing is deliberately
+ * unconditional: the transform must remain injective because its output is
+ * part of the child dispatch key and deterministic Execution ID. */
 const CHILD_DISPATCH_PREFIX = "child-dispatch-";
 
 export function childDispatchStep(stepName: string): string {
-  return stepName.startsWith(CHILD_DISPATCH_PREFIX) ? stepName : `child-dispatch-${stepName}`;
+  return `${CHILD_DISPATCH_PREFIX}${stepName}`;
 }
 
 export function childPollStep(stepName: string): string {

@@ -29,7 +29,7 @@ function expectBaseline(response: Response, csp: string): void {
   expect(response.headers.get("Content-Security-Policy")).toBe(csp);
 }
 
-const API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
+const API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 const ASSET_CSP = "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'";
 
 beforeEach(async () => {

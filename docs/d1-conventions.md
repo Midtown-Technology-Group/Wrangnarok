@@ -98,15 +98,26 @@ Template for bounded batches (tune `LIMIT` by measurement; ~1k rows is the
 starting point, not doctrine):
 
 ```sql
-DELETE FROM <table> WHERE <predicate> AND id NOT IN (SELECT id FROM <table> WHERE <predicate> LIMIT 1000);
-/* repeat until changes() = 0, or loop keyset: WHERE id > :last ORDER BY id LIMIT 1000 */
+DELETE FROM <table>
+WHERE id IN (
+  SELECT id
+  FROM <table>
+  WHERE <predicate>
+  ORDER BY id
+  LIMIT 1000
+);
+/* repeat until changes() = 0 */
 ```
 
 - Run from a script with progress output (rows affected per batch), never
   silently; stop and page a human if a batch affects 0 rows unexpectedly
   or errors twice in a row.
+- Keep the bounded ID selection inside the write statement so every execution
+  can affect at most the reviewed batch size. For destructive writes, never
+  invert the selection with `NOT IN`.
 - Prefer keyset pagination (`WHERE id > :last ORDER BY id LIMIT n`) over
-  `OFFSET` for large tables.
+  `OFFSET` for large non-deleting updates. Repeated deletes can select the next
+  lowest IDs because each completed batch removes the prior page.
 - Never wrap a backfill around remote API calls: saga/workflow durability
   belongs in Workflows/Queues/DOs, not in a D1 emulation.
 
