@@ -230,6 +230,20 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^\d{2}:\d{2}(:\d{2})?$/;
 const DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/;
+const FORM_ADMISSION_WINDOW_MS = 60 * 1000;
+
+/** Exact D1 admission policy used only by credential-free public forms.
+ * Signed and operator sessions keep their existing authorization-bound
+ * posture. The startup limits bound durable session allocation; the submit
+ * limit bounds durable Execution/Workflow admission. */
+export interface PublicFormStartupAdmission {
+  readonly maxLive: number;
+  readonly maxPerMinute: number;
+}
+
+export interface PublicFormSubmissionAdmission {
+  readonly maxPerMinute: number;
+}
 
 interface FormRow {
   id: string;
@@ -1537,7 +1551,7 @@ export function parseScheduleAt(value: unknown): string | null {
 async function ensureStartupTable(db: D1Database): Promise<void> {
   await db
     .prepare(
-      "CREATE TABLE IF NOT EXISTS form_startups(handle_hash TEXT PRIMARY KEY, org_id TEXT NOT NULL, user_id TEXT NOT NULL, form_id TEXT NOT NULL, form_name TEXT NOT NULL, prefill_json TEXT, options_json TEXT, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL, claimed_key TEXT)",
+      "CREATE TABLE IF NOT EXISTS form_startups(handle_hash TEXT PRIMARY KEY, org_id TEXT NOT NULL, user_id TEXT NOT NULL, form_id TEXT NOT NULL, form_name TEXT NOT NULL, prefill_json TEXT, options_json TEXT, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL, claimed_key TEXT, public_live_slot INTEGER)",
     )
     .run();
   // Additive convergence for databases created before the handle-to-key
@@ -1548,9 +1562,121 @@ async function ensureStartupTable(db: D1Database): Promise<void> {
     .run()
     .catch(() => undefined);
   await db
+    .prepare("ALTER TABLE form_startups ADD COLUMN public_live_slot INTEGER")
+    .run()
+    .catch(() => undefined);
+  await db
     .prepare("CREATE INDEX IF NOT EXISTS form_startups_expiry ON form_startups(expires_at)")
     .run()
     .catch(() => undefined);
+  await db
+    .prepare(
+      "CREATE UNIQUE INDEX IF NOT EXISTS form_startups_public_live_slot ON form_startups(user_id,public_live_slot) WHERE public_live_slot IS NOT NULL AND used_at IS NULL",
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE TABLE IF NOT EXISTS public_form_admission_slots(publication_key TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('startup','submit')),window_start TEXT NOT NULL,slot INTEGER NOT NULL,claim_key TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(publication_key,kind,window_start,slot),UNIQUE(publication_key,kind,claim_key))",
+    )
+    .run();
+}
+
+function admissionWindowStart(now: Date): string {
+  return new Date(Math.floor(now.getTime() / FORM_ADMISSION_WINDOW_MS) * FORM_ADMISSION_WINDOW_MS).toISOString();
+}
+
+function publicFormRateLimited(): Fault {
+  return new Fault(429, "PUBLIC_FORM_RATE_LIMITED", "This public form is receiving too many requests.");
+}
+
+/** Claim one exact per-publication window slot. Unique D1 keys, rather than
+ * count-then-insert, close concurrent request races. A submission's
+ * idempotency key is also unique across windows so same-key recovery and
+ * replay never spend a second slot. */
+async function claimPublicFormAdmissionSlot(
+  db: D1Database,
+  publicationKey: string,
+  kind: "startup" | "submit",
+  claimKey: string,
+  limit: number,
+  now: Date,
+): Promise<void> {
+  const createdAt = now.toISOString();
+  const retainAfter = new Date(now.getTime() - FORM_STARTUP_TTL_MS - FORM_ADMISSION_WINDOW_MS).toISOString();
+  await db
+    .prepare("DELETE FROM public_form_admission_slots WHERE publication_key=? AND created_at<?")
+    .bind(publicationKey, retainAfter)
+    .run();
+  const existing = await db
+    .prepare("SELECT 1 AS present FROM public_form_admission_slots WHERE publication_key=? AND kind=? AND claim_key=?")
+    .bind(publicationKey, kind, claimKey)
+    .first<{ present: number }>();
+  if (existing) return;
+  const windowStart = admissionWindowStart(now);
+  const occupied = await db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM public_form_admission_slots WHERE publication_key=? AND kind=? AND window_start=?",
+    )
+    .bind(publicationKey, kind, windowStart)
+    .first<{ n: number }>();
+  if ((occupied?.n ?? 0) >= limit) throw publicFormRateLimited();
+  const slotStart = Number.parseInt((await hashHandle(claimKey)).slice(0, 8), 16) % limit;
+  for (let offset = 0; offset < limit; offset += 1) {
+    const slot = (slotStart + offset) % limit;
+    const claimed = await db
+      .prepare(
+        "INSERT OR IGNORE INTO public_form_admission_slots(publication_key,kind,window_start,slot,claim_key,created_at) VALUES (?,?,?,?,?,?)",
+      )
+      .bind(publicationKey, kind, windowStart, slot, claimKey, createdAt)
+      .run();
+    if (claimed.meta.changes > 0) return;
+    const converged = await db
+      .prepare(
+        "SELECT 1 AS present FROM public_form_admission_slots WHERE publication_key=? AND kind=? AND claim_key=?",
+      )
+      .bind(publicationKey, kind, claimKey)
+      .first<{ present: number }>();
+    if (converged) return;
+  }
+  throw publicFormRateLimited();
+}
+
+/** Reserve the request's minute budget before provider resolution, then
+ * derive the still-available live-slot range. The unique partial index at
+ * insertion remains authoritative if another request fills that range
+ * concurrently. */
+async function preparePublicStartupAdmission(
+  db: D1Database,
+  publicationKey: string,
+  claimKey: string,
+  admission: PublicFormStartupAdmission,
+  now: Date,
+): Promise<number> {
+  const createdAt = now.toISOString();
+  await claimPublicFormAdmissionSlot(db, publicationKey, "startup", claimKey, admission.maxPerMinute, now);
+  await db
+    .prepare("DELETE FROM form_startups WHERE user_id=? AND used_at IS NULL AND expires_at<=?")
+    .bind(publicationKey, createdAt)
+    .run();
+  // Rows minted before this admission policy have no slot. Count their
+  // remaining live footprint so a rollout cannot add fifty more sessions
+  // on top of legacy handles; legacy rows only decrease as they are used
+  // or expire, while every new row is slot-fenced below.
+  const legacy = await db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM form_startups WHERE user_id=? AND public_live_slot IS NULL AND used_at IS NULL AND expires_at>?",
+    )
+    .bind(publicationKey, createdAt)
+    .first<{ n: number }>();
+  const liveSlotRange = Math.max(0, admission.maxLive - (legacy?.n ?? 0));
+  const slotted = await db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM form_startups WHERE user_id=? AND public_live_slot IS NOT NULL AND used_at IS NULL AND expires_at>?",
+    )
+    .bind(publicationKey, createdAt)
+    .first<{ n: number }>();
+  if ((slotted?.n ?? 0) >= liveSlotRange) throw publicFormRateLimited();
+  return liveSlotRange;
 }
 
 async function hashHandle(handle: string): Promise<string> {
@@ -1688,6 +1814,7 @@ export async function startFormSession(
   def: FormDefinition,
   body: unknown,
   readRows: (db: D1Database, caller: Principal, table: string) => Promise<readonly Record<string, unknown>[]>,
+  publicAdmission?: PublicFormStartupAdmission,
 ): Promise<FormStartup> {
   await ensureStartupTable(db);
   let prefill: Record<string, unknown> = {};
@@ -1715,6 +1842,17 @@ export async function startFormSession(
   if (Object.keys(prefill).length > 0 && !def.allowPrefill) {
     throw new Fault(403, "PREFILL_NOT_ALLOWED", "This form does not accept URL prefill.");
   }
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + FORM_STARTUP_TTL_MS).toISOString();
+  const handle = randomHandle();
+  const handleHash = await hashHandle(handle);
+  const createdAt = now.toISOString();
+  // Claim the exact public budget before any provider scan. Invalid request
+  // shape was rejected above; option/prefill failures after this point may
+  // consume one conservative slot, just as a valid anonymous caller could.
+  const publicLiveSlotRange = publicAdmission
+    ? await preparePublicStartupAdmission(db, caller.userId, handleHash, publicAdmission, now)
+    : null;
   // One provider pass feeds options and auto-fill together; fetch failures
   // and invalid projections yield no snapshot entry (the providers route
   // surfaces them), so they can never poison the snapshot.
@@ -1761,25 +1899,53 @@ export async function startFormSession(
     }
     if (field.default !== undefined) snapshot[field.name] = field.default;
   }
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + FORM_STARTUP_TTL_MS).toISOString();
-  const handle = randomHandle();
-  await db
-    .prepare(
-      "INSERT INTO form_startups(handle_hash,org_id,user_id,form_id,form_name,prefill_json,options_json,expires_at,used_at,created_at) VALUES (?,?,?,?,?,?,?,?,NULL,?)",
-    )
-    .bind(
-      await hashHandle(handle),
-      caller.orgId,
-      caller.userId,
-      def.id,
-      def.name,
-      JSON.stringify(snapshot),
-      JSON.stringify(options),
-      expiresAt,
-      now.toISOString(),
-    )
-    .run();
+  if (publicAdmission) {
+    if (publicLiveSlotRange === null) throw new Error("public startup admission was not prepared");
+    const slotStart = Number.parseInt(handleHash.slice(0, 8), 16) % publicLiveSlotRange;
+    let inserted = false;
+    for (let offset = 0; offset < publicLiveSlotRange; offset += 1) {
+      const slot = (slotStart + offset) % publicLiveSlotRange;
+      const result = await db
+        .prepare(
+          "INSERT OR IGNORE INTO form_startups(handle_hash,org_id,user_id,form_id,form_name,prefill_json,options_json,expires_at,used_at,created_at,public_live_slot) VALUES (?,?,?,?,?,?,?,?,NULL,?,?)",
+        )
+        .bind(
+          handleHash,
+          caller.orgId,
+          caller.userId,
+          def.id,
+          def.name,
+          JSON.stringify(snapshot),
+          JSON.stringify(options),
+          expiresAt,
+          createdAt,
+          slot,
+        )
+        .run();
+      if (result.meta.changes > 0) {
+        inserted = true;
+        break;
+      }
+    }
+    if (!inserted) throw publicFormRateLimited();
+  } else {
+    await db
+      .prepare(
+        "INSERT INTO form_startups(handle_hash,org_id,user_id,form_id,form_name,prefill_json,options_json,expires_at,used_at,created_at) VALUES (?,?,?,?,?,?,?,?,NULL,?)",
+      )
+      .bind(
+        handleHash,
+        caller.orgId,
+        caller.userId,
+        def.id,
+        def.name,
+        JSON.stringify(snapshot),
+        JSON.stringify(options),
+        expiresAt,
+        createdAt,
+      )
+      .run();
+  }
   // Best-effort expiry sweep keeps the table bounded (D1 has no TTL;
   // SQLite has no DELETE ... LIMIT, so the delete is bounded by a
   // handle_hash subselect instead).
@@ -1856,6 +2022,7 @@ export async function reserveStartupHandle(
   handle: string,
   expectedFormId: string,
   key: string,
+  publicAdmission?: PublicFormSubmissionAdmission,
 ): Promise<void> {
   const { handleHash } = await peekStartupHandle(db, caller, formName, handle, expectedFormId, key);
   const reserved = await db
@@ -1867,6 +2034,9 @@ export async function reserveStartupHandle(
     .catch(() => null);
   if (!reserved || reserved.meta.changes === 0) {
     throw new Fault(422, "STALE_FORM_HANDLE", "This form session is unknown or expired. Restart the form.");
+  }
+  if (publicAdmission) {
+    await claimPublicFormAdmissionSlot(db, caller.userId, "submit", key, publicAdmission.maxPerMinute, new Date());
   }
 }
 

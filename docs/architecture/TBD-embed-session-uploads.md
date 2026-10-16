@@ -13,8 +13,9 @@
   reserves one. Per the #225 convention, unreserved decisions stay at
   non-numeric filenames (the slice-1 and slice-2 `TBD-*` precedent).
 - **Phase gate:** EMBED-01 is Phase 4 (Partial through this slice —
-  authenticated external-user access and the Turnstile/CAPTCHA binding
-  stay missing by owner decision, recorded below). The one-diagram
+  authenticated external-user access stays missing by owner decision;
+  Turnstile/CAPTCHA remains an optional bot signal above the exact
+  anonymous admission budgets recorded in the slice-2 ADR). The one-diagram
   checkpoint below applies (new authorization boundary + persistence-model
   change), recorded here per `docs/architecture/000-steward-checklist.md`.
 
@@ -108,11 +109,11 @@ past the raw-values check exactly as before.
 - **Authenticated external-user access** stays missing: operator-session
   onboarding for outsiders is an Access seat/cost decision for the
   owner, not a capability gap this slice can close.
-- **Turnstile/CAPTCHA binding** stays deferred per the slice-2 ADR: it
-  needs a new secret binding plus a vendor round-trip the Free-tier
-  slice cannot justify while single-use handles, per-session caps,
-  confirmation-only disclosure (no oracle), and session-bound uploads
-  close the cheap abuse shapes.
+- **Turnstile/CAPTCHA binding** remains optional per the slice-2 ADR: it
+  needs a new secret binding plus a vendor round-trip. Exact D1
+  per-publication startup/live/submit budgets own the resource ceiling;
+  Turnstile can later add a stronger bot signal without becoming the only
+  admission fence.
 - **"Signed HMAC embed"** needs no new mechanism: upstream HMAC pins
   cover webhook body signatures (see `docs/upstream-spec.md` §webhooks),
   while the embed routers name stored-secret grants — the local

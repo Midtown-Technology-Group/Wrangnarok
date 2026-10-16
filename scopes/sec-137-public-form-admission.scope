@@ -1,0 +1,11 @@
+# Security-ledger row 137: exact anonymous public-form admission budgets.
+# One D1 session/admission path bounds startup allocation, live sessions,
+# and durable submit admission; no new Cloudflare primitive or secret.
+src/forms.ts
+src/index.ts
+src/public-forms.ts
+test/form-publication.test.ts
+docs/architecture/TBD-anon-app-embeds.md
+docs/architecture/TBD-embed-session-uploads.md
+docs/upstream-parity.md
+scopes/sec-137-public-form-admission.scope
