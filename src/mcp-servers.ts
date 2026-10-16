@@ -343,12 +343,28 @@ export async function updateMcpServerTemplate(
   const discoveryMetadata =
     body.discoveryMetadata === undefined ? row.discovery_metadata : parseDiscoveryMetadata(body.discoveryMetadata);
   const now = new Date().toISOString();
-  await db
-    .prepare(
-      "UPDATE mcp_server_templates SET server_url=?,provider_flow=?,discovery_metadata=?,updated_at=? WHERE id=?",
-    )
-    .bind(serverUrl, providerFlow, discoveryMetadata, now, id)
-    .run();
+  const serverUrlChanged = serverUrl !== row.server_url;
+  const providerFlowChanged = providerFlow !== row.provider_flow;
+  const trustAnchorsChanged = serverUrlChanged || providerFlowChanged;
+  const update = trustAnchorsChanged
+    ? db
+        .prepare(
+          "UPDATE mcp_server_templates SET server_url=?,provider_flow=?,discovery_metadata=?,updated_at=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM mcp_connections WHERE server_id=?)",
+        )
+        .bind(serverUrl, providerFlow, discoveryMetadata, now, id, id)
+    : db
+        .prepare(
+          "UPDATE mcp_server_templates SET server_url=?,provider_flow=?,discovery_metadata=?,updated_at=? WHERE id=?",
+        )
+        .bind(serverUrl, providerFlow, discoveryMetadata, now, id);
+  const updated = await update.run();
+  if (trustAnchorsChanged && updated.meta.changes === 0) {
+    throw invalid(
+      "MCP_SERVER_REBIND_REQUIRED",
+      "Delete every bound MCP Connection before changing this server URL or provider flow.",
+      409,
+    );
+  }
   // The view is built from the pre-update row plus the applied values —
   // no re-read: the UPDATE above succeeding on the visible row is the
   // existence proof.
