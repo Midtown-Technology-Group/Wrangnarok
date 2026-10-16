@@ -1,0 +1,6 @@
+# Security finding 505: bound Access JWKS refreshes for rotating unknown kids.
+src/access.ts
+test/access-auth.test.ts
+docs/architecture/014-access-auth.md
+docs/architecture/000-steward-checklist.md
+scopes/sec-access-jwks-budget.scope
