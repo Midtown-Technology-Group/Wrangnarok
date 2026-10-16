@@ -57,7 +57,11 @@ export async function authenticate(request: Request, env: LabAuth & AccessEnv): 
       // AUTH-02 (ADR 018): same standing bootstrap as the org tables — the
       // migration-0013 tables may not exist on hand-built databases.
       await ensureRoleTables(env.DB);
-    } catch {
+    } catch (error) {
+      // A legacy schedules table may hold rows for multiple Organizations.
+      // Authentication must surface the explicit migration gate rather than
+      // swallowing it and continuing after request-time schema convergence.
+      if (error instanceof Fault && error.code === "SCHEDULE_SCHEMA_MIGRATION_REQUIRED") throw error;
       // Pre-migration databases (no users table): leave auth working, the
       // membership gate answers 503 with ORG_STORE_NOT_MIGRATED.
     }
