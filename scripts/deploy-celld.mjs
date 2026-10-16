@@ -30,6 +30,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildCelldConfig, parseJsonc, renderCelldConfig, SOURCE_PATH, TARGET_PATH } from "./build-celld-config.mjs";
+import { createSelftest } from "./selftest-harness.mjs";
 
 /** Fail closed when wrangler.jsonc moved but the committed celld
  * projection was not regenerated: deploys read only the committed file,
@@ -62,7 +63,7 @@ export function parseDotenv(text) {
     // pasted credential, and echoing it would leak it to stderr and logs.
     if (eq <= 0) throw new Error(`Invalid vars line ${index + 1} (expected NAME=value).`);
     const name = entry.slice(0, eq).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`Invalid var name on line ${index + 1}.`);
+    if (!/^[A-Za-z_]\w*$/.test(name)) throw new Error(`Invalid var name on line ${index + 1}.`);
     let value = entry.slice(eq + 1).trim();
     if (
       (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
@@ -79,7 +80,7 @@ export function parseDotenv(text) {
  * Operator vars win (e.g. LAB_ENABLED=true for LAB auth on a self-host). */
 export function buildDeployConfig(committedText, operatorVars) {
   const config = buildCelldConfig(parseJsonc(committedText));
-  config.vars = { ...(config.vars ?? {}), ...operatorVars };
+  config.vars = { ...config.vars, ...operatorVars };
   return config;
 }
 
@@ -133,6 +134,23 @@ export function planCommands({ config, bucket, migrate, migrateOnly, skipBuild }
   return plan;
 }
 
+/** Load the operator vars file. A real deploy without one would
+ * silently ship the committed posture (LAB_ENABLED=false, no secrets):
+ * a dead deployment that looks successful. Fail closed instead;
+ * --dry-run may still preview var-less. */
+export function loadOperatorVars(varsFile, dryRun) {
+  if (!existsSync(varsFile)) {
+    if (!dryRun) {
+      throw new Error(
+        `No vars file at ${varsFile}. Create it from the example in docs/self-hosting-celld.md (or pass --vars-file); refusing to deploy the bare committed config.`,
+      );
+    }
+    console.log(`note: no vars file at ${varsFile}; the real deploy will require one.`);
+    return {};
+  }
+  return parseDotenv(readFileSync(varsFile, "utf8"));
+}
+
 function fail(message) {
   console.error(`deploy-celld: ${message}`);
   process.exitCode = 1;
@@ -164,33 +182,11 @@ function main(argv) {
     return fail("CELLD_BUCKET must be an s3://, gs://, or az:// fleet bucket (see docs/self-hosting-celld.md).");
   }
 
-  // A real deploy without a vars file would silently ship the committed
-  // posture (LAB_ENABLED=false, no secrets): a dead deployment that looks
-  // successful. Fail closed instead; --dry-run may still preview var-less.
-  if (!existsSync(varsFile)) {
-    if (!dryRun) {
-      return fail(
-        `No vars file at ${varsFile}. Create it from the example in docs/self-hosting-celld.md (or pass --vars-file); refusing to deploy the bare committed config.`,
-      );
-    }
-    console.log(`note: no vars file at ${varsFile}; the real deploy will require one.`);
-  }
-  let operatorVars = {};
-  if (existsSync(varsFile)) {
-    try {
-      operatorVars = parseDotenv(readFileSync(varsFile, "utf8"));
-    } catch (error) {
-      return fail(error instanceof Error ? error.message : String(error));
-    }
-  }
-  try {
-    validateBucketEnv({ endpoint: process.env.S3_ENDPOINT, region: process.env.AWS_REGION });
-  } catch (error) {
-    return fail(error instanceof Error ? error.message : String(error));
-  }
-
+  let operatorVars;
   let config;
   try {
+    operatorVars = loadOperatorVars(varsFile, dryRun);
+    validateBucketEnv({ endpoint: process.env.S3_ENDPOINT, region: process.env.AWS_REGION });
     const committed = readFileSync(TARGET_PATH, "utf8");
     assertCelldConfigFresh(readFileSync(SOURCE_PATH, "utf8"), committed);
     config = buildDeployConfig(committed, operatorVars);
@@ -237,19 +233,7 @@ function main(argv) {
 }
 
 function selftest() {
-  const failures = [];
-  const expect = (label, fn) => {
-    try {
-      fn();
-      console.log(`ok - ${label}`);
-    } catch (error) {
-      failures.push(label);
-      console.error(`FAIL - ${label}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  };
-  const assert = (condition, message) => {
-    if (!condition) throw new Error(message);
-  };
+  const { assert, expect, finish } = createSelftest("deploy-celld selftest");
   expect("parses dotenv with quotes, export, and comments", () => {
     const vars = parseDotenv('# note\nexport LAB_ENABLED=true\nLAB_TOKEN="a b"\nPLAIN=x\n');
     assert(vars.LAB_ENABLED === "true", "export prefix must parse");
@@ -307,7 +291,7 @@ function selftest() {
   });
   expect("validates bucket endpoint and region", () => {
     validateBucketEnv({ endpoint: "https://acct.r2.cloudflarestorage.com", region: "auto" });
-    validateBucketEnv({ endpoint: "http://s3:9000", region: "us-east-1" }); // single-label dev host
+    validateBucketEnv({ endpoint: "http://s3:9000", region: "us-east-1" }); // NOSONAR: intentional http fixture, single-label dev host
     let threw = false;
     try {
       validateBucketEnv({ endpoint: "http://169.254.169.254/latest", region: "us-east-1" });
@@ -355,12 +339,7 @@ function selftest() {
       "migrations must read the merged deploy config, not wrangler.jsonc",
     );
   });
-  if (failures.length > 0) {
-    console.error(`deploy-celld selftest: ${failures.length} failure(s).`);
-    process.exitCode = 1;
-    return;
-  }
-  console.log("deploy-celld selftest: all checks passed.");
+  finish();
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

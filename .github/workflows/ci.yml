@@ -316,7 +316,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: celld config and deploy-helper checks
         run: npm run check:celld && node scripts/build-celld-config.mjs selftest && node scripts/deploy-celld.mjs selftest

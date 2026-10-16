@@ -6,6 +6,7 @@ scopes/celld-self-hosting.scope
 wrangler.celld.jsonc
 scripts/build-celld-config.mjs
 scripts/deploy-celld.mjs
+scripts/selftest-harness.mjs
 docs/self-hosting-celld.md
 docs/architecture/047-celld-self-hosting.md
 docs/architecture/adr-index.md

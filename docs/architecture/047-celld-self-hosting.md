@@ -65,10 +65,12 @@ Mechanics that keep this honest:
   Windows workstations).
 - `observability` (Workers Logs/traces sampling) has no celld
   equivalent; celld telemetry replaces it on that target.
-- Cloudflare Access is not in front of a self-hosted fleet. The LAB
-  Bearer path works unchanged; the Access JWT path in `src/access.ts`
-  only works if the operator's ingress injects a verifiable
-  `Cf-Access-Jwt-Assertion`.
+- Cloudflare Access is not in front of a self-hosted fleet, and this
+  ADR does not amend ADR 014: fixture LAB auth stays local/CI and
+  non-production, so on celld it serves local development and trusted
+  trial fleets only. Production human sign-in requires an ingress
+  injecting a verifiable `Cf-Access-Jwt-Assertion` into the
+  `src/access.ts` path, or a future ADR for self-hosted identity.
 - Cron Triggers are supported, but the hosted config currently ships
   `crons: []` (ADR 012 pause), so `scheduled` stays dormant on both
   targets until re-enabled.

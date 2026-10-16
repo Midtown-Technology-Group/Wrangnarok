@@ -18,6 +18,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createSelftest } from "./selftest-harness.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const SOURCE_PATH = join(root, "wrangler.jsonc");
@@ -57,15 +58,11 @@ const CELLD_ASSET_KEYS = new Set(["directory", "binding", "html_handling", "not_
 // celld name rule: 1-63 lowercase ASCII letters, digits, or internal hyphens.
 const CELLD_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-/** Strip JSONC comments and trailing commas. Both passes are
- * string-aware: `//`, `/*`, and `,}` inside a string literal are data,
- * never syntax (a regex over the whole text would silently rewrite
- * string values such as "x,}" -- probed in review). */
+/** Strip JSONC comments and trailing commas in one string-aware pass:
+ * `//`, `/*`, and `,}` inside a string literal are data, never syntax
+ * (a regex over the whole text would silently rewrite string values
+ * such as "x,}" -- probed in review). */
 export function parseJsonc(text) {
-  return JSON.parse(dropTrailingCommas(stripComments(text)));
-}
-
-function stripComments(text) {
   let out = "";
   let inString = false;
   let escaped = false;
@@ -83,48 +80,44 @@ function stripComments(text) {
       out += ch;
       continue;
     }
-    if (ch === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i += 1;
+    const afterComment = skipComment(text, i);
+    if (afterComment !== i) {
+      i = afterComment;
       out += "\n";
       continue;
     }
-    if (ch === "/" && text[i + 1] === "*") {
-      i += 2;
-      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i += 1;
-      i += 1;
-      continue;
-    }
+    if (ch === "," && isTrailingComma(text, i)) continue;
     out += ch;
   }
-  return out;
+  return JSON.parse(out);
 }
 
-function dropTrailingCommas(text) {
-  let out = "";
-  let inString = false;
-  let escaped = false;
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-    if (inString) {
-      out += ch;
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-      out += ch;
-      continue;
-    }
-    if (ch === ",") {
-      let next = i + 1;
-      while (next < text.length && /\s/.test(text[next])) next += 1;
-      if (text[next] === "}" || text[next] === "]") continue; // trailing comma: drop it
-    }
-    out += ch;
+/** Index just past a // or /* comment starting at i, or i itself. */
+function skipComment(text, i) {
+  if (text[i] !== "/") return i;
+  if (text[i + 1] === "/") {
+    let end = i;
+    while (end < text.length && text[end] !== "\n") end += 1;
+    return end - 1; // leave the newline for the main loop
   }
-  return out;
+  if (text[i + 1] === "*") {
+    let end = i + 2;
+    while (end < text.length && !(text[end] === "*" && text[end + 1] === "/")) end += 1;
+    return end + 1;
+  }
+  return i;
+}
+
+/** True when the comma at i is followed (past whitespace/comments) by } or ]. */
+function isTrailingComma(text, i) {
+  let next = i + 1;
+  for (;;) {
+    while (next < text.length && /\s/.test(text[next] ?? "")) next += 1;
+    const afterComment = skipComment(text, next);
+    if (afterComment === next) break;
+    next = afterComment + 1;
+  }
+  return text[next] === "}" || text[next] === "]";
 }
 
 // Hosted-only top-level keys the projection deliberately drops. Any
@@ -228,10 +221,10 @@ export function buildCelldConfig(source) {
   if (!Array.isArray(durableBindings) || durableBindings.length === 0) {
     throw new Error("celld config requires a non-empty `durable_objects.bindings` list.");
   }
-  const fence = durableBindings.find(
+  const hasFence = durableBindings.some(
     (entry) => entry !== null && typeof entry === "object" && entry.name === "OAUTH_REFRESH_FENCE",
   );
-  if (!fence) throw new Error("durable_objects.bindings is missing OAUTH_REFRESH_FENCE (src/bindings.ts).");
+  if (!hasFence) throw new Error("durable_objects.bindings is missing OAUTH_REFRESH_FENCE (src/bindings.ts).");
   if (config.vars !== undefined) {
     for (const key of Object.keys(config.vars)) {
       if (!COMMITTED_VAR_ALLOWLIST.has(key)) {
@@ -242,12 +235,14 @@ export function buildCelldConfig(source) {
     }
   }
   if (config.assets !== undefined) {
+    if (config.assets === null || typeof config.assets !== "object" || config.assets.binding !== "ASSETS") {
+      throw new Error("celld assets require binding ASSETS (src/bindings.ts).");
+    }
     const assets = {};
     for (const [key, value] of Object.entries(config.assets)) {
       if (CELLD_ASSET_KEYS.has(key)) assets[key] = value;
     }
     if (typeof assets.directory !== "string") throw new Error("celld assets require a `directory`.");
-    if (assets.binding !== "ASSETS") throw new Error("celld assets require binding ASSETS (src/bindings.ts).");
     config.assets = assets;
   }
   return config;
@@ -289,19 +284,7 @@ function main(argv) {
 }
 
 function selftest() {
-  const failures = [];
-  const expect = (label, fn) => {
-    try {
-      fn();
-      console.log(`ok - ${label}`);
-    } catch (error) {
-      failures.push(label);
-      console.error(`FAIL - ${label}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  };
-  const assert = (condition, message) => {
-    if (!condition) throw new Error(message);
-  };
+  const { assert, expect, finish } = createSelftest("celld config selftest");
   const sample = `{
     // hosted comment
     "name": "wrangnarok-local",
@@ -358,10 +341,11 @@ function selftest() {
     assert(threw, "missing workflows must throw");
   });
   expect("preserves string data that looks like a trailing comma", () => {
-    const parsed = parseJsonc(`{"a":"x,}","b":"y, ] z","c":"w,\\n}"}`);
+    const parsed = parseJsonc(String.raw`{"a":"x,}","b":"y, ] z","c":"w,\n}"}`);
     assert(parsed.a === "x,}", "comma-brace inside a string must survive");
     assert(parsed.b === "y, ] z", "comma-bracket inside a string must survive");
     assert(parsed.c === "w,\n}", "escaped newline plus comma-brace must survive");
+    assert(parseJsonc(`{"a":1, /* note */}`).a === 1, "trailing comma before a comment must be dropped");
   });
   expect("rejects a renamed required binding", () => {
     const parsed = parseJsonc(sample);
@@ -406,12 +390,7 @@ function selftest() {
     assert(!rendered.includes("observability"), "rendered config must not carry observability");
     assert(rendered.startsWith("// GENERATED"), "rendered config must carry the generated header");
   });
-  if (failures.length > 0) {
-    console.error(`celld config selftest: ${failures.length} failure(s).`);
-    process.exitCode = 1;
-    return;
-  }
-  console.log("celld config selftest: all checks passed.");
+  finish();
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

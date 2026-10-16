@@ -152,10 +152,16 @@ the Execution idempotency contract relies on.
 
 ## Operational notes
 
-- **Auth.** Without Cloudflare Access, human sign-in is the LAB Bearer
-  path unless your ingress injects a verifiable
-  `Cf-Access-Jwt-Assertion` for `src/access.ts` to check. Plan tenant
-  auth before exposing a fleet beyond a trusted network.
+- **Auth.** ADR 014 is unchanged: fixture LAB auth is local/CI only and
+  explicitly non-production, and ADR 047 does not amend that. On celld,
+  LAB Bearer is therefore for local development and trial fleets on a
+  trusted network only -- it authenticates one shared fixture identity
+  and is never a production human sign-in. A production fleet must
+  terminate at an ingress that injects a verifiable
+  `Cf-Access-Jwt-Assertion` for `src/access.ts` to check (the
+  Access-verified Principal and membership gate then apply unchanged),
+  or wait for a future ADR that gives self-hosting a real identity
+  path. Do not expose a LAB-only fleet beyond a trusted network.
 - **Schedules.** Cron Triggers are supported, but the config ships
   `crons: []` (ADR 012 pause) on both targets; re-enabling the tick is
   the same reviewed config edit in `wrangler.jsonc`, then
