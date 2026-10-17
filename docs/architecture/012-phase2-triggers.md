@@ -133,9 +133,14 @@ registering an enabled topic-kind source named `platform` (an ordinary
 row through the ordinary registry — no auto-provisioning, no
 reserved-name rule), each schedule promotion lands
 `platform.schedule.delivered` and each endpoint delivery lands
-`platform.webhook.delivered` there, then fans out through the shared
-`dispatchEventFanout` helper with the same stable `evt-` keys and
-per-subscriber fences as operator emits. No platform source (or a
+`platform.webhook.delivered` there. Endpoint-request emissions fan out
+through the shared `dispatchEventFanout` helper with the same stable `evt-`
+keys and per-subscriber fences as operator emits. Schedule emissions stop
+after the durable append: matching subscriptions appear in the existing
+failed/no-receipt view and dispatch only through explicit operator retry,
+which receives a separate Worker invocation budget. This boundary prevents
+one tenant's subscribers from exhausting the shared Cron tick before later
+Organizations persist their schedule progress. No platform source (or a
 disabled one, or one registered under another kind): one indexed lookup
 misses and the promotion/delivery proceeds untouched, so the unused cost
 is a single SELECT. Payloads are descriptive delivery attribution
@@ -145,7 +150,9 @@ Saga parse gate; the `plat-` event ID is deterministic per (org, topic,
 producer delivery), so redelivery converges on one row and one Execution
 (the restart-recovery story, like every other re-emit). Fan-out is
 exactly one level deep: nothing observes Execution terminals (see below),
-so platform-dispatched Executions complete without emitting.
+so platform-dispatched Executions complete without emitting. The schedule
+producer never performs subscription fan-out in Cron; its deterministic log
+row is the restart and retry handoff.
 
 Execution-lifecycle topics (succeeded/failed) stay deferred by design,
 not by backlog: the terminal checkpoints run inside Workflow steps with
@@ -157,8 +164,8 @@ must earn its hook the same way every other primitive was earned.
 
 ### TRG-03 retention and admission limits (issue #139, S3b)
 
-Admission bounds (all code-enforced, all shared by operator emits,
-platform emissions, and retries — one bound, not three):
+Admission bounds (all code-enforced across operator emits, request-path
+platform fan-out, and retries; scheduled platform events defer all dispatch):
 
 - At most `EVENT_FANOUT_LIMIT` (10) dispatches per accepted event; the
   remainder report as `overflowSkipped`, and retries past the bound
@@ -187,7 +194,8 @@ Retention posture (deliberate, not missing):
   event log.
 - Free-tier fit: Worker + Workflows + D1 only, unchanged from S1. The
   S3b addition costs one indexed SELECT per promotion/delivery when
-  unused, and at most the standard bounded fan-out when opted in.
+  unused. Endpoint requests may use the standard bounded fan-out; schedule
+  Cron spends at most one additional event INSERT and defers all dispatch.
 
 ### Same-window deduplication is not cross-window overlap policy
 
