@@ -1,0 +1,10 @@
+# AUTH-01/UX-01 Organization-delete lifecycle hardening (issues #142/#176):
+# count and display branding/profile metadata and reserved image objects,
+# delete the FILES bytes before their restrictive D1 rows, and prove a
+# customized Organization is removed completely in one pass. No migration,
+# auth model, branding/profile write-path, or retained-history change.
+src/orgs.ts
+client/src/lib/orgs-client.ts
+client/src/pages/AdminOrgs.tsx
+test/org-lifecycle.test.ts
+scopes/auth-142-branding-profile-delete.scope

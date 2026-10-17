@@ -1,0 +1,17 @@
+# celld self-hosting lane scope (ADR 047): generated celld config from
+# wrangler.jsonc, deploy helper, operator runbook, and CI drift check.
+# No src/ changes: celld supplies the same native bindings, so the
+# Cloudflare path and the Saga/Execution contract stay untouched.
+scopes/celld-self-hosting.scope
+wrangler.celld.jsonc
+scripts/build-celld-config.mjs
+scripts/deploy-celld.mjs
+scripts/selftest-harness.mjs
+docs/self-hosting-celld.md
+docs/architecture/047-celld-self-hosting.md
+docs/architecture/adr-index.md
+.github/workflows/ci.yml
+package.json
+.gitignore
+.prettierignore
+README.md

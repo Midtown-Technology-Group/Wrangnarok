@@ -510,7 +510,7 @@ export { OAuthRefreshFence } from "./oauth-refresh-fence";
 /** Content-Security-Policy per surface: the JSON/file API carries no active
  * content, so default-src 'none'; the Static Assets UI shell needs its own
  * scripts, styles, and images, so self-only. */
-const API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
+const API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 const ASSET_CSP = "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'";
 const SECURITY_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
@@ -2025,6 +2025,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // Enablement fences future emits and delivery appends while logged
       // events keep their rows and history.
       await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
       rejectQuery(url);
       const name = parseEventSourceName(eventSourceEnable[1]);
       return json({
@@ -2153,6 +2154,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // Enablement fences future fan-out while dispatched Executions run
       // to terminal and delivery receipts keep history.
       await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
       rejectQuery(url);
       const source = await loadEventSource(env.DB, caller.orgId, parseEventSourceName(subscriptionEnable[1]));
       if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");
@@ -2210,6 +2212,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
       // fails closed with no Execution. Operator-managed like every
       // dispatching write; foreign rows answer 404.
       await requireManageOrg(env.DB, ctx, caller.orgId);
+      requireJson(request);
       rejectQuery(url);
       const source = await loadEventSource(env.DB, caller.orgId, parseEventSourceName(subscriptionRetry[1]));
       if (!source) throw new Fault(404, "NOT_FOUND", "Not found.");

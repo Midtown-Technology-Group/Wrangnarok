@@ -51,9 +51,15 @@ export interface Bindings
     AiProviderCredentials,
     CloudflareCredentials,
     SecretsKek {
+  ENVIRONMENT?: string;
   DB: D1Database;
   FILES: R2Bucket;
   ARTIFACTS?: R2Bucket;
+  /** Provider-global NinjaOne admission fences (ADR 026). The principal
+   * limiter contains per-(Organization,user) abuse; the provider limiter
+   * protects the shared credential/quota across all callers. */
+  NINJAONE_PRINCIPAL_RATE_LIMITER: RateLimit;
+  NINJAONE_PROVIDER_RATE_LIMITER: RateLimit;
   /** OAUTH-01 follow-up (issue #149): cross-instance rotating-refresh fence.
    * The `OAuthRefreshFence` object behind each (tenant, generation) key runs
    * one volatile vendor POST per rotation round. Memory-only: no storage, no

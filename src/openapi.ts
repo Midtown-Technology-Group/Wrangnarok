@@ -126,12 +126,10 @@ export function detectGeneratorAuthKind(doc: OpenApiDocument): GeneratorAuthKind
       : {};
   const referenced = referencedSchemeNames(raw);
   if (referenced.size === 0) return "unknown";
-  const lowered: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(schemes)) lowered[key.toLowerCase()] = value;
   let sawBearer = false;
   let sawOAuth = false;
   for (const name of referenced) {
-    const scheme = lowered[name];
+    const scheme = schemes[name];
     if (scheme === null || typeof scheme !== "object" || Array.isArray(scheme)) return "unknown";
     const entry = scheme as Record<string, unknown>;
     const type = typeof entry["type"] === "string" ? entry["type"].toLowerCase() : "";
@@ -165,8 +163,8 @@ export function detectGeneratorAuthKind(doc: OpenApiDocument): GeneratorAuthKind
   return "unknown";
 }
 
-/** Every scheme name referenced by any top-level or per-operation `security`
- * block (lowercased). Per-operation blocks override the top-level default
+/** Every case-sensitive scheme name referenced by any top-level or
+ * per-operation `security` block. Per-operation blocks override the top-level default
  * for that operation; an empty array means anonymous for that operation.
  * Malformed blocks contribute nothing (fail closed downstream). */
 function referencedSchemeNames(raw: Record<string, unknown>): Set<string> {
@@ -175,7 +173,7 @@ function referencedSchemeNames(raw: Record<string, unknown>): Set<string> {
     if (!Array.isArray(value)) return;
     for (const requirement of value) {
       if (requirement === null || typeof requirement !== "object" || Array.isArray(requirement)) continue;
-      for (const name of Object.keys(requirement as Record<string, unknown>)) names.add(name.toLowerCase());
+      for (const name of Object.keys(requirement as Record<string, unknown>)) names.add(name);
     }
   };
   collect(raw["security"]);

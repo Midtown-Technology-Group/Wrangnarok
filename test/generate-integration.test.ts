@@ -495,6 +495,46 @@ describe("INT-01 generator (issue #229)", () => {
     ).toBe("unknown");
   });
 
+  it("resolves case-distinct security-scheme names without changing their meaning", async () => {
+    const caseDistinct = {
+      openapi: "3.0.3",
+      info: { version: "1.0.0", title: "Case-sensitive auth" },
+      components: {
+        securitySchemes: {
+          auth: { type: "http", scheme: "bearer" },
+          Auth: {
+            type: "oauth2",
+            flows: { clientCredentials: { tokenUrl: "https://case-in-test.invalid/token", scopes: {} } },
+          },
+        },
+      },
+      security: [{ auth: [] }],
+      paths: { "/v1/things": { get: { operationId: "Things_List" } } },
+    };
+
+    expect(detectGeneratorAuthKind(caseDistinct)).toBe("apiToken");
+    const typed = generateIntegrationModule(JSON.stringify(caseDistinct), { ...opts(), id: "case-auth" }, DIGEST);
+    expect(typed.source).toContain("// Auth kind: apiToken");
+    expect(typed.source).not.toContain("requestClientCredentialsToken");
+
+    const cli = (await runCommand({
+      command: "generate-integration",
+      genId: "case-auth",
+      genName: "case-auth",
+      genSpec: JSON.stringify(caseDistinct),
+      genOrigins: ["https://case-in-test.invalid"],
+    })) as GeneratedCliResult;
+    expect(cli.generated.content).toContain("// Auth kind: apiToken");
+    expect(cli.generated.content).not.toContain("requestClientCredentialsToken");
+
+    expect(
+      detectGeneratorAuthKind({
+        ...caseDistinct,
+        security: [{ auth: [], Auth: [] }],
+      }),
+    ).toBe("unknown");
+  });
+
   it("detects OAuth client-credentials and keeps existing OAuth specs working (fix 1)", () => {
     expect(detectGeneratorAuthKind(JSON.parse(haloShaped()))).toBe("clientCredentials");
     const implicit = {

@@ -75,6 +75,7 @@ export const SDK_ERROR_CODES = [
   "INVALID_POLICY",
   "SAGA_PAUSED",
   "ADMISSION_LIMITED",
+  "ADMISSION_UNAVAILABLE",
   "SYNC_NOT_SUPPORTED",
   "TRANSIENT_NOT_SUPPORTED",
   "PROVIDER_NOT_SUPPORTED",
@@ -1933,7 +1934,9 @@ function hintFor(code: unknown): string | null {
     case "SAGA_PAUSED":
       return "This Saga is paused for this Organization; an operator must re-enable its runtime policy.";
     case "ADMISSION_LIMITED":
-      return "This Saga reached its concurrent Execution limit; wait for an active Execution to settle.";
+      return "This Execution reached an admission limit; wait for active work or the request window to settle.";
+    case "ADMISSION_UNAVAILABLE":
+      return "Execution admission control is unavailable; retry later with the same Idempotency-Key.";
     case "DISPATCH_UNCONFIRMED":
       return "Work may have started. Retry the same request and Idempotency-Key.";
     default:

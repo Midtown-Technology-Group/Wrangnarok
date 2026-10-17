@@ -126,7 +126,7 @@ describe("RUN-02 nested invocation (issue #136)", () => {
     const child = await detail(parent.result?.childExecutionId as string);
     expect(child.status).toBe("Succeeded");
     expect(child.parentExecutionId).toBe(id);
-    expect(child.parentStep).toBe("child-dispatch-invoke-v1");
+    expect(child.parentStep).toBe("child-dispatch-child-dispatch-invoke-v1");
     expect(child.result).toMatchObject({ greeting: "Hello, Ada!", name: "Ada" });
   }, 25000);
 
@@ -1138,6 +1138,7 @@ describe("RUN-02 child helpers (pure, no bindings)", () => {
     expect(() => resolveChildSaga(catalog, "nope")).toThrow(Fault);
     expect(childDispatchKey("p", "s", "c", "k")).toBe("child.p.s.c.k");
     expect(childDispatchStep("invoke")).toBe("child-dispatch-invoke");
+    expect(childDispatchStep("child-dispatch-invoke")).toBe("child-dispatch-child-dispatch-invoke");
     expect(childPollStep("abcdef12")).toBe("child-poll-abcdef12");
     expect(childTerminalOf("Succeeded")).toBe("Succeeded");
     expect(childTerminalOf("Failed")).toBe("Failed");
@@ -1269,7 +1270,7 @@ describe("RUN-02 child helpers (pure, no bindings)", () => {
     const first = await inlineStep.do("fanout-left-v1", () =>
       bindSagaChildren(childEnv, inlineStep).invoke(helloSaga.id, { name: "Ada" }),
     );
-    const second = await inlineStep.do("fanout-right-v1", () =>
+    const second = await inlineStep.do("child-dispatch-fanout-left-v1", () =>
       bindSagaChildren(childEnv, inlineStep).invoke(helloSaga.id, { name: "Ada" }),
     );
     expect(second.executionId).not.toBe(first.executionId);
@@ -1279,8 +1280,8 @@ describe("RUN-02 child helpers (pure, no bindings)", () => {
       .bind(parentId)
       .all<{ id: string; parent_step: string }>();
     expect(rows.results.map((row) => row.parent_step)).toEqual([
+      "child-dispatch-child-dispatch-fanout-left-v1",
       "child-dispatch-fanout-left-v1",
-      "child-dispatch-fanout-right-v1",
     ]);
     // Same key with same step still converges: a retry of the left Operation
     // lands on the left child row, not a third row.

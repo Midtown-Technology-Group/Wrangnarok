@@ -1,0 +1,7 @@
+# TRG-03 event-source-toggle CSRF hardening (issue #139): apply the shared
+# unencoded-JSON browser-session guard to enable/disable and prove both HTML
+# form simple content types fail without changing state. No authorization,
+# delivery, event-source model, event log, or legitimate JSON-client change.
+src/index.ts
+test/events.test.ts
+scopes/trg-139-event-source-toggle-json.scope

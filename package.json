@@ -25,6 +25,9 @@
     "db:migrate:local": "wrangler d1 migrations apply DB --local && wrangler d1 execute DB --local --command \"PRAGMA optimize\"",
     "db:optimize:local": "wrangler d1 execute DB --local --command \"PRAGMA optimize\"",
     "db:seed:local": "node scripts/seed-local.mjs",
+    "config:celld": "node scripts/build-celld-config.mjs",
+    "check:celld": "node scripts/build-celld-config.mjs --check",
+    "deploy:celld": "node scripts/deploy-celld.mjs",
     "fixture": "node scripts/echo-server.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -36,7 +39,9 @@
     "preview:smoke": "node scripts/smoke-preview.mjs",
     "preview:smoke:selftest": "node scripts/smoke-preview.mjs selftest",
     "preview:token": "node scripts/mint-preview-token.mjs",
-    "preview:token:selftest": "node scripts/mint-preview-token.mjs selftest"
+    "preview:token:selftest": "node scripts/mint-preview-token.mjs selftest",
+    "preview:workflow:check": "node scripts/preview-workflow-trust.mjs --check",
+    "preview:workflow:selftest": "node scripts/preview-workflow-trust.mjs --selftest"
   },
   "dependencies": {
     "react": "19.3.0",

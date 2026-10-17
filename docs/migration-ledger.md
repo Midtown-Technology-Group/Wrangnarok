@@ -115,20 +115,32 @@ repair, not from re-applying the renamed files.
 
 ## Reserved (assigned, not yet merged — do not reuse)
 
-| Number | Lane    | Issue | Planned content              |
-| ------ | ------- | ----- | ---------------------------- |
-| 0017   | SOL-03  | #163  | solution export (if DDL needed) |
+| Number | Lane                           | Issue                | Planned content                       |
+| ------ | ------------------------------ | -------------------- | ------------------------------------- |
+| 0017   | SOL-03                         | #163                 | solution export (if DDL needed)       |
+| 0043   | codex-execution-restore-repair | security finding 635 | renamed execution restore convergence |
+| 0044   | TRG-01                         | #137                 | persisted schedule tick cursor        |
 
 Rule: a lane renames its migration file to the reserved number, updates its
 test imports, and runs the full gate before opening its PR. The ledger is
 updated in the same PR that lands the migration.
 
-## Overrides (break-glass, steward-signed only)
+## Overrides (break-glass, steward-authorized only)
 
-An urgent repair migration may land without a prior `Reserved` row only when
-this table carries a row for its number with a reason and a steward sign-off
-ref, and the consuming PR repeats the reason in a trailer. "Next free" prose
-in the PR body is not an override. No override rows are currently active.
+An urgent repair migration may land without a prior `Reserved` row only after
+the steward lands its authorization row in this table on `main` in a separate
+PR. The consuming PR must retain that row byte-for-byte, cite its exact Issue in
+the matching `Landed` row, and include both trailers below in one branch commit:
+
+```text
+Migration-Override: NNNN
+Migration-Override-Reason: exact reason from the trusted row
+```
+
+The authorization row remains after consumption as an audit record. A row
+introduced or edited by the consuming PR, arbitrary sign-off text, PR-body
+prose, and "next free" prose are not authorization. No override rows currently
+exist.
 
 | Number | Issue | Reason | Steward sign-off |
 | ------ | ----- | ------ | ---------------- |

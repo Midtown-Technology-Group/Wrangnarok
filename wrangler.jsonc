@@ -44,6 +44,23 @@
   "vars": {
     "LAB_ENABLED": "false",
   },
+  // ADR 026: local/test uses the real binding shape with a deliberately high
+  // ceiling so deterministic suites inject their own allow/deny limiters.
+  // Deployed environments below own the protective policy values. Namespace
+  // IDs are stable and shared deliberately: provider credentials/quota can
+  // be shared across dev and preview even though principal keys include env.
+  "ratelimits": [
+    {
+      "name": "NINJAONE_PRINCIPAL_RATE_LIMITER",
+      "namespace_id": "658305970",
+      "simple": { "limit": 100000, "period": 60 },
+    },
+    {
+      "name": "NINJAONE_PROVIDER_RATE_LIMITER",
+      "namespace_id": "1134235993",
+      "simple": { "limit": 100000, "period": 60 },
+    },
+  ],
   "d1_databases": [
     {
       "binding": "DB",
@@ -186,6 +203,18 @@
         // come from `wrangler secret put --env dev` ONLY. Do not add empty
         // placeholders here: empty vars shadow uploaded secrets at runtime.
       },
+      "ratelimits": [
+        {
+          "name": "NINJAONE_PRINCIPAL_RATE_LIMITER",
+          "namespace_id": "658305970",
+          "simple": { "limit": 5, "period": 60 },
+        },
+        {
+          "name": "NINJAONE_PROVIDER_RATE_LIMITER",
+          "namespace_id": "1134235993",
+          "simple": { "limit": 30, "period": 60 },
+        },
+      ],
       "d1_databases": [
         {
           "binding": "DB",
@@ -315,6 +344,18 @@
         "LAB_ORG_ID": "00000000-0000-4000-8000-000000000001",
         "LAB_USER_ID": "00000000-0000-4000-8000-000000000002",
       },
+      "ratelimits": [
+        {
+          "name": "NINJAONE_PRINCIPAL_RATE_LIMITER",
+          "namespace_id": "658305970",
+          "simple": { "limit": 5, "period": 60 },
+        },
+        {
+          "name": "NINJAONE_PROVIDER_RATE_LIMITER",
+          "namespace_id": "1134235993",
+          "simple": { "limit": 30, "period": 60 },
+        },
+      ],
       "d1_databases": [
         {
           "binding": "DB",

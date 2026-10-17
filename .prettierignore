@@ -4,6 +4,8 @@ dist/
 client/dist/
 coverage/
 worker-configuration.d.ts
+wrangler.celld.jsonc
+wrangler.celld.deploy.jsonc
 package-lock.json
 docs/
 .opencode/

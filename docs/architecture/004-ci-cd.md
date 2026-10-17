@@ -112,20 +112,20 @@ Retention and quotas follow the account plan, not this ADR: verify vs current Cl
 
 ### PR preview environments
 
-Every pull request deploys to one shared disposable preview Worker (`preview` env in `wrangler.jsonc`, `.github/workflows/preview.yml`) and smokes `system.smoke` against its workers.dev URL. Previews catch binding/config drift that `wrangler deploy --dry-run --env dev` cannot: real account calls, real D1 migrations, real Workflow dispatch.
+An authorized steward can manually deploy a reviewed pull-request revision to one shared disposable preview Worker (`preview` env in `wrangler.jsonc`, `.github/workflows/preview.yml`) and smoke `system.smoke` against its workers.dev URL. The workflow requires the PR number and exact reviewed head SHA, rejects moved or fork PRs, and checks out the API-resolved immutable merge commit. Previews catch binding/config drift that `wrangler deploy --dry-run --env dev` cannot: real account calls, real D1 migrations, real Workflow dispatch.
 
 Design rules:
 
 - One shared preview Worker + one disposable preview D1 + both R2 buckets (`FILES`, `ARTIFACTS`), last-wins across PRs at experiment scale. Per-PR environments graduate only when contention demands it.
 - The preview D1 is disposable: smoke writes land under the disposable smoke Organization and test data is never promoted anywhere.
 - Fixture credentials are ephemeral per run: the workflow generates a random `LAB_TOKEN`, masks it, plants it with `wrangler secret put`, and smokes with it. The next run replaces it, so there is nothing to rotate on leak. Demo org/user IDs ship as committed non-secret `vars`, matching the local fixture pattern.
-- Without secrets (forks) the workflow skips gracefully; credential-free CI on the PR itself stays the merge gate.
+- Preview deployment never runs automatically for PR code. Credential-free CI on the PR itself stays the merge gate; a steward dispatches Preview only after reviewing the supplied head SHA.
 
 Token lifecycle (least privilege, no dashboard clicking after bootstrap):
 
 1. Once, a human creates a parent token (dashboard) with `API Tokens Write` + `Workers Scripts Write` + `D1 Write`, scoped to the account.
-2. `CLOUDFLARE_API_TOKEN=<parent> node scripts/mint-preview-token.mjs --account-id <id>` mints the CI child (Workers Scripts Write + D1 Write, account-scoped, 1-year expiry) and prints its value exactly once. The parent token is never printed, logged, or committed.
-3. Store the child as the `CLOUDFLARE_PREVIEW_TOKEN` GitHub Actions secret and the account ID as the `CLOUDFLARE_ACCOUNT_ID` variable, then delete the parent token (or keep it offline for rotation).
+2. `CLOUDFLARE_API_TOKEN=<parent> node scripts/mint-preview-token.mjs --account-id <id>` mints the CI child (Workers Scripts Write + D1 Write, account-scoped, 30-day expiry) and prints its value exactly once. The parent token is never printed, logged, or committed.
+3. Store the child as the `CLOUDFLARE_PREVIEW_TOKEN` secret in the GitHub `preview` environment and the account ID as the `CLOUDFLARE_ACCOUNT_ID` environment variable, then delete the parent token (or keep it offline for rotation). Required environment reviewers are recommended as a second gate, but the manual dispatch plus exact-SHA validation is mandatory even when none are configured.
 4. Rotation = rerun the mint, update the secret, delete the old child. Real Integration/Connection credentials MUST NEVER take this path — preview secrets are fixture-only by construction.
 
 Human setup before the first preview run: `wrangler d1 create wrangnarok-preview`, paste its database ID over the placeholder in the `preview` env; `wrangler r2 bucket create wrangnarok-preview` and `wrangler r2 bucket create wrangnarok-artifacts-preview` (issue #227: preview binds both buckets like local/dev so the smoke artifact probe exercises real byte storage — no R2 API permission is needed on the CI token for this, bucket creation is a one-time human operator action); complete the token lifecycle above. Until then `--env preview` commands fail closed.
@@ -134,7 +134,7 @@ Human setup before the first preview run: `wrangler d1 create wrangnarok-preview
 
 Three environments, one deployment mechanic (`wrangler --env` + `smoke-preview.mjs` + ephemeral token — no second deployment system):
 
-- `preview` — shared disposable PR smoke. One Worker + one D1 + both R2 buckets, deployed per PR by `.github/workflows/preview.yml`, smoked with `system.smoke` plus the artifact byte probe (issue #227). Last-wins across PRs at experiment scale; smoke writes land under the disposable smoke Organization and nothing promotes anywhere. On failure the workflow preserves `deploy.log`, the smoke log, and the `/api/usage/summary` block as a `preview-diagnostics` CI artifact (7-day retention).
+- `preview` — shared disposable PR smoke. One Worker + one D1 + both R2 buckets, deployed only by a manual exact-SHA dispatch of `.github/workflows/preview.yml`, then smoked with `system.smoke` plus the artifact byte probe (issue #227). Last-wins across approved PRs at experiment scale; smoke writes land under the disposable smoke Organization and nothing promotes anywhere. On failure the workflow preserves `deploy.log`, the smoke log, and the `/api/usage/summary` block as a `preview-diagnostics` CI artifact (7-day retention).
 - `dev` — stable smoke target. Own Worker name, D1, and both R2 buckets; sampled Workers Logs/Traces (0.25/0.1). Human-driven deploy + `system.smoke` per the runbook below, with usage-block archiving per the cost-logging requirement.
 - `test` (future, GATED — do not build until a live consumer needs it): a disposable isolated target for mutative/security scans. Candidate consumers #242 (Shannon) and #246 (RESTler) are both open and neither is blocked today. When the first consumer lands, clone the preview mechanics with a distinct Worker name + D1 + both R2 buckets, an ephemeral per-run token via the `mint-preview-token.mjs` pattern, a synthetic seed copied from `scripts/seed-remote-dev.sql` (generic smoke-org row only, no credentials), and the reset procedure below for reproducible cleanup. Least-privilege token, fixture-only secrets.
 
