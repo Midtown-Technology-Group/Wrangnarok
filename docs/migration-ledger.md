@@ -58,6 +58,7 @@ Reservation workflow (enforced by `scripts/check-migration-numbers.mjs`):
 | 0040   | 0040_session_uploads.sql            | EMBED-01 | form_session_uploads: session-owned upload claims (session hash, org, location, path, field, size/type bounds) for external form sessions (issue #156, slice 3) |
 | 0041   | 0041_mcp_external.sql               | TOOL-02  | external MCP servers, org tools, per-user consent, secret envelopes (issue #171, PR #534; grandfathered per #528, no renumber) |
 | 0042   | 0042_table_row_revision_index.sql   | TABLE-02 | composite revision index for bounded writes and change polling (security findings 121/122) |
+| 0043   | 0043_execution_restore_convergence.sql | codex-execution-restore-repair | converge renamed execution restore after journal recovery (security finding 635) |
 
 ## Stuck-database recovery (codex findings #381, #367-371)
 
@@ -98,6 +99,16 @@ re-application" claims were wrong for filename-tracked journals. Renamed files
 are never recognized as already applied; convergence now comes from the 0027
 repair, not from re-applying the renamed files.
 
+The same filename rule applies to the execution-column restore that briefly
+landed as `0028_executions_column_restore.sql` before becoming 0032. A database
+that journaled the old name already has the three columns, so operators must
+record `0032_executions_column_restore.sql` as applied without running its
+duplicate `ALTER TABLE` statements. The next normal migration, 0043, then
+rebuilds the affected table shape and its foreign-key children, preserving
+existing policy and lineage values and converging with fresh databases. Do not
+mark 0032 applied until `PRAGMA table_info(executions)` confirms all three of
+`policy_json`, `parent_execution_id`, and `parent_step` are present.
+
 ## Resolved collisions
 
 - 0007_org_membership.sql vs 0007_files.sql: resolved 2026-09-11 by
@@ -118,7 +129,6 @@ repair, not from re-applying the renamed files.
 | Number | Lane                           | Issue                | Planned content                       |
 | ------ | ------------------------------ | -------------------- | ------------------------------------- |
 | 0017   | SOL-03                         | #163                 | solution export (if DDL needed)       |
-| 0043   | codex-execution-restore-repair | security finding 635 | renamed execution restore convergence |
 
 Rule: a lane renames its migration file to the reserved number, updates its
 test imports, and runs the full gate before opening its PR. The ledger is

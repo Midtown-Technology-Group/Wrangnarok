@@ -46,8 +46,16 @@ import migration36 from "../migrations/0036_anon_app_embeds.sql?raw";
 import migration37 from "../migrations/0037_executions_org_fk_drop.sql?raw";
 import migration38 from "../migrations/0038_capability_resolution.sql?raw";
 import migration42 from "../migrations/0042_table_row_revision_index.sql?raw";
+import migration43 from "../migrations/0043_execution_restore_convergence.sql?raw";
 
 const bindings = env as unknown as Bindings;
+
+const LEGACY_EXECUTION_RESTORE = `
+ALTER TABLE executions ADD COLUMN policy_json TEXT;
+ALTER TABLE executions ADD COLUMN parent_execution_id TEXT;
+ALTER TABLE executions ADD COLUMN parent_step TEXT;
+CREATE INDEX IF NOT EXISTS executions_parent ON executions(parent_execution_id);
+`;
 
 const CHAIN = [
   migration01,
@@ -85,13 +93,16 @@ const CHAIN = [
   migration34,
   migration35,
   migration36,
+  migration37,
   migration38,
   migration42,
+  migration43,
 ];
 
-// Issue #493: the 0037 repair is applied explicitly per test (after optional
-// seeding on the 0001->0036 shape) to model the real upgrade path: a populated
-// database where DROP TABLE executions must preserve child-table rows.
+// Issue #493: selected tests apply the 0037 repair explicitly after seeding on
+// the 0001->0036 shape to model a populated upgrade. The default chain includes
+// 0037 in order so later migrations are always tested against the production
+// schema they actually follow.
 async function applyRepairMigration() {
   await bindings.DB.exec(migration37);
 }
@@ -118,8 +129,83 @@ it("rebuilds carry every previously added executions column", async () => {
   expect(index?.name).toBe("executions_parent");
 });
 
+it("recovers the renamed execution restore without losing existing values or child rows", async () => {
+  await reset();
+  const restoreIndex = CHAIN.indexOf(migration32);
+  for (const migration of CHAIN.slice(0, restoreIndex)) {
+    await bindings.DB.exec(migration);
+  }
+  await bindings.DB.exec(LEGACY_EXECUTION_RESTORE);
+  await expect(bindings.DB.exec(migration32)).rejects.toThrow(/duplicate column name: policy_json/);
+
+  const now = new Date().toISOString();
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-replay", "org").run();
+  await bindings.DB.prepare(
+    "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,status,created_at,policy_json,parent_execution_id,parent_step) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+  )
+    .bind(
+      "exec-replay",
+      "smoke",
+      "smoke",
+      "r1",
+      "org-replay",
+      "user-1",
+      "{}",
+      "Succeeded",
+      now,
+      '{"retained":true}',
+      "parent-replay",
+      "step-replay",
+    )
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO operations(execution_id,name,position,status,started_at,completed_at,result_json) VALUES (?,?,?,?,?,?,?)",
+  )
+    .bind("exec-replay", "run", 0, "Succeeded", now, now, '{"ok":true}')
+    .run();
+  await bindings.DB.prepare("INSERT INTO usage_blocks(execution_id,usage_json,created_at) VALUES (?,?,?)")
+    .bind("exec-replay", '{"tokens":11}', now)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO execution_logs(execution_id,org_id,user_id,saga_id,saga_name,level,message,created_at) VALUES (?,?,?,?,?,?,?,?)",
+  )
+    .bind("exec-replay", "org-replay", "user-1", "smoke", "smoke", "INFO", "retained", now)
+    .run();
+
+  // The old filename already applied the same DDL. Marking 0032 in Wrangler's
+  // journal is represented here by skipping its SQL, then applying 0033-0043.
+  for (const migration of CHAIN.slice(restoreIndex + 1)) {
+    await bindings.DB.exec(migration);
+  }
+
+  const execution = await bindings.DB.prepare(
+    "SELECT policy_json,parent_execution_id,parent_step FROM executions WHERE id=?",
+  )
+    .bind("exec-replay")
+    .first<{ policy_json: string; parent_execution_id: string; parent_step: string }>();
+  expect(execution).toEqual({
+    policy_json: '{"retained":true}',
+    parent_execution_id: "parent-replay",
+    parent_step: "step-replay",
+  });
+  expect(
+    await bindings.DB.prepare("SELECT result_json FROM operations WHERE execution_id=?")
+      .bind("exec-replay")
+      .first<{ result_json: string }>(),
+  ).toEqual({ result_json: '{"ok":true}' });
+  expect(
+    await bindings.DB.prepare("SELECT usage_json FROM usage_blocks WHERE execution_id=?")
+      .bind("exec-replay")
+      .first<{ usage_json: string }>(),
+  ).toEqual({ usage_json: '{"tokens":11}' });
+  expect(
+    await bindings.DB.prepare("SELECT message FROM execution_logs WHERE execution_id=?")
+      .bind("exec-replay")
+      .first<{ message: string }>(),
+  ).toEqual({ message: "retained" });
+});
+
 it("executions carries no organizations foreign key after the 0037 repair", async () => {
-  await applyRepairMigration();
   const ddl = await bindings.DB.prepare("SELECT sql FROM sqlite_master WHERE name='executions'").first<{
     sql: string;
   }>();
@@ -127,6 +213,11 @@ it("executions carries no organizations foreign key after the 0037 repair", asyn
 });
 
 it("0037 preserves populated child tables across the executions rebuild", async () => {
+  await reset();
+  const repairIndex = CHAIN.indexOf(migration37);
+  for (const migration of CHAIN.slice(0, repairIndex)) {
+    await bindings.DB.exec(migration);
+  }
   const now = new Date().toISOString();
   await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "org").run();
   await bindings.DB.prepare(
@@ -187,7 +278,6 @@ it("0037 preserves populated child tables across the executions rebuild", async 
 });
 
 it("org delete retains execution history on the fully migrated schema", async () => {
-  await applyRepairMigration();
   await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "org").run();
   await bindings.DB.prepare(
     "INSERT INTO executions(id,saga_id,saga_name,saga_revision,org_id,user_id,input_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
