@@ -35,6 +35,16 @@ endpoint, Bearer token as a transient secret handle, bounded JSON, shaped
 safe fields, scrubbed errors) plus Sagas that persist shaped summaries via
 the standard submit/ExecutionHistory path.
 
+Every Cloudflare Saga resolves the account from the Organization-scoped
+Connection's admin-owned **primary ExternalEntityMapping**. Configure it with
+`PUT /api/connections/6b0d2a48-1c3e-4d5a-7b9a-4c6e8d0f2a1b/mappings` using a
+32-character Cloudflare account ID, its display name, and `primary: true`.
+Existing Connections must receive this mapping before their next run; missing
+or malformed mappings fail closed before vendor contact. A saved Saga input
+may still carry `account.id` for compatibility, but it must match the trusted
+mapping, and its account name is ignored. This is the data migration path—no
+new D1 schema or runtime/customer mutation is performed by the source change.
+
 | Saga | Name | Purpose |
 | --- | --- | --- |
 | S1 | `cloudflare-audit-logs` | Bounded Audit Logs v2 summary with filter classes (`token`, `membership`, `zone-config`, `other`) and actor-vs-service attribution. Scheduled + on-demand; scheduled rows omit `since` and read the trailing 24h at execution. |
@@ -79,11 +89,12 @@ Vendor shapes (verified against the Cloudflare API reference 2026-09-19):
 
 ## Credentials (one shared token, one ADR 005 discipline)
 
-The posture slice reuses the single provider-global `CLOUDFLARE_API_TOKEN`
-deployment secret (stdin-provisioned, never in D1/logs/source). Operators
-MAY provision a least-privilege read-only-scoped token value with zero code
-change — every posture Action is a GET. A per-Organization posture token
-would be the ADR 005 tripwire firing condition and is NOT added silently.
+The posture slice accepts the Connection's encrypted per-Organization
+`apiToken` when provisioned and otherwise retains the provider-global
+`CLOUDFLARE_API_TOKEN` deployment fallback. Either credential may span more
+than one Cloudflare account, so the mandatory primary mapping above is the
+authorization boundary. Operators MAY provision a least-privilege read-only
+token value with zero code change—every posture Action is a GET.
 
 Suggested least-privilege scopes for a dedicated posture value: Account
 Settings Read (audit logs), Zone Read + SSL/TLS read equivalents (zone

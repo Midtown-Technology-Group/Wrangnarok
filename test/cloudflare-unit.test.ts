@@ -13,7 +13,12 @@ import {
   parseCloudflareInventoryInput,
   parseCloudflareVerifyInput,
 } from "../src/domain";
-import { inventoryZones, requireAccountId, verifyConnection } from "../src/integrations/cloudflare";
+import {
+  bindCloudflareAccount,
+  inventoryZones,
+  requireAccountId,
+  verifyConnection,
+} from "../src/integrations/cloudflare";
 
 const CONNECTION = { endpoint: CLOUDFLARE_API_BASE };
 const ACCOUNT = { id: "0123456789abcdef0123456789abcdef", name: "Example MSP" };
@@ -39,6 +44,20 @@ describe("requireAccountId", () => {
     for (const bad of [null, undefined, "", "short", "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", 42]) {
       expect(() => requireAccountId(bad)).toThrow(expect.objectContaining({ code: "CLOUDFLARE_ACCOUNT_MISSING" }));
     }
+  });
+});
+
+describe("bindCloudflareAccount", () => {
+  const mapping = { entityId: ACCOUNT.id, displayName: ACCOUNT.name };
+  it("derives identity from the trusted mapping and ignores caller labels", () => {
+    expect(bindCloudflareAccount(mapping)).toEqual(ACCOUNT);
+    expect(bindCloudflareAccount(mapping, { id: ACCOUNT.id, name: "Forged label" })).toEqual(ACCOUNT);
+  });
+  it("fails closed on missing mappings and cross-account selectors", () => {
+    expect(() => bindCloudflareAccount(null)).toThrow(expect.objectContaining({ code: "CLOUDFLARE_ACCOUNT_MISSING" }));
+    expect(() => bindCloudflareAccount(mapping, { id: "f".repeat(32), name: "Other" })).toThrow(
+      expect.objectContaining({ code: "CLOUDFLARE_ACCOUNT_FORBIDDEN" }),
+    );
   });
 });
 

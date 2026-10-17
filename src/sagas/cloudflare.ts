@@ -8,6 +8,7 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
+import { resolvePrimaryEntityMapping } from "../capabilities";
 import {
   CLOUDFLARE_INTEGRATION_ID,
   CLOUDFLARE_TIMEOUT_MS,
@@ -23,6 +24,7 @@ import type {
   ExecutionParams,
   SafeError,
 } from "../domain";
+import { bindCloudflareAccount } from "../integrations/cloudflare";
 import { defineSaga } from "../saga";
 import { integrationOperation } from "../saga-helpers";
 import { scrubExecutionError } from "../secrets";
@@ -129,13 +131,10 @@ export const cloudflareVerifySagaDef = defineSaga<CloudflareVerifyResult>({
       );
       // ADR-033-4: one Action convention — the helper supplies
       // (connection, secrets, deadline, operationId) and each leg takes what
-      // its Action needs. The account mapping rides the parsed Execution input
-      // (scenario `binding.entity_id/entity_name`, validated by the input
-      // parser and persisted through submit): read it from the prepared
-      // input, never from Workflow params. The Integration boundary owns
-      // the strict account-ID check.
+      // its Action needs. Caller input may confirm the account id for saved
+      // scenario compatibility, but the admin-owned primary mapping on the
+      // resolved Organization Connection is authoritative.
       const outcome = await step.do("cloudflare-verify-v2", () => {
-        const binding = prepared.input.account ?? { id: null, name: null };
         return integrationOperation(ctx, cloudflareVerifySagaDef, prepared, {
           op: "cloudflare-verify-v2",
           position: 1,
@@ -143,8 +142,13 @@ export const cloudflareVerifySagaDef = defineSaga<CloudflareVerifyResult>({
           vendorDefaultMs: CLOUDFLARE_TIMEOUT_MS,
           failureCode: "CLOUDFLARE_INTEGRATION_FAILED",
           failureMessage: "The Cloudflare Integration could not complete.",
-          call: (connection, secrets, deadline) =>
-            ctx.integrations.cloudflare.verifyConnection(connection, secrets, binding, id, deadline),
+          call: async (connection, secrets, deadline) => {
+            const binding = bindCloudflareAccount(
+              await resolvePrimaryEntityMapping(ctx.db, connection.orgId, connection),
+              prepared.input.account,
+            );
+            return ctx.integrations.cloudflare.verifyConnection(connection, secrets, binding, id, deadline);
+          },
         });
       });
       if (!outcome.ok) {
@@ -193,9 +197,8 @@ export const cloudflareInventorySagaDef = defineSaga<CloudflareInventoryResult>(
       );
       // ADR-033-4: same Action convention as the verify leg above and
       // every other Saga. The bounded inventory input shapes from the
-      // prepared input beside the account mapping.
+      // prepared input; trusted account identity comes from the Connection.
       const outcome = await step.do("cloudflare-inventory-v1", () => {
-        const binding = prepared.input.account ?? { id: null, name: null };
         const input: CloudflareInventoryInput = { maxZones: prepared.input.maxZones };
         return integrationOperation(ctx, cloudflareInventorySagaDef, prepared, {
           op: "cloudflare-inventory-v1",
@@ -204,8 +207,13 @@ export const cloudflareInventorySagaDef = defineSaga<CloudflareInventoryResult>(
           vendorDefaultMs: CLOUDFLARE_TIMEOUT_MS,
           failureCode: "CLOUDFLARE_INTEGRATION_FAILED",
           failureMessage: "The Cloudflare Integration could not complete.",
-          call: (connection, secrets, deadline) =>
-            ctx.integrations.cloudflare.inventoryZones(connection, secrets, binding, input, id, deadline),
+          call: async (connection, secrets, deadline) => {
+            const binding = bindCloudflareAccount(
+              await resolvePrimaryEntityMapping(ctx.db, connection.orgId, connection),
+              prepared.input.account,
+            );
+            return ctx.integrations.cloudflare.inventoryZones(connection, secrets, binding, input, id, deadline);
+          },
         });
       });
       if (!outcome.ok) {

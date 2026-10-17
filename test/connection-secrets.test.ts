@@ -23,6 +23,7 @@ import {
   putConnectionSecrets,
   resolveConnectionSecrets,
 } from "../src/connections";
+import { upsertMapping } from "../src/capabilities";
 import { resolveExecutionOrgSecrets } from "../src/sagas/shared";
 import { clearExecutionSecrets, getExecutionSecrets } from "../src/secrets";
 import { trackWorkflowInstance, useWorkflowHarness } from "./helpers/workflow-harness";
@@ -64,9 +65,15 @@ beforeEach(async () => {
 });
 
 async function seedCloudflareMapping() {
-  return createConnection(bindings.DB, caller, CLOUDFLARE_INTEGRATION_ID, {
+  const created = await createConnection(bindings.DB, caller, CLOUDFLARE_INTEGRATION_ID, {
     config: { endpoint: CLOUDFLARE_API_BASE },
   });
+  await upsertMapping(bindings.DB, caller, CLOUDFLARE_INTEGRATION_ID, {
+    entityId: ACCOUNT_ID,
+    displayName: "Example MSP",
+    primary: true,
+  });
+  return created;
 }
 
 async function storedRows() {

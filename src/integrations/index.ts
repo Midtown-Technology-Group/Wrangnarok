@@ -673,7 +673,8 @@ export const cloudflareIntegrationDef = defineIntegration({
       type: "string",
       required: false,
       maxLength: 128,
-      description: "Optional non-secret label naming which Cloudflare account this mapping inventories.",
+      description:
+        "Legacy optional label; runtime account identity and display name come from the Connection's primary entity mapping.",
     },
   ],
   requiredSecrets: ["apiToken"],

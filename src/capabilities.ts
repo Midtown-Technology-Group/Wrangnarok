@@ -17,7 +17,7 @@
 // shape expressing another Organization's capability. Secret values never
 // appear on any path in this module — assignments and mappings carry ids,
 // names, and presence only.
-import { Fault } from "./domain";
+import { CLOUDFLARE_ACCOUNT_ID_PATTERN, CLOUDFLARE_INTEGRATION_ID, Fault } from "./domain";
 import type { Principal, SafeError } from "./domain";
 import { integrationById } from "./integrations";
 import type { Connection } from "./integrations";
@@ -430,6 +430,19 @@ async function primaryMapping(db: D1Database, orgId: string, connectionId: strin
     return null;
   }
 }
+/** Resolve the trusted primary vendor entity for one already-authorized
+ * Connection. Both the Organization and Connection id are required so a
+ * caller-supplied vendor selector can never cross either boundary. Missing
+ * pre-0038 storage and missing mappings both resolve to null; provider
+ * Actions then fail closed before any outbound request. */
+export async function resolvePrimaryEntityMapping(
+  db: D1Database,
+  orgId: string,
+  connection: Pick<Connection, "id" | "integrationId">,
+): Promise<EntityMappingView | null> {
+  const row = await primaryMapping(db, orgId, connection.id);
+  return row === null ? null : Object.freeze(toMappingView(row, connection.integrationId));
+}
 export interface MappingWrite {
   readonly entityId?: unknown;
   readonly displayName?: unknown;
@@ -477,6 +490,9 @@ export async function upsertMapping(
     throw new Fault(404, "CONNECTION_NOT_FOUND", "No Connection exists for this Organization and Integration.");
   }
   const entityId = parseEntityId(body.entityId);
+  if (integrationId === CLOUDFLARE_INTEGRATION_ID && !CLOUDFLARE_ACCOUNT_ID_PATTERN.test(entityId)) {
+    throw new Fault(400, "INVALID_MAPPING", "A Cloudflare mapping entityId must be a 32-character account id.");
+  }
   const displayName = parseMappingDisplayName(body.displayName);
   const source = parseMappingSource(body.source);
   const primary = body.primary === undefined ? false : body.primary === true;

@@ -19,11 +19,14 @@ import {
   loadFrozenBinding,
   previewCapability,
   removeCapability,
+  resolvePrimaryEntityMapping,
   upsertMapping,
 } from "../src/capabilities";
 import { createConnection, deleteConnection, putConnectionSecrets } from "../src/connections";
 import {
   AD_INTEGRATION_ID,
+  CLOUDFLARE_API_BASE,
+  CLOUDFLARE_INTEGRATION_ID,
   GOOGLEWORKSPACE_INTEGRATION_ID,
   GRAPH_INTEGRATION_ID,
   NINJA_INTEGRATION_ID,
@@ -288,6 +291,27 @@ describe("external entity mappings", () => {
       code: "MAPPING_NOT_FOUND",
     });
     expect(await listMappings(bindings.DB, { orgId: ORG_A, userId: USER_A }, AD_INTEGRATION_ID)).toEqual([]);
+  });
+  it("validates and resolves a Cloudflare account only within its owning Organization", async () => {
+    const connectionId = await seedConnection(ORG_A, CLOUDFLARE_INTEGRATION_ID, CLOUDFLARE_API_BASE);
+    const connection = { id: connectionId, integrationId: CLOUDFLARE_INTEGRATION_ID };
+    await expect(
+      upsertMapping(bindings.DB, { orgId: ORG_A, userId: USER_A }, CLOUDFLARE_INTEGRATION_ID, {
+        entityId: "not-an-account",
+        primary: true,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_MAPPING" });
+    await upsertMapping(bindings.DB, { orgId: ORG_A, userId: USER_A }, CLOUDFLARE_INTEGRATION_ID, {
+      entityId: "0123456789abcdef0123456789abcdef",
+      displayName: "Org A Cloudflare",
+      primary: true,
+    });
+    expect(await resolvePrimaryEntityMapping(bindings.DB, ORG_A, connection)).toMatchObject({
+      entityId: "0123456789abcdef0123456789abcdef",
+      displayName: "Org A Cloudflare",
+      primary: true,
+    });
+    expect(await resolvePrimaryEntityMapping(bindings.DB, ORG_B, connection)).toBeNull();
   });
 });
 describe("readiness reporting", () => {
