@@ -31,9 +31,11 @@ Support exactly two deployment targets for the same Worker bundle:
 2. **celld (self-hosted, additive).** `npm run config:celld` derives
    `wrangler.celld.jsonc` from `wrangler.jsonc`; `npm run deploy:celld`
    deploys it to a celld fleet. No `src/` code changes, no binding
-   abstraction, no second Saga/Execution path: celld supplies the same
-   native bindings (`DB`, `FILES`, `ARTIFACTS`, `OAUTH_REFRESH_FENCE`,
-   the 13 Workflow bindings, `ASSETS`) under the same names.
+   abstraction, no second Saga/Execution path: celld supplies its
+   compatible native bindings (`DB`, `FILES`, `ARTIFACTS`,
+   `OAUTH_REFRESH_FENCE`, the 13 Workflow bindings, `ASSETS`) under the
+   same names. Unsupported hosted-only bindings are omitted explicitly
+   and their dependent feature fails closed rather than being emulated.
 
 Mechanics that keep this honest:
 
@@ -65,6 +67,13 @@ Mechanics that keep this honest:
   Windows workstations).
 - `observability` (Workers Logs/traces sampling) has no celld
   equivalent; celld telemetry replaces it on that target.
+- Cloudflare Workers Rate Limiting bindings are unavailable: celld
+  v0.6.2 neither accepts the top-level `ratelimits` key nor exposes that
+  binding type. The generated config deliberately omits it. NinjaOne
+  Execution admission therefore returns `503 ADMISSION_UNAVAILABLE`
+  before persistence or dispatch on celld; those provider-backed Sagas
+  remain unsupported there until celld adds the native binding or a
+  separately reviewed self-hosted admission design is accepted.
 - Cloudflare Access is not in front of a self-hosted fleet, and this
   ADR does not amend ADR 014: fixture LAB auth stays local/CI and
   non-production, so on celld it serves local development and trusted

@@ -18,6 +18,7 @@ smoke below before upgrading a fleet.
 | `wrangler secret put` | No equivalent: vars merged from `.celld.vars` at deploy time |
 | `wrangler d1 migrations apply` | `celld d1 migrations apply wrangnarok-local` |
 | D1 / R2 / Workflows / Durable Objects | Same bindings, run as cells over your bucket |
+| Workers Rate Limiting bindings | Unavailable; omitted from generated config, so NinjaOne Execution admission fails closed before persistence |
 | Workers Logs / traces | celld telemetry (no `observability` block) |
 | Cloudflare Access in front | Your ingress proxy; LAB Bearer auth works unchanged |
 

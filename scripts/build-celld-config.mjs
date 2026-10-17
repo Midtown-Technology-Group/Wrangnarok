@@ -127,7 +127,7 @@ function isTrailingComma(text, i) {
 // OTHER non-celld key (a new binding type, say `ai`) fails closed here
 // instead of vanishing silently -- adding one needs an explicit decision
 // in this file, not a quiet green check.
-const HOSTED_ONLY_KEYS = new Set(["env", "observability", "workers_dev", "preview_urls", "routes"]);
+const HOSTED_ONLY_KEYS = new Set(["env", "observability", "preview_urls", "ratelimits", "routes", "workers_dev"]);
 
 // Binding identities src/bindings.ts requires at runtime. The projection
 // must carry every one under its exact name; a rename or drop in
@@ -311,6 +311,7 @@ function selftest() {
     "observability": { "enabled": true },
     "workers_dev": false,
     "routes": [],
+    "ratelimits": [{ "name": "NINJAONE_PRINCIPAL_RATE_LIMITER", "namespace_id": "658305970", "simple": { "limit": 5, "period": 60 } }],
     "assets": { "directory": "./client/dist/", "binding": "ASSETS", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*"], "bogus": 1 },
     "vars": { "LAB_ENABLED": "false", "LAB_ORG_ID": "https://example.test//not-a-comment" },
     "d1_databases": [{ "binding": "DB", "database_name": "wrangnarok-local", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations", }],
@@ -325,6 +326,7 @@ function selftest() {
     assert(!("observability" in config), "observability must be dropped");
     assert(!("workers_dev" in config), "workers_dev must be dropped");
     assert(!("routes" in config), "routes must be dropped");
+    assert(!("ratelimits" in config), "Cloudflare rate-limit bindings must be dropped");
     assert(!("env" in config), "env must never project");
     assert(config.name === "wrangnarok-local", "name must survive");
   });
@@ -405,6 +407,7 @@ function selftest() {
   expect("rendered output has no hosted-only keys", () => {
     const rendered = renderCelldConfig(sample);
     assert(!rendered.includes("observability"), "rendered config must not carry observability");
+    assert(!rendered.includes("ratelimits"), "rendered config must not carry Cloudflare rate-limit bindings");
     assert(rendered.startsWith("// GENERATED"), "rendered config must carry the generated header");
   });
   finish();
