@@ -198,7 +198,9 @@ async function keyFor(teamDomain: string, kid: string, fetchFn: typeof fetch): P
     throw new Fault(503, "ACCESS_CERTS_UNAVAILABLE", "The Access certificate endpoint is unavailable.");
   }
   if (cache.refreshedAt > 0 && now - cache.refreshedAt < certRefreshTtlMs) {
-    rememberUnknown(cache, kid, now);
+    // The authoritative fresh set already prevents another fetch. Recording
+    // this miss from its lookup time would outlive the freshness window and
+    // delay genuine rotation past the first eligible post-window lookup.
     return null;
   }
   await refreshCertSetCoalesced(teamDomain, fetchFn);

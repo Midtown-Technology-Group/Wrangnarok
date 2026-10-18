@@ -318,6 +318,37 @@ it("atomically replaces rotated team JWKS keys", async () => {
   expect(fetchSpy).toHaveBeenCalledTimes(3);
 });
 
+it("refreshes a rotated key on the first lookup after the freshness window", async () => {
+  const first = await keypair();
+  const second = await keypair();
+  const pubs = await Promise.all([
+    crypto.subtle.exportKey("jwk", first.publicKey),
+    crypto.subtle.exportKey("jwk", second.publicKey),
+  ]);
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  let serving = 0;
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    const pub = pubs[serving];
+    if (pub == null) throw new Error("access-auth boundary rotation stub: no key served");
+    return Response.json({ keys: [{ ...pub, kid: `boundary-${serving}`, alg: "RS256" }] });
+  });
+
+  const firstToken = await mint(first.privateKey, "boundary-0", validPayload());
+  const secondToken = await mint(second.privateKey, "boundary-1", validPayload());
+  await expect(verifyAccess(firstToken, accessEnv)).resolves.toMatchObject({ userId: EMAIL });
+  expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+  now += ACCESS_CERT_REFRESH_TTL_MS - 1000;
+  await expect(verifyAccess(secondToken, accessEnv)).rejects.toMatchObject({ status: 401 });
+  expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+  serving = 1;
+  now += 2000;
+  await expect(verifyAccess(secondToken, accessEnv)).resolves.toMatchObject({ userId: EMAIL });
+  expect(fetchSpy).toHaveBeenCalledTimes(2);
+});
+
 it("fails fast with 503 when the cert endpoint hangs, errors, or is malformed", async () => {
   const { privateKey } = await keypair();
   const token = await mint(privateKey, "k-hang", validPayload());
