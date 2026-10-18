@@ -72,31 +72,48 @@ their recoveries:
   the stranded table, reruns the same rebuild while briefly removing and
   restoring the `operations` child (rows preserved), and converges healthy,
   pre-0002, fresh, and rerun states.
-- #367-371 (renamed files): databases that applied an old filename
-  (`0010_ops`, `0007_files`, `0010_artifacts`, `0009_endpoints`,
-  `0005_solutions_activation`) treat the byte-identical new filename
-  (`0018`, `0019`, `0020`, `0021`, `0010`) as pending, but the new files use
-  bare CREATE/ALTER statements that fail against the already-existing objects.
-  Because the failing new-name files sort before 0027 and the batch is atomic,
-  such databases can never reach 0027 through `migrations apply` alone.
-  Recovery: delete the stuck new-name journal rows (and any half-applied
-  ledger entries) with
-  `DELETE FROM d1_migrations WHERE name IN
-  ('0018_ops.sql','0019_files.sql','0020_artifacts.sql','0021_endpoints.sql',
-  '0010_solutions_activation.sql')`, re-run `wrangler d1 migrations apply`
-  (the ORIGINAL old-name files are skipped as already applied; genuinely
-  missing objects are created by the new-name files that now run), then 0027
-  converges every renamed object with IF NOT EXISTS guards. The 0010
-  `config_json` column is intentionally absent from 0027: ALTER TABLE ADD
-  COLUMN has no conditional form in SQLite/D1, so an unconditional ADD would
-  fail on exactly the already-migrated databases 0027 serves. Both old-name
-  (0005) and new-name (0010) carriers already have the column, and fresh
-  databases receive it from 0010 itself, which sorts before 0027.
+- #367-370 (additive renamed files): databases that applied an old filename
+  (`0010_ops`, `0007_files`, `0010_artifacts`, or `0009_endpoints`) treat the
+  new filename (`0018`, `0019`, `0020`, or `0021`) as pending. Those four
+  migrations now use `CREATE ... IF NOT EXISTS`; applying them preserves the
+  existing objects and rows, records the new names, and lets later migrations
+  continue. Migration 0027 remains a defense-in-depth repair for a genuinely
+  missing renamed object.
+- #371 (Solution activation rename): a database whose journal contains
+  `0005_solutions_activation.sql` already has `connections.config_json`, so
+  replaying the pending `0010_solutions_activation.sql` would fail at its
+  `ALTER TABLE ... ADD COLUMN`. Do not rebuild `connections`: later migrations
+  add columns and tenant-scoped foreign-key children that a historical-table
+  rebuild could discard. Before applying migrations, reconcile only this
+  proven old-name state with:
 
-Correction to the 2026-09-11 collision notes above: the "converge on
-re-application" claims were wrong for filename-tracked journals. Renamed files
-are never recognized as already applied; convergence now comes from the 0027
-repair, not from re-applying the renamed files.
+  ```sql
+  INSERT INTO d1_migrations(name)
+  SELECT '0010_solutions_activation.sql'
+  WHERE EXISTS (
+    SELECT 1 FROM d1_migrations
+    WHERE name = '0005_solutions_activation.sql'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM d1_migrations
+    WHERE name = '0010_solutions_activation.sql'
+  );
+  ```
+
+  Then apply migrations to the same remote environment whose journal you
+  inspected:
+
+  ```sh
+  : "${ENVIRONMENT:?set ENVIRONMENT to the exact named environment}"
+  npx wrangler d1 migrations apply DB --env "$ENVIRONMENT" --remote
+  ```
+
+  If the old name is absent, do not insert the alias: the new migration must
+  run to add `config_json`.
+
+Correction to the 2026-09-11 collision notes above: renamed files are never
+recognized as already applied. The four additive carriers now converge on
+replay; the activation carrier requires the conditional journal alias above.
 
 ## Resolved collisions
 
