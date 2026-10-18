@@ -30,7 +30,7 @@ import { submit } from "./executions";
 import {
   PLATFORM_SCHEDULE_DELIVERED_TOPIC,
   SCHEDULE_DELIVERED_TOPIC,
-  recordPlatformDelivery,
+  recordPlatformEvent,
   recordSourceDelivery,
 } from "./events";
 import { resolveCurrentAuthority } from "./roles";
@@ -630,9 +630,13 @@ export async function promoteWindow(
   });
   // TRG-03 S3b (issue #139): built-in platform emission. When the operator
   // opted in with an enabled `platform` topic source, the same window lands
-  // there as platform.schedule.delivered and fans out through the standard
-  // submit protocol. Best-effort: never fails the promotion above.
-  await recordPlatformDelivery(db, env, submitFn, {
+  // there as platform.schedule.delivered. Subscription fan-out is
+  // deliberately deferred to the existing operator retry route: doing a
+  // full submit per subscriber inside the shared Cron invocation lets one
+  // tenant exhaust its D1 query budget before later tenants advance. The
+  // durable event and absent receipts make every matching subscription
+  // retry-visible. Best-effort: never fails the promotion above.
+  await recordPlatformEvent(db, {
     orgId: fresh.org_id,
     topic: PLATFORM_SCHEDULE_DELIVERED_TOPIC,
     distinctId: `${fresh.id}.${window}`,

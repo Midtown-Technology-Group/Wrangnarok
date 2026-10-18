@@ -6,18 +6,19 @@
 // Covers the S3b acceptance: an operator-registered `platform` topic source
 // receives platform.schedule.delivered on schedule promotion and
 // platform.webhook.delivered on endpoint delivery, each with Execution
-// attribution in both the log row and the descriptive payload, fanning out
-// through the shared submit-protocol helper. Silence paths (no source,
+// attribution in both the log row and the descriptive payload. Endpoint
+// emissions fan out through the shared submit-protocol helper; schedule
+// emissions hand matching subscribers to the derived failed/retry surface
+// without spending the shared Cron budget. Silence paths (no source,
 // disabled source, wrong-kind row) leave the promotion/delivery untouched;
 // redelivery converges on one platform row and one Execution (duplicate
 // suppression + restart recovery); foreign callers 404 and org B rows stay
 // empty (no cross-org leakage).
 //
 // Successful-dispatch fan-out itself is proven by the S2 suite over the same
-// shared helper: platform payloads are descriptive attribution, not Saga
-// input, so the hello subscriber deterministically hits the parse gate
-// (INVALID_INPUT skip, no receipt) and stays visible in the derived failed
-// set — the same posture S2 pins for any non-conforming payload.
+// shared helper. Platform payloads are descriptive attribution, not Saga
+// input, so the hello subscriber stays visible in the derived failed set;
+// explicit retry reaches the usual parse gate in its own request budget.
 import { env } from "cloudflare:workers";
 import { expect, it, vi } from "vitest";
 import worker from "../src/index";
@@ -50,6 +51,24 @@ function authed(path: string, method: string, body?: unknown): Request {
 
 function asUser(userId: string): Bindings {
   return { ...bindings, LAB_USER_ID: userId, LAB_FIXTURE_USER_ID: LAB_USER };
+}
+
+function cappedDatabase(limit: number): { db: D1Database; count: () => number } {
+  let count = 0;
+  const db = new Proxy(bindings.DB, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => {
+          count += 1;
+          if (count > limit) throw new Error(`D1 query budget exhausted after ${limit} statements`);
+          return target.prepare(query);
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { db, count: () => count };
 }
 
 async function executionCount(): Promise<number> {
@@ -120,8 +139,8 @@ it("emits platform.schedule.delivered with execution attribution on promotion", 
   ).toBe(201);
   await tick();
 
-  // The promotion ran exactly once; platform fan-out hit the hello parse
-  // gate (descriptive payload, not Saga input), so no second Execution.
+  // The promotion ran exactly once; scheduled platform fan-out is deferred,
+  // so no subscriber Execution shares the Cron invocation.
   expect(await executionCount()).toBe(before + 1);
   const promoted = await bindings.DB.prepare(
     "SELECT execution_id AS executionId FROM schedule_deliveries WHERE schedule_id=(SELECT id FROM schedules WHERE org_id=? AND name=?)",
@@ -155,8 +174,8 @@ it("emits platform.schedule.delivered with execution attribution on promotion", 
   const expected = await platformEventId(ORG, PLATFORM_SCHEDULE_DELIVERED_TOPIC, `${scheduleId?.id}.${windowValue}`);
   expect(event?.eventId).toBe(expected);
 
-  // The parse-gated subscriber dispatched nothing, so the emission stays
-  // visible in the derived failed set with no receipt.
+  // Cron dispatched no subscriber, so the emission stays visible in the
+  // derived failed set with no receipt for explicit retry.
   const failed = await worker.fetch(
     authed("/api/event-sources/platform/subscriptions/sched-watch/deliveries?outcome=failed", "GET"),
     bindings,
@@ -174,6 +193,88 @@ it("emits platform.schedule.delivered with execution attribution on promotion", 
   const { inner } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, promoted?.executionId as string);
   await inner.waitForStatus("complete");
 }, 25000);
+
+it("keeps Cron platform fan-out outside the shared D1 budget so a later tenant advances", async () => {
+  await createPlatformSource();
+  for (let n = 0; n < 10; n += 1) {
+    await createSub(`budget-${String(n).padStart(2, "0")}`, "platform.schedule.*");
+  }
+
+  const stamp = new Date().toISOString();
+  const due = new Date(Date.now() - 30_000).toISOString();
+  await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?) ON CONFLICT(id) DO NOTHING")
+    .bind(ORG_B, "Budget follower")
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO org_memberships(org_id,user_id,role,status,kind,created_at,updated_at) VALUES (?,?,'admin','active','ordinary',?,?) ON CONFLICT(org_id,user_id) DO UPDATE SET status='active'",
+  )
+    .bind(ORG_B, LAB_USER, stamp, stamp)
+    .run();
+
+  const schedules = [
+    { id: "00000000-0000-4000-8000-0000000136a0", orgId: ORG, name: "budget-first" },
+    { id: "00000000-0000-4000-8000-0000000136b0", orgId: ORG_B, name: "budget-follower" },
+  ] as const;
+  for (const schedule of schedules) {
+    await bindings.DB.prepare(
+      "INSERT INTO schedules(id,org_id,name,saga_id,kind,cron,timezone,enabled,input_json,run_as_user_id,run_at,next_due_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    )
+      .bind(
+        schedule.id,
+        schedule.orgId,
+        schedule.name,
+        helloSaga.id,
+        "one-off",
+        "",
+        "UTC",
+        1,
+        '{"name":"sched"}',
+        LAB_USER,
+        due,
+        due,
+        stamp,
+        stamp,
+      )
+      .run();
+  }
+
+  // Cloudflare Free permits 50 D1 queries per Worker invocation. Ten
+  // subscribers used to spend that shared Cron budget while processing the
+  // first Organization. The hard cap turns a regression into the same failure
+  // the production binding would raise; both due schedules must still commit.
+  const budget = cappedDatabase(50);
+  const cron = worker as unknown as { scheduled: (event: unknown, env: Bindings) => Promise<void> };
+  await cron.scheduled({ cron: "* * * * *" }, { ...bindings, DB: budget.db });
+  expect(budget.count()).toBeLessThanOrEqual(50);
+
+  const promoted = await bindings.DB.prepare(
+    "SELECT schedule_id AS scheduleId,execution_id AS executionId FROM schedule_deliveries WHERE schedule_id IN (?,?) ORDER BY schedule_id",
+  )
+    .bind(schedules[0].id, schedules[1].id)
+    .all<{ scheduleId: string; executionId: string }>();
+  expect(promoted.results.map((row) => row.scheduleId)).toEqual(schedules.map((schedule) => schedule.id));
+
+  // The event is durable, but Cron records no subscription receipt. The
+  // existing derived-failure view is the explicit, separately budgeted retry
+  // handoff rather than an invisible drop.
+  expect(await platformEventCount()).toBe(1);
+  const receipts = await bindings.DB.prepare(
+    "SELECT COUNT(*) AS n FROM event_deliveries WHERE subscription_id IN (SELECT id FROM event_subscriptions WHERE source_id=(SELECT id FROM event_sources WHERE org_id=? AND name='platform'))",
+  )
+    .bind(ORG)
+    .first<{ n: number }>();
+  expect(receipts?.n).toBe(0);
+  const failed = await worker.fetch(
+    authed("/api/event-sources/platform/subscriptions/budget-00/deliveries?outcome=failed", "GET"),
+    bindings,
+  );
+  expect(await failed.json()).toMatchObject({ deliveries: [{ outcome: "failed", executionId: null }] });
+
+  for (const row of promoted.results) {
+    const { inner } = await trackWorkflowInstance(bindings.HELLO_WORKFLOW, row.executionId);
+    await inner.waitForStatus("complete");
+  }
+}, 30000);
 
 it("leaves promotion untouched when no platform source is registered", async () => {
   const before = await executionCount();

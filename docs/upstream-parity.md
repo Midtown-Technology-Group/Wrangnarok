@@ -173,6 +173,15 @@ Phase 4; **Partial**; existing issue: #139
 
 Local status: S1 ships the org-scoped event-source registry plus the typed append-only event log (migration 0030, `src/events.ts`): deterministic (source, event) identity with same-content replay and 409 on mismatched content, operator emit/list, disable fencing, and best-effort delivery appends from schedule promotion and endpoint delivery. S2 (issue #139, migration 0033) adds scoped subscriptions binding topic filters (exact or trailing-`.*` namespace) to a target Saga with bounded fan-out through the standard submit protocol: exact-org rows in name order, stable `evt-` delivery keys, per-subscriber disable/delete fencing plus pre-dispatch authority revalidation through the canonical resolver/grant path, an explicit per-event admission bound (10 dispatches, overflow reported, never silently dropped), and per-subscription delivery receipts. S3a (issue #139) ships operator retry/replay over the same receipt rows with no new DDL: a derived failed set (log minus receipts) with `?outcome=delivered|failed|all` listing, single-event retry through the shared submit-protocol dispatch with identical `evt-` keys (first retry creates the Execution, duplicates converge), dispatch-time authority revalidation (disabled/deleted/revoked fail closed), cross-org 404 posture, and the per-event 10-dispatch bound honored on replay. S3b (issue #139) ships built-in platform emissions plus the retention/admission posture with no new DDL, route, or primitive: an operator-opt-in `platform` topic source receives `platform.schedule.delivered` per promotion and `platform.webhook.delivered` per endpoint delivery (deterministic `plat-` IDs, descriptive attribution payloads, same-path bounded fan-out, best-effort silence when unregistered/disabled), and ADR 012 records the admission bounds (10 dispatches/event, 50-row newest-first reads, 4 KiB payloads) with deliberate no-purge retention (operator DELETE reclaims; no sweeper by steward-gate design). Remaining deferral: execution-lifecycle topics (no fetch-context terminal hook; a polling emitter would be sweeper-shaped — see ADR 012 S3b). Worker + Workflows + D1 only; no Queue/DO.
 
+Security follow-through (2026-10-17): the shared Cron tick no longer performs
+subscription fan-out for `platform.schedule.delivered`. It appends the
+deterministic platform event and advances the Schedule; matching subscriptions
+remain explicit failed/no-receipt deliveries for the existing operator retry
+route, which runs with a separate Worker invocation budget. Request-path
+`platform.webhook.delivered` emissions retain same-request bounded fan-out.
+This preserves one dispatch primitive and replay keys while preventing one
+tenant's subscribers from consuming the Cron budget before later tenants.
+
 Depends: TRG-01, TRG-02, AUTH-02
 
 Acceptance:

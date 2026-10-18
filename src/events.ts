@@ -1082,9 +1082,12 @@ export async function retrySubscriptionDelivery(
 // source named `platform` (an ordinary row through the ordinary registry —
 // no auto-provisioning, no reserved-name rule, no new table or migration),
 // each schedule promotion and each endpoint delivery additionally lands a
-// `platform.*` event there and fans out through the shared
-// dispatchEventFanout helper with the same stable `evt-` keys and the same
-// per-subscriber fences as operator emits. No platform source (or a disabled
+// `platform.*` event there. Endpoint delivery runs in its own request budget
+// and fans out through the shared dispatchEventFanout helper. Schedule
+// promotion only appends the event: subscription deliveries stay visible as
+// failed/no-receipt rows for explicit retry in a separately budgeted request.
+// This prevents one tenant's subscribers from exhausting the shared Cron
+// tick before later Organizations advance. No platform source (or a disabled
 // one, or one registered under another kind): the emission resolves to
 // silence after one indexed lookup, and the promotion/delivery is unaffected.
 //
@@ -1094,12 +1097,15 @@ export async function retrySubscriptionDelivery(
 // Subscriber Sagas consume them through the usual parse gate — a Saga whose
 // input shape does not fit skips with its parse code, exactly like any other
 // non-conforming payload, and the derived failed set keeps it retry-visible.
+// Schedule events deliberately enter that failed set without an automatic
+// Cron dispatch; the existing retry route is the only dispatch path for them.
 // Execution-lifecycle topics (succeeded/failed) stay deferred by design: the
 // terminal checkpoints run inside Workflow steps with no submit access, and
 // dispatching new Workflow instances from inside a step would be a second
-// execution path. The two delivery topics above run in fetch/cron context
-// where submit is already the single path, and they cannot recurse: fan-out
-// executions complete without emitting (no terminal hook), so platform
+// execution path. Endpoint delivery runs in fetch context where submit is
+// already the single path; schedule promotion uses Cron only for the
+// originating Execution and event append. Fan-out executions cannot recurse
+// because they complete without emitting (no terminal hook), so platform
 // fan-out is exactly one level deep.
 //
 // Best-effort throughout: any fault — old database, oversize payload, fan-out
@@ -1157,15 +1163,12 @@ export async function platformEventId(orgId: string, topic: string, distinctId: 
   return `plat-${await hash(JSON.stringify(["wrangnarok.platform-delivery.v1", orgId, topic, distinctId]))}`;
 }
 
-/** Append one platform emission plus same-path fan-out, best-effort. Returns
- * the fan-out result, or null when there is no eligible platform source (or
- * on any fault, by the best-effort contract above). */
-export async function recordPlatformDelivery(
-  db: D1Database,
-  env: Bindings,
-  submitFn: typeof submit,
-  delivery: PlatformDelivery,
-): Promise<FanoutResult | null> {
+/** Append one platform emission without dispatching subscriptions,
+ * best-effort. Schedule promotion uses this bounded half so an arbitrary
+ * subscriber count cannot spend the shared Cron tick's D1 query budget.
+ * The durable event plus missing receipts deliberately expose every matching
+ * subscription through the existing failed-delivery/retry surface. */
+export async function recordPlatformEvent(db: D1Database, delivery: PlatformDelivery): Promise<FanoutEvent | null> {
   try {
     const topic = parseTopic(delivery.topic);
     const source = await db
@@ -1182,13 +1185,32 @@ export async function recordPlatformDelivery(
       )
       .bind(source.id, eventId, delivery.orgId, topic, payloadJson, delivery.executionId, new Date().toISOString())
       .run();
-    return await dispatchEventFanout(db, env, submitFn, {
+    return {
       orgId: delivery.orgId,
       sourceId: source.id,
       eventId,
       topic,
       payload,
-    });
+    };
+  } catch {
+    // Best-effort by contract: see the S3b block comment above.
+    return null;
+  }
+}
+
+/** Append one platform emission plus same-request fan-out, best-effort.
+ * Endpoint deliveries use this path because each request has an independent
+ * D1 budget. Schedule Cron must use recordPlatformEvent instead. */
+export async function recordPlatformDelivery(
+  db: D1Database,
+  env: Bindings,
+  submitFn: typeof submit,
+  delivery: PlatformDelivery,
+): Promise<FanoutResult | null> {
+  const event = await recordPlatformEvent(db, delivery);
+  if (!event) return null;
+  try {
+    return await dispatchEventFanout(db, env, submitFn, event);
   } catch {
     // Best-effort by contract: see the S3b block comment above.
     return null;
