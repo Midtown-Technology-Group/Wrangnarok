@@ -96,13 +96,13 @@ export const helloParentSaga = Object.freeze({
 export const cloudflareVerifySaga = Object.freeze({
   id: "9d2f4a6c-3b1e-4f5a-9c2d-6e8f0a1b2c3d",
   name: "cloudflare-verify-connection",
-  revision: "cloudflare-verify-connection-v2",
+  revision: "cloudflare-verify-connection-v3",
   description: "Zone Inventory migration: verify the Cloudflare API credential and account mapping read-only",
 });
 export const cloudflareInventorySaga = Object.freeze({
   id: "7c1e3b5a-2d4f-4e6b-8a1c-5d7f9e0a1b2c",
   name: "cloudflare-inventory-zones",
-  revision: "cloudflare-inventory-zones-v1",
+  revision: "cloudflare-inventory-zones-v2",
   description: "Zone Inventory migration: bounded read-only inventory of Cloudflare zones",
 });
 // Account posture slice (issue #252): three read-only Sagas on the existing
@@ -112,19 +112,19 @@ export const cloudflareInventorySaga = Object.freeze({
 export const cloudflareAuditSaga = Object.freeze({
   id: "5b0448bb-ab43-4ed1-8315-81b96ad7b57f",
   name: "cloudflare-audit-logs",
-  revision: "cloudflare-audit-logs-v1",
+  revision: "cloudflare-audit-logs-v2",
   description: "Account posture: bounded read-only summary of Cloudflare Audit Logs v2 with filter classes",
 });
 export const cloudflareInsightsSaga = Object.freeze({
   id: "ade72191-699d-4f95-aec5-f786fef6fc67",
   name: "cloudflare-security-insights",
-  revision: "cloudflare-security-insights-v1",
+  revision: "cloudflare-security-insights-v2",
   description: "Account posture: advisory-first Security Insights list with unresolved-Critical tracking",
 });
 export const cloudflarePostureSaga = Object.freeze({
   id: "92baddec-e920-4f42-bf8c-772fac55e427",
   name: "cloudflare-posture-benchmark",
-  revision: "cloudflare-posture-benchmark-v1",
+  revision: "cloudflare-posture-benchmark-v2",
   description: "Account posture: typed benchmark checks over already-called Cloudflare APIs plus manual controls",
 });
 export const CLOUDFLARE_INTEGRATION_ID = "6b0d2a48-1c3e-4d5a-7b9a-4c6e8d0f2a1b";
@@ -731,11 +731,9 @@ export interface CloudflareInventoryInput {
   readonly maxZones: number;
   readonly account?: CloudflareAccountBinding;
 }
-/** Optional account envelope (migration binding `entity_id/entity_name`):
- * accepted and carried through the parsed input so the Saga can resolve
- * the account mapping without scraping the raw persisted body. Validated
- * as an object when present; the Integration boundary owns the strict
- * account-ID check. */
+/** Optional account selector retained for saved-input compatibility. It may
+ * confirm the trusted primary ExternalEntityMapping on the Organization's
+ * resolved Connection, but can never select or relabel an account. */
 function parseCloudflareAccountBinding(value: unknown): CloudflareAccountBinding | undefined {
   if (value === undefined) return undefined;
   if (!object(value)) {

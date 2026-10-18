@@ -4,9 +4,9 @@
 // `functions/cloudflare_inventory.py` (bundle `cloudflare-zone-inventory`
 // 0.1.0). Two Actions: token verification (one GET) and bounded zone
 // inventory (paginated GETs, max 250 zones, 50 per page). Bearer
-// `api_token` arrives as a transient secret handle; the account mapping
-// arrives as plain args (Connection holds endpoint + org mapping; D1 holds
-// no per-tenant secrets per ADR 005). Every vendor call enforces its own
+// `api_token` arrives as a transient secret handle; the account mapping is
+// resolved from the Organization Connection's primary ExternalEntityMapping
+// before entering these Actions. Every vendor call enforces its own
 // 20s deadline and surfaces CLOUDFLARE_VENDOR_TIMEOUT for slow or late
 // vendors; failSagaExecution classifies it as TimedOut (ADR-033-3, issue #414).
 import {
@@ -36,6 +36,7 @@ import {
 import type {
   AuditActorKind,
   AuditEventClass,
+  CloudflareAccountBinding,
   CloudflareAccountRef,
   CloudflareAuditEntry,
   CloudflareAuditResult,
@@ -64,6 +65,11 @@ export interface CloudflareSecrets {
   readonly apiToken?: string;
 }
 
+export interface CloudflareTrustedAccountMapping {
+  readonly entityId: string;
+  readonly displayName: string | null;
+}
+
 function cleanMessage(message: string, registered: readonly string[]): string {
   return scrubTextWithSecrets(message, registered);
 }
@@ -85,6 +91,25 @@ export function requireAccountId(accountId: unknown): string {
 
 function requireAccountName(accountName: unknown): string {
   return typeof accountName === "string" ? accountName : "";
+}
+
+/** Bind an optional caller selector to the Organization's trusted primary
+ * ExternalEntityMapping. The mapping is admin-owned state scoped to the
+ * resolved Connection; caller input may only confirm its account id and can
+ * never choose or relabel the account used by the vendor Action. */
+export function bindCloudflareAccount(
+  mapping: CloudflareTrustedAccountMapping | null,
+  requested?: CloudflareAccountBinding,
+): CloudflareAccountRef {
+  const id = requireAccountId(mapping?.entityId);
+  if (requested?.id !== undefined && requested.id !== null && requested.id !== id) {
+    throw new Fault(
+      403,
+      "CLOUDFLARE_ACCOUNT_FORBIDDEN",
+      "The requested Cloudflare account does not match this Organization's Connection mapping.",
+    );
+  }
+  return Object.freeze({ id, name: requireAccountName(mapping?.displayName) });
 }
 
 interface CloudflareErrorItem {

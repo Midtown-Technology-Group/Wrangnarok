@@ -8,6 +8,7 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Bindings } from "../bindings";
+import { resolvePrimaryEntityMapping } from "../capabilities";
 import {
   CLOUDFLARE_BENCHMARK_DEFAULT_CHECKED_ZONES,
   CLOUDFLARE_INTEGRATION_ID,
@@ -35,6 +36,7 @@ import type {
   PostureSettingEvidence,
   SafeError,
 } from "../domain";
+import { bindCloudflareAccount } from "../integrations/cloudflare";
 import { defineSaga } from "../saga";
 import { integrationOperation } from "../saga-helpers";
 import { scrubExecutionError } from "../secrets";
@@ -205,7 +207,6 @@ export const cloudflareAuditSagaDef = defineSaga<CloudflareAuditResult>({
         prepareExecution(ctx.db, id, cloudflareAuditSaga.id, cloudflareAuditSaga.revision, parseCloudflareAuditInput),
       );
       const outcome = await step.do("cloudflare-audit-logs-v1", () => {
-        const binding = prepared.input.account ?? { id: null, name: null };
         const input: CloudflareAuditInput = {
           ...(prepared.input.since !== undefined ? { since: prepared.input.since } : {}),
           ...(prepared.input.limit !== undefined ? { limit: prepared.input.limit } : {}),
@@ -218,8 +219,13 @@ export const cloudflareAuditSagaDef = defineSaga<CloudflareAuditResult>({
           vendorDefaultMs: CLOUDFLARE_TIMEOUT_MS,
           failureCode: "CLOUDFLARE_INTEGRATION_FAILED",
           failureMessage: "The Cloudflare Integration could not complete.",
-          call: (connection, secrets, deadline) =>
-            ctx.integrations.cloudflare.listAuditLogs(connection, secrets, binding, input, id, deadline),
+          call: async (connection, secrets, deadline) => {
+            const binding = bindCloudflareAccount(
+              await resolvePrimaryEntityMapping(ctx.db, connection.orgId, connection),
+              prepared.input.account,
+            );
+            return ctx.integrations.cloudflare.listAuditLogs(connection, secrets, binding, input, id, deadline);
+          },
         });
       });
       if (!outcome.ok) {
@@ -271,7 +277,6 @@ export const cloudflareInsightsSagaDef = defineSaga<CloudflareInsightsResult>({
         ),
       );
       const outcome = await step.do("cloudflare-security-insights-v1", () => {
-        const binding = prepared.input.account ?? { id: null, name: null };
         const input: CloudflareInsightsInput = {
           ...(prepared.input.limit !== undefined ? { limit: prepared.input.limit } : {}),
           ...(prepared.input.includeDismissed !== undefined
@@ -285,8 +290,13 @@ export const cloudflareInsightsSagaDef = defineSaga<CloudflareInsightsResult>({
           vendorDefaultMs: CLOUDFLARE_TIMEOUT_MS,
           failureCode: "CLOUDFLARE_INTEGRATION_FAILED",
           failureMessage: "The Cloudflare Integration could not complete.",
-          call: (connection, secrets, deadline) =>
-            ctx.integrations.cloudflare.listSecurityInsights(connection, secrets, binding, input, id, deadline),
+          call: async (connection, secrets, deadline) => {
+            const binding = bindCloudflareAccount(
+              await resolvePrimaryEntityMapping(ctx.db, connection.orgId, connection),
+              prepared.input.account,
+            );
+            return ctx.integrations.cloudflare.listSecurityInsights(connection, secrets, binding, input, id, deadline);
+          },
         });
       });
       if (!outcome.ok) {
@@ -346,7 +356,6 @@ export const cloudflarePostureSagaDef = defineSaga<CloudflarePostureResult>({
           parseCloudflarePostureInput,
         ),
       );
-      const binding = prepared.input.account ?? { id: null, name: null };
       const verifyOutcome = await step.do("cloudflare-posture-verify-v1", () =>
         integrationOperation(ctx, cloudflarePostureSagaDef, prepared, {
           op: "cloudflare-posture-verify-v1",
@@ -355,8 +364,13 @@ export const cloudflarePostureSagaDef = defineSaga<CloudflarePostureResult>({
           vendorDefaultMs: CLOUDFLARE_TIMEOUT_MS,
           failureCode: "CLOUDFLARE_INTEGRATION_FAILED",
           failureMessage: "The Cloudflare Integration could not complete.",
-          call: (connection, secrets, deadline) =>
-            ctx.integrations.cloudflare.verifyConnection(connection, secrets, binding, id, deadline),
+          call: async (connection, secrets, deadline) => {
+            const binding = bindCloudflareAccount(
+              await resolvePrimaryEntityMapping(ctx.db, connection.orgId, connection),
+              prepared.input.account,
+            );
+            return ctx.integrations.cloudflare.verifyConnection(connection, secrets, binding, id, deadline);
+          },
         }),
       );
       if (!verifyOutcome.ok) {
@@ -368,6 +382,7 @@ export const cloudflarePostureSagaDef = defineSaga<CloudflarePostureResult>({
         }
         throw new NonRetryableError(verifyOutcome.error.code);
       }
+      const binding = verifyOutcome.result.account;
       const maxZones = prepared.input.maxZones ?? CLOUDFLARE_MAX_ZONES;
       const inventoryInput: CloudflareInventoryInput = { maxZones };
       const inventoryOutcome = await step.do("cloudflare-posture-inventory-v1", () =>
@@ -378,8 +393,20 @@ export const cloudflarePostureSagaDef = defineSaga<CloudflarePostureResult>({
           vendorDefaultMs: CLOUDFLARE_TIMEOUT_MS,
           failureCode: "CLOUDFLARE_INTEGRATION_FAILED",
           failureMessage: "The Cloudflare Integration could not complete.",
-          call: (connection, secrets, deadline) =>
-            ctx.integrations.cloudflare.inventoryZones(connection, secrets, binding, inventoryInput, id, deadline),
+          call: async (connection, secrets, deadline) => {
+            const trusted = bindCloudflareAccount(
+              await resolvePrimaryEntityMapping(ctx.db, connection.orgId, connection),
+              binding,
+            );
+            return ctx.integrations.cloudflare.inventoryZones(
+              connection,
+              secrets,
+              trusted,
+              inventoryInput,
+              id,
+              deadline,
+            );
+          },
         }),
       );
       if (!inventoryOutcome.ok) {
@@ -405,15 +432,20 @@ export const cloudflarePostureSagaDef = defineSaga<CloudflarePostureResult>({
             vendorDefaultMs: CLOUDFLARE_TIMEOUT_MS,
             failureCode: "CLOUDFLARE_INTEGRATION_FAILED",
             failureMessage: "The Cloudflare Integration could not complete.",
-            call: (connection, secrets, deadline) =>
-              ctx.integrations.cloudflare.readZoneSettings(
+            call: async (connection, secrets, deadline) => {
+              const trusted = bindCloudflareAccount(
+                await resolvePrimaryEntityMapping(ctx.db, connection.orgId, connection),
+                binding,
+              );
+              return ctx.integrations.cloudflare.readZoneSettings(
                 connection,
                 secrets,
-                binding,
+                trusted,
                 { zoneIds: checkedZoneIds, settings: checkedSettings },
                 id,
                 deadline,
-              ),
+              );
+            },
           }),
         );
         if (!settingsOutcome.ok) {

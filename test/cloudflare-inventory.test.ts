@@ -99,12 +99,25 @@ function request(path: string, method = "GET", sagaId: string, body: unknown, id
   });
 }
 
-/** Seed the Cloudflare Connection row (endpoint only — D1 holds no
- * secrets) for the fixture org. The account mapping rides the Execution
- * input binding per scenario; the token rides the test env binding. */
+/** Seed the Cloudflare Connection plus its trusted primary account mapping
+ * for the fixture org. The token rides the test env binding; Execution input
+ * may only confirm this mapping and can never choose another account. */
 async function seedConnection() {
   await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
     .bind("00000000-0000-4000-8000-000000000201", principal.orgId, CLOUDFLARE_INTEGRATION_ID, CLOUDFLARE_API_BASE)
+    .run();
+  await bindings.DB.prepare(
+    "INSERT INTO external_entity_mappings(id,org_id,connection_id,entity_id,display_name,is_primary,source,created_at,updated_at) VALUES (?,?,?,?,?,1,'manual',?,?)",
+  )
+    .bind(
+      "00000000-0000-4000-8000-000000000211",
+      principal.orgId,
+      "00000000-0000-4000-8000-000000000201",
+      ACCOUNT_ID,
+      ACCOUNT_NAME,
+      "2026-10-17T00:00:00.000Z",
+      "2026-10-17T00:00:00.000Z",
+    )
     .run();
 }
 
@@ -334,6 +347,7 @@ it("replays inventory-missing-mapping: fails before any network request", async 
   };
   // Empty http array: the run must make no network request.
   expect(scenario.http ?? []).toEqual([]);
+  await bindings.DB.prepare("DELETE FROM external_entity_mappings WHERE org_id=?").bind(principal.orgId).run();
   const mock = mockVendor([]);
   const key = "cf-inventory-missing-0001";
   const id = await executionId(principal, key);
@@ -416,25 +430,27 @@ it("fails a declared verify without a Connection row before any network request"
   await seedConnection();
 });
 
-it("accepts a bare verify input and fails on the missing mapping", async () => {
-  // Input without the account envelope: the parser admits it, the prepared
-  // input carries no account, and the Integration boundary fails closed
-  // (covers the binding-fallback arm).
-  mockVendor([]);
+it("accepts a bare verify input and derives the trusted Connection mapping", async () => {
+  const mock = mockVendor([
+    {
+      request: { method: "GET", url: `${CLOUDFLARE_API_BASE}/user/tokens/verify` },
+      response: { status: 200, json: { success: true, result: { status: "active" } } },
+    },
+  ]);
   const key = "cf-verify-bare-00001";
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_VERIFY_WORKFLOW, id);
   expect(
     (await worker.fetch(request("/api/executions", "POST", cloudflareVerifySaga.id, {}, key), bindings)).status,
   ).toBe(202);
-  await instance.waitForStatus("errored");
+  await instance.waitForStatus("complete");
   const detail = await worker.fetch(
     request(`/api/executions/${id}`, "GET", cloudflareVerifySaga.id, {}, key),
     bindings,
   );
-  const payload = (await detail.json()) as { status: string; error: { code: string; message: string } };
-  expect(payload.status).toBe("Failed");
-  expect(payload.error.message).toBe("Cloudflare integration is missing account mapping.");
+  const payload = (await detail.json()) as { status: string; result: { account: { id: string; name: string } } };
+  expect(payload).toMatchObject({ status: "Succeeded", result: { account: { id: ACCOUNT_ID, name: ACCOUNT_NAME } } });
+  expect(mock).toHaveBeenCalledTimes(1);
 });
 
 it("surfaces a slow vendor as TimedOut through the policy snapshot deadline", async () => {
@@ -482,22 +498,48 @@ it("fails a declared inventory without a Connection row before any network reque
   await seedConnection();
 });
 
-it("accepts a bare inventory input and fails on the missing mapping", async () => {
-  mockVendor([]);
+it("accepts a bare inventory input and derives the trusted Connection mapping", async () => {
+  const mock = mockVendor([
+    {
+      request: { method: "GET", url: `${CLOUDFLARE_API_BASE}/zones` },
+      response: { status: 200, json: { success: true, result: [], result_info: { total_pages: 1, total_count: 0 } } },
+    },
+  ]);
   const key = "cf-inventory-bare-001";
   const id = await executionId(principal, key);
   const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_INVENTORY_WORKFLOW, id);
   expect(
     (await worker.fetch(request("/api/executions", "POST", cloudflareInventorySaga.id, {}, key), bindings)).status,
   ).toBe(202);
+  await instance.waitForStatus("complete");
+  const detail = await worker.fetch(
+    request(`/api/executions/${id}`, "GET", cloudflareInventorySaga.id, {}, key),
+    bindings,
+  );
+  const payload = (await detail.json()) as { status: string; result: { account: { id: string; name: string } } };
+  expect(payload).toMatchObject({ status: "Succeeded", result: { account: { id: ACCOUNT_ID, name: ACCOUNT_NAME } } });
+  expect(mock).toHaveBeenCalledTimes(1);
+});
+
+it("rejects a caller-selected Cloudflare account before any vendor request", async () => {
+  const mock = mockVendor([]);
+  const key = "cf-account-mismatch-01";
+  const id = await executionId(principal, key);
+  const { inner: instance } = await trackWorkflowInstance(bindings.CLOUDFLARE_INVENTORY_WORKFLOW, id);
+  const body = { max_zones: 10, ...accountBinding("f".repeat(32), "Forged account") };
+  expect(
+    (await worker.fetch(request("/api/executions", "POST", cloudflareInventorySaga.id, body, key), bindings)).status,
+  ).toBe(202);
   await instance.waitForStatus("errored");
   const detail = await worker.fetch(
     request(`/api/executions/${id}`, "GET", cloudflareInventorySaga.id, {}, key),
     bindings,
   );
-  const payload = (await detail.json()) as { status: string; error: { code: string; message: string } };
-  expect(payload.status).toBe("Failed");
-  expect(payload.error.message).toBe("Cloudflare integration is missing account mapping.");
+  expect(await detail.json()).toMatchObject({
+    status: "Failed",
+    error: { code: "CLOUDFLARE_ACCOUNT_FORBIDDEN" },
+  });
+  expect(mock).not.toHaveBeenCalled();
 });
 
 it("surfaces a slow inventory vendor as TimedOut through the policy snapshot deadline", async () => {

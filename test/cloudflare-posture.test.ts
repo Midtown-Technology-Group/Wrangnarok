@@ -885,6 +885,19 @@ async function seedConnection() {
   await bindings.DB.prepare("INSERT INTO connections(id,org_id,integration_id,endpoint) VALUES (?,?,?,?)")
     .bind("00000000-0000-4000-8000-000000000202", principal.orgId, CLOUDFLARE_INTEGRATION_ID, CLOUDFLARE_API_BASE)
     .run();
+  await bindings.DB.prepare(
+    "INSERT INTO external_entity_mappings(id,org_id,connection_id,entity_id,display_name,is_primary,source,created_at,updated_at) VALUES (?,?,?,?,?,1,'manual',?,?)",
+  )
+    .bind(
+      "00000000-0000-4000-8000-000000000212",
+      principal.orgId,
+      "00000000-0000-4000-8000-000000000202",
+      ACCOUNT.id,
+      ACCOUNT.name,
+      "2026-10-17T00:00:00.000Z",
+      "2026-10-17T00:00:00.000Z",
+    )
+    .run();
 }
 
 useWorkflowHarness(bindings.DB, {
@@ -1306,6 +1319,7 @@ describe("posture failure legs (issue #252)", () => {
   });
 
   it("fails the audit run on a missing account mapping", async () => {
+    await bindings.DB.prepare("DELETE FROM external_entity_mappings WHERE org_id=?").bind(principal.orgId).run();
     const mock = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async () => Response.json({ success: true, result: [] }));

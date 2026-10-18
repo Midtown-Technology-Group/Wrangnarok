@@ -131,11 +131,13 @@ operator sagaMap records the mapping explicitly.
 
 - `2fcb2d31-091a-583f-a980-38c4de3da9ab` (`verify_cloudflare_connection`)
   → registered Saga UUID `9d2f4a6c-3b1e-4f5a-9c2d-6e8f0a1b2c3d`
-  (`cloudflare-verify-connection`, `cloudflare-verify-connection-v2`; v2
-  advertises the credential-status output contract).
+  (`cloudflare-verify-connection`, `cloudflare-verify-connection-v3`; v2
+  advertised the credential-status output contract and v3 binds account
+  identity to the Connection's primary ExternalEntityMapping).
 - `a5160896-d1de-55cc-b1af-71e57b670f44` (`inventory_cloudflare_zones`)
   → registered Saga UUID `7c1e3b5a-2d4f-4e6b-8a1c-5d7f9e0a1b2c`
-  (`cloudflare-inventory-zones`, `cloudflare-inventory-zones-v1`).
+  (`cloudflare-inventory-zones`, `cloudflare-inventory-zones-v2`; v2 binds
+  account identity to the Connection's primary ExternalEntityMapping).
 - Integration `Cloudflare` → `6b0d2a48-1c3e-4d5a-7b9a-4c6e8d0f2a1b`
   (`cloudflare`), bearer `apiToken` secret.
 
@@ -180,9 +182,10 @@ installer pins in `src/solutions.ts` CODE_SAGAS, the source-catalog pins in
   parser must be idempotent over its own output (like every other Saga).
 - Descriptions avoid the substrings `secret`/`token` (same tripwire);
   "credential" reads fine and changes no behavior.
-- No migration for the account mapping: Connection rows persist endpoint
-  only, so `accountId` resolves test-locally per Execution input; a general
-  per-tenant mapping store is a follow-up, not this lane.
+- Account identity resolves from the Connection's admin-owned primary
+  `ExternalEntityMapping`; saved input can only confirm its `entity_id`.
+  Existing Connections need this mapping before their next Cloudflare run.
+  The mapping uses the existing API and schema, with no second config store.
 
 ### Acceptance proof
 
