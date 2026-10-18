@@ -17,26 +17,44 @@ interface AccessConfig {
   services: ReadonlySet<string>;
 }
 
-// Module-level cert cache: kid -> imported key plus first-seen timestamp.
-// Workers isolates reuse it; rotation is picked up when an unknown kid
-// arrives (single refetch). Bounded by size and TTL (#234) so key churn or
-// hostile kids cannot grow it for the life of the isolate.
+// Module-level cert cache, isolated by Access team domain. Workers isolates
+// reuse it; rotation is picked up after the short refresh window. Both team
+// and key cardinality are bounded so configuration churn cannot grow isolate
+// memory for its lifetime.
 const MAX_CERT_KEYS = 32;
+const MAX_CERT_TEAMS = 8;
 const CERT_KEY_TTL_MS = 6 * 60 * 60 * 1000;
-const certCache = new Map<string, { key: CryptoKey; at: number }>();
-// Negative cache (codex #358): unknown kids are remembered briefly so a
-// hostile caller rotating random kids cannot trigger one cert subrequest
-// per request. Short TTL (rotation still converges); never imports.
+interface TeamCertCache {
+  readonly keys: Map<string, { key: CryptoKey; at: number }>;
+  readonly unknownKids: Map<string, number>;
+  refreshedAt: number;
+  unavailableAt: number;
+}
+const certCaches = new Map<string, TeamCertCache>();
+// A successful JWKS response is authoritative for this short window. This is
+// the essential rotating-kid fence: distinct unknown kids do not each force a
+// new subrequest, while genuine key rotation converges within one minute.
+export const ACCESS_CERT_REFRESH_TTL_MS = 60 * 1000;
+let certRefreshTtlMs = ACCESS_CERT_REFRESH_TTL_MS;
+// Briefly remember endpoint failures too. Without this cooldown a sequential
+// forged-kid flood could amplify an Access outage despite the fetch timeout.
+export const ACCESS_CERT_FAILURE_TTL_MS = 5 * 1000;
+// Unknown kids are also remembered individually so repeats remain cheap after
+// the team refresh window elapses. Short TTL preserves rotation convergence.
 const NEGATIVE_KID_TTL_MS = 60 * 1000;
-const unknownKids = new Map<string, number>();
 let negativeKidTtlMs = NEGATIVE_KID_TTL_MS;
 /** Test hook: bound the unknown-kid negative-cache TTL (suite isolation). */
 export function setAccessNegativeKidTtlMs(ms: number): void {
   negativeKidTtlMs = ms;
 }
-// In-flight coalescing (codex #358): concurrent misses for one team domain
-// share a single cert fetch instead of fanning out N subrequests.
-const certInflight = new Map<string, Promise<{ kid?: string; kty?: string; n?: string; e?: string }[]>>();
+/** Test hook: bound the team JWKS freshness window (rotation tests). */
+export function setAccessCertRefreshTtlMs(ms: number): void {
+  certRefreshTtlMs = ms;
+}
+// In-flight coalescing covers the complete fetch-and-import operation, not
+// merely HTTP. Concurrent misses therefore share one subrequest and one set of
+// cryptographic imports.
+const certInflight = new Map<string, Promise<void>>();
 /** Largest assertion the verifier parses (codex #358): 8 KiB covers real
  * Access JWTs; larger inputs fail closed before any cert fetch. */
 export const ACCESS_ASSERTION_MAX = 8192;
@@ -54,20 +72,35 @@ export function setAccessCertFetchTimeoutMs(ms: number): void {
   certFetchTimeoutMs = ms;
 }
 
-/** Drop expired entries; the cache is tiny (<= MAX_CERT_KEYS) so a full sweep is cheap. */
-function sweepExpiredCertKeys(now: number): void {
-  for (const [kid, entry] of certCache) {
-    if (now - entry.at > CERT_KEY_TTL_MS) certCache.delete(kid);
+function teamCache(teamDomain: string): TeamCertCache {
+  const existing = certCaches.get(teamDomain);
+  if (existing !== undefined) {
+    certCaches.delete(teamDomain);
+    certCaches.set(teamDomain, existing);
+    return existing;
+  }
+  const created: TeamCertCache = { keys: new Map(), unknownKids: new Map(), refreshedAt: 0, unavailableAt: 0 };
+  certCaches.set(teamDomain, created);
+  if (certCaches.size > MAX_CERT_TEAMS) {
+    const oldest = certCaches.keys().next().value as string;
+    certCaches.delete(oldest);
+  }
+  return created;
+}
+
+/** Drop expired entries; each team cache is tiny so a full sweep is cheap. */
+function sweepExpiredCertKeys(cache: TeamCertCache, now: number): void {
+  for (const [kid, entry] of cache.keys) {
+    if (now - entry.at > CERT_KEY_TTL_MS) cache.keys.delete(kid);
   }
 }
 
-function putCertKey(kid: string, key: CryptoKey, now: number): void {
-  if (certCache.has(kid)) certCache.delete(kid);
-  certCache.set(kid, { key, at: now });
-  // LRU: insertion order is recency (hits re-insert below), so evict oldest.
-  for (const oldest of certCache.keys()) {
-    if (certCache.size <= MAX_CERT_KEYS) break;
-    certCache.delete(oldest);
+function rememberUnknown(cache: TeamCertCache, kid: string, now: number): void {
+  cache.unknownKids.delete(kid);
+  cache.unknownKids.set(kid, now);
+  if (cache.unknownKids.size > MAX_CERT_KEYS) {
+    const oldest = cache.unknownKids.keys().next().value as string;
+    cache.unknownKids.delete(oldest);
   }
 }
 
@@ -135,72 +168,89 @@ async function fetchCertSet(
     console.warn("WRANGNAROK_ACCESS_CERTS_FAILED malformed");
     throw new Fault(503, "ACCESS_CERTS_UNAVAILABLE", "The Access certificate endpoint is unavailable.");
   }
+  if (keys.length > MAX_CERT_KEYS) {
+    console.warn("WRANGNAROK_ACCESS_CERTS_FAILED oversized");
+    throw new Fault(503, "ACCESS_CERTS_UNAVAILABLE", "The Access certificate endpoint is unavailable.");
+  }
   return keys as { kid?: string; kty?: string; n?: string; e?: string }[];
 }
 
 async function keyFor(teamDomain: string, kid: string, fetchFn: typeof fetch): Promise<CryptoKey | null> {
   const now = Date.now();
-  sweepExpiredCertKeys(now);
-  const hit = certCache.get(kid);
-  if (hit) {
-    // Refresh recency so live keys are not evicted ahead of stale ones.
-    certCache.delete(kid);
-    certCache.set(kid, hit);
-    return hit.key;
-  }
+  const cache = teamCache(teamDomain);
+  sweepExpiredCertKeys(cache, now);
+  const hit = cache.keys.get(kid);
+  if (hit) return hit.key;
   // Negative cache: a recently-unknown kid fails closed with no subrequest.
   // Stale entries expire via the sweep in the miss path below.
-  const deniedAt = unknownKids.get(kid);
+  const deniedAt = cache.unknownKids.get(kid);
   if (deniedAt !== undefined) {
     if (now - deniedAt < negativeKidTtlMs) return null;
-    unknownKids.delete(kid);
+    cache.unknownKids.delete(kid);
   } else {
     // Sweep stale negatives only on a fresh miss: keeps the hot path (hit
     // or live negative) branch-free while expiry still converges.
-    for (const [miss, at] of unknownKids) {
-      if (now - at >= negativeKidTtlMs) unknownKids.delete(miss);
+    for (const [miss, at] of cache.unknownKids) {
+      if (now - at >= negativeKidTtlMs) cache.unknownKids.delete(miss);
     }
   }
-  const certs = await fetchCertSetCoalesced(teamDomain, fetchFn);
-  const seen = Date.now();
-  // The looked-up kid is pinned most-recent so a large rotation set can
-  // never evict the very key this call is resolving mid-import.
-  let wanted: CryptoKey | null = null;
-  for (const k of certs) {
-    if (k.kid == null || k.kty !== "RSA" || k.n == null || k.e == null) continue;
-    const jwk: JsonWebKey = { kty: "RSA", n: k.n, e: k.e, alg: "RS256", ext: true };
-    const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, [
-      "verify",
-    ]);
-    if (k.kid === kid) wanted = key;
-    else putCertKey(k.kid, key, seen);
+  if (cache.unavailableAt > 0 && now - cache.unavailableAt < ACCESS_CERT_FAILURE_TTL_MS) {
+    throw new Fault(503, "ACCESS_CERTS_UNAVAILABLE", "The Access certificate endpoint is unavailable.");
   }
-  if (wanted != null) {
-    putCertKey(kid, wanted, seen);
-    unknownKids.delete(kid);
-  } else {
-    // Remember the miss briefly: random-kid floods converge to zero
-    // subrequests until the entry expires. Bounded like the cert cache:
-    // insertion order is oldest-first, so drop the head on overflow.
-    unknownKids.set(kid, seen);
-    if (unknownKids.size > MAX_CERT_KEYS) {
-      const oldest = unknownKids.keys().next().value as string;
-      unknownKids.delete(oldest);
-    }
+  if (cache.refreshedAt > 0 && now - cache.refreshedAt < certRefreshTtlMs) {
+    // The authoritative fresh set already prevents another fetch. Recording
+    // this miss from its lookup time would outlive the freshness window and
+    // delay genuine rotation past the first eligible post-window lookup.
+    return null;
   }
-  return certCache.get(kid)?.key ?? null;
+  await refreshCertSetCoalesced(teamDomain, fetchFn);
+  const refreshed = teamCache(teamDomain);
+  const resolved = refreshed.keys.get(kid)?.key ?? null;
+  if (resolved !== null) refreshed.unknownKids.delete(kid);
+  else rememberUnknown(refreshed, kid, Date.now());
+  return resolved;
 }
 
-/** One cert fetch per team domain at a time: concurrent misses share the
- * in-flight call and all waiters resolve from it. Settles release so the
- * next rotation still refetches. */
-function fetchCertSetCoalesced(
-  teamDomain: string,
-  fetchFn: typeof fetch,
-): Promise<{ kid?: string; kty?: string; n?: string; e?: string }[]> {
+async function refreshCertSet(teamDomain: string, fetchFn: typeof fetch): Promise<void> {
+  const cache = teamCache(teamDomain);
+  try {
+    const certs = await fetchCertSet(teamDomain, fetchFn);
+    const seen = Date.now();
+    const imported = new Map<string, { key: CryptoKey; at: number }>();
+    for (const k of certs) {
+      if (
+        typeof k.kid !== "string" ||
+        k.kid.length === 0 ||
+        k.kid.length > ACCESS_KID_MAX ||
+        k.kty !== "RSA" ||
+        k.n == null ||
+        k.e == null
+      )
+        continue;
+      const jwk: JsonWebKey = { kty: "RSA", n: k.n, e: k.e, alg: "RS256", ext: true };
+      const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, [
+        "verify",
+      ]);
+      imported.set(k.kid, { key, at: seen });
+    }
+    cache.keys.clear();
+    for (const [importedKid, entry] of imported) cache.keys.set(importedKid, entry);
+    cache.refreshedAt = seen;
+    cache.unavailableAt = 0;
+  } catch (error) {
+    cache.unavailableAt = Date.now();
+    if (error instanceof Fault) throw error;
+    console.warn("WRANGNAROK_ACCESS_CERTS_FAILED invalid-key");
+    throw new Fault(503, "ACCESS_CERTS_UNAVAILABLE", "The Access certificate endpoint is unavailable.");
+  }
+}
+
+/** One complete JWKS refresh per team domain at a time. Settled operations
+ * release so genuine rotation can refresh after the bounded freshness window. */
+function refreshCertSetCoalesced(teamDomain: string, fetchFn: typeof fetch): Promise<void> {
   const existing = certInflight.get(teamDomain);
   if (existing !== undefined) return existing;
-  const task = fetchCertSet(teamDomain, fetchFn);
+  const task = refreshCertSet(teamDomain, fetchFn);
   certInflight.set(teamDomain, task);
   const cleanup = (): void => {
     if (certInflight.get(teamDomain) === task) certInflight.delete(teamDomain);
@@ -303,11 +353,11 @@ export function credentialClassFor(userId: string, viaAccess: boolean): Credenti
   return viaAccess ? "human" : "fixture";
 }
 
-/** Test hook: drop cached certs and reset the fetch budget (rotation tests, suite isolation). */
+/** Test hook: drop cached certs and reset fetch/refresh budgets (suite isolation). */
 export function clearAccessCertCache(): void {
-  certCache.clear();
-  unknownKids.clear();
+  certCaches.clear();
   certInflight.clear();
   certFetchTimeoutMs = ACCESS_CERT_FETCH_TIMEOUT_MS;
+  certRefreshTtlMs = ACCESS_CERT_REFRESH_TTL_MS;
   negativeKidTtlMs = NEGATIVE_KID_TTL_MS;
 }

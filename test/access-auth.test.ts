@@ -5,8 +5,11 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import {
+  ACCESS_CERT_FAILURE_TTL_MS,
   ACCESS_CERT_FETCH_TIMEOUT_MS,
+  ACCESS_CERT_REFRESH_TTL_MS,
   clearAccessCertCache,
+  setAccessCertRefreshTtlMs,
   setAccessCertFetchTimeoutMs,
   verifyAccess,
 } from "../src/access";
@@ -286,40 +289,65 @@ it("evicts stale cert keys by TTL and refetches on next use", async () => {
   expect(fetchSpy).toHaveBeenCalledTimes(2);
 });
 
-it("caps the cert cache so hostile kid churn cannot grow it", async () => {
-  // One rotating stub serves whichever single kid the lookup needs (the
-  // request kid is the mock's current target). 40 distinct kids each miss
-  // once and import; only the newest 32 stay cached. Re-resolving the
-  // oldest kid misses again (eviction refetch), while two live kids churn
-  // hit-for-hit with no further fetches (LRU recency refresh).
-  const pairs = await Promise.all(Array.from({ length: 40 }, () => keypair()));
-  const pubs = await Promise.all(pairs.map((p) => crypto.subtle.exportKey("jwk", p.publicKey)));
+it("atomically replaces rotated team JWKS keys", async () => {
+  // A successful refresh is authoritative for the team. Rotated-out keys
+  // are removed instead of accumulating until an LRU eviction, while the
+  // newly published key remains a cache hit.
+  const first = await keypair();
+  const second = await keypair();
+  const pubs = await Promise.all([
+    crypto.subtle.exportKey("jwk", first.publicKey),
+    crypto.subtle.exportKey("jwk", second.publicKey),
+  ]);
+  setAccessCertRefreshTtlMs(0);
   let serving = 0;
   const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
     const pub = pubs[serving];
-    if (pub == null) throw new Error("access-auth churn stub: no key served");
-    return Response.json({ keys: [{ ...pub, kid: `churn-${serving}`, alg: "RS256" }] });
+    if (pub == null) throw new Error("access-auth rotation stub: no key served");
+    return Response.json({ keys: [{ ...pub, kid: `rotation-${serving}`, alg: "RS256" }] });
   });
-  const tokenFor = (i: number) => mint(pairs[i]!.privateKey, `churn-${i}`, validPayload());
-  async function resolveKid(i: number): Promise<void> {
-    serving = i;
-    await expect(tokenFor(i).then((token) => verifyAccess(token, accessEnv))).resolves.toMatchObject({
-      userId: EMAIL,
-    });
-  }
-  for (let i = 0; i < 40; i += 1) await resolveKid(i);
-  expect(fetchSpy).toHaveBeenCalledTimes(40);
-  // Kid 0 was evicted by the 8 newer arrivals past the 32-key cap: resolving
-  // it again refetches (41st fetch) and still verifies.
-  await resolveKid(0);
-  expect(fetchSpy).toHaveBeenCalledTimes(41);
-  // Kids 0 and 39 are both live now; alternating between them serves purely
-  // from cache — no further fetches.
-  await resolveKid(39);
-  await resolveKid(0);
-  await resolveKid(39);
-  expect(fetchSpy).toHaveBeenCalledTimes(41);
-}, 30000);
+  const firstToken = await mint(first.privateKey, "rotation-0", validPayload());
+  await expect(verifyAccess(firstToken, accessEnv)).resolves.toMatchObject({ userId: EMAIL });
+  serving = 1;
+  const secondToken = await mint(second.privateKey, "rotation-1", validPayload());
+  await expect(verifyAccess(secondToken, accessEnv)).resolves.toMatchObject({ userId: EMAIL });
+  expect(fetchSpy).toHaveBeenCalledTimes(2);
+  await expect(verifyAccess(firstToken, accessEnv)).rejects.toMatchObject({ status: 401 });
+  expect(fetchSpy).toHaveBeenCalledTimes(3);
+  await expect(verifyAccess(secondToken, accessEnv)).resolves.toMatchObject({ userId: EMAIL });
+  expect(fetchSpy).toHaveBeenCalledTimes(3);
+});
+
+it("refreshes a rotated key on the first lookup after the freshness window", async () => {
+  const first = await keypair();
+  const second = await keypair();
+  const pubs = await Promise.all([
+    crypto.subtle.exportKey("jwk", first.publicKey),
+    crypto.subtle.exportKey("jwk", second.publicKey),
+  ]);
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  let serving = 0;
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+    const pub = pubs[serving];
+    if (pub == null) throw new Error("access-auth boundary rotation stub: no key served");
+    return Response.json({ keys: [{ ...pub, kid: `boundary-${serving}`, alg: "RS256" }] });
+  });
+
+  const firstToken = await mint(first.privateKey, "boundary-0", validPayload());
+  const secondToken = await mint(second.privateKey, "boundary-1", validPayload());
+  await expect(verifyAccess(firstToken, accessEnv)).resolves.toMatchObject({ userId: EMAIL });
+  expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+  now += ACCESS_CERT_REFRESH_TTL_MS - 1000;
+  await expect(verifyAccess(secondToken, accessEnv)).rejects.toMatchObject({ status: 401 });
+  expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+  serving = 1;
+  now += 2000;
+  await expect(verifyAccess(secondToken, accessEnv)).resolves.toMatchObject({ userId: EMAIL });
+  expect(fetchSpy).toHaveBeenCalledTimes(2);
+});
 
 it("fails fast with 503 when the cert endpoint hangs, errors, or is malformed", async () => {
   const { privateKey } = await keypair();
@@ -348,14 +376,18 @@ it("fails fast with 503 when the cert endpoint hangs, errors, or is malformed", 
   });
   expect(Date.now() - started).toBeLessThan(5000);
   // Network error, non-200, and malformed body all answer the same 503.
+  clearAccessCertCache();
   vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("down")).mockRejectedValue(new Error("down"));
   await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({ status: 503 });
+  clearAccessCertCache();
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("nope", { status: 500 }));
   await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({ status: 503 });
+  clearAccessCertCache();
   vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ keys: "garbage" }));
   await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({ status: 503 });
   // A body that throws on .json() (not just a missing keys array) takes
   // the catch arm: same 503, no leak.
+  clearAccessCertCache();
   vi.spyOn(globalThis, "fetch").mockImplementation(
     async () =>
       new Response("ok", {
@@ -365,10 +397,29 @@ it("fails fast with 503 when the cert endpoint hangs, errors, or is malformed", 
   );
   vi.spyOn(Response.prototype, "json").mockRejectedValueOnce(new Error("truncated body"));
   await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({ status: 503 });
+  // More keys than the bounded cache can retain fail closed before any
+  // cryptographic imports rather than consuming response-proportional CPU.
+  clearAccessCertCache();
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json({ keys: Array.from({ length: 33 }, (_, n) => ({ kid: `key-${n}` })) }),
+  );
+  await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({ status: 503 });
+  // A structurally selected RSA entry whose key material cannot be imported
+  // is an unavailable/malformed provider response, never an internal 500.
+  clearAccessCertCache();
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json({ keys: [{ kid: "k-hang", kty: "RSA", n: "invalid", e: "AQAB" }] }),
+  );
+  await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({
+    status: 503,
+    code: "ACCESS_CERTS_UNAVAILABLE",
+  });
 });
 
-it("pins the default cert fetch budget at five seconds", () => {
+it("pins the cert fetch, freshness, and failure budgets", () => {
   expect(ACCESS_CERT_FETCH_TIMEOUT_MS).toBe(5000);
+  expect(ACCESS_CERT_REFRESH_TTL_MS).toBe(60_000);
+  expect(ACCESS_CERT_FAILURE_TTL_MS).toBe(5000);
 });
 
 it("codex #358: coalesces, negatively caches, and bounds cert fetches", async () => {
@@ -394,17 +445,16 @@ it("codex #358: coalesces, negatively caches, and bounds cert fetches", async ()
     const principals = await Promise.all(tokens.map((token) => verifyAccess(token, accessEnv)));
     expect(fetches).toBe(1);
     for (const p of principals) expect(p).toEqual({ userId: EMAIL, orgId: ORG.toLowerCase() });
-    // Unknown kids fetch once, then fail closed with no further subrequest
-    // (negative cache): ten distinct random kids cost at most ten fetches
-    // total, and a repeat of a seen kid costs zero.
+    // A fresh team JWKS is authoritative: even a rotating flood of distinct
+    // random kids costs zero more subrequests, not one fetch per unique kid.
     const before = fetches;
     const kids: string[] = [];
-    for (let n = 0; n < 10; n += 1) {
+    for (let n = 0; n < 100; n += 1) {
       kids.push(`random-kid-${n}-${Date.now()}`);
       const bad = await mint(privateKey, kids[n] as string, validPayload());
       await expect(verifyAccess(bad, accessEnv)).rejects.toMatchObject({ status: 401 });
     }
-    expect(fetches - before).toBeLessThanOrEqual(10);
+    expect(fetches).toBe(before);
     const repeatBad = await mint(privateKey, kids[0] as string, validPayload());
     const repeatBefore = fetches;
     await expect(verifyAccess(repeatBad, accessEnv)).rejects.toMatchObject({ status: 401 });
@@ -424,6 +474,45 @@ it("codex #358: coalesces, negatively caches, and bounds cert fetches", async ()
   } finally {
     vi.restoreAllMocks();
   }
+});
+
+it("isolates and bounds JWKS caches by Access team domain", async () => {
+  const { publicKey, privateKey } = await keypair();
+  const pub = await crypto.subtle.exportKey("jwk", publicKey);
+  const token = await mint(privateKey, "shared-kid", validPayload());
+  let fetches = 0;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = String(input);
+    if (!url.endsWith("/cdn-cgi/access/certs")) throw new Error("access-auth tests must not fetch");
+    fetches += 1;
+    return Response.json({ keys: [{ ...pub, kid: "shared-kid", alg: "RS256" }] });
+  });
+  const teams = Array.from({ length: 9 }, (_, n) => `https://team-${n}.cloudflareaccess.com`);
+  for (const team of teams) {
+    await expect(verifyAccess(token, { ...accessEnv, ACCESS_TEAM_DOMAIN: team })).resolves.toMatchObject({
+      userId: EMAIL,
+    });
+  }
+  expect(fetches).toBe(9);
+  // Only eight team caches are retained: revisiting the oldest domain must
+  // refetch instead of reusing another team's same-named key.
+  await expect(verifyAccess(token, { ...accessEnv, ACCESS_TEAM_DOMAIN: teams[0] })).resolves.toMatchObject({
+    userId: EMAIL,
+  });
+  expect(fetches).toBe(10);
+});
+
+it("backs off sequential cert-endpoint failures", async () => {
+  const { privateKey } = await keypair();
+  const token = await mint(privateKey, "unavailable-kid", validPayload());
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("down"));
+  for (let n = 0; n < 10; n += 1) {
+    await expect(verifyAccess(token, accessEnv)).rejects.toMatchObject({
+      status: 503,
+      code: "ACCESS_CERTS_UNAVAILABLE",
+    });
+  }
+  expect(fetchSpy).toHaveBeenCalledTimes(1);
 });
 
 it("codex #358: expires negative entries and rejects empty segments", async () => {
@@ -449,6 +538,7 @@ it("codex #358: expires negative entries and rejects empty segments", async () =
     expect(fetches).toBe(1);
     // Expire the entry: the next attempt refetches (rotation converges).
     setAccessNegativeKidTtlMs(0);
+    setAccessCertRefreshTtlMs(0);
     await expect(verifyAccess(bad, accessEnv)).rejects.toMatchObject({ status: 401 });
     expect(fetches).toBe(2);
   } finally {
@@ -466,6 +556,7 @@ it("codex #358: evicts oldest negative entries past the bound", async () => {
   // Fill the negative cache past MAX_CERT_KEYS (32): the oldest entry
   // evicts, so its repeat refetches while a fresh entry stays cached.
   const { publicKey, privateKey } = await keypair();
+  setAccessCertRefreshTtlMs(0);
   const pub = await crypto.subtle.exportKey("jwk", publicKey);
   let fetches = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
