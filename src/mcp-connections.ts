@@ -7,7 +7,9 @@
 // This row carries no secret material by schema — service and per-user
 // tokens persist as envelopes beside it (`src/mcp-tokens.ts`), so the
 // management views below are secret-free by construction and safe to audit,
-// log, and return to operators.
+// log, and return to operators. Endpoint/OAuth trust anchors are immutable:
+// rebinding deletes this Connection (and its credential/catalog cascade) and
+// creates a new identity, so in-flight token writes can never cross origins.
 //
 // Reads are membership-scoped (exact org, cross-org 404); writes ride
 // requireManageOrg at the route, matching `src/connections.ts`. Delete is
@@ -357,6 +359,13 @@ export async function updateMcpConnection(
   const availableToAutonomous =
     parseFlag(body.availableToAutonomous, "availableToAutonomous") ?? row.available_to_autonomous === 1;
   const enabled = parseFlag(body.enabled, "enabled") ?? row.enabled === 1;
+  if (override !== row.server_url_override || tokenPath !== row.token_path || clientId !== row.client_id) {
+    throw invalid(
+      "MCP_CONNECTION_REBIND_REQUIRED",
+      "Delete and recreate this MCP Connection to change its server URL, token path, or client id.",
+      409,
+    );
+  }
   const now = new Date().toISOString();
   await db
     .prepare(

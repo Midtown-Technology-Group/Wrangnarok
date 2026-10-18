@@ -86,6 +86,16 @@ inbound gateway existed and are reused, never forked.
    serialization (module-local single-flight without it). Catalog/CRUD
    rows fit Free D1 limits; external model inference stays vendor-paid
    per the feasibility envelope.
+9. **Credentials bind to immutable endpoint and OAuth identity.** A bound
+   Connection's server URL override, token path, and client id cannot change;
+   rebinding requires deleting the Connection (which cascades its service
+   token, every user-consent token, client-secret envelope, and tool catalog)
+   and creating a new Connection identity. A template's server URL or
+   provider flow cannot change while any Connection is bound; the conditional
+   D1 update closes create/update races. Availability flags, enablement, and
+   discovery metadata remain mutable because they do not change credential
+   identity. This prevents an in-flight token exchange from repopulating a
+   credential minted for an old endpoint after a configuration edit.
 
 ## Adaptations (upstream behavior intentionally reshaped)
 
