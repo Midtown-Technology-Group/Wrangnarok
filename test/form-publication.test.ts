@@ -23,7 +23,14 @@ import { beforeEach, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Bindings } from "../src/bindings";
 import { echoSaga, helloSaga } from "../src/domain";
-import { anonPubIdFromUser, assertNoPublicFileRefs, parseHoneypotField } from "../src/public-forms";
+import {
+  anonPubIdFromUser,
+  assertNoPublicFileRefs,
+  parseHoneypotField,
+  PUBLIC_FORM_LIVE_STARTUPS_MAX,
+  PUBLIC_FORM_STARTUPS_PER_MINUTE,
+  PUBLIC_FORM_SUBMISSIONS_PER_MINUTE,
+} from "../src/public-forms";
 import { useWorkflowHarness } from "./helpers/workflow-harness";
 import migration35 from "../migrations/0035_embeds.sql?raw";
 import migration36 from "../migrations/0036_anon_app_embeds.sql?raw";
@@ -238,6 +245,91 @@ it("submits confirmation-only: dispatch admits, the receipt discloses nothing", 
   expect(replay.status).toBe(200);
   expect(await replay.json()).toEqual({ form: "contact", received: true });
   expect(await executionCount()).toBe(before + 1);
+});
+
+it("bounds anonymous startup rows and dispatched submissions per publication", async () => {
+  await createForm();
+  const pub = await publish("contact");
+
+  const startupAttempts = await Promise.all(
+    Array.from({ length: PUBLIC_FORM_STARTUPS_PER_MINUTE + 1 }, () => publicStartup(pub.id)),
+  );
+  expect(startupAttempts.filter((response) => response.status === 201)).toHaveLength(PUBLIC_FORM_STARTUPS_PER_MINUTE);
+  expect(startupAttempts.filter((response) => response.status === 429)).toHaveLength(1);
+  const deniedStartup = startupAttempts.find((response) => response.status === 429);
+  expect(deniedStartup).toBeDefined();
+  expect(await deniedStartup?.json()).toMatchObject({ error: { code: "PUBLIC_FORM_RATE_LIMITED" } });
+
+  const principal = `anon:${pub.id}`;
+  const startupRows = await bindings.DB.prepare("SELECT COUNT(*) AS n FROM form_startups WHERE user_id=?")
+    .bind(principal)
+    .first<{ n: number }>();
+  expect(startupRows?.n).toBe(PUBLIC_FORM_STARTUPS_PER_MINUTE);
+
+  const admittedStartups = await Promise.all(
+    startupAttempts
+      .filter((response) => response.status === 201)
+      .slice(0, PUBLIC_FORM_SUBMISSIONS_PER_MINUTE + 1)
+      .map(async (response) => (await response.json()) as PublicBootstrapReceipt),
+  );
+  const before = await executionCount();
+  const scheduleAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const submissionAttempts = await Promise.all(
+    admittedStartups.map((started, index) =>
+      publicSubmit(
+        { handle: started.handle, values: { name: `Ada ${index}` }, scheduleAt },
+        keyFor(`bounded-${index}`),
+      ),
+    ),
+  );
+  expect(submissionAttempts.filter((response) => response.status === 202)).toHaveLength(
+    PUBLIC_FORM_SUBMISSIONS_PER_MINUTE,
+  );
+  expect(submissionAttempts.filter((response) => response.status === 429)).toHaveLength(1);
+  const deniedSubmission = submissionAttempts.find((response) => response.status === 429);
+  expect(deniedSubmission).toBeDefined();
+  expect(await deniedSubmission?.json()).toMatchObject({ error: { code: "PUBLIC_FORM_RATE_LIMITED" } });
+  expect(await executionCount()).toBe(before + PUBLIC_FORM_SUBMISSIONS_PER_MINUTE);
+
+  const replay = await publicSubmit(
+    { handle: admittedStartups[0]?.handle, values: { name: "Ada 0" }, scheduleAt },
+    keyFor("bounded-0"),
+  );
+  expect(replay.status).toBe(200);
+  expect(await executionCount()).toBe(before + PUBLIC_FORM_SUBMISSIONS_PER_MINUTE);
+});
+
+it("keeps the public live-session cap exact across legacy rows and minute windows", async () => {
+  await createForm();
+  const pub = await publish("contact");
+  await startupOk(pub.id);
+  const principal = `anon:${pub.id}`;
+  await bindings.DB.prepare("DELETE FROM form_startups WHERE user_id=?").bind(principal).run();
+  await bindings.DB.prepare("DELETE FROM public_form_admission_slots WHERE publication_key=?").bind(principal).run();
+  const publication = await bindings.DB.prepare("SELECT form_id FROM form_publications WHERE id=?")
+    .bind(pub.id)
+    .first<{ form_id: string }>();
+  if (!publication) throw new Error("expected the published form binding");
+  const now = Date.now();
+  const createdAt = new Date(now - 2 * 60 * 1000).toISOString();
+  const expiresAt = new Date(now + 10 * 60 * 1000).toISOString();
+  await bindings.DB.batch(
+    Array.from({ length: PUBLIC_FORM_LIVE_STARTUPS_MAX }, (_, slot) =>
+      bindings.DB.prepare(
+        "INSERT INTO form_startups(handle_hash,org_id,user_id,form_id,form_name,expires_at,used_at,created_at) VALUES (?,?,?,?,?,?,NULL,?)",
+      ).bind(slot.toString(16).padStart(64, "0"), ORG, principal, publication.form_id, "contact", expiresAt, createdAt),
+    ),
+  );
+
+  const denied = await publicStartup(pub.id);
+  expect(denied.status).toBe(429);
+  expect(await denied.json()).toMatchObject({ error: { code: "PUBLIC_FORM_RATE_LIMITED" } });
+  const rows = await bindings.DB.prepare(
+    "SELECT COUNT(*) AS n FROM form_startups WHERE user_id=? AND used_at IS NULL AND expires_at>?",
+  )
+    .bind(principal, new Date().toISOString())
+    .first<{ n: number }>();
+  expect(rows?.n).toBe(PUBLIC_FORM_LIVE_STARTUPS_MAX);
 });
 
 it("traps honeypot fills with an identical confirmation and no dispatch", async () => {

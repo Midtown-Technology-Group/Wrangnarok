@@ -19,16 +19,17 @@
 // to them. The honeypot spam trap answers the identical confirmation
 // without dispatching, so bots learn nothing from the response shape.
 //
-// Anti-abuse (proportionate, Worker + D1 only, no new primitive): the
-// single-use startup handle IS the submission nonce (random 64-hex,
+// Anti-abuse (proportionate, Worker + D1 only, no new primitive): exact
+// per-publication admission caps bound startup-row allocation, live
+// sessions, and submissions reaching Execution/Workflow dispatch. The
+// single-use startup handle remains the submission nonce (random 64-hex,
 // SHA-256 persisted, 30-minute TTL, peek-then-consume fence with
-// claimed_key idempotency — the FORM-02 contract), plus a server-checked
-// honeypot field (default `wrangnarok_hp`, admin-overridable at publish,
-// must never collide with a declared field name). A Turnstile/CAPTCHA
-// binding is deliberately deferred: it needs a new secret binding and a
-// vendor round-trip that the Free-tier slice cannot justify while
-// honeypot + nonce + confirmation-only (no oracle) close the cheap abuse
-// shapes. That deferral is recorded in the slice-2 ADR.
+// claimed_key idempotency), plus a server-checked honeypot field (default
+// `wrangnarok_hp`, admin-overridable at publish, never colliding with a
+// declared field). Native Workers Rate Limiting is per-location and
+// intentionally permissive, so it cannot own these global storage/vendor
+// ceilings. A Turnstile/CAPTCHA binding remains an optional stronger bot
+// signal rather than the only budget fence.
 //
 // Upload ownership: anonymous submissions carry only session-owned file
 // references — triples the submitting session itself staged through the
@@ -66,6 +67,12 @@ import { invalidateFormSessions } from "./forms";
 
 /** Default honeypot field: an unlikely-declared name bots still fill. */
 export const PUBLIC_HONEYPOT_DEFAULT = "wrangnarok_hp";
+/** Exact per-publication budget: 20 startup rows per minute bucket. */
+export const PUBLIC_FORM_STARTUPS_PER_MINUTE = 20;
+/** Exact per-publication bound on unconsumed, unexpired startup rows. */
+export const PUBLIC_FORM_LIVE_STARTUPS_MAX = 50;
+/** Exact per-publication budget before durable Execution/Workflow admission. */
+export const PUBLIC_FORM_SUBMISSIONS_PER_MINUTE = 10;
 /** Honeypot names share the form field-name shape (never a declared name). */
 const HONEYPOT_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
 

@@ -175,19 +175,34 @@ admin deliberately re-binds through `POST
 else answers 400, never a rebind). The admin summary carries the live
 `stale` bit the review UX keys on. Re-publishing heals identically.
 
-### 3. Anti-abuse without a CAPTCHA binding (explicit deferral)
+### 3. Exact anonymous admission budgets; CAPTCHA remains optional
 
 The anonymous class carries honeypot + single-use nonce + 30-minute TTL
 + confirmation-only disclosure (no oracle: success, trap, and validation
 outcomes are indistinguishable beyond the 422 validation channel the
-operator path already exposes) + per-organization standard submit
-accounting. A Turnstile/CAPTCHA binding is deliberately deferred: it
-needs a new secret binding, a vendor round-trip, and a pre-write
-verification hop that this Worker + D1 slice cannot justify while the
-cheap abuse shapes (naive bots, handle replay, execution enumeration)
-are closed by the means above. Adopting Turnstile later is a new
-primitive decision with its own ADR; this slice must not be read as
-deciding it.
+operator path already exposes). It also has exact, per-publication D1
+admission budgets: 20 startup rows per minute, at most 50 live startup
+rows, and 10 submissions per minute reaching durable Execution/Workflow
+admission. Over-limit requests fail before the protected allocation or
+dispatch with 429 `PUBLIC_FORM_RATE_LIMITED`.
+
+`public_form_admission_slots` uses unique `(publication, kind, window,
+slot)` keys instead of count-then-insert, so concurrent requests cannot
+overrun a window. Submit slots also bind the idempotency key across
+windows, preserving same-key recovery/replay without spending another
+slot. `form_startups.public_live_slot` has a partial unique index over
+unconsumed rows; rows minted before this policy have no slot and are
+counted against the same 50-row ceiling until use or expiry. Slot rows are
+retained through the startup TTL for recovery, then pruned on subsequent
+requests.
+
+Cloudflare's native Workers Rate Limiting binding is local to a Cloudflare
+location, permissive, and eventually consistent. It can be layered on as
+traffic shaping later, but it cannot own the exact global storage and
+vendor-dispatch ceilings here. A Turnstile/CAPTCHA binding likewise remains
+an optional stronger bot signal: adopting it needs a new secret binding,
+browser contract, and vendor round-trip, while the authoritative resource
+budget already fails closed in D1.
 
 ### 4. What this slice is NOT
 
@@ -196,16 +211,14 @@ deciding it.
   stands: TLS plus short-lived single-use handles plus exact origins
   already bind the session).
 - Session-owned anonymous uploads (refusal is the ownership enforcement).
-- Per-grant rate limits (secret-gated like api-key endpoints, which carry
-  them only optionally; anonymous admission inherits the standard submit
-  accounting, and a dedicated anonymous limiter is future work with its
-  own ADR).
+- Per-grant limits for signed embed secrets; this decision is narrowly the
+  credential-free anonymous publication class.
 
 ## Consequences
 
-- Worker + D1 only: two tables, bounded allowlists, no new Cloudflare
-  primitive, Free-tier neutral (tiny rows, no new bindings). File bytes
-  stay on the FILE-01 path; D1 holds grant/publication metadata only.
+- Worker + D1 only: bounded allowlists plus one bounded anonymous-admission
+  slot table, no new Cloudflare primitive or binding. File bytes stay on
+  the FILE-01 path; D1 holds grant/publication/session/admission metadata.
 - Admin inventory: `/api/apps/:id/embeds` (issue/list/rotate/revoke) and
   `/api/forms/:name/publication` (publish/read/block) plus
   `/publication/review`, all `requireManageOrg`-gated. Unknown or foreign
@@ -240,8 +253,9 @@ deciding it.
    standard submit protocol (Execution row before Workflow dispatch),
    and the only anonymous delta is the receipt shape. App-embed reads
    dispatch nothing.
-3. **Persistence:** one path. Single D1 schema, 0036 uncontested
-   (0035 landed in slice 1, 0017 still reserved per the ledger).
+3. **Persistence:** one path. Single D1 schema. The existing lazy
+   `form_startups` convergence adds `public_live_slot`; the adjacent
+   `public_form_admission_slots` table owns only transient admission claims.
 4. **Secrets:** digests only, show-once; the anonymous class holds no
    secrets at all.
 5. **Deployment:** unchanged (single Worker + Static Assets + D1).
@@ -253,6 +267,14 @@ deciding it.
 the existing Organization store per request while retaining their hidden or
 stale response shapes. No new authority, execution path, persistence model,
 secret, deployment primitive, or recovery mechanism was introduced.
+
+2026-10-16 anonymous-admission follow-through (security ledger row 137):
+PASS. Authentication/authorization and the shared submit path are unchanged.
+The single D1 persistence path now places exact unique-slot ceilings before
+anonymous startup allocation and durable submit admission. Same-key replay
+uses the existing idempotency key, no second execution or recovery path is
+introduced, and no new Cloudflare binding, secret, or deployment primitive
+is required.
 
 Stop conditions re-checked: no second auth path (no parallel credential
 store or session), no second execution path (shared core + standard

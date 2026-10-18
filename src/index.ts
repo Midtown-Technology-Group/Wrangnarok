@@ -260,6 +260,7 @@ import {
   deleteForm,
   FORM_NAME,
   type FormDefinition,
+  type PublicFormSubmissionAdmission,
   listForms,
   loadForm,
   mayStartForm,
@@ -447,6 +448,9 @@ import {
   loadPublication,
   loadScopedPublication,
   parsePublicationId,
+  PUBLIC_FORM_LIVE_STARTUPS_MAX,
+  PUBLIC_FORM_STARTUPS_PER_MINUTE,
+  PUBLIC_FORM_SUBMISSIONS_PER_MINUTE,
   publicationSummary,
   publishForm,
   reviewPublication,
@@ -1073,6 +1077,7 @@ async function runFormSubmit(
   files: "check" | "session",
   extraHeaders: Record<string, string> = {},
   disclosure: "standard" | "confirmation-only" = "standard",
+  publicAdmission?: PublicFormSubmissionAdmission,
 ): Promise<Response> {
   const name = def.name;
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
@@ -1118,7 +1123,7 @@ async function runFormSubmit(
   // DISPATCH_UNCONFIRMED leaves the reservation recoverable only by the
   // same key, which reaches the standard idempotent execution path; every
   // different key fails stale before an Execution row or Workflow exists.
-  await reserveStartupHandle(env.DB, caller, name, handle, def.id, key);
+  await reserveStartupHandle(env.DB, caller, name, handle, def.id, key, publicAdmission);
   if (scheduleAt !== null) {
     const scheduled = await scheduleFormExecution(env.DB, caller, key, name, saga, input, scheduleAt);
     // Consume on every confirmed admission, including idempotent
@@ -1489,6 +1494,10 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           def,
           await boundedJson(request.body),
           readProviderRows,
+          {
+            maxLive: PUBLIC_FORM_LIVE_STARTUPS_MAX,
+            maxPerMinute: PUBLIC_FORM_STARTUPS_PER_MINUTE,
+          },
         );
         await touchPublicationUse(env.DB, pub.id);
         return json(
@@ -1574,6 +1583,7 @@ async function handleFetch(request: Request, env: Bindings): Promise<Response> {
           "session",
           cors,
           "confirmation-only",
+          { maxPerMinute: PUBLIC_FORM_SUBMISSIONS_PER_MINUTE },
         );
       } catch (error) {
         return faultResponse(error, env, url, cors);
