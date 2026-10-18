@@ -100,8 +100,16 @@ their recoveries:
   );
   ```
 
-  Then run `wrangler d1 migrations apply`. If the old name is absent, do not
-  insert the alias: the new migration must run to add `config_json`.
+  Then apply migrations to the same remote environment whose journal you
+  inspected:
+
+  ```sh
+  : "${ENVIRONMENT:?set ENVIRONMENT to the exact named environment}"
+  npx wrangler d1 migrations apply DB --env "$ENVIRONMENT" --remote
+  ```
+
+  If the old name is absent, do not insert the alias: the new migration must
+  run to add `config_json`.
 
 Correction to the 2026-09-11 collision notes above: renamed files are never
 recognized as already applied. The four additive carriers now converge on

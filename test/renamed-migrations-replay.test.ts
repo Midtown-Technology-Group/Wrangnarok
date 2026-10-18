@@ -8,9 +8,12 @@ import migration18 from "../migrations/0018_ops.sql?raw";
 import migration19 from "../migrations/0019_files.sql?raw";
 import migration20 from "../migrations/0020_artifacts.sql?raw";
 import migration21 from "../migrations/0021_endpoints.sql?raw";
+import legacyMigration18 from "./fixtures/renamed-migrations/0010_ops.sql?raw";
+import legacyMigration19 from "./fixtures/renamed-migrations/0007_files.sql?raw";
+import legacyMigration20 from "./fixtures/renamed-migrations/0010_artifacts.sql?raw";
+import legacyMigration21 from "./fixtures/renamed-migrations/0009_endpoints.sql?raw";
 
 const bindings = env as unknown as Bindings;
-const legacyDefinition = (migration: string) => migration.replaceAll("IF NOT EXISTS ", "");
 const activationJournalAlias = `
 INSERT INTO d1_migrations(name)
 SELECT '0010_solutions_activation.sql'
@@ -58,7 +61,7 @@ it("leaves the activation migration pending when its legacy name is absent", asy
 });
 
 it("replays the renamed ops migration without replacing existing rows", async () => {
-  await bindings.DB.exec(legacyDefinition(migration18));
+  await bindings.DB.exec(legacyMigration18);
   const now = new Date().toISOString();
   await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "Example").run();
   await bindings.DB.prepare(
@@ -85,7 +88,7 @@ it("replays the renamed ops migration without replacing existing rows", async ()
 });
 
 it("replays the renamed artifact migration without replacing existing rows", async () => {
-  await bindings.DB.exec(legacyDefinition(migration20));
+  await bindings.DB.exec(legacyMigration20);
   const now = new Date().toISOString();
   await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "Example").run();
   await bindings.DB.prepare(
@@ -122,7 +125,7 @@ it("replays the renamed artifact migration without replacing existing rows", asy
 });
 
 it("replays the renamed file migration without replacing existing rows", async () => {
-  await bindings.DB.exec(legacyDefinition(migration19));
+  await bindings.DB.exec(legacyMigration19);
   const now = new Date().toISOString();
   await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "Example").run();
   await bindings.DB.prepare("INSERT INTO file_locations(org_id,name,max_bytes,created_at) VALUES (?,?,?,?)")
@@ -157,7 +160,7 @@ it("replays the renamed file migration without replacing existing rows", async (
 });
 
 it("replays the renamed endpoint migration without replacing existing rows", async () => {
-  await bindings.DB.exec(legacyDefinition(migration21));
+  await bindings.DB.exec(legacyMigration21);
   const now = new Date().toISOString();
   await bindings.DB.prepare("INSERT INTO organizations(id,name) VALUES (?,?)").bind("org-1", "Example").run();
   await bindings.DB.prepare("INSERT INTO endpoints(id,org_id,name,saga_id,kind,created_at) VALUES (?,?,?,?,?,?)")
