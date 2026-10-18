@@ -1,0 +1,8 @@
+# SEC-01 Gitleaks installer integrity hardening (issue #247): commit the
+# independently verified SHA-256 for the pinned Linux x64 archive, enforce
+# verification before extraction/execution, pin that order in tests, and
+# document the upgrade procedure. No scanner rules or permissions change.
+.github/workflows/secret-scan.yml
+test/secret-scan.test.ts
+SECURITY.md
+scopes/sec-247-gitleaks-checksum.scope

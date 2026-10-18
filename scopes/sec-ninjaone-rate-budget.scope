@@ -1,0 +1,15 @@
+# Security finding 504: bound authenticated NinjaOne vendor-call pressure at
+# both async and inline Execution admission. Native Workers Rate Limiting only;
+# no migration, credential-store, auth, vendor-client, or Saga behavior change.
+src/bindings.ts
+src/executions.ts
+src/sync.ts
+src/sdk.ts
+wrangler.jsonc
+test/execution-guards.test.ts
+docs/architecture/000-steward-checklist.md
+docs/architecture/013-phase2-egress-limits.md
+docs/architecture/018-runtime-policy.md
+docs/architecture/026-rate-limiting.md
+docs/feasibility-envelope.md
+scopes/sec-ninjaone-rate-budget.scope

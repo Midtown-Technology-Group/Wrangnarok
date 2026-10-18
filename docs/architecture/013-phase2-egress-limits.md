@@ -40,6 +40,7 @@ connectivity — each Integration re-states its limits here.
 | Byte caps | Token response under shared 4096-byte `boundedJson`; orgs transport cap 262144 bytes; persisted shape is count plus max 25 orgs (`NINJA_ORGS_MAX`) under the D1 result CHECK. |
 | Error codes | 401 `NINJA_UNAUTHORIZED`, 429 `NINJA_RATE_LIMITED` (both calls), 5xx `NINJA_VENDOR_FAILED`, non-array `NINJA_BAD_RESPONSE`. No automatic retry on any of them. |
 | Retries | 0 — `stepRetryLimit("ninja-list-orgs-v1")`. |
+| Request admission | Before a new Execution row or Workflow exists, every NinjaOne-calling Saga consumes a native principal budget (5/60s per environment + Organization + user), then a shared provider budget (30/60s across deployed environments). Denial is `429 ADMISSION_LIMITED`; limiter failure is fail-closed `503 ADMISSION_UNAVAILABLE`; exact existing-id replays bypass the request budget without creating more work (`enforceNinjaOneExecutionBudget`, ADR 026). Native counters are approximate per Cloudflare location, not exact global accounting. |
 | Concurrency | Serial steps; fanout cap 8 per ADR 001 (unused here). |
 | Secrets | Client ID/secret from Worker env only, transient inside the Action; presence enforced behind the Action boundary (`NINJA_NOT_CONFIGURED`); tokens fetched per execution, never cached, never persisted (audited in `test/ninjaone.test.ts` and `test/ninja-echo-digest.test.ts`). |
 | Not supported | Non-HTTP transports, private registries, IP-allowlist validation; OAuth authorization-code flow and refresh lifecycle (deferred to Phase 3 per ADR 005). |
@@ -89,6 +90,11 @@ source: Workflow step timeout `10 seconds`; vendor/Integration steps
 (`STEP_RETRY_CEILING`); unknown step names fail closed to 0. Business and
 expected failures throw `NonRetryableError` so the engine never retries a
 non-idempotent mutation.
+
+Per-Saga `maxConcurrent` and the NinjaOne request budgets protect different
+dimensions. The persisted runtime policy bounds active Executions in one
+Organization; the deployment-owned native bindings bound request pressure on
+the shared provider credential. Neither substitutes for the other.
 
 ## Adding the next Integration
 

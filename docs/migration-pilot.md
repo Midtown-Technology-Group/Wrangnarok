@@ -182,9 +182,10 @@ installer pins in `src/solutions.ts` CODE_SAGAS, the source-catalog pins in
   parser must be idempotent over its own output (like every other Saga).
 - Descriptions avoid the substrings `secret`/`token` (same tripwire);
   "credential" reads fine and changes no behavior.
-- No migration for the account mapping: Connection rows persist endpoint
-  only, so `accountId` resolves test-locally per Execution input; a general
-  per-tenant mapping store is a follow-up, not this lane.
+- Account identity resolves from the Connection's admin-owned primary
+  `ExternalEntityMapping`; saved input can only confirm its `entity_id`.
+  Existing Connections need this mapping before their next Cloudflare run.
+  The mapping uses the existing API and schema, with no second config store.
 
 ### Acceptance proof
 
